@@ -457,7 +457,8 @@ const std::vector<std::pair<std::string, std::string>> ConvertKeys =
     { "ALTERNATE_BACKUP", "F11" },
     { "SELECT_SHOW_FOLDER", "F9" },
     { "CANCEL_RENDER", "ESCAPE" },
-    { "FOCUS_SEQUENCER", "F12" }
+    { "FOCUS_SEQUENCER", "F12" },
+    { "COLOR_UPDATE", "SHIFT+F5" }
 };
 
 // These are the keys that we we consider equivalent
