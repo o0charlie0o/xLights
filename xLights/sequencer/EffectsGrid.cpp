@@ -7649,11 +7649,15 @@ void EffectsGrid::DuplicateEffectLeft() {
 }
 
 void EffectsGrid::DuplicateEffectUp() {
+    static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
     if (mSelectedEffect == nullptr) {
+        logger_base.debug("DuplicateEffectUp: No effect selected");
         return;
     }
 
     if (mSelectedRow <= 0) {
+        logger_base.debug("DuplicateEffectUp: Already at top row");
         return; // Already at top
     }
 
@@ -7663,53 +7667,85 @@ void EffectsGrid::DuplicateEffectUp() {
     long start = mSelectedEffect->GetStartTimeMS();
     long end = mSelectedEffect->GetEndTimeMS();
 
+    fprintf(stderr, "DuplicateEffectUp: Selected effect at %ldms-%ldms, row %d, paste_by_cell=%d\n",
+        start, end, mSelectedRow, paste_by_cell);
+    logger_base.warn("DuplicateEffectUp: Selected effect at %ldms-%ldms, row %d, paste_by_cell=%d",
+        start, end, mSelectedRow, paste_by_cell);
+
     // Get the row above
     int target_row = mSelectedRow - 1;
     if (target_row < 0 || target_row >= mSequenceElements->GetVisibleRowInformationSize()) {
+        logger_base.debug("DuplicateEffectUp: Target row %d out of bounds", target_row);
         return;
     }
 
     EffectLayer* target_el = mSequenceElements->GetVisibleEffectLayer(target_row);
     if (target_el == nullptr) {
+        logger_base.debug("DuplicateEffectUp: Target layer is null");
         return;
     }
 
     if (paste_by_cell) {
         tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
         if (tel == nullptr) {
+            logger_base.debug("DuplicateEffectUp: Timing layer is null");
             return;
         }
 
         // Find the timing cell at the current effect's start time
         Effect* timing_eff = tel->GetEffectByTime(start);
         if (timing_eff != nullptr) {
-            long newstart = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetStartTimeMS(), mSequenceElements->GetFrequency());
-            long newEnd = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetEndTimeMS(), mSequenceElements->GetFrequency());
+            long timing_start = timing_eff->GetStartTimeMS();
+            long timing_end = timing_eff->GetEndTimeMS();
+            fprintf(stderr, "DuplicateEffectUp: Found timing cell at %ldms-%ldms (ID=%d)\n",
+                timing_start, timing_end, timing_eff->GetID());
+            logger_base.warn("DuplicateEffectUp: Found timing cell at %ldms-%ldms (ID=%d)",
+                timing_start, timing_end, timing_eff->GetID());
+
+            long newstart = mTimeline->RoundToMultipleOfPeriod(timing_start, mSequenceElements->GetFrequency());
+            long newEnd = mTimeline->RoundToMultipleOfPeriod(timing_end, mSequenceElements->GetFrequency());
+            fprintf(stderr, "DuplicateEffectUp: Creating effect at %ldms-%ldms on target row\n", newstart, newEnd);
+            logger_base.warn("DuplicateEffectUp: Creating effect at %ldms-%ldms on target row", newstart, newEnd);
+
             if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
                 Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
                     mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
                     newstart, newEnd, EFFECT_SELECTED, false);
                 mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+                logger_base.debug("DuplicateEffectUp: Effect created successfully");
+            } else {
+                logger_base.debug("DuplicateEffectUp: Target range already has effects");
             }
+        } else {
+            logger_base.debug("DuplicateEffectUp: No timing effect found at %ldms", start);
         }
     } else {
         long newstart = mTimeline->RoundToMultipleOfPeriod(start, mSequenceElements->GetFrequency());
         long newEnd = mTimeline->RoundToMultipleOfPeriod(end, mSequenceElements->GetFrequency());
+        logger_base.debug("DuplicateEffectUp: Creating effect at %ldms-%ldms on target row (paste by time)", newstart, newEnd);
+
         if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
             Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
                 mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
                 newstart, newEnd, EFFECT_SELECTED, false);
             mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+            logger_base.debug("DuplicateEffectUp: Effect created successfully");
+        } else {
+            logger_base.debug("DuplicateEffectUp: Target range already has effects");
         }
     }
 }
 
 void EffectsGrid::DuplicateEffectDown() {
+    static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
     if (mSelectedEffect == nullptr) {
+        logger_base.debug("DuplicateEffectDown: No effect selected");
         return;
     }
 
     if (mSelectedRow < 0 || mSelectedRow >= mSequenceElements->GetVisibleRowInformationSize() - 1) {
+        logger_base.debug("DuplicateEffectDown: Already at bottom row");
         return; // Already at bottom or not found
     }
 
@@ -7719,43 +7755,71 @@ void EffectsGrid::DuplicateEffectDown() {
     long start = mSelectedEffect->GetStartTimeMS();
     long end = mSelectedEffect->GetEndTimeMS();
 
+    fprintf(stderr, "DuplicateEffectDown: Selected effect at %ldms-%ldms, row %d, paste_by_cell=%d\n",
+        start, end, mSelectedRow, paste_by_cell);
+    logger_base.warn("DuplicateEffectDown: Selected effect at %ldms-%ldms, row %d, paste_by_cell=%d",
+        start, end, mSelectedRow, paste_by_cell);
+
     // Get the row below
     int target_row = mSelectedRow + 1;
     if (target_row >= mSequenceElements->GetVisibleRowInformationSize()) {
+        logger_base.debug("DuplicateEffectDown: Target row %d out of bounds", target_row);
         return;
     }
 
     EffectLayer* target_el = mSequenceElements->GetVisibleEffectLayer(target_row);
     if (target_el == nullptr) {
+        logger_base.debug("DuplicateEffectDown: Target layer is null");
         return;
     }
 
     if (paste_by_cell) {
         tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
         if (tel == nullptr) {
+            logger_base.debug("DuplicateEffectDown: Timing layer is null");
             return;
         }
 
         // Find the timing cell at the current effect's start time
         Effect* timing_eff = tel->GetEffectByTime(start);
         if (timing_eff != nullptr) {
-            long newstart = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetStartTimeMS(), mSequenceElements->GetFrequency());
-            long newEnd = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetEndTimeMS(), mSequenceElements->GetFrequency());
+            long timing_start = timing_eff->GetStartTimeMS();
+            long timing_end = timing_eff->GetEndTimeMS();
+            fprintf(stderr, "DuplicateEffectDown: Found timing cell at %ldms-%ldms (ID=%d)\n",
+                timing_start, timing_end, timing_eff->GetID());
+            logger_base.warn("DuplicateEffectDown: Found timing cell at %ldms-%ldms (ID=%d)",
+                timing_start, timing_end, timing_eff->GetID());
+
+            long newstart = mTimeline->RoundToMultipleOfPeriod(timing_start, mSequenceElements->GetFrequency());
+            long newEnd = mTimeline->RoundToMultipleOfPeriod(timing_end, mSequenceElements->GetFrequency());
+            fprintf(stderr, "DuplicateEffectDown: Creating effect at %ldms-%ldms on target row\n", newstart, newEnd);
+            logger_base.warn("DuplicateEffectDown: Creating effect at %ldms-%ldms on target row", newstart, newEnd);
+
             if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
                 Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
                     mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
                     newstart, newEnd, EFFECT_SELECTED, false);
                 mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+                logger_base.debug("DuplicateEffectDown: Effect created successfully");
+            } else {
+                logger_base.debug("DuplicateEffectDown: Target range already has effects");
             }
+        } else {
+            logger_base.debug("DuplicateEffectDown: No timing effect found at %ldms", start);
         }
     } else {
         long newstart = mTimeline->RoundToMultipleOfPeriod(start, mSequenceElements->GetFrequency());
         long newEnd = mTimeline->RoundToMultipleOfPeriod(end, mSequenceElements->GetFrequency());
+        logger_base.debug("DuplicateEffectDown: Creating effect at %ldms-%ldms on target row (paste by time)", newstart, newEnd);
+
         if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
             Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
                 mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
                 newstart, newEnd, EFFECT_SELECTED, false);
             mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+            logger_base.debug("DuplicateEffectDown: Effect created successfully");
+        } else {
+            logger_base.debug("DuplicateEffectDown: Target range already has effects");
         }
     }
 }
