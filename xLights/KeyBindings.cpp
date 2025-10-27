@@ -387,7 +387,7 @@ const std::vector<KeyBinding> DefaultBindings =
     KeyBinding("F11", false, "SEARCH_TOGGLE", true),
     KeyBinding("F12", false, "PERSPECTIVES_TOGGLE", true),
     KeyBinding("F5", false, "EFFECT_UPDATE"),
-    KeyBinding("", false, "COLOR_UPDATE"),
+    KeyBinding("F5", false, "COLOR_UPDATE", false, false, true),
     KeyBinding("ESCAPE", false, "CANCEL_RENDER"),
     KeyBinding("", false, "TOGGLE_RENDER"),
 
