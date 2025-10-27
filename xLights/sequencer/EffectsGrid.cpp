@@ -7693,7 +7693,8 @@ void EffectsGrid::DuplicateEffectUp() {
         }
 
         // Find the timing cell at the current effect's start time
-        Effect* timing_eff = tel->GetEffectByTime(start);
+        // Use start+1 to avoid getting the previous cell when effect starts exactly at a boundary
+        Effect* timing_eff = tel->GetEffectByTime(start + 1);
         if (timing_eff != nullptr) {
             long timing_start = timing_eff->GetStartTimeMS();
             long timing_end = timing_eff->GetEndTimeMS();
@@ -7781,7 +7782,8 @@ void EffectsGrid::DuplicateEffectDown() {
         }
 
         // Find the timing cell at the current effect's start time
-        Effect* timing_eff = tel->GetEffectByTime(start);
+        // Use start+1 to avoid getting the previous cell when effect starts exactly at a boundary
+        Effect* timing_eff = tel->GetEffectByTime(start + 1);
         if (timing_eff != nullptr) {
             long timing_start = timing_eff->GetStartTimeMS();
             long timing_end = timing_eff->GetEndTimeMS();
