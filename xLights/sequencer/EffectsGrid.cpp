@@ -7736,7 +7736,8 @@ void EffectsGrid::DuplicateEffectRight() {
             mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetName(), el->GetIndex(), newef->GetID());
         }
     }
-    ForceRefresh();
+    sendRenderDirtyEvent();
+    Draw();
 }
 
 void EffectsGrid::DuplicateEffectLeft() {
@@ -7949,7 +7950,8 @@ void EffectsGrid::DuplicateEffectLeft() {
             mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetName(), el->GetIndex(), newef->GetID());
         }
     }
-    ForceRefresh();
+    sendRenderDirtyEvent();
+    Draw();
 }
 
 void EffectsGrid::DuplicateEffectUp() {
@@ -8154,7 +8156,8 @@ void EffectsGrid::DuplicateEffectUp() {
             logger_base.debug("DuplicateEffectUp: Target range already has effects");
         }
     }
-    ForceRefresh();
+    sendRenderDirtyEvent();
+    Draw();
 }
 
 void EffectsGrid::DuplicateEffectDown() {
@@ -8359,5 +8362,6 @@ void EffectsGrid::DuplicateEffectDown() {
             logger_base.debug("DuplicateEffectDown: Target range already has effects");
         }
     }
-    ForceRefresh();
+    sendRenderDirtyEvent();
+    Draw();
 }
