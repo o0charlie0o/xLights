@@ -883,11 +883,23 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
 
                 PanelEffectGrid->EnDisableRenderEffectsWithRefresh(0);
 
-            } 
+            }
             else if (type == "MODEL_EFFECT_TOGGLE") {
 
                 PanelEffectGrid->EnDisableSelectedModelOrEffectsWithRefresh();
 
+            }
+            else if (type == "DUPLICATE_RIGHT") {
+                PanelEffectGrid->DuplicateEffectRight();
+            }
+            else if (type == "DUPLICATE_LEFT") {
+                PanelEffectGrid->DuplicateEffectLeft();
+            }
+            else if (type == "DUPLICATE_UP") {
+                PanelEffectGrid->DuplicateEffectUp();
+            }
+            else if (type == "DUPLICATE_DOWN") {
+                PanelEffectGrid->DuplicateEffectDown();
             }
             else {
                 logger_base.warn("Keybinding '%s' not recognised.", (const char*)type.c_str());

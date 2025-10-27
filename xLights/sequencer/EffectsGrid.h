@@ -138,6 +138,10 @@ public:
     void RemapSelectedDMXEffectValues(const std::vector<std::tuple<int, int, float, int, wxString>>& dmxmappings);
     void ConvertSelectedEffectsTo(const std::string& effectName);
     void DuplicateSelectedEffects();
+    void DuplicateEffectRight();
+    void DuplicateEffectLeft();
+    void DuplicateEffectUp();
+    void DuplicateEffectDown();
     void CreateTimingFromSelectedEffects();
     bool IsTopModelVisible();
     bool IsMouseOverTiming(int y);
@@ -408,6 +412,10 @@ private:
     static const long ID_GRID_MNU_CLOSE_GAP;
     static const long ID_GRID_MNU_SPLIT_EFFECT;
     static const long ID_GRID_MNU_DUPLICATE_EFFECT;
+    static const long ID_GRID_MNU_DUPLICATE_RIGHT;
+    static const long ID_GRID_MNU_DUPLICATE_LEFT;
+    static const long ID_GRID_MNU_DUPLICATE_UP;
+    static const long ID_GRID_MNU_DUPLICATE_DOWN;
     static const long ID_GRID_MNU_CREATE_TIMING_FROM_EFFECT;
     EventPlayEffectArgs* playArgs = nullptr;
 

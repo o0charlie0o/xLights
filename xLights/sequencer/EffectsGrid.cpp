@@ -114,6 +114,10 @@ const long EffectsGrid::ID_GRID_MNU_ALIGN_TO_TIMING_MARK = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_CLOSE_GAP = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_SPLIT_EFFECT = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_DUPLICATE_EFFECT = wxNewId();
+const long EffectsGrid::ID_GRID_MNU_DUPLICATE_RIGHT = wxNewId();
+const long EffectsGrid::ID_GRID_MNU_DUPLICATE_LEFT = wxNewId();
+const long EffectsGrid::ID_GRID_MNU_DUPLICATE_UP = wxNewId();
+const long EffectsGrid::ID_GRID_MNU_DUPLICATE_DOWN = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_CREATE_TIMING_FROM_EFFECT = wxNewId();
 
 int findDataEffect::GetStrand() const {
@@ -394,6 +398,26 @@ void EffectsGrid::rightClick(wxMouseEvent& event) {
         wxMenuItem* menu_duplicate = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_EFFECT, "Duplicate");
         if (mSelectedEffect == nullptr) {
             menu_duplicate->Enable(false);
+        }
+
+        wxMenuItem* menu_duplicate_right = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_RIGHT, "Duplicate Right");
+        if (mSelectedEffect == nullptr) {
+            menu_duplicate_right->Enable(false);
+        }
+
+        wxMenuItem* menu_duplicate_left = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_LEFT, "Duplicate Left");
+        if (mSelectedEffect == nullptr) {
+            menu_duplicate_left->Enable(false);
+        }
+
+        wxMenuItem* menu_duplicate_up = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_UP, "Duplicate Up");
+        if (mSelectedEffect == nullptr) {
+            menu_duplicate_up->Enable(false);
+        }
+
+        wxMenuItem* menu_duplicate_down = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_DOWN, "Duplicate Down");
+        if (mSelectedEffect == nullptr) {
+            menu_duplicate_down->Enable(false);
         }
 
         // Undo
@@ -1100,6 +1124,18 @@ void EffectsGrid::OnGridPopup(wxCommandEvent& event) {
     } else if (id == ID_GRID_MNU_DUPLICATE_EFFECT) {
         logger_base.debug("OnGridPopup - DUPLICATE_EFFECT");
         DuplicateSelectedEffects();
+    } else if (id == ID_GRID_MNU_DUPLICATE_RIGHT) {
+        logger_base.debug("OnGridPopup - DUPLICATE_RIGHT");
+        DuplicateEffectRight();
+    } else if (id == ID_GRID_MNU_DUPLICATE_LEFT) {
+        logger_base.debug("OnGridPopup - DUPLICATE_LEFT");
+        DuplicateEffectLeft();
+    } else if (id == ID_GRID_MNU_DUPLICATE_UP) {
+        logger_base.debug("OnGridPopup - DUPLICATE_UP");
+        DuplicateEffectUp();
+    } else if (id == ID_GRID_MNU_DUPLICATE_DOWN) {
+        logger_base.debug("OnGridPopup - DUPLICATE_DOWN");
+        DuplicateEffectDown();
     } else if (id == ID_GRID_MNU_PRESETS) {
         logger_base.debug("OnGridPopup - PRESETS");
 
@@ -7489,6 +7525,256 @@ void EffectsGrid::DuplicateSelectedEffects() {
                     newstart = newEnd;
                 }
             }
+        }
+    }
+}
+
+void EffectsGrid::DuplicateEffectRight() {
+    if (mSelectedEffect == nullptr) {
+        return;
+    }
+
+    bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
+    EffectLayer* tel{ nullptr };
+
+    if (paste_by_cell) {
+        tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+        if (tel == nullptr) {
+            return;
+        }
+
+        long start = mSelectedEffect->GetStartTimeMS();
+        long end = mSelectedEffect->GetEndTimeMS();
+        long length = end - start;
+
+        // Find the current timing cell
+        long startCol = tel->GetEffectByTime(start)->GetID() + 1;
+        if (start == 0) {
+            startCol--;
+        }
+
+        auto el = mSelectedEffect->GetParentEffectLayer();
+        Effect* eff = tel->GetEffect(startCol);
+        if (nullptr != eff) {
+            long newstart = mTimeline->RoundToMultipleOfPeriod(eff->GetStartTimeMS(), mSequenceElements->GetFrequency());
+            long newEnd = mTimeline->RoundToMultipleOfPeriod(eff->GetEndTimeMS(), mSequenceElements->GetFrequency());
+            if (!el->HasEffectsInTimeRange(newstart, newEnd)) {
+                Effect* newef = el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                    mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                    newstart, newEnd, EFFECT_SELECTED, false);
+                mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetName(), el->GetIndex(), newef->GetID());
+            }
+        }
+    } else {
+        long start = mSelectedEffect->GetStartTimeMS();
+        long end = mSelectedEffect->GetEndTimeMS();
+        long length = end - start;
+
+        auto el = mSelectedEffect->GetParentEffectLayer();
+        long newstart = mTimeline->RoundToMultipleOfPeriod(end, mSequenceElements->GetFrequency());
+        long newEnd = mTimeline->RoundToMultipleOfPeriod(newstart + length, mSequenceElements->GetFrequency());
+        if (!el->HasEffectsInTimeRange(newstart, newEnd)) {
+            Effect* newef = el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                newstart, newEnd, EFFECT_SELECTED, false);
+            mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetName(), el->GetIndex(), newef->GetID());
+        }
+    }
+}
+
+void EffectsGrid::DuplicateEffectLeft() {
+    if (mSelectedEffect == nullptr) {
+        return;
+    }
+
+    bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
+    EffectLayer* tel{ nullptr };
+
+    if (paste_by_cell) {
+        tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+        if (tel == nullptr) {
+            return;
+        }
+
+        long start = mSelectedEffect->GetStartTimeMS();
+        long end = mSelectedEffect->GetEndTimeMS();
+        long length = end - start;
+
+        // Find the previous timing cell
+        long startCol = tel->GetEffectByTime(start)->GetID() - 1;
+        if (start == 0) {
+            startCol--;
+        }
+
+        auto el = mSelectedEffect->GetParentEffectLayer();
+        if (startCol >= 0) {
+            Effect* eff = tel->GetEffect(startCol);
+            if (nullptr != eff) {
+                long newstart = mTimeline->RoundToMultipleOfPeriod(eff->GetStartTimeMS(), mSequenceElements->GetFrequency());
+                long newEnd = mTimeline->RoundToMultipleOfPeriod(eff->GetEndTimeMS(), mSequenceElements->GetFrequency());
+                if (!el->HasEffectsInTimeRange(newstart, newEnd)) {
+                    Effect* newef = el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                        mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                        newstart, newEnd, EFFECT_SELECTED, false);
+                    mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetName(), el->GetIndex(), newef->GetID());
+                }
+            }
+        }
+    } else {
+        long start = mSelectedEffect->GetStartTimeMS();
+        long end = mSelectedEffect->GetEndTimeMS();
+        long length = end - start;
+
+        auto el = mSelectedEffect->GetParentEffectLayer();
+        long newEnd = mTimeline->RoundToMultipleOfPeriod(start, mSequenceElements->GetFrequency());
+        long newstart = mTimeline->RoundToMultipleOfPeriod(newEnd - length, mSequenceElements->GetFrequency());
+        if (newstart >= 0 && !el->HasEffectsInTimeRange(newstart, newEnd)) {
+            Effect* newef = el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                newstart, newEnd, EFFECT_SELECTED, false);
+            mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetName(), el->GetIndex(), newef->GetID());
+        }
+    }
+}
+
+void EffectsGrid::DuplicateEffectUp() {
+    if (mSelectedEffect == nullptr) {
+        return;
+    }
+
+    bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
+    EffectLayer* tel{ nullptr };
+
+    long start = mSelectedEffect->GetStartTimeMS();
+    long end = mSelectedEffect->GetEndTimeMS();
+    long length = end - start;
+
+    // Find the current row
+    auto current_el = mSelectedEffect->GetParentEffectLayer();
+    int current_row = -1;
+    for (int row = 0; row < mSequenceElements->GetVisibleRowInformationSize(); ++row) {
+        Row_Information_Struct* ri = mSequenceElements->GetVisibleRowInformation(row);
+        if (ri->element != nullptr && ri->element == current_el->GetParentElement()) {
+            if (ri->layerIndex == current_el->GetIndex()) {
+                current_row = row;
+                break;
+            }
+        }
+    }
+
+    if (current_row <= 0) {
+        return; // Already at top
+    }
+
+    // Get the row above
+    int target_row = current_row - 1;
+    Row_Information_Struct* target_ri = mSequenceElements->GetVisibleRowInformation(target_row);
+    if (target_ri->element == nullptr) {
+        return;
+    }
+
+    EffectLayer* target_el = target_ri->element->GetEffectLayer(target_ri->layerIndex);
+    if (target_el == nullptr) {
+        return;
+    }
+
+    if (paste_by_cell) {
+        tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+        if (tel == nullptr) {
+            return;
+        }
+
+        // Find the timing cell at the current effect's start time
+        Effect* timing_eff = tel->GetEffectByTime(start);
+        if (timing_eff != nullptr) {
+            long newstart = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetStartTimeMS(), mSequenceElements->GetFrequency());
+            long newEnd = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetEndTimeMS(), mSequenceElements->GetFrequency());
+            if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
+                Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                    mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                    newstart, newEnd, EFFECT_SELECTED, false);
+                mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+            }
+        }
+    } else {
+        long newstart = mTimeline->RoundToMultipleOfPeriod(start, mSequenceElements->GetFrequency());
+        long newEnd = mTimeline->RoundToMultipleOfPeriod(end, mSequenceElements->GetFrequency());
+        if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
+            Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                newstart, newEnd, EFFECT_SELECTED, false);
+            mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+        }
+    }
+}
+
+void EffectsGrid::DuplicateEffectDown() {
+    if (mSelectedEffect == nullptr) {
+        return;
+    }
+
+    bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
+    EffectLayer* tel{ nullptr };
+
+    long start = mSelectedEffect->GetStartTimeMS();
+    long end = mSelectedEffect->GetEndTimeMS();
+    long length = end - start;
+
+    // Find the current row
+    auto current_el = mSelectedEffect->GetParentEffectLayer();
+    int current_row = -1;
+    for (int row = 0; row < mSequenceElements->GetVisibleRowInformationSize(); ++row) {
+        Row_Information_Struct* ri = mSequenceElements->GetVisibleRowInformation(row);
+        if (ri->element != nullptr && ri->element == current_el->GetParentElement()) {
+            if (ri->layerIndex == current_el->GetIndex()) {
+                current_row = row;
+                break;
+            }
+        }
+    }
+
+    if (current_row < 0 || current_row >= mSequenceElements->GetVisibleRowInformationSize() - 1) {
+        return; // Already at bottom or not found
+    }
+
+    // Get the row below
+    int target_row = current_row + 1;
+    Row_Information_Struct* target_ri = mSequenceElements->GetVisibleRowInformation(target_row);
+    if (target_ri->element == nullptr) {
+        return;
+    }
+
+    EffectLayer* target_el = target_ri->element->GetEffectLayer(target_ri->layerIndex);
+    if (target_el == nullptr) {
+        return;
+    }
+
+    if (paste_by_cell) {
+        tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+        if (tel == nullptr) {
+            return;
+        }
+
+        // Find the timing cell at the current effect's start time
+        Effect* timing_eff = tel->GetEffectByTime(start);
+        if (timing_eff != nullptr) {
+            long newstart = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetStartTimeMS(), mSequenceElements->GetFrequency());
+            long newEnd = mTimeline->RoundToMultipleOfPeriod(timing_eff->GetEndTimeMS(), mSequenceElements->GetFrequency());
+            if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
+                Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                    mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                    newstart, newEnd, EFFECT_SELECTED, false);
+                mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+            }
+        }
+    } else {
+        long newstart = mTimeline->RoundToMultipleOfPeriod(start, mSequenceElements->GetFrequency());
+        long newEnd = mTimeline->RoundToMultipleOfPeriod(end, mSequenceElements->GetFrequency());
+        if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
+            Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()),
+                mSelectedEffect->GetSettingsAsString(), mSelectedEffect->GetPaletteAsString(),
+                newstart, newEnd, EFFECT_SELECTED, false);
+            mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
         }
     }
 }
