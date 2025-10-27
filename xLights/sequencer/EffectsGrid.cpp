@@ -7738,6 +7738,7 @@ void EffectsGrid::DuplicateEffectRight() {
     }
     sendRenderDirtyEvent();
     Refresh();
+    Update();
 }
 
 void EffectsGrid::DuplicateEffectLeft() {
@@ -7952,6 +7953,7 @@ void EffectsGrid::DuplicateEffectLeft() {
     }
     sendRenderDirtyEvent();
     Refresh();
+    Update();
 }
 
 void EffectsGrid::DuplicateEffectUp() {
@@ -8158,6 +8160,7 @@ void EffectsGrid::DuplicateEffectUp() {
     }
     sendRenderDirtyEvent();
     Refresh();
+    Update();
 }
 
 void EffectsGrid::DuplicateEffectDown() {
@@ -8364,4 +8367,5 @@ void EffectsGrid::DuplicateEffectDown() {
     }
     sendRenderDirtyEvent();
     Refresh();
+    Update();
 }
