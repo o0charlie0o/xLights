@@ -7548,7 +7548,12 @@ void EffectsGrid::DuplicateEffectRight() {
         long length = end - start;
 
         // Find the current timing cell
-        long startCol = tel->GetEffectByTime(start)->GetID() + 1;
+        Effect* current_timing = tel->GetEffectByTime(start);
+        if (current_timing == nullptr) {
+            return;
+        }
+
+        long startCol = current_timing->GetID() + 2;
         if (start == 0) {
             startCol--;
         }
@@ -7600,10 +7605,16 @@ void EffectsGrid::DuplicateEffectLeft() {
         long end = mSelectedEffect->GetEndTimeMS();
         long length = end - start;
 
-        // Find the previous timing cell
-        long startCol = tel->GetEffectByTime(start)->GetID() - 1;
+        // Find the current timing cell
+        Effect* current_timing = tel->GetEffectByTime(start);
+        if (current_timing == nullptr) {
+            return;
+        }
+
+        // Previous timing cell is at ID
+        long startCol = current_timing->GetID();
         if (start == 0) {
-            startCol--;
+            return; // Can't go left from the first cell
         }
 
         auto el = mSelectedEffect->GetParentEffectLayer();
@@ -7642,38 +7653,23 @@ void EffectsGrid::DuplicateEffectUp() {
         return;
     }
 
+    if (mSelectedRow <= 0) {
+        return; // Already at top
+    }
+
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
 
     long start = mSelectedEffect->GetStartTimeMS();
     long end = mSelectedEffect->GetEndTimeMS();
-    long length = end - start;
-
-    // Find the current row
-    auto current_el = mSelectedEffect->GetParentEffectLayer();
-    int current_row = -1;
-    for (int row = 0; row < mSequenceElements->GetVisibleRowInformationSize(); ++row) {
-        Row_Information_Struct* ri = mSequenceElements->GetVisibleRowInformation(row);
-        if (ri->element != nullptr && ri->element == current_el->GetParentElement()) {
-            if (ri->layerIndex == current_el->GetIndex()) {
-                current_row = row;
-                break;
-            }
-        }
-    }
-
-    if (current_row <= 0) {
-        return; // Already at top
-    }
 
     // Get the row above
-    int target_row = current_row - 1;
-    Row_Information_Struct* target_ri = mSequenceElements->GetVisibleRowInformation(target_row);
-    if (target_ri->element == nullptr) {
+    int target_row = mSelectedRow - 1;
+    if (target_row < 0 || target_row >= mSequenceElements->GetVisibleRowInformationSize()) {
         return;
     }
 
-    EffectLayer* target_el = target_ri->element->GetEffectLayer(target_ri->layerIndex);
+    EffectLayer* target_el = mSequenceElements->GetVisibleEffectLayer(target_row);
     if (target_el == nullptr) {
         return;
     }
@@ -7713,38 +7709,23 @@ void EffectsGrid::DuplicateEffectDown() {
         return;
     }
 
+    if (mSelectedRow < 0 || mSelectedRow >= mSequenceElements->GetVisibleRowInformationSize() - 1) {
+        return; // Already at bottom or not found
+    }
+
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
 
     long start = mSelectedEffect->GetStartTimeMS();
     long end = mSelectedEffect->GetEndTimeMS();
-    long length = end - start;
-
-    // Find the current row
-    auto current_el = mSelectedEffect->GetParentEffectLayer();
-    int current_row = -1;
-    for (int row = 0; row < mSequenceElements->GetVisibleRowInformationSize(); ++row) {
-        Row_Information_Struct* ri = mSequenceElements->GetVisibleRowInformation(row);
-        if (ri->element != nullptr && ri->element == current_el->GetParentElement()) {
-            if (ri->layerIndex == current_el->GetIndex()) {
-                current_row = row;
-                break;
-            }
-        }
-    }
-
-    if (current_row < 0 || current_row >= mSequenceElements->GetVisibleRowInformationSize() - 1) {
-        return; // Already at bottom or not found
-    }
 
     // Get the row below
-    int target_row = current_row + 1;
-    Row_Information_Struct* target_ri = mSequenceElements->GetVisibleRowInformation(target_row);
-    if (target_ri->element == nullptr) {
+    int target_row = mSelectedRow + 1;
+    if (target_row >= mSequenceElements->GetVisibleRowInformationSize()) {
         return;
     }
 
-    EffectLayer* target_el = target_ri->element->GetEffectLayer(target_ri->layerIndex);
+    EffectLayer* target_el = mSequenceElements->GetVisibleEffectLayer(target_row);
     if (target_el == nullptr) {
         return;
     }
