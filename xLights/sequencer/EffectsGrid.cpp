@@ -395,31 +395,35 @@ void EffectsGrid::rightClick(wxMouseEvent& event) {
             menu_createTiming->Enable(false);
         }
 
-        wxMenuItem* menu_duplicate = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_EFFECT, "Duplicate");
+        // Duplicate submenu
+        wxMenu* mnuDuplicate = new wxMenu();
+        wxMenuItem* menu_duplicate = mnuDuplicate->Append(ID_GRID_MNU_DUPLICATE_EFFECT, "Duplicate");
+        bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
         if (mSelectedEffect == nullptr) {
             menu_duplicate->Enable(false);
         }
-
-        wxMenuItem* menu_duplicate_right = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_RIGHT, "Duplicate Right");
-        bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
-        if (mSelectedEffect == nullptr && !(mCellRangeSelected && paste_by_cell)) {
+        mnuDuplicate->AppendSeparator();
+        wxMenuItem* menu_duplicate_right = mnuDuplicate->Append(ID_GRID_MNU_DUPLICATE_RIGHT, "Duplicate Right");
+        if (mSelectedEffect == nullptr && !mCellRangeSelected) {
             menu_duplicate_right->Enable(false);
         }
 
-        wxMenuItem* menu_duplicate_left = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_LEFT, "Duplicate Left");
-        if (mSelectedEffect == nullptr && !(mCellRangeSelected && paste_by_cell)) {
+        wxMenuItem* menu_duplicate_left = mnuDuplicate->Append(ID_GRID_MNU_DUPLICATE_LEFT, "Duplicate Left");
+        if (mSelectedEffect == nullptr && !mCellRangeSelected) {
             menu_duplicate_left->Enable(false);
         }
 
-        wxMenuItem* menu_duplicate_up = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_UP, "Duplicate Up");
-        if (mSelectedEffect == nullptr && !(mCellRangeSelected && paste_by_cell)) {
+        wxMenuItem* menu_duplicate_up = mnuDuplicate->Append(ID_GRID_MNU_DUPLICATE_UP, "Duplicate Up");
+        if (mSelectedEffect == nullptr && !mCellRangeSelected) {
             menu_duplicate_up->Enable(false);
         }
 
-        wxMenuItem* menu_duplicate_down = mnuLayer.Append(ID_GRID_MNU_DUPLICATE_DOWN, "Duplicate Down");
-        if (mSelectedEffect == nullptr && !(mCellRangeSelected && paste_by_cell)) {
+        wxMenuItem* menu_duplicate_down = mnuDuplicate->Append(ID_GRID_MNU_DUPLICATE_DOWN, "Duplicate Down");
+        if (mSelectedEffect == nullptr && !mCellRangeSelected) {
             menu_duplicate_down->Enable(false);
         }
+        mnuDuplicate->Connect(wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&EffectsGrid::OnGridPopup, nullptr, this);
+        mnuLayer.AppendSubMenu(mnuDuplicate, "Duplicate");
 
         // Undo
         mnuLayer.AppendSeparator();
@@ -7535,55 +7539,145 @@ void EffectsGrid::DuplicateEffectRight() {
     EffectLayer* tel{ nullptr };
 
     // Handle cell range selection
-    if (mCellRangeSelected && paste_by_cell) {
-        tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
-        if (tel == nullptr) {
-            return;
-        }
-
-        int startCol = GetStartColumn();
-        int endCol = GetEndColumn();
+    if (mCellRangeSelected) {
         int startRow = GetStartRow();
         int endRow = GetEndRow();
-        int rangeWidth = endCol - startCol + 1;
 
-        fprintf(stderr, "DuplicateEffectRight: Range selected, cols %d-%d, rows %d-%d\n",
-            startCol, endCol, startRow, endRow);
+        if (paste_by_cell) {
+            tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+            if (tel == nullptr) {
+                return;
+            }
 
-        // Duplicate each effect in the range to the right
-        for (int row = startRow; row <= endRow; row++) {
-            EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
-            if (layer == nullptr) continue;
+            int startCol = GetStartColumn();
+            int endCol = GetEndColumn();
+            int rangeWidth = endCol - startCol + 1;
 
-            for (int col = startCol; col <= endCol; col++) {
-                Effect* timing_cell = tel->GetEffect(col);
-                if (timing_cell == nullptr) continue;
+            fprintf(stderr, "DuplicateEffectRight: Range selected (paste by cell), cols %d-%d, rows %d-%d\n",
+                startCol, endCol, startRow, endRow);
 
-                int targetCol = col + rangeWidth;
-                Effect* target_timing = tel->GetEffect(targetCol);
-                if (target_timing == nullptr) continue;
+            // Duplicate each effect in the range to the right
+            for (int row = startRow; row <= endRow; row++) {
+                EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
+                if (layer == nullptr) continue;
 
-                // Find effect in this cell (if any)
-                long cell_start = timing_cell->GetStartTimeMS();
-                long cell_end = timing_cell->GetEndTimeMS();
-                Effect* source_effect = layer->GetEffectByTime(cell_start + 1);
+                for (int col = startCol; col <= endCol; col++) {
+                    Effect* timing_cell = tel->GetEffect(col);
+                    if (timing_cell == nullptr) continue;
 
-                // Check if the effect is actually in this cell
-                if (source_effect && source_effect->GetStartTimeMS() >= cell_start &&
-                    source_effect->GetEndTimeMS() <= cell_end) {
+                    int targetCol = col + rangeWidth;
+                    Effect* target_timing = tel->GetEffect(targetCol);
+                    if (target_timing == nullptr) continue;
 
-                    // Duplicate to target cell
-                    long newstart = mTimeline->RoundToMultipleOfPeriod(target_timing->GetStartTimeMS(), mSequenceElements->GetFrequency());
-                    long newEnd = mTimeline->RoundToMultipleOfPeriod(target_timing->GetEndTimeMS(), mSequenceElements->GetFrequency());
+                    // Find effect in this cell (if any)
+                    long cell_start = timing_cell->GetStartTimeMS();
+                    long cell_end = timing_cell->GetEndTimeMS();
+                    Effect* source_effect = layer->GetEffectByTime(cell_start + 1);
 
-                    if (!layer->HasEffectsInTimeRange(newstart, newEnd)) {
-                        Effect* newef = layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
-                            source_effect->GetSettingsAsString(), source_effect->GetPaletteAsString(),
-                            newstart, newEnd, EFFECT_SELECTED, false);
-                        mSequenceElements->get_undo_mgr().CaptureAddedEffect(layer->GetParentElement()->GetName(), layer->GetIndex(), newef->GetID());
+                    // Check if the effect starts in this cell (it may extend beyond the cell)
+                    if (source_effect && source_effect->GetStartTimeMS() >= cell_start &&
+                        source_effect->GetStartTimeMS() < cell_end) {
+
+                        // Duplicate maintaining the original effect's duration
+                        long effect_duration = source_effect->GetEndTimeMS() - source_effect->GetStartTimeMS();
+                        long newstart = mTimeline->RoundToMultipleOfPeriod(target_timing->GetStartTimeMS(), mSequenceElements->GetFrequency());
+                        long newEnd = mTimeline->RoundToMultipleOfPeriod(newstart + effect_duration, mSequenceElements->GetFrequency());
+
+                        if (!layer->HasEffectsInTimeRange(newstart, newEnd)) {
+                            Effect* newef = layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
+                                source_effect->GetSettingsAsString(), source_effect->GetPaletteAsString(),
+                                newstart, newEnd, EFFECT_SELECTED, false);
+                            mSequenceElements->get_undo_mgr().CaptureAddedEffect(layer->GetParentElement()->GetName(), layer->GetIndex(), newef->GetID());
+                        }
+                    }
+                    // If no effect in this cell, the target cell stays empty (preserving the gap)
+                }
+            }
+        } else {
+            // Paste by time mode - duplicate effects maintaining their relative positions
+            fprintf(stderr, "DuplicateEffectRight: Range selected (paste by time), rows %d-%d\n",
+                startRow, endRow);
+
+            // Find the rightmost effect in the selection to determine where to place duplicates
+            long range_start_time = LONG_MAX;
+            long range_end_time = 0;
+            int selected_count = 0;
+
+            for (int row = startRow; row <= endRow; row++) {
+                EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
+                if (layer == nullptr) continue;
+
+                fprintf(stderr, "  Row %d: checking %d effects\n", row, layer->GetEffectCount());
+                for (int i = 0; i < layer->GetEffectCount(); i++) {
+                    Effect* eff = layer->GetEffect(i);
+                    if (eff && eff->GetSelected() != EFFECT_NOT_SELECTED) {
+                        selected_count++;
+                        fprintf(stderr, "    Found selected effect at %ldms-%ldms\n",
+                            eff->GetStartTimeMS(), eff->GetEndTimeMS());
+                        if (eff->GetStartTimeMS() < range_start_time) {
+                            range_start_time = eff->GetStartTimeMS();
+                        }
+                        if (eff->GetEndTimeMS() > range_end_time) {
+                            range_end_time = eff->GetEndTimeMS();
+                        }
                     }
                 }
-                // If no effect in this cell, the target cell stays empty (preserving the gap)
+            }
+
+            fprintf(stderr, "  Selected effects: %d, range: %ldms-%ldms\n",
+                selected_count, range_start_time, range_end_time);
+
+            if (range_end_time == 0 || selected_count == 0) {
+                fprintf(stderr, "  No selected effects found in range\n");
+                return; // No effects found in range
+            }
+
+            long range_width = range_end_time - range_start_time;
+
+            // Collect all effects to duplicate first (to avoid duplicating newly created effects)
+            struct EffectToDuplicate {
+                Effect* source;
+                EffectLayer* layer;
+                long newstart;
+                long newEnd;
+            };
+            std::vector<EffectToDuplicate> effects_to_duplicate;
+
+            for (int row = startRow; row <= endRow; row++) {
+                EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
+                if (layer == nullptr) continue;
+
+                for (int i = 0; i < layer->GetEffectCount(); i++) {
+                    Effect* source_effect = layer->GetEffect(i);
+                    if (source_effect && source_effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                        long effect_start = source_effect->GetStartTimeMS();
+                        long effect_end = source_effect->GetEndTimeMS();
+                        long effect_duration = effect_end - effect_start;
+                        long offset_from_range_start = effect_start - range_start_time;
+
+                        // Place duplicate after the range end, maintaining relative position
+                        long newstart = mTimeline->RoundToMultipleOfPeriod(range_end_time + offset_from_range_start, mSequenceElements->GetFrequency());
+                        long newEnd = mTimeline->RoundToMultipleOfPeriod(newstart + effect_duration, mSequenceElements->GetFrequency());
+
+                        effects_to_duplicate.push_back({source_effect, layer, newstart, newEnd});
+                    }
+                }
+            }
+
+            // Now duplicate all the collected effects
+            for (const auto& etd : effects_to_duplicate) {
+                fprintf(stderr, "    Duplicating effect from %ldms-%ldms to %ldms-%ldms\n",
+                    etd.source->GetStartTimeMS(), etd.source->GetEndTimeMS(), etd.newstart, etd.newEnd);
+
+                if (!etd.layer->HasEffectsInTimeRange(etd.newstart, etd.newEnd)) {
+                    Effect* newef = etd.layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(etd.source->GetEffectIndex()),
+                        etd.source->GetSettingsAsString(), etd.source->GetPaletteAsString(),
+                        etd.newstart, etd.newEnd, EFFECT_SELECTED, false);
+                    mSequenceElements->get_undo_mgr().CaptureAddedEffect(etd.layer->GetParentElement()->GetName(), etd.layer->GetIndex(), newef->GetID());
+                    fprintf(stderr, "      Effect duplicated successfully\n");
+                } else {
+                    fprintf(stderr, "      Target range already has effects\n");
+                }
             }
         }
         return;
@@ -7649,7 +7743,11 @@ void EffectsGrid::DuplicateEffectLeft() {
     EffectLayer* tel{ nullptr };
 
     // Handle cell range selection
-    if (mCellRangeSelected && paste_by_cell) {
+    if (mCellRangeSelected) {
+        int startRow = GetStartRow();
+        int endRow = GetEndRow();
+
+        if (paste_by_cell) {
         tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
         if (tel == nullptr) {
             return;
@@ -7661,7 +7759,7 @@ void EffectsGrid::DuplicateEffectLeft() {
         int endRow = GetEndRow();
         int rangeWidth = endCol - startCol + 1;
 
-        fprintf(stderr, "DuplicateEffectLeft: Range selected, cols %d-%d, rows %d-%d\n",
+        fprintf(stderr, "DuplicateEffectLeft: Range selected (paste by cell), cols %d-%d, rows %d-%d\n",
             startCol, endCol, startRow, endRow);
 
         // Check if we can duplicate left (target columns must be >= 0)
@@ -7689,13 +7787,14 @@ void EffectsGrid::DuplicateEffectLeft() {
                 long cell_end = timing_cell->GetEndTimeMS();
                 Effect* source_effect = layer->GetEffectByTime(cell_start + 1);
 
-                // Check if the effect is actually in this cell
+                // Check if the effect starts in this cell (it may extend beyond the cell)
                 if (source_effect && source_effect->GetStartTimeMS() >= cell_start &&
-                    source_effect->GetEndTimeMS() <= cell_end) {
+                    source_effect->GetStartTimeMS() < cell_end) {
 
-                    // Duplicate to target cell
+                    // Duplicate maintaining the original effect's duration
+                    long effect_duration = source_effect->GetEndTimeMS() - source_effect->GetStartTimeMS();
                     long newstart = mTimeline->RoundToMultipleOfPeriod(target_timing->GetStartTimeMS(), mSequenceElements->GetFrequency());
-                    long newEnd = mTimeline->RoundToMultipleOfPeriod(target_timing->GetEndTimeMS(), mSequenceElements->GetFrequency());
+                    long newEnd = mTimeline->RoundToMultipleOfPeriod(newstart + effect_duration, mSequenceElements->GetFrequency());
 
                     if (!layer->HasEffectsInTimeRange(newstart, newEnd)) {
                         Effect* newef = layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
@@ -7705,6 +7804,89 @@ void EffectsGrid::DuplicateEffectLeft() {
                     }
                 }
                 // If no effect in this cell, the target cell stays empty (preserving the gap)
+            }
+        }
+        } else {
+            // Paste by time mode - duplicate effects maintaining their relative positions
+            fprintf(stderr, "DuplicateEffectLeft: Range selected (paste by time), rows %d-%d\n",
+                startRow, endRow);
+
+            // Find the leftmost and rightmost effects in the selection
+            long range_start_time = LONG_MAX;
+            long range_end_time = 0;
+            int selected_count = 0;
+
+            for (int row = startRow; row <= endRow; row++) {
+                EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
+                if (layer == nullptr) continue;
+
+                for (int i = 0; i < layer->GetEffectCount(); i++) {
+                    Effect* eff = layer->GetEffect(i);
+                    if (eff && eff->GetSelected() != EFFECT_NOT_SELECTED) {
+                        selected_count++;
+                        if (eff->GetStartTimeMS() < range_start_time) {
+                            range_start_time = eff->GetStartTimeMS();
+                        }
+                        if (eff->GetEndTimeMS() > range_end_time) {
+                            range_end_time = eff->GetEndTimeMS();
+                        }
+                    }
+                }
+            }
+
+            if (range_start_time == LONG_MAX || selected_count == 0) {
+                fprintf(stderr, "  No selected effects found in range\n");
+                return; // No effects found in range
+            }
+
+            long range_width = range_end_time - range_start_time;
+
+            // Check if we can duplicate left (must not go before time 0)
+            if (range_start_time - range_width < 0) {
+                fprintf(stderr, "  Cannot duplicate left - would go before time 0\n");
+                return;
+            }
+
+            // Collect all effects to duplicate first
+            struct EffectToDuplicate {
+                Effect* source;
+                EffectLayer* layer;
+                long newstart;
+                long newEnd;
+            };
+            std::vector<EffectToDuplicate> effects_to_duplicate;
+
+            for (int row = startRow; row <= endRow; row++) {
+                EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
+                if (layer == nullptr) continue;
+
+                for (int i = 0; i < layer->GetEffectCount(); i++) {
+                    Effect* source_effect = layer->GetEffect(i);
+                    if (source_effect && source_effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                        long effect_start = source_effect->GetStartTimeMS();
+                        long effect_end = source_effect->GetEndTimeMS();
+                        long effect_duration = effect_end - effect_start;
+                        long offset_from_range_start = effect_start - range_start_time;
+
+                        // Place duplicate before the range start, maintaining relative position
+                        long newstart = mTimeline->RoundToMultipleOfPeriod(range_start_time - range_width + offset_from_range_start, mSequenceElements->GetFrequency());
+                        long newEnd = mTimeline->RoundToMultipleOfPeriod(newstart + effect_duration, mSequenceElements->GetFrequency());
+
+                        if (newstart >= 0) {
+                            effects_to_duplicate.push_back({source_effect, layer, newstart, newEnd});
+                        }
+                    }
+                }
+            }
+
+            // Now duplicate all the collected effects
+            for (const auto& etd : effects_to_duplicate) {
+                if (!etd.layer->HasEffectsInTimeRange(etd.newstart, etd.newEnd)) {
+                    Effect* newef = etd.layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(etd.source->GetEffectIndex()),
+                        etd.source->GetSettingsAsString(), etd.source->GetPaletteAsString(),
+                        etd.newstart, etd.newEnd, EFFECT_SELECTED, false);
+                    mSequenceElements->get_undo_mgr().CaptureAddedEffect(etd.layer->GetParentElement()->GetName(), etd.layer->GetIndex(), newef->GetID());
+                }
             }
         }
         return;
@@ -7775,63 +7957,114 @@ void EffectsGrid::DuplicateEffectUp() {
     EffectLayer* tel{ nullptr };
 
     // Handle cell range selection
-    if (mCellRangeSelected && paste_by_cell) {
-        tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
-        if (tel == nullptr) {
-            return;
-        }
-
-        int startCol = GetStartColumn();
-        int endCol = GetEndColumn();
+    if (mCellRangeSelected) {
         int startRow = GetStartRow();
         int endRow = GetEndRow();
         int rangeHeight = endRow - startRow + 1;
-
-        fprintf(stderr, "DuplicateEffectUp: Range selected, cols %d-%d, rows %d-%d\n",
-            startCol, endCol, startRow, endRow);
 
         // Check if we can duplicate up (target rows must be >= 0)
         if (startRow - rangeHeight < 0) {
             return; // Can't duplicate up, would go before the first row
         }
 
-        // Duplicate each effect in the range upward
-        for (int col = startCol; col <= endCol; col++) {
-            Effect* timing_cell = tel->GetEffect(col);
-            if (timing_cell == nullptr) continue;
+        if (paste_by_cell) {
+            tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+            if (tel == nullptr) {
+                return;
+            }
 
-            long cell_start = timing_cell->GetStartTimeMS();
-            long cell_end = timing_cell->GetEndTimeMS();
+            int startCol = GetStartColumn();
+            int endCol = GetEndColumn();
+
+            fprintf(stderr, "DuplicateEffectUp: Range selected (paste by cell), cols %d-%d, rows %d-%d\n",
+                startCol, endCol, startRow, endRow);
+
+            // Duplicate each effect in the range upward
+            for (int col = startCol; col <= endCol; col++) {
+                Effect* timing_cell = tel->GetEffect(col);
+                if (timing_cell == nullptr) continue;
+
+                long cell_start = timing_cell->GetStartTimeMS();
+                long cell_end = timing_cell->GetEndTimeMS();
+
+                for (int row = startRow; row <= endRow; row++) {
+                    EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
+                    if (layer == nullptr) continue;
+
+                    int targetRow = row - rangeHeight;
+                    if (targetRow < 0) continue; // Skip if target is out of bounds
+
+                    EffectLayer* target_layer = mSequenceElements->GetVisibleEffectLayer(targetRow);
+                    if (target_layer == nullptr) continue;
+
+                    // Find effect in this cell (if any)
+                    Effect* source_effect = layer->GetEffectByTime(cell_start + 1);
+
+                    // Check if the effect starts in this cell (it may extend beyond the cell)
+                    if (source_effect && source_effect->GetStartTimeMS() >= cell_start &&
+                        source_effect->GetStartTimeMS() < cell_end) {
+
+                        // Duplicate maintaining the original effect's duration
+                        long effect_duration = source_effect->GetEndTimeMS() - source_effect->GetStartTimeMS();
+                        long newstart = mTimeline->RoundToMultipleOfPeriod(cell_start, mSequenceElements->GetFrequency());
+                        long newEnd = mTimeline->RoundToMultipleOfPeriod(newstart + effect_duration, mSequenceElements->GetFrequency());
+
+                        if (!target_layer->HasEffectsInTimeRange(newstart, newEnd)) {
+                            Effect* newef = target_layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
+                                source_effect->GetSettingsAsString(), source_effect->GetPaletteAsString(),
+                                newstart, newEnd, EFFECT_SELECTED, false);
+                            mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_layer->GetParentElement()->GetName(), target_layer->GetIndex(), newef->GetID());
+                        }
+                    }
+                    // If no effect in this cell, the target cell stays empty (preserving the gap)
+                }
+            }
+        } else {
+            // Paste by time mode - duplicate effects maintaining their time positions
+            fprintf(stderr, "DuplicateEffectUp: Range selected (paste by time), rows %d-%d\n",
+                startRow, endRow);
+
+            // Collect all effects to duplicate first
+            struct EffectToDuplicate {
+                Effect* source;
+                EffectLayer* target_layer;
+                long newstart;
+                long newEnd;
+            };
+            std::vector<EffectToDuplicate> effects_to_duplicate;
 
             for (int row = startRow; row <= endRow; row++) {
                 EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
                 if (layer == nullptr) continue;
 
                 int targetRow = row - rangeHeight;
-                if (targetRow < 0) continue; // Skip if target is out of bounds
+                if (targetRow < 0) continue;
 
                 EffectLayer* target_layer = mSequenceElements->GetVisibleEffectLayer(targetRow);
                 if (target_layer == nullptr) continue;
 
-                // Find effect in this cell (if any)
-                Effect* source_effect = layer->GetEffectByTime(cell_start + 1);
+                for (int i = 0; i < layer->GetEffectCount(); i++) {
+                    Effect* source_effect = layer->GetEffect(i);
+                    if (source_effect && source_effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                        long effect_start = source_effect->GetStartTimeMS();
+                        long effect_end = source_effect->GetEndTimeMS();
 
-                // Check if the effect is actually in this cell
-                if (source_effect && source_effect->GetStartTimeMS() >= cell_start &&
-                    source_effect->GetEndTimeMS() <= cell_end) {
+                        long newstart = mTimeline->RoundToMultipleOfPeriod(effect_start, mSequenceElements->GetFrequency());
+                        long newEnd = mTimeline->RoundToMultipleOfPeriod(effect_end, mSequenceElements->GetFrequency());
 
-                    // Duplicate to target cell
-                    long newstart = mTimeline->RoundToMultipleOfPeriod(cell_start, mSequenceElements->GetFrequency());
-                    long newEnd = mTimeline->RoundToMultipleOfPeriod(cell_end, mSequenceElements->GetFrequency());
-
-                    if (!target_layer->HasEffectsInTimeRange(newstart, newEnd)) {
-                        Effect* newef = target_layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
-                            source_effect->GetSettingsAsString(), source_effect->GetPaletteAsString(),
-                            newstart, newEnd, EFFECT_SELECTED, false);
-                        mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_layer->GetParentElement()->GetName(), target_layer->GetIndex(), newef->GetID());
+                        effects_to_duplicate.push_back({source_effect, target_layer, newstart, newEnd});
                     }
                 }
-                // If no effect in this cell, the target cell stays empty (preserving the gap)
+            }
+
+            // Now duplicate all the collected effects
+            for (const auto& etd : effects_to_duplicate) {
+                if (!etd.target_layer->HasEffectsInTimeRange(etd.newstart, etd.newEnd)) {
+                    Effect* newef = etd.target_layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(etd.source->GetEffectIndex()),
+                        etd.source->GetSettingsAsString(), etd.source->GetPaletteAsString(),
+                        etd.newstart, etd.newEnd, EFFECT_SELECTED, false);
+                    mSequenceElements->get_undo_mgr().CaptureAddedEffect(etd.target_layer->GetParentElement()->GetName(), etd.target_layer->GetIndex(), newef->GetID());
+                }
             }
         }
         return;
@@ -7928,63 +8161,114 @@ void EffectsGrid::DuplicateEffectDown() {
     EffectLayer* tel{ nullptr };
 
     // Handle cell range selection
-    if (mCellRangeSelected && paste_by_cell) {
-        tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
-        if (tel == nullptr) {
-            return;
-        }
-
-        int startCol = GetStartColumn();
-        int endCol = GetEndColumn();
+    if (mCellRangeSelected) {
         int startRow = GetStartRow();
         int endRow = GetEndRow();
         int rangeHeight = endRow - startRow + 1;
-
-        fprintf(stderr, "DuplicateEffectDown: Range selected, cols %d-%d, rows %d-%d\n",
-            startCol, endCol, startRow, endRow);
 
         // Check if we can duplicate down (target rows must be < visible row count)
         if (endRow + rangeHeight >= mSequenceElements->GetVisibleRowInformationSize()) {
             return; // Can't duplicate down, would go past the last row
         }
 
-        // Duplicate each effect in the range downward
-        for (int col = startCol; col <= endCol; col++) {
-            Effect* timing_cell = tel->GetEffect(col);
-            if (timing_cell == nullptr) continue;
+        if (paste_by_cell) {
+            tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+            if (tel == nullptr) {
+                return;
+            }
 
-            long cell_start = timing_cell->GetStartTimeMS();
-            long cell_end = timing_cell->GetEndTimeMS();
+            int startCol = GetStartColumn();
+            int endCol = GetEndColumn();
+
+            fprintf(stderr, "DuplicateEffectDown: Range selected (paste by cell), cols %d-%d, rows %d-%d\n",
+                startCol, endCol, startRow, endRow);
+
+            // Duplicate each effect in the range downward
+            for (int col = startCol; col <= endCol; col++) {
+                Effect* timing_cell = tel->GetEffect(col);
+                if (timing_cell == nullptr) continue;
+
+                long cell_start = timing_cell->GetStartTimeMS();
+                long cell_end = timing_cell->GetEndTimeMS();
+
+                for (int row = startRow; row <= endRow; row++) {
+                    EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
+                    if (layer == nullptr) continue;
+
+                    int targetRow = row + rangeHeight;
+                    if (targetRow >= mSequenceElements->GetVisibleRowInformationSize()) continue; // Skip if target is out of bounds
+
+                    EffectLayer* target_layer = mSequenceElements->GetVisibleEffectLayer(targetRow);
+                    if (target_layer == nullptr) continue;
+
+                    // Find effect in this cell (if any)
+                    Effect* source_effect = layer->GetEffectByTime(cell_start + 1);
+
+                    // Check if the effect starts in this cell (it may extend beyond the cell)
+                    if (source_effect && source_effect->GetStartTimeMS() >= cell_start &&
+                        source_effect->GetStartTimeMS() < cell_end) {
+
+                        // Duplicate maintaining the original effect's duration
+                        long effect_duration = source_effect->GetEndTimeMS() - source_effect->GetStartTimeMS();
+                        long newstart = mTimeline->RoundToMultipleOfPeriod(cell_start, mSequenceElements->GetFrequency());
+                        long newEnd = mTimeline->RoundToMultipleOfPeriod(newstart + effect_duration, mSequenceElements->GetFrequency());
+
+                        if (!target_layer->HasEffectsInTimeRange(newstart, newEnd)) {
+                            Effect* newef = target_layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
+                                source_effect->GetSettingsAsString(), source_effect->GetPaletteAsString(),
+                                newstart, newEnd, EFFECT_SELECTED, false);
+                            mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_layer->GetParentElement()->GetName(), target_layer->GetIndex(), newef->GetID());
+                        }
+                    }
+                    // If no effect in this cell, the target cell stays empty (preserving the gap)
+                }
+            }
+        } else {
+            // Paste by time mode - duplicate effects maintaining their time positions
+            fprintf(stderr, "DuplicateEffectDown: Range selected (paste by time), rows %d-%d\n",
+                startRow, endRow);
+
+            // Collect all effects to duplicate first
+            struct EffectToDuplicate {
+                Effect* source;
+                EffectLayer* target_layer;
+                long newstart;
+                long newEnd;
+            };
+            std::vector<EffectToDuplicate> effects_to_duplicate;
 
             for (int row = startRow; row <= endRow; row++) {
                 EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
                 if (layer == nullptr) continue;
 
                 int targetRow = row + rangeHeight;
-                if (targetRow >= mSequenceElements->GetVisibleRowInformationSize()) continue; // Skip if target is out of bounds
+                if (targetRow >= mSequenceElements->GetVisibleRowInformationSize()) continue;
 
                 EffectLayer* target_layer = mSequenceElements->GetVisibleEffectLayer(targetRow);
                 if (target_layer == nullptr) continue;
 
-                // Find effect in this cell (if any)
-                Effect* source_effect = layer->GetEffectByTime(cell_start + 1);
+                for (int i = 0; i < layer->GetEffectCount(); i++) {
+                    Effect* source_effect = layer->GetEffect(i);
+                    if (source_effect && source_effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                        long effect_start = source_effect->GetStartTimeMS();
+                        long effect_end = source_effect->GetEndTimeMS();
 
-                // Check if the effect is actually in this cell
-                if (source_effect && source_effect->GetStartTimeMS() >= cell_start &&
-                    source_effect->GetEndTimeMS() <= cell_end) {
+                        long newstart = mTimeline->RoundToMultipleOfPeriod(effect_start, mSequenceElements->GetFrequency());
+                        long newEnd = mTimeline->RoundToMultipleOfPeriod(effect_end, mSequenceElements->GetFrequency());
 
-                    // Duplicate to target cell
-                    long newstart = mTimeline->RoundToMultipleOfPeriod(cell_start, mSequenceElements->GetFrequency());
-                    long newEnd = mTimeline->RoundToMultipleOfPeriod(cell_end, mSequenceElements->GetFrequency());
-
-                    if (!target_layer->HasEffectsInTimeRange(newstart, newEnd)) {
-                        Effect* newef = target_layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
-                            source_effect->GetSettingsAsString(), source_effect->GetPaletteAsString(),
-                            newstart, newEnd, EFFECT_SELECTED, false);
-                        mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_layer->GetParentElement()->GetName(), target_layer->GetIndex(), newef->GetID());
+                        effects_to_duplicate.push_back({source_effect, target_layer, newstart, newEnd});
                     }
                 }
-                // If no effect in this cell, the target cell stays empty (preserving the gap)
+            }
+
+            // Now duplicate all the collected effects
+            for (const auto& etd : effects_to_duplicate) {
+                if (!etd.target_layer->HasEffectsInTimeRange(etd.newstart, etd.newEnd)) {
+                    Effect* newef = etd.target_layer->AddEffect(0, xlights->GetEffectManager().GetEffectName(etd.source->GetEffectIndex()),
+                        etd.source->GetSettingsAsString(), etd.source->GetPaletteAsString(),
+                        etd.newstart, etd.newEnd, EFFECT_SELECTED, false);
+                    mSequenceElements->get_undo_mgr().CaptureAddedEffect(etd.target_layer->GetParentElement()->GetName(), etd.target_layer->GetIndex(), newef->GetID());
+                }
             }
         }
         return;
