@@ -548,6 +548,33 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
             }
             else if (type == "TIMING_SPLIT") {
                 SplitTimingMark();
+            }
+            else if (type == "PHONEME_ETC") {
+                SetTimingLabel("etc");
+            }
+            else if (type == "PHONEME_AI") {
+                SetTimingLabel("AI");
+            }
+            else if (type == "PHONEME_E") {
+                SetTimingLabel("E");
+            }
+            else if (type == "PHONEME_O") {
+                SetTimingLabel("O");
+            }
+            else if (type == "PHONEME_WQ") {
+                SetTimingLabel("WQ");
+            }
+            else if (type == "PHONEME_FV") {
+                SetTimingLabel("FV");
+            }
+            else if (type == "PHONEME_MBP") {
+                SetTimingLabel("MBP");
+            }
+            else if (type == "PHONEME_REST") {
+                SetTimingLabel("rest");
+            }
+            else if (type == "PHONEME_L") {
+                SetTimingLabel("L");
             } else if (type == "EFFECTS_TO_TIMING") {
                 PanelEffectGrid->CreateTimingFromSelectedEffects();
             } else if (type == "SELECT_TIMING_1") {
@@ -1855,6 +1882,54 @@ void MainSequencer::SplitTimingMark()
             }
         }
     }
+}
+
+void MainSequencer::SetTimingLabel(const std::string& label)
+{
+    log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
+    // Get the currently selected effect
+    Effect* selectedEffect = PanelEffectGrid->GetSelectedEffect();
+
+    if (selectedEffect == nullptr)
+    {
+        logger_base.debug("MainSequencer::SetTimingLabel No effect selected.");
+        return;
+    }
+
+    // Check if it's a timing element
+    if (selectedEffect->GetParentEffectLayer()->GetParentElement()->GetType() != ElementType::ELEMENT_TYPE_TIMING)
+    {
+        logger_base.debug("MainSequencer::SetTimingLabel Selected effect is not a timing element.");
+        return;
+    }
+
+    // Check if it's a fixed timing layer
+    if (selectedEffect->GetParentEffectLayer()->IsFixedTimingLayer())
+    {
+        if (wxMessageBox("Cannot Add Labels to a Fixed Timing Track.\nWould You Like to convert it to a Variable Timing Track First?",
+                        "Convert Fixed Timing Track First", wxYES_NO) == wxYES)
+        {
+            TimingElement* te = dynamic_cast<TimingElement*>(selectedEffect->GetParentEffectLayer()->GetParentElement());
+            te->SetFixedTiming(0);
+        }
+        else
+        {
+            return;
+        }
+    }
+
+    // Set the label
+    selectedEffect->SetEffectName(label);
+
+    // If we have a fixed timing track and we add a label, we can no longer store it as a fixed timing track
+    TimingElement* te = dynamic_cast<TimingElement*>(selectedEffect->GetParentEffectLayer()->GetParentElement());
+    if (label != "" && te->GetFixedTiming() != 0)
+    {
+        te->SetFixedTiming(0);
+    }
+
+    PanelEffectGrid->ForceRefresh();
 }
 
 void MainSequencer::OnScrollBarEffectsHorizontalScrollLineUp(wxScrollEvent& event)
