@@ -891,15 +891,19 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
             }
             else if (type == "DUPLICATE_RIGHT") {
                 PanelEffectGrid->DuplicateEffectRight();
+                PanelEffectGrid->ForceRefresh();
             }
             else if (type == "DUPLICATE_LEFT") {
                 PanelEffectGrid->DuplicateEffectLeft();
+                PanelEffectGrid->ForceRefresh();
             }
             else if (type == "DUPLICATE_UP") {
                 PanelEffectGrid->DuplicateEffectUp();
+                PanelEffectGrid->ForceRefresh();
             }
             else if (type == "DUPLICATE_DOWN") {
                 PanelEffectGrid->DuplicateEffectDown();
+                PanelEffectGrid->ForceRefresh();
             }
             else {
                 logger_base.warn("Keybinding '%s' not recognised.", (const char*)type.c_str());
