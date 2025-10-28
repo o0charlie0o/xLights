@@ -561,6 +561,10 @@
 		<Unit filename="effects/AdjustEffect.h" />
 		<Unit filename="effects/AdjustPanel.cpp" />
 		<Unit filename="effects/AdjustPanel.h" />
+		<Unit filename="effects/ArpeggioEffect.cpp" />
+		<Unit filename="effects/ArpeggioEffect.h" />
+		<Unit filename="effects/ArpeggioPanel.cpp" />
+		<Unit filename="effects/ArpeggioPanel.h" />
 		<Unit filename="effects/BarsEffect.cpp" />
 		<Unit filename="effects/BarsEffect.h" />
 		<Unit filename="effects/BarsPanel.cpp" />

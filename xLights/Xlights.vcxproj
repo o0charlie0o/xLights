@@ -716,6 +716,8 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClCompile Include="effects\assist\xlGridCanvasEmpty.cpp" />
     <ClCompile Include="effects\assist\xlGridCanvasMorph.cpp" />
     <ClCompile Include="effects\assist\xlGridCanvasPictures.cpp" />
+    <ClCompile Include="effects\ArpeggioEffect.cpp" />
+    <ClCompile Include="effects\ArpeggioPanel.cpp" />
     <ClCompile Include="effects\BarsEffect.cpp" />
     <ClCompile Include="effects\BarsPanel.cpp" />
     <ClCompile Include="effects\ButterflyEffect.cpp" />
@@ -1258,6 +1260,8 @@ xcopy "$(SolutionDir)..\bin64\Vamp\" "$(TargetDir)Vamp\" /e /y /i /r
     <ClInclude Include="EffectIconPanel.h" />
     <ClInclude Include="EffectListDialog.h" />
     <ClInclude Include="EffectsPanel.h" />
+    <ClInclude Include="effects\ArpeggioEffect.h" />
+    <ClInclude Include="effects\ArpeggioPanel.h" />
     <ClInclude Include="effects\BarsEffect.h" />
     <ClInclude Include="effects\BarsPanel.h" />
     <ClInclude Include="effects\ButterflyEffect.h" />

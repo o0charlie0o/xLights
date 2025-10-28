@@ -24,6 +24,7 @@ public:
         eff_OFF,
         eff_ON,
         eff_ADJUST,
+        eff_ARPEGGIO,
         eff_BARS,
         eff_BUTTERFLY,
         eff_CANDLE,
