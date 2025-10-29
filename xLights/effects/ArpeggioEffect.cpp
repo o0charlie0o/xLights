@@ -493,6 +493,10 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
     if (manualMode && !sequencerData.empty()) {
         // Manual mode: parse sequencer data to get which props are active at this step
         // Format: "0,2;1,3;0,1,2" where semicolons separate steps and commas separate prop indices
+
+        static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+        logger_base.debug("Manual mode: sequencerData='%s', activeStepIndex=%d", sequencerData.c_str(), activeStepIndex);
+
         std::istringstream ss(sequencerData);
         std::string stepData;
         int stepIndex = 0;
@@ -501,6 +505,8 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
         while (std::getline(ss, stepData, ';') && stepIndex < activeStepIndex) {
             stepIndex++;
         }
+
+        logger_base.debug("  stepIndex=%d, stepData='%s'", stepIndex, stepData.c_str());
 
         if (stepIndex == activeStepIndex && !stepData.empty()) {
             // Parse the prop indices for this step
@@ -512,12 +518,15 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
                     int propIndex = std::stoi(propStr);
                     if (propIndex >= 0) {
                         activePropIndices.push_back(propIndex);
+                        logger_base.debug("    Added prop index: %d", propIndex);
                     }
                 } catch (...) {
                     // Ignore invalid prop indices
                 }
             }
         }
+
+        logger_base.debug("  Total props in activePropIndices: %d", (int)activePropIndices.size());
 
         // If looping is enabled and we're past the end of the sequence data, wrap around
         if (loop && activePropIndices.empty() && activeStepIndex >= stepIndex) {
