@@ -260,6 +260,11 @@ void ArpeggioSequencerDialog::LoadSequenceData(const std::string& data)
     }
     catch (...) {
         // If parsing fails, just clear the grid
-        OnClear(wxCommandEvent());
+        for (int step = 0; step < m_numSteps; step++) {
+            for (int prop = 0; prop < m_numProps; prop++) {
+                m_gridData[step][prop] = false;
+                UpdateCellColor(prop, step);
+            }
+        }
     }
 }

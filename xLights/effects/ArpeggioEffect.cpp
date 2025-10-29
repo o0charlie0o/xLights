@@ -510,7 +510,7 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
             while (std::getline(stepSS, propStr, ',')) {
                 try {
                     int propIndex = std::stoi(propStr);
-                    if (propIndex >= 0 && propIndex < numSteps) {
+                    if (propIndex >= 0) {
                         activePropIndices.push_back(propIndex);
                     }
                 } catch (...) {
@@ -538,7 +538,7 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
                 while (std::getline(stepSS, propStr, ',')) {
                     try {
                         int propIndex = std::stoi(propStr);
-                        if (propIndex >= 0 && propIndex < numSteps) {
+                        if (propIndex >= 0) {
                             activePropIndices.push_back(propIndex);
                         }
                     } catch (...) {
