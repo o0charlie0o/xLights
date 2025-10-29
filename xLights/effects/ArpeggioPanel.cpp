@@ -36,6 +36,7 @@ const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_PropsPerStep = wxNewId();
 const long ArpeggioPanel::IDD_SLIDER_Arpeggio_PropsPerStep = wxNewId();
 const long ArpeggioPanel::ID_TEXTCTRL_Arpeggio_PropsPerStep = wxNewId();
 const long ArpeggioPanel::ID_CHECKBOX_Arpeggio_Loop = wxNewId();
+const long ArpeggioPanel::ID_CHECKBOX_Arpeggio_ManualMode = wxNewId();
 const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_Overlap = wxNewId();
 const long ArpeggioPanel::IDD_SLIDER_Arpeggio_Overlap = wxNewId();
 const long ArpeggioPanel::ID_VALUECURVE_Arpeggio_Overlap = wxNewId();
@@ -196,6 +197,10 @@ ArpeggioPanel::ArpeggioPanel(wxWindow* parent) : xlEffectPanel(parent)
 	CheckBoxLoop = new BulkEditCheckBox(this, ID_CHECKBOX_Arpeggio_Loop, _("Loop"), wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("ID_CHECKBOX_Arpeggio_Loop"));
 	CheckBoxLoop->SetValue(true);
 	FlexGridSizerMain->Add(CheckBoxLoop, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 5);
+
+	CheckBoxManualMode = new BulkEditCheckBox(this, ID_CHECKBOX_Arpeggio_ManualMode, _("Manual Mode (Step Sequencer)"), wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("ID_CHECKBOX_Arpeggio_ManualMode"));
+	CheckBoxManualMode->SetValue(false);
+	FlexGridSizerMain->Add(CheckBoxManualMode, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 5);
 
 	CheckBoxShimmer = new BulkEditCheckBox(this, ID_CHECKBOX_Arpeggio_Shimmer, _("Shimmer"), wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("ID_CHECKBOX_Arpeggio_Shimmer"));
 	CheckBoxShimmer->SetValue(false);

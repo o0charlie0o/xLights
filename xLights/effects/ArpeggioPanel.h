@@ -40,6 +40,7 @@ class ArpeggioPanel: public xlEffectPanel
 		BulkEditSlider* SliderPropsPerStep;
 		BulkEditTextCtrl* TextCtrlPropsPerStep;
 		BulkEditCheckBox* CheckBoxLoop;
+		BulkEditCheckBox* CheckBoxManualMode;
 		BulkEditSlider* SliderOverlap;
 		BulkEditTextCtrl* TextCtrlOverlap;
 		BulkEditValueCurveButton* BitmapButton_Arpeggio_Overlap;
@@ -77,6 +78,7 @@ class ArpeggioPanel: public xlEffectPanel
 		static const long IDD_SLIDER_Arpeggio_PropsPerStep;
 		static const long ID_TEXTCTRL_Arpeggio_PropsPerStep;
 		static const long ID_CHECKBOX_Arpeggio_Loop;
+		static const long ID_CHECKBOX_Arpeggio_ManualMode;
 		static const long ID_STATICTEXT_Arpeggio_Overlap;
 		static const long IDD_SLIDER_Arpeggio_Overlap;
 		static const long ID_VALUECURVE_Arpeggio_Overlap;
