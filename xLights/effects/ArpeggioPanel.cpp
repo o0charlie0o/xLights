@@ -32,6 +32,9 @@ const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_Steps = wxNewId();
 const long ArpeggioPanel::ID_TEXTCTRL_Arpeggio_Steps = wxNewId();
 const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_AutoSplit = wxNewId();
 const long ArpeggioPanel::ID_TEXTCTRL_Arpeggio_AutoSplit = wxNewId();
+const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_PropsPerStep = wxNewId();
+const long ArpeggioPanel::IDD_SLIDER_Arpeggio_PropsPerStep = wxNewId();
+const long ArpeggioPanel::ID_TEXTCTRL_Arpeggio_PropsPerStep = wxNewId();
 const long ArpeggioPanel::ID_CHECKBOX_Arpeggio_Loop = wxNewId();
 const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_Overlap = wxNewId();
 const long ArpeggioPanel::IDD_SLIDER_Arpeggio_Overlap = wxNewId();
@@ -39,6 +42,8 @@ const long ArpeggioPanel::ID_VALUECURVE_Arpeggio_Overlap = wxNewId();
 const long ArpeggioPanel::ID_TEXTCTRL_Arpeggio_Overlap = wxNewId();
 const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_Order = wxNewId();
 const long ArpeggioPanel::ID_CHOICE_Arpeggio_Order = wxNewId();
+const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_Pattern = wxNewId();
+const long ArpeggioPanel::ID_CHOICE_Arpeggio_Pattern = wxNewId();
 const long ArpeggioPanel::ID_CHECKBOX_Arpeggio_Shimmer = wxNewId();
 const long ArpeggioPanel::ID_CHECKBOX_Arpeggio_PerPropGradient = wxNewId();
 const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_FadeIn = wxNewId();
@@ -103,6 +108,18 @@ ArpeggioPanel::ArpeggioPanel(wxWindow* parent) : xlEffectPanel(parent)
 	TextCtrlAutoSplit->SetMaxLength(3);
 	FlexGridSizerSettings->Add(TextCtrlAutoSplit, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 2);
 
+	// Props Per Step
+	StaticText_PropsPerStep = new wxStaticText(this, ID_STATICTEXT_Arpeggio_PropsPerStep, _("Props Per Step"), wxDefaultPosition, wxDefaultSize, 0, _T("ID_STATICTEXT_Arpeggio_PropsPerStep"));
+	FlexGridSizerSettings->Add(StaticText_PropsPerStep, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 2);
+	wxFlexGridSizer* FlexGridSizerPropsPerStep = new wxFlexGridSizer(0, 2, 0, 0);
+	FlexGridSizerPropsPerStep->AddGrowableCol(0);
+	SliderPropsPerStep = new BulkEditSlider(this, IDD_SLIDER_Arpeggio_PropsPerStep, 1, 1, 16, wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("IDD_SLIDER_Arpeggio_PropsPerStep"));
+	FlexGridSizerPropsPerStep->Add(SliderPropsPerStep, 1, wxALL|wxEXPAND, 2);
+	TextCtrlPropsPerStep = new BulkEditTextCtrl(this, ID_TEXTCTRL_Arpeggio_PropsPerStep, _("1"), wxDefaultPosition, wxDLG_UNIT(this,wxSize(20,-1)), 0, wxDefaultValidator, _T("ID_TEXTCTRL_Arpeggio_PropsPerStep"));
+	TextCtrlPropsPerStep->SetMaxLength(2);
+	FlexGridSizerPropsPerStep->Add(TextCtrlPropsPerStep, 1, wxALL|wxALIGN_CENTER_HORIZONTAL|wxALIGN_CENTER_VERTICAL, 2);
+	FlexGridSizerSettings->Add(FlexGridSizerPropsPerStep, 1, wxALL|wxEXPAND, 0);
+
 	// Overlap
 	StaticText_Overlap = new wxStaticText(this, ID_STATICTEXT_Arpeggio_Overlap, _("Overlap %"), wxDefaultPosition, wxDefaultSize, 0, _T("ID_STATICTEXT_Arpeggio_Overlap"));
 	FlexGridSizerSettings->Add(StaticText_Overlap, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 2);
@@ -121,10 +138,28 @@ ArpeggioPanel::ArpeggioPanel(wxWindow* parent) : xlEffectPanel(parent)
 	StaticText_Order = new wxStaticText(this, ID_STATICTEXT_Arpeggio_Order, _("Order"), wxDefaultPosition, wxDefaultSize, 0, _T("ID_STATICTEXT_Arpeggio_Order"));
 	FlexGridSizerSettings->Add(StaticText_Order, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 2);
 	ChoiceOrder = new BulkEditChoice(this, ID_CHOICE_Arpeggio_Order, wxDefaultPosition, wxDefaultSize, 0, 0, 0, wxDefaultValidator, _T("ID_CHOICE_Arpeggio_Order"));
-	ChoiceOrder->Append(_("Group Order"));
+	ChoiceOrder->Append(_("Forward"));
+	ChoiceOrder->Append(_("Reverse"));
+	ChoiceOrder->Append(_("Ping-Pong"));
+	ChoiceOrder->Append(_("Even"));
+	ChoiceOrder->Append(_("Odd"));
 	ChoiceOrder->Append(_("Random"));
 	ChoiceOrder->SetSelection(0);
 	FlexGridSizerSettings->Add(ChoiceOrder, 1, wxALL|wxEXPAND, 2);
+
+	// Pattern Presets
+	StaticText_Pattern = new wxStaticText(this, ID_STATICTEXT_Arpeggio_Pattern, _("Pattern"), wxDefaultPosition, wxDefaultSize, 0, _T("ID_STATICTEXT_Arpeggio_Pattern"));
+	FlexGridSizerSettings->Add(StaticText_Pattern, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 2);
+	ChoicePattern = new BulkEditChoice(this, ID_CHOICE_Arpeggio_Pattern, wxDefaultPosition, wxDefaultSize, 0, 0, 0, wxDefaultValidator, _T("ID_CHOICE_Arpeggio_Pattern"));
+	ChoicePattern->Append(_("None"));
+	ChoicePattern->Append(_("Center Out"));
+	ChoicePattern->Append(_("Edges In"));
+	ChoicePattern->Append(_("Left to Right"));
+	ChoicePattern->Append(_("Right to Left"));
+	ChoicePattern->Append(_("Alternating"));
+	ChoicePattern->Append(_("Split"));
+	ChoicePattern->SetSelection(0);
+	FlexGridSizerSettings->Add(ChoicePattern, 1, wxALL|wxEXPAND, 2);
 
 	// Fade In
 	StaticText_FadeIn = new wxStaticText(this, ID_STATICTEXT_Arpeggio_FadeIn, _("Fade In (ms)"), wxDefaultPosition, wxDefaultSize, 0, _T("ID_STATICTEXT_Arpeggio_FadeIn"));

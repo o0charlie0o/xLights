@@ -37,11 +37,14 @@ class ArpeggioPanel: public xlEffectPanel
 		BulkEditChoice* ChoiceTimingTrack;
 		BulkEditTextCtrl* TextCtrlSteps;
 		BulkEditTextCtrl* TextCtrlAutoSplit;
+		BulkEditSlider* SliderPropsPerStep;
+		BulkEditTextCtrl* TextCtrlPropsPerStep;
 		BulkEditCheckBox* CheckBoxLoop;
 		BulkEditSlider* SliderOverlap;
 		BulkEditTextCtrl* TextCtrlOverlap;
 		BulkEditValueCurveButton* BitmapButton_Arpeggio_Overlap;
 		BulkEditChoice* ChoiceOrder;
+		BulkEditChoice* ChoicePattern;
 		BulkEditCheckBox* CheckBoxShimmer;
 		BulkEditCheckBox* CheckBoxPerPropGradient;
 		BulkEditSlider* SliderFadeIn;
@@ -53,8 +56,10 @@ class ArpeggioPanel: public xlEffectPanel
 		wxStaticText* StaticText_TimingTrack;
 		wxStaticText* StaticText_Steps;
 		wxStaticText* StaticText_AutoSplit;
+		wxStaticText* StaticText_PropsPerStep;
 		wxStaticText* StaticText_Overlap;
 		wxStaticText* StaticText_Order;
+		wxStaticText* StaticText_Pattern;
 		wxStaticText* StaticText_FadeIn;
 		wxStaticText* StaticText_FadeOut;
 		//*)
@@ -68,6 +73,9 @@ class ArpeggioPanel: public xlEffectPanel
 		static const long ID_TEXTCTRL_Arpeggio_Steps;
 		static const long ID_STATICTEXT_Arpeggio_AutoSplit;
 		static const long ID_TEXTCTRL_Arpeggio_AutoSplit;
+		static const long ID_STATICTEXT_Arpeggio_PropsPerStep;
+		static const long IDD_SLIDER_Arpeggio_PropsPerStep;
+		static const long ID_TEXTCTRL_Arpeggio_PropsPerStep;
 		static const long ID_CHECKBOX_Arpeggio_Loop;
 		static const long ID_STATICTEXT_Arpeggio_Overlap;
 		static const long IDD_SLIDER_Arpeggio_Overlap;
@@ -75,6 +83,8 @@ class ArpeggioPanel: public xlEffectPanel
 		static const long ID_TEXTCTRL_Arpeggio_Overlap;
 		static const long ID_STATICTEXT_Arpeggio_Order;
 		static const long ID_CHOICE_Arpeggio_Order;
+		static const long ID_STATICTEXT_Arpeggio_Pattern;
+		static const long ID_CHOICE_Arpeggio_Pattern;
 		static const long ID_CHECKBOX_Arpeggio_Shimmer;
 		static const long ID_CHECKBOX_Arpeggio_PerPropGradient;
 		static const long ID_STATICTEXT_Arpeggio_FadeIn;
