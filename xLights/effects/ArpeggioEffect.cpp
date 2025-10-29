@@ -39,6 +39,8 @@ static const std::string CHECKBOX_Arpeggio_Shimmer("CHECKBOX_Arpeggio_Shimmer");
 static const std::string CHECKBOX_Arpeggio_PerPropGradient("CHECKBOX_Arpeggio_PerPropGradient");
 static const std::string TEXTCTRL_Arpeggio_FadeIn("TEXTCTRL_Arpeggio_FadeIn");
 static const std::string TEXTCTRL_Arpeggio_FadeOut("TEXTCTRL_Arpeggio_FadeOut");
+static const std::string CHECKBOX_Arpeggio_ManualMode("CHECKBOX_Arpeggio_ManualMode");
+static const std::string TEXTCTRL_Arpeggio_SequencerData("TEXTCTRL_Arpeggio_SequencerData");
 
 ArpeggioEffect::ArpeggioEffect(int i) : RenderableEffect(i, "Arpeggio", Arpeggio, Arpeggio, Arpeggio, Arpeggio, Arpeggio)
 {
@@ -68,6 +70,7 @@ void ArpeggioEffect::SetDefaultParameters() {
     p->TextCtrlFadeOut->SetValue("50");
     p->ChoiceOrder->SetSelection(0);  // Forward
     p->ChoicePattern->SetSelection(0);  // None
+    p->CheckBoxManualMode->SetValue(false);
     p->BitmapButton_Arpeggio_FadeIn->SetActive(false);
     p->BitmapButton_Arpeggio_FadeOut->SetActive(false);
     p->BitmapButton_Arpeggio_Overlap->SetActive(false);
@@ -169,6 +172,18 @@ wxString ArpeggioEffect::GetEffectString() {
         ret << ",";
     }
 
+    // Manual Mode
+    if (p->CheckBoxManualMode->GetValue()) {
+        ret << "E_CHECKBOX_Arpeggio_ManualMode=1,";
+    }
+
+    // Sequencer Data
+    if (!p->m_sequencerData.empty()) {
+        ret << "E_TEXTCTRL_Arpeggio_SequencerData=";
+        ret << p->m_sequencerData;
+        ret << ",";
+    }
+
     return ret.str();
 }
 
@@ -203,6 +218,12 @@ void ArpeggioEffect::RemoveDefaults(const std::string &version, Effect *effect) 
     }
     if (settingsMap.Get("E_CHOICE_Arpeggio_Pattern", "") == "None") {
         settingsMap.erase("E_CHOICE_Arpeggio_Pattern");
+    }
+    if (settingsMap.Get("E_CHECKBOX_Arpeggio_ManualMode", "") == "0") {
+        settingsMap.erase("E_CHECKBOX_Arpeggio_ManualMode");
+    }
+    if (settingsMap.Get("E_TEXTCTRL_Arpeggio_SequencerData", "") == "") {
+        settingsMap.erase("E_TEXTCTRL_Arpeggio_SequencerData");
     }
     RenderableEffect::RemoveDefaults(version, effect);
 }
@@ -239,6 +260,8 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
     bool perPropGradient = SettingsMap.GetInt(CHECKBOX_Arpeggio_PerPropGradient, 0) > 0;
     std::string orderStr = SettingsMap.Get(CHOICE_Arpeggio_Order, "Forward");
     std::string pattern = SettingsMap.Get(CHOICE_Arpeggio_Pattern, "None");
+    bool manualMode = SettingsMap.GetInt(CHECKBOX_Arpeggio_ManualMode, 0) > 0;
+    std::string sequencerData = SettingsMap.Get(TEXTCTRL_Arpeggio_SequencerData, "");
 
     double adjust = buffer.GetEffectTimeIntervalPosition();
     int fadeIn = GetValueCurveInt("Arpeggio_FadeIn", 50, SettingsMap, adjust,
@@ -465,10 +488,71 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
 
     // Apply order mapping to get actual prop indices
     std::vector<int> activePropIndices;
-    for (int p = 0; p < propsPerStep; p++) {
-        int idx = (orderMapPosition + p) % orderMapSize;
-        int propIndex = orderMap[idx];
-        activePropIndices.push_back(propIndex);
+
+    if (manualMode && !sequencerData.empty()) {
+        // Manual mode: parse sequencer data to get which props are active at this step
+        // Format: "0,2;1,3;0,1,2" where semicolons separate steps and commas separate prop indices
+        std::istringstream ss(sequencerData);
+        std::string stepData;
+        int stepIndex = 0;
+
+        // Find the data for the active step
+        while (std::getline(ss, stepData, ';') && stepIndex < activeStepIndex) {
+            stepIndex++;
+        }
+
+        if (stepIndex == activeStepIndex && !stepData.empty()) {
+            // Parse the prop indices for this step
+            std::istringstream stepSS(stepData);
+            std::string propStr;
+
+            while (std::getline(stepSS, propStr, ',')) {
+                try {
+                    int propIndex = std::stoi(propStr);
+                    if (propIndex >= 0 && propIndex < numSteps) {
+                        activePropIndices.push_back(propIndex);
+                    }
+                } catch (...) {
+                    // Ignore invalid prop indices
+                }
+            }
+        }
+
+        // If looping is enabled and we're past the end of the sequence data, wrap around
+        if (loop && activePropIndices.empty() && activeStepIndex >= stepIndex) {
+            // Reparse from beginning
+            ss.clear();
+            ss.str(sequencerData);
+            stepIndex = 0;
+            int wrappedStepIndex = activeStepIndex % (stepIndex + 1);
+
+            while (std::getline(ss, stepData, ';') && stepIndex < wrappedStepIndex) {
+                stepIndex++;
+            }
+
+            if (stepIndex == wrappedStepIndex && !stepData.empty()) {
+                std::istringstream stepSS(stepData);
+                std::string propStr;
+
+                while (std::getline(stepSS, propStr, ',')) {
+                    try {
+                        int propIndex = std::stoi(propStr);
+                        if (propIndex >= 0 && propIndex < numSteps) {
+                            activePropIndices.push_back(propIndex);
+                        }
+                    } catch (...) {
+                        // Ignore invalid prop indices
+                    }
+                }
+            }
+        }
+    } else {
+        // Normal mode: use order map and props per step
+        for (int p = 0; p < propsPerStep; p++) {
+            int idx = (orderMapPosition + p) % orderMapSize;
+            int propIndex = orderMap[idx];
+            activePropIndices.push_back(propIndex);
+        }
     }
 
     // Calculate intensity based on fade in/out

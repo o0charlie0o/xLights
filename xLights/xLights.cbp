@@ -565,6 +565,8 @@
 		<Unit filename="effects/ArpeggioEffect.h" />
 		<Unit filename="effects/ArpeggioPanel.cpp" />
 		<Unit filename="effects/ArpeggioPanel.h" />
+		<Unit filename="effects/ArpeggioSequencerDialog.cpp" />
+		<Unit filename="effects/ArpeggioSequencerDialog.h" />
 		<Unit filename="effects/BarsEffect.cpp" />
 		<Unit filename="effects/BarsEffect.h" />
 		<Unit filename="effects/BarsPanel.cpp" />

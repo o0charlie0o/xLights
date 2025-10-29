@@ -32,6 +32,8 @@ class ArpeggioPanel: public xlEffectPanel
 		virtual ~ArpeggioPanel();
 		virtual void ValidateWindow() override;
 		void SetTimingTracks(wxCommandEvent& event);
+		void OnSequencerButtonClick(wxCommandEvent& event);
+		void OnManualModeChange(wxCommandEvent& event);
 
 		//(*Declarations(ArpeggioPanel)
 		BulkEditChoice* ChoiceTimingTrack;
@@ -41,6 +43,7 @@ class ArpeggioPanel: public xlEffectPanel
 		BulkEditTextCtrl* TextCtrlPropsPerStep;
 		BulkEditCheckBox* CheckBoxLoop;
 		BulkEditCheckBox* CheckBoxManualMode;
+		wxButton* ButtonSequencer;
 		BulkEditSlider* SliderOverlap;
 		BulkEditTextCtrl* TextCtrlOverlap;
 		BulkEditValueCurveButton* BitmapButton_Arpeggio_Overlap;
@@ -79,6 +82,7 @@ class ArpeggioPanel: public xlEffectPanel
 		static const long ID_TEXTCTRL_Arpeggio_PropsPerStep;
 		static const long ID_CHECKBOX_Arpeggio_Loop;
 		static const long ID_CHECKBOX_Arpeggio_ManualMode;
+		static const long ID_BUTTON_Arpeggio_Sequencer;
 		static const long ID_STATICTEXT_Arpeggio_Overlap;
 		static const long IDD_SLIDER_Arpeggio_Overlap;
 		static const long ID_VALUECURVE_Arpeggio_Overlap;
@@ -103,6 +107,8 @@ class ArpeggioPanel: public xlEffectPanel
 
 	    //(*Handlers(ArpeggioPanel)
 		//*)
+
+		std::string m_sequencerData;  // Stores the step sequencer grid data
 
 		DECLARE_EVENT_TABLE()
 };

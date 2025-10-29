@@ -10,6 +10,7 @@
 
 #include "ArpeggioPanel.h"
 #include "ArpeggioEffect.h"
+#include "ArpeggioSequencerDialog.h"
 
 //(*InternalHeaders(ArpeggioPanel)
 #include <wx/bitmap.h>
@@ -37,6 +38,7 @@ const long ArpeggioPanel::IDD_SLIDER_Arpeggio_PropsPerStep = wxNewId();
 const long ArpeggioPanel::ID_TEXTCTRL_Arpeggio_PropsPerStep = wxNewId();
 const long ArpeggioPanel::ID_CHECKBOX_Arpeggio_Loop = wxNewId();
 const long ArpeggioPanel::ID_CHECKBOX_Arpeggio_ManualMode = wxNewId();
+const long ArpeggioPanel::ID_BUTTON_Arpeggio_Sequencer = wxNewId();
 const long ArpeggioPanel::ID_STATICTEXT_Arpeggio_Overlap = wxNewId();
 const long ArpeggioPanel::IDD_SLIDER_Arpeggio_Overlap = wxNewId();
 const long ArpeggioPanel::ID_VALUECURVE_Arpeggio_Overlap = wxNewId();
@@ -198,9 +200,14 @@ ArpeggioPanel::ArpeggioPanel(wxWindow* parent) : xlEffectPanel(parent)
 	CheckBoxLoop->SetValue(true);
 	FlexGridSizerMain->Add(CheckBoxLoop, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 5);
 
-	CheckBoxManualMode = new BulkEditCheckBox(this, ID_CHECKBOX_Arpeggio_ManualMode, _("Manual Mode (Step Sequencer)"), wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("ID_CHECKBOX_Arpeggio_ManualMode"));
+	// Manual Mode with sequencer button
+	wxBoxSizer* ManualModeSizer = new wxBoxSizer(wxHORIZONTAL);
+	CheckBoxManualMode = new BulkEditCheckBox(this, ID_CHECKBOX_Arpeggio_ManualMode, _("Manual Mode"), wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("ID_CHECKBOX_Arpeggio_ManualMode"));
 	CheckBoxManualMode->SetValue(false);
-	FlexGridSizerMain->Add(CheckBoxManualMode, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 5);
+	ManualModeSizer->Add(CheckBoxManualMode, 0, wxALL|wxALIGN_CENTER_VERTICAL, 0);
+	ButtonSequencer = new wxButton(this, ID_BUTTON_Arpeggio_Sequencer, _("Edit Sequence..."), wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("ID_BUTTON_Arpeggio_Sequencer"));
+	ManualModeSizer->Add(ButtonSequencer, 0, wxLEFT|wxALIGN_CENTER_VERTICAL, 10);
+	FlexGridSizerMain->Add(ManualModeSizer, 1, wxALL|wxALIGN_LEFT|wxALIGN_CENTER_VERTICAL, 5);
 
 	CheckBoxShimmer = new BulkEditCheckBox(this, ID_CHECKBOX_Arpeggio_Shimmer, _("Shimmer"), wxDefaultPosition, wxDefaultSize, 0, wxDefaultValidator, _T("ID_CHECKBOX_Arpeggio_Shimmer"));
 	CheckBoxShimmer->SetValue(false);
@@ -215,6 +222,8 @@ ArpeggioPanel::ArpeggioPanel(wxWindow* parent) : xlEffectPanel(parent)
 	Connect(ID_VALUECURVE_Arpeggio_Overlap,wxEVT_COMMAND_BUTTON_CLICKED,(wxObjectEventFunction)&ArpeggioPanel::OnVCButtonClick);
 	Connect(ID_VALUECURVE_Arpeggio_FadeIn,wxEVT_COMMAND_BUTTON_CLICKED,(wxObjectEventFunction)&ArpeggioPanel::OnVCButtonClick);
 	Connect(ID_VALUECURVE_Arpeggio_FadeOut,wxEVT_COMMAND_BUTTON_CLICKED,(wxObjectEventFunction)&ArpeggioPanel::OnVCButtonClick);
+	Connect(ID_BUTTON_Arpeggio_Sequencer,wxEVT_COMMAND_BUTTON_CLICKED,(wxObjectEventFunction)&ArpeggioPanel::OnSequencerButtonClick);
+	Connect(ID_CHECKBOX_Arpeggio_ManualMode,wxEVT_COMMAND_CHECKBOX_CLICKED,(wxObjectEventFunction)&ArpeggioPanel::OnManualModeChange);
 	//*)
 
     Connect(wxID_ANY, EVT_VC_CHANGED, (wxObjectEventFunction)&ArpeggioPanel::OnVCChanged, 0, this);
@@ -237,6 +246,20 @@ ArpeggioPanel::~ArpeggioPanel()
 
 void ArpeggioPanel::ValidateWindow()
 {
+    // Enable/disable controls based on Manual Mode checkbox
+    bool manualMode = CheckBoxManualMode->GetValue();
+
+    // Disable these controls when Manual Mode is enabled
+    SliderPropsPerStep->Enable(!manualMode);
+    TextCtrlPropsPerStep->Enable(!manualMode);
+    StaticText_PropsPerStep->Enable(!manualMode);
+    ChoiceOrder->Enable(!manualMode);
+    StaticText_Order->Enable(!manualMode);
+    ChoicePattern->Enable(!manualMode);
+    StaticText_Pattern->Enable(!manualMode);
+
+    // Enable sequencer button only when Manual Mode is enabled
+    ButtonSequencer->Enable(manualMode);
 }
 
 void ArpeggioPanel::SetTimingTracks(wxCommandEvent& event)
@@ -293,4 +316,47 @@ void ArpeggioPanel::SetTimingTracks(wxCommandEvent& event)
     {
         ChoiceTimingTrack->SetSelection(0);
     }
+}
+
+void ArpeggioPanel::OnSequencerButtonClick(wxCommandEvent& event)
+{
+    // Get current settings
+    int numSteps = 8;  // Default
+    wxString stepsStr = TextCtrlSteps->GetValue();
+    if (!stepsStr.IsEmpty() && stepsStr != "0") {
+        long val;
+        if (stepsStr.ToLong(&val)) {
+            numSteps = val;
+        }
+    } else {
+        // Use auto split value
+        wxString autoSplitStr = TextCtrlAutoSplit->GetValue();
+        if (!autoSplitStr.IsEmpty()) {
+            long val;
+            if (autoSplitStr.ToLong(&val)) {
+                numSteps = val;
+            }
+        }
+    }
+
+    // We'll need to get the number of props from the model
+    // For now, let's use a default of 16, but we should get this from the effect
+    int numProps = 16;  // TODO: Get from model group
+
+    // Open the sequencer dialog
+    ArpeggioSequencerDialog dialog(this, numSteps, numProps, m_sequencerData);
+
+    if (dialog.ShowModal() == wxID_OK) {
+        // Save the sequence data
+        m_sequencerData = dialog.GetSequenceData();
+
+        // Mark that we've changed something
+        FireChangeEvent();
+    }
+}
+
+void ArpeggioPanel::OnManualModeChange(wxCommandEvent& event)
+{
+    // Update the enabled/disabled state of controls
+    ValidateWindow();
 }
