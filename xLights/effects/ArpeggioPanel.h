@@ -34,6 +34,7 @@ class ArpeggioPanel: public xlEffectPanel
 		void SetTimingTracks(wxCommandEvent& event);
 		void OnSequencerButtonClick(wxCommandEvent& event);
 		void OnManualModeChange(wxCommandEvent& event);
+		std::string GetSequencerData() const { return m_sequencerData; }
 
 		//(*Declarations(ArpeggioPanel)
 		BulkEditChoice* ChoiceTimingTrack;

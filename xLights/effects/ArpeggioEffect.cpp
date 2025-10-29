@@ -178,9 +178,10 @@ wxString ArpeggioEffect::GetEffectString() {
     }
 
     // Sequencer Data
-    if (!p->m_sequencerData.empty()) {
+    std::string sequencerData = p->GetSequencerData();
+    if (!sequencerData.empty()) {
         ret << "E_TEXTCTRL_Arpeggio_SequencerData=";
-        ret << p->m_sequencerData;
+        ret << sequencerData;
         ret << ",";
     }
 
