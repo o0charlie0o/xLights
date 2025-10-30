@@ -11,6 +11,12 @@
 #include "ArpeggioPanel.h"
 #include "ArpeggioEffect.h"
 #include "ArpeggioSequencerDialog.h"
+#include "xLightsApp.h"
+#include "../xLightsMain.h"
+#include "../sequencer/MainSequencer.h"
+#include "../models/Model.h"
+#include "../models/ModelGroup.h"
+#include "../sequencer/Element.h"
 
 //(*InternalHeaders(ArpeggioPanel)
 #include <wx/bitmap.h>
@@ -339,9 +345,47 @@ void ArpeggioPanel::OnSequencerButtonClick(wxCommandEvent& event)
         }
     }
 
-    // We'll need to get the number of props from the model
-    // For now, let's use a default of 16, but we should get this from the effect
-    int numProps = 16;  // TODO: Get from model group
+    // Get the number of props from the model group
+    int numProps = 16;  // Default fallback
+
+    // Try to get the actual number of props from the current model/group
+    auto effect = xLightsApp::GetFrame()->GetMainSequencer()->GetSelectedEffect();
+
+    if (effect != nullptr && effect->GetParentEffectLayer() != nullptr) {
+        Element* element = effect->GetParentEffectLayer()->GetParentElement();
+
+        if (element != nullptr) {
+            ModelElement* me = dynamic_cast<ModelElement*>(element);
+
+            if (me != nullptr) {
+                Model* model = xLightsApp::GetFrame()->AllModels[me->GetModelName()];
+
+                if (model != nullptr) {
+                    if (model->GetDisplayAs() == "ModelGroup") {
+                        ModelGroup* mg = dynamic_cast<ModelGroup*>(model);
+                        if (mg != nullptr) {
+                            // Count the flat models in the group (include SubModels, exclude nested ModelGroups)
+                            auto models = mg->GetFlatModels(true, false);
+                            numProps = 0;
+                            for (const auto& it : models) {
+                                if (it->GetDisplayAs() != "ModelGroup") {
+                                    numProps++;
+                                }
+                            }
+                        }
+                    } else {
+                        // Single model - just 1 prop
+                        numProps = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // Ensure we have at least 1 prop
+    if (numProps < 1) {
+        numProps = 16;  // Fallback to default
+    }
 
     // Open the sequencer dialog
     ArpeggioSequencerDialog dialog(this, numSteps, numProps, m_sequencerData);

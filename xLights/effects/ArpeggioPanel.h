@@ -24,6 +24,9 @@ class wxTextCtrl;
 #include "../BulkEditControls.h"
 #include "EffectPanelUtils.h"
 
+class SequenceElements;
+class Element;
+
 class ArpeggioPanel: public xlEffectPanel
 {
 	public:

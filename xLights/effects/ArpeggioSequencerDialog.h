@@ -37,6 +37,9 @@ private:
     void CreateControls();
     void OnCellLeftClick(wxGridEvent& event);
     void OnCellRightClick(wxGridEvent& event);
+    void OnCellLeftDown(wxMouseEvent& event);
+    void OnCellLeftUp(wxMouseEvent& event);
+    void OnMotion(wxMouseEvent& event);
     void OnOK(wxCommandEvent& event);
     void OnCancel(wxCommandEvent& event);
     void OnClear(wxCommandEvent& event);
@@ -44,6 +47,7 @@ private:
 
     void LoadSequenceData(const std::string& data);
     void UpdateCellColor(int row, int col);
+    void SetCellState(int row, int col, bool state);
 
     wxGrid* m_grid;
     wxButton* m_okButton;
@@ -55,6 +59,10 @@ private:
     int m_numSteps;
     int m_numProps;
     std::vector<std::vector<bool>> m_gridData; // [step][prop]
+
+    // Drag state tracking
+    bool m_isDragging;
+    bool m_dragState;  // true = turning cells ON, false = turning cells OFF
 
     static const long ID_GRID;
     static const long ID_CLEAR_BTN;

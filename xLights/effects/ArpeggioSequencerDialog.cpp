@@ -34,7 +34,9 @@ ArpeggioSequencerDialog::ArpeggioSequencerDialog(wxWindow* parent,
                wxDefaultPosition, wxDefaultSize,
                wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
       m_numSteps(numSteps),
-      m_numProps(numProps)
+      m_numProps(numProps),
+      m_isDragging(false),
+      m_dragState(false)
 {
     // Initialize grid data (steps x props)
     m_gridData.resize(m_numSteps);
@@ -62,7 +64,7 @@ void ArpeggioSequencerDialog::CreateControls()
 
     // Info text
     wxString info = wxString::Format(
-        "Click cells to toggle props on/off for each step. Steps: %d, Props: %d",
+        "Click or drag cells to toggle props on/off for each step. Steps: %d, Props: %d",
         m_numSteps, m_numProps);
     m_infoText = new wxStaticText(this, wxID_ANY, info);
     mainSizer->Add(m_infoText, 0, wxALL | wxEXPAND, 10);
@@ -73,6 +75,11 @@ void ArpeggioSequencerDialog::CreateControls()
     m_grid->EnableEditing(false);
     m_grid->EnableDragGridSize(false);
     m_grid->SetSelectionMode(wxGrid::wxGridSelectCells);
+
+    // Connect mouse events for drag functionality
+    m_grid->GetGridWindow()->Bind(wxEVT_LEFT_DOWN, &ArpeggioSequencerDialog::OnCellLeftDown, this);
+    m_grid->GetGridWindow()->Bind(wxEVT_LEFT_UP, &ArpeggioSequencerDialog::OnCellLeftUp, this);
+    m_grid->GetGridWindow()->Bind(wxEVT_MOTION, &ArpeggioSequencerDialog::OnMotion, this);
 
     // Set column labels (Step 1, Step 2, etc.)
     for (int col = 0; col < m_numSteps; col++) {
@@ -137,6 +144,61 @@ void ArpeggioSequencerDialog::OnCellRightClick(wxGridEvent& event)
     OnCellLeftClick(event);
 }
 
+void ArpeggioSequencerDialog::OnCellLeftDown(wxMouseEvent& event)
+{
+    // Convert mouse position to grid coordinates
+    int x, y;
+    m_grid->CalcUnscrolledPosition(event.GetX(), event.GetY(), &x, &y);
+
+    int row = m_grid->YToRow(y);
+    int col = m_grid->XToCol(x);
+
+    if (row >= 0 && row < m_numProps && col >= 0 && col < m_numSteps) {
+        // Start dragging - remember the new state we're setting
+        m_isDragging = true;
+        m_dragState = !m_gridData[col][row];  // Toggle from current state
+
+        // Apply the state to the clicked cell
+        SetCellState(row, col, m_dragState);
+    }
+
+    event.Skip();
+}
+
+void ArpeggioSequencerDialog::OnCellLeftUp(wxMouseEvent& event)
+{
+    // Stop dragging
+    m_isDragging = false;
+    event.Skip();
+}
+
+void ArpeggioSequencerDialog::OnMotion(wxMouseEvent& event)
+{
+    if (m_isDragging && event.LeftIsDown()) {
+        // Convert mouse position to grid coordinates
+        int x, y;
+        m_grid->CalcUnscrolledPosition(event.GetX(), event.GetY(), &x, &y);
+
+        int row = m_grid->YToRow(y);
+        int col = m_grid->XToCol(x);
+
+        // Apply drag state to the cell under the mouse
+        if (row >= 0 && row < m_numProps && col >= 0 && col < m_numSteps) {
+            SetCellState(row, col, m_dragState);
+        }
+    }
+
+    event.Skip();
+}
+
+void ArpeggioSequencerDialog::SetCellState(int row, int col, bool state)
+{
+    if (m_gridData[col][row] != state) {
+        m_gridData[col][row] = state;
+        UpdateCellColor(row, col);
+    }
+}
+
 void ArpeggioSequencerDialog::UpdateCellColor(int row, int col)
 {
     if (m_gridData[col][row]) {
@@ -186,8 +248,9 @@ void ArpeggioSequencerDialog::OnFill(wxCommandEvent& event)
 std::string ArpeggioSequencerDialog::GetSequenceData() const
 {
     // Serialize grid data to string format:
-    // Format: step1_prop1,prop2;step2_prop3,prop4;...
-    // Example: "0,2;1,3;0,1,2" means:
+    // Format: step1_prop1|prop2:step2_prop3|prop4:...
+    // Using | and : instead of , and ; to avoid conflicts with effect parameter delimiters
+    // Example: "0|2:1|3:0|1|2" means:
     //   Step 1: props 0 and 2 are on
     //   Step 2: props 1 and 3 are on
     //   Step 3: props 0, 1, and 2 are on
@@ -198,16 +261,16 @@ std::string ArpeggioSequencerDialog::GetSequenceData() const
         for (int prop = 0; prop < m_numProps; prop++) {
             if (m_gridData[step][prop]) {
                 if (!firstProp) {
-                    ss << ",";
+                    ss << "|";
                 }
                 ss << prop;
                 firstProp = false;
             }
         }
 
-        if (step < m_numSteps - 1) {
-            ss << ";";
-        }
+        // Always add separator after each step (including the last one)
+        // This ensures totalStepsInData matches m_numSteps when parsing
+        ss << ":";
     }
 
     return ss.str();
@@ -225,12 +288,13 @@ void ArpeggioSequencerDialog::LoadSequenceData(const std::string& data)
     }
 
     try {
-        // Parse format: "0,2;1,3;0,1,2"
+        // Parse format: "0|2:1|3:0|1|2"
+        // Using | and : instead of , and ; to avoid conflicts with effect parameter delimiters
         std::stringstream ss(data);
         std::string stepData;
         int step = 0;
 
-        while (std::getline(ss, stepData, ';') && step < m_numSteps) {
+        while (std::getline(ss, stepData, ':') && step < m_numSteps) {  // Changed from ';'
             // Clear this step first
             for (int prop = 0; prop < m_numProps; prop++) {
                 m_gridData[step][prop] = false;
@@ -240,10 +304,16 @@ void ArpeggioSequencerDialog::LoadSequenceData(const std::string& data)
                 std::stringstream stepSS(stepData);
                 std::string propStr;
 
-                while (std::getline(stepSS, propStr, ',')) {
-                    int prop = std::stoi(propStr);
-                    if (prop >= 0 && prop < m_numProps) {
-                        m_gridData[step][prop] = true;
+                while (std::getline(stepSS, propStr, '|')) {  // Changed from ','
+                    if (!propStr.empty()) {  // Check if string is not empty before parsing
+                        try {
+                            int prop = std::stoi(propStr);
+                            if (prop >= 0 && prop < m_numProps) {
+                                m_gridData[step][prop] = true;
+                            }
+                        } catch (...) {
+                            // Ignore invalid prop indices
+                        }
                     }
                 }
             }

@@ -453,6 +453,7 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
 
     // Determine which step(s) should be active at current time
     int activeStepIndex = -1;
+
     for (size_t i = 0; i < stepTimes.size(); i++) {
         int startMS = stepTimes[i].first;
         int endMS = stepTimes[i].second;
@@ -483,8 +484,11 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
     // Calculate the starting position in orderMap
     // Multiply by propsPerStep so each time step advances by the right amount
     int orderMapPosition = (activeStepIndex * propsPerStep) % orderMapSize;
-    if (!loop && (activeStepIndex * propsPerStep) >= orderMapSize) {
-        return;  // Don't wrap if loop is disabled
+
+    // In normal mode, don't wrap if loop is disabled
+    // In manual mode, let the sequencer data determine what renders
+    if (!manualMode && !loop && (activeStepIndex * propsPerStep) >= orderMapSize) {
+        return;  // Don't wrap if loop is disabled (normal mode only)
     }
 
     // Apply order mapping to get actual prop indices
@@ -492,65 +496,52 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
 
     if (manualMode && !sequencerData.empty()) {
         // Manual mode: parse sequencer data to get which props are active at this step
-        // Format: "0,2;1,3;0,1,2" where semicolons separate steps and commas separate prop indices
+        // Format: "0|2:1|3:0|1|2" where colons separate steps and pipes separate prop indices
 
-        static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
-        logger_base.debug("Manual mode: sequencerData='%s', activeStepIndex=%d", sequencerData.c_str(), activeStepIndex);
+        // Count total number of steps in sequence data
+        int totalStepsInData = 0;
+        std::istringstream countSS(sequencerData);
+        std::string tempStep;
+        while (std::getline(countSS, tempStep, ':')) {
+            totalStepsInData++;
+        }
+
+        // Map the timing interval index to the configured step number
+        // If we have more timing intervals than configured steps, we need to map them
+        int mappedStepIndex = activeStepIndex;
+        if (totalStepsInData > 0 && activeStepIndex >= totalStepsInData) {
+            if (loop) {
+                // Wrap around to the beginning
+                mappedStepIndex = activeStepIndex % totalStepsInData;
+            } else {
+                // Past the end with loop off - don't render
+                return;
+            }
+        }
 
         std::istringstream ss(sequencerData);
         std::string stepData;
         int stepIndex = 0;
 
-        // Find the data for the active step
-        while (std::getline(ss, stepData, ';') && stepIndex < activeStepIndex) {
+        // Find the data for the mapped step
+        while (std::getline(ss, stepData, ':') && stepIndex < mappedStepIndex) {
             stepIndex++;
         }
 
-        logger_base.debug("  stepIndex=%d, stepData='%s'", stepIndex, stepData.c_str());
-
-        if (stepIndex == activeStepIndex && !stepData.empty()) {
+        if (stepIndex == mappedStepIndex && !stepData.empty()) {
             // Parse the prop indices for this step
             std::istringstream stepSS(stepData);
             std::string propStr;
 
-            while (std::getline(stepSS, propStr, ',')) {
-                try {
-                    int propIndex = std::stoi(propStr);
-                    if (propIndex >= 0) {
-                        activePropIndices.push_back(propIndex);
-                        logger_base.debug("    Added prop index: %d", propIndex);
-                    }
-                } catch (...) {
-                    // Ignore invalid prop indices
-                }
-            }
-        }
-
-        logger_base.debug("  Total props in activePropIndices: %d", (int)activePropIndices.size());
-
-        // If looping is enabled and we're past the end of the sequence data, wrap around
-        if (loop && activePropIndices.empty() && activeStepIndex >= stepIndex) {
-            // Reparse from beginning
-            ss.clear();
-            ss.str(sequencerData);
-            stepIndex = 0;
-            int wrappedStepIndex = activeStepIndex % (stepIndex + 1);
-
-            while (std::getline(ss, stepData, ';') && stepIndex < wrappedStepIndex) {
-                stepIndex++;
-            }
-
-            if (stepIndex == wrappedStepIndex && !stepData.empty()) {
-                std::istringstream stepSS(stepData);
-                std::string propStr;
-
-                while (std::getline(stepSS, propStr, ',')) {
+            while (std::getline(stepSS, propStr, '|')) {
+                // Trim whitespace and check if non-empty
+                if (!propStr.empty() && propStr.find_first_not_of(" \t\n\r") != std::string::npos) {
                     try {
                         int propIndex = std::stoi(propStr);
                         if (propIndex >= 0) {
                             activePropIndices.push_back(propIndex);
                         }
-                    } catch (...) {
+                    } catch (const std::exception& e) {
                         // Ignore invalid prop indices
                     }
                 }
