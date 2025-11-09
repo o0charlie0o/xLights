@@ -45,6 +45,111 @@ EVT_MOTION(RowHeading::mouseMove)
 EVT_PAINT(RowHeading::render)
 END_EVENT_TABLE()
 
+// Dialog for selecting subdivision options
+class SubdivisionOptionsDialog : public wxDialog
+{
+public:
+    SubdivisionOptionsDialog(wxWindow* parent)
+        : wxDialog(parent, wxID_ANY, "Select Subdivisions to Generate", wxDefaultPosition, wxDefaultSize)
+    {
+        wxBoxSizer* mainSizer = new wxBoxSizer(wxVERTICAL);
+
+        // Info text
+        wxStaticText* infoText = new wxStaticText(this, wxID_ANY,
+            "Select which subdivided timing tracks to generate:");
+        mainSizer->Add(infoText, 0, wxALL, 10);
+
+        // Checkboxes - Split timing options
+        m_check_half = new wxCheckBox(this, wxID_ANY, "1/2 - Split each mark into 2 parts");
+        m_check_third = new wxCheckBox(this, wxID_ANY, "1/3 - Split each mark into 3 parts");
+        m_check_quarter = new wxCheckBox(this, wxID_ANY, "1/4 - Split each mark into 4 parts");
+        m_check_sixth = new wxCheckBox(this, wxID_ANY, "1/6 - Split each mark into 6 parts");
+        m_check_eighth = new wxCheckBox(this, wxID_ANY, "1/8 - Split each mark into 8 parts");
+
+        // Checkboxes - Combine timing options
+        m_check_double = new wxCheckBox(this, wxID_ANY, "2x - Combine every 2 marks (half-time)");
+        m_check_quadruple = new wxCheckBox(this, wxID_ANY, "4x - Combine every 4 marks");
+        m_check_octuple = new wxCheckBox(this, wxID_ANY, "8x - Combine every 8 marks");
+
+        // Check split timing options by default, but not combine options
+        m_check_half->SetValue(true);
+        m_check_third->SetValue(true);
+        m_check_quarter->SetValue(true);
+        m_check_sixth->SetValue(true);
+        m_check_eighth->SetValue(true);
+        m_check_double->SetValue(false);
+        m_check_quadruple->SetValue(false);
+        m_check_octuple->SetValue(false);
+
+        mainSizer->Add(m_check_half, 0, wxALL, 5);
+        mainSizer->Add(m_check_third, 0, wxALL, 5);
+        mainSizer->Add(m_check_quarter, 0, wxALL, 5);
+        mainSizer->Add(m_check_sixth, 0, wxALL, 5);
+        mainSizer->Add(m_check_eighth, 0, wxALL, 5);
+        mainSizer->Add(m_check_double, 0, wxALL, 5);
+        mainSizer->Add(m_check_quadruple, 0, wxALL, 5);
+        mainSizer->Add(m_check_octuple, 0, wxALL, 5);
+
+        // Select/Deselect All buttons
+        wxBoxSizer* selectionButtonSizer = new wxBoxSizer(wxHORIZONTAL);
+        wxButton* selectAllBtn = new wxButton(this, wxID_ANY, "Select All");
+        wxButton* deselectAllBtn = new wxButton(this, wxID_ANY, "Deselect All");
+
+        selectAllBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            m_check_half->SetValue(true);
+            m_check_third->SetValue(true);
+            m_check_quarter->SetValue(true);
+            m_check_sixth->SetValue(true);
+            m_check_eighth->SetValue(true);
+            m_check_double->SetValue(true);
+            m_check_quadruple->SetValue(true);
+            m_check_octuple->SetValue(true);
+        });
+
+        deselectAllBtn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            m_check_half->SetValue(false);
+            m_check_third->SetValue(false);
+            m_check_quarter->SetValue(false);
+            m_check_sixth->SetValue(false);
+            m_check_eighth->SetValue(false);
+            m_check_double->SetValue(false);
+            m_check_quadruple->SetValue(false);
+            m_check_octuple->SetValue(false);
+        });
+
+        selectionButtonSizer->Add(selectAllBtn, 0, wxALL, 5);
+        selectionButtonSizer->Add(deselectAllBtn, 0, wxALL, 5);
+        mainSizer->Add(selectionButtonSizer, 0, wxALIGN_CENTER | wxALL, 5);
+
+        // OK/Cancel buttons
+        wxSizer* buttonSizer = CreateButtonSizer(wxOK | wxCANCEL);
+        mainSizer->Add(buttonSizer, 0, wxALIGN_CENTER | wxALL, 10);
+
+        SetSizer(mainSizer);
+        Fit();
+        CenterOnParent();
+    }
+
+    bool GetHalfSelected() const { return m_check_half->GetValue(); }
+    bool GetThirdSelected() const { return m_check_third->GetValue(); }
+    bool GetQuarterSelected() const { return m_check_quarter->GetValue(); }
+    bool GetSixthSelected() const { return m_check_sixth->GetValue(); }
+    bool GetEighthSelected() const { return m_check_eighth->GetValue(); }
+    bool GetDoubleSelected() const { return m_check_double->GetValue(); }
+    bool GetQuadrupleSelected() const { return m_check_quadruple->GetValue(); }
+    bool GetOctupleSelected() const { return m_check_octuple->GetValue(); }
+
+private:
+    wxCheckBox* m_check_half;
+    wxCheckBox* m_check_third;
+    wxCheckBox* m_check_quarter;
+    wxCheckBox* m_check_sixth;
+    wxCheckBox* m_check_eighth;
+    wxCheckBox* m_check_double;
+    wxCheckBox* m_check_quadruple;
+    wxCheckBox* m_check_octuple;
+};
+
 // Menu constants
 const long RowHeading::ID_ROW_MNU_INSERT_LAYER_ABOVE = wxNewId();
 const long RowHeading::ID_ROW_MNU_INSERT_LAYER_BELOW = wxNewId();
@@ -870,20 +975,53 @@ void RowHeading::OnLayerPopup(wxCommandEvent& event)
             return;
         }
 
-        // Create subdivided tracks: 1/2, 1/3, 1/4, and 2x (half-time)
-        std::vector<int> divisors = {2, 3, 4};
-        std::vector<std::string> suffixes = {" - 1/2", " - 1/3", " - 1/4"};
+        // Show subdivision options dialog
+        SubdivisionOptionsDialog dialog(this);
+        if (dialog.ShowModal() != wxID_OK) {
+            return;
+        }
 
-        // Ask user if they want to include half-time track
-        int includeHalfTime = wxMessageBox(
-            "Do you want to include a half-time (2x) track with longer divisions?",
-            "Include Half-Time Track",
-            wxYES_NO | wxICON_QUESTION
-        );
+        // Build vectors based on user selections
+        std::vector<int> divisors;
+        std::vector<std::string> suffixes;
 
-        if (includeHalfTime == wxYES) {
+        if (dialog.GetHalfSelected()) {
+            divisors.push_back(2);
+            suffixes.push_back(" - 1/2");
+        }
+        if (dialog.GetThirdSelected()) {
+            divisors.push_back(3);
+            suffixes.push_back(" - 1/3");
+        }
+        if (dialog.GetQuarterSelected()) {
+            divisors.push_back(4);
+            suffixes.push_back(" - 1/4");
+        }
+        if (dialog.GetSixthSelected()) {
+            divisors.push_back(6);
+            suffixes.push_back(" - 1/6");
+        }
+        if (dialog.GetEighthSelected()) {
+            divisors.push_back(8);
+            suffixes.push_back(" - 1/8");
+        }
+        if (dialog.GetDoubleSelected()) {
             divisors.push_back(-2);  // negative value indicates multiplication (half-time)
             suffixes.push_back(" - 2x");
+        }
+        if (dialog.GetQuadrupleSelected()) {
+            divisors.push_back(-4);  // negative value indicates multiplication
+            suffixes.push_back(" - 4x");
+        }
+        if (dialog.GetOctupleSelected()) {
+            divisors.push_back(-8);  // negative value indicates multiplication
+            suffixes.push_back(" - 8x");
+        }
+
+        // If no options selected, nothing to do
+        if (divisors.empty()) {
+            wxMessageBox("No subdivision options selected.", "No Selection", wxOK | wxICON_INFORMATION);
+            return;
         }
 
         mSequenceElements->get_undo_mgr().CreateUndoStep();
@@ -921,7 +1059,7 @@ void RowHeading::OnLayerPopup(wxCommandEvent& event)
                 long duration = endTime - startTime;
 
                 if (divisor > 0) {
-                    // Subdivision mode (divide by 2, 3, or 4)
+                    // Subdivision mode (divide by 2, 3, 4, 6, or 8)
                     float subdivisionDuration = (float)duration / (float)divisor;
 
                     for (int k = 0; k < divisor; k++) {
@@ -933,11 +1071,17 @@ void RowHeading::OnLayerPopup(wxCommandEvent& event)
                         }
                     }
                 } else {
-                    // Half-time mode (multiply by 2 - every other mark)
-                    if (j % 2 == 0) {
-                        // Only add every other timing mark
-                        long nextEndTime = (j + 1 < sourceLayer->GetEffectCount()) ?
-                                          sourceLayer->GetEffect(j + 1)->GetEndTimeMS() : endTime;
+                    // Combine mode (multiply - combine every N marks)
+                    int multiplier = -divisor;  // Convert negative divisor to positive multiplier
+                    if (j % multiplier == 0) {
+                        // Only add every Nth timing mark, combining the marks in between
+                        long nextEndTime = endTime;
+
+                        // Find the end time of the (multiplier-1)th mark ahead
+                        for (int m = 1; m < multiplier && (j + m) < sourceLayer->GetEffectCount(); m++) {
+                            nextEndTime = sourceLayer->GetEffect(j + m)->GetEndTimeMS();
+                        }
+
                         newLayer->AddEffect(0, "", "", "", startTime, nextEndTime, EFFECT_NOT_SELECTED, false);
                     }
                 }
