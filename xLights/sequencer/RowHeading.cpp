@@ -105,6 +105,7 @@ const long RowHeading::ID_ROW_MNU_REMOVE_TIMING_PHONEMES = wxNewId();
 const long RowHeading::ID_ROW_MNU_REMOVE_TIMING_WORDS_PHONEMES = wxNewId();
 const long RowHeading::ID_ROW_MNU_HIDEALLTIMING = wxNewId();
 const long RowHeading::ID_ROW_MNU_SHOWALLTIMING = wxNewId();
+const long RowHeading::ID_ROW_MNU_GENERATE_SUBDIVIDED_TRACKS = wxNewId();
 const long RowHeading::ID_ROW_MNU_SETLAYERNAME = wxNewId();
 
 int DEFAULT_ROW_HEADING_HEIGHT = 22;
@@ -463,6 +464,7 @@ void RowHeading::rightClick( wxMouseEvent& event)
                 EffectLayer* el = element->GetEffectLayer(ri->layerIndex);
                 if (el != nullptr) {
                     mnuLayer.Append(ID_ROW_MNU_ADD_TIMING_TRACK, "Add Timing Track");
+                    mnuLayer.Append(ID_ROW_MNU_GENERATE_SUBDIVIDED_TRACKS, "Generate Subdivided Timing Tracks");
                     mnuLayer.Append(ID_ROW_MNU_RENAME_TIMING_TRACK, "Rename Timing Track");
                     mnuLayer.Append(ID_ROW_MNU_DELETE_TIMING_TRACK, "Delete Timing Track");
                     mnuLayer.Append(ID_ROW_MNU_IMPORT_TIMING_TRACK, "Import Timing Track");
@@ -857,6 +859,93 @@ void RowHeading::OnLayerPopup(wxCommandEvent& event)
             std::string oldname = element->GetName();
             mSequenceElements->GetXLightsFrame()->RenameTimingElement(oldname, name);
         }
+    } else if (id == ID_ROW_MNU_GENERATE_SUBDIVIDED_TRACKS) {
+        // Generate subdivided timing tracks from the current timing track
+        xLightsXmlFile* xml_file = mSequenceElements->GetXLightsFrame()->CurrentSeqXmlFile;
+        std::string originalName = element->GetName();
+        EffectLayer* sourceLayer = element->GetEffectLayer(0);
+
+        if (sourceLayer == nullptr || sourceLayer->GetEffectCount() == 0) {
+            wxMessageBox("The selected timing track has no timing marks to subdivide.", "No Timing Marks", wxOK | wxICON_WARNING);
+            return;
+        }
+
+        // Create subdivided tracks: 1/2, 1/3, 1/4, and 2x (half-time)
+        std::vector<int> divisors = {2, 3, 4};
+        std::vector<std::string> suffixes = {" - 1/2", " - 1/3", " - 1/4"};
+
+        // Ask user if they want to include half-time track
+        int includeHalfTime = wxMessageBox(
+            "Do you want to include a half-time (2x) track with longer divisions?",
+            "Include Half-Time Track",
+            wxYES_NO | wxICON_QUESTION
+        );
+
+        if (includeHalfTime == wxYES) {
+            divisors.push_back(-2);  // negative value indicates multiplication (half-time)
+            suffixes.push_back(" - 2x");
+        }
+
+        mSequenceElements->get_undo_mgr().CreateUndoStep();
+
+        for (size_t i = 0; i < divisors.size(); i++) {
+            int divisor = divisors[i];
+            std::string newTrackName = originalName + suffixes[i];
+
+            // Check if track already exists
+            if (xml_file->TimingAlreadyExists(newTrackName, mSequenceElements->GetXLightsFrame())) {
+                wxMessageBox("Timing track '" + newTrackName + "' already exists. Skipping.", "Track Exists", wxOK | wxICON_WARNING);
+                continue;
+            }
+
+            // Create new timing track
+            xml_file->AddNewTimingSection(newTrackName, mSequenceElements->GetXLightsFrame());
+            Element* newElement = mSequenceElements->GetElement(newTrackName);
+
+            if (newElement == nullptr) {
+                wxMessageBox("Failed to create timing track '" + newTrackName + "'", "Error", wxOK | wxICON_ERROR);
+                continue;
+            }
+
+            EffectLayer* newLayer = newElement->GetEffectLayer(0);
+            if (newLayer == nullptr) {
+                wxMessageBox("Failed to get effect layer for '" + newTrackName + "'", "Error", wxOK | wxICON_ERROR);
+                continue;
+            }
+
+            // Copy and subdivide timing marks
+            for (int j = 0; j < sourceLayer->GetEffectCount(); j++) {
+                Effect* sourceEffect = sourceLayer->GetEffect(j);
+                long startTime = sourceEffect->GetStartTimeMS();
+                long endTime = sourceEffect->GetEndTimeMS();
+                long duration = endTime - startTime;
+
+                if (divisor > 0) {
+                    // Subdivision mode (divide by 2, 3, or 4)
+                    float subdivisionDuration = (float)duration / (float)divisor;
+
+                    for (int k = 0; k < divisor; k++) {
+                        long newStart = startTime + (long)(subdivisionDuration * k);
+                        long newEnd = (k == divisor - 1) ? endTime : startTime + (long)(subdivisionDuration * (k + 1));
+
+                        if (newStart < newEnd) {
+                            newLayer->AddEffect(0, "", "", "", newStart, newEnd, EFFECT_NOT_SELECTED, false);
+                        }
+                    }
+                } else {
+                    // Half-time mode (multiply by 2 - every other mark)
+                    if (j % 2 == 0) {
+                        // Only add every other timing mark
+                        long nextEndTime = (j + 1 < sourceLayer->GetEffectCount()) ?
+                                          sourceLayer->GetEffect(j + 1)->GetEndTimeMS() : endTime;
+                        newLayer->AddEffect(0, "", "", "", startTime, nextEndTime, EFFECT_NOT_SELECTED, false);
+                    }
+                }
+            }
+        }
+
+        wxCommandEvent eventRowHeaderChanged(EVT_ROW_HEADINGS_CHANGED);
+        wxPostEvent(GetParent(), eventRowHeaderChanged);
     } else if (id == ID_ROW_MNU_DELETE_TIMING_TRACK) {
         wxString prompt = wxString::Format("Delete 'Timing Track '%s'?", element->GetName());
         wxString caption = "Confirm Timing Track Deletion";
