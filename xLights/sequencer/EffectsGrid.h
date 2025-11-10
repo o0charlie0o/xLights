@@ -298,6 +298,7 @@ private:
     void Replace();
     void AddShimmer();
     void RemoveShimmer();
+    void CreateAlternatingPhonemes();
 
     SequenceElements* mSequenceElements = nullptr;
     bool mIsDrawing = false;
@@ -383,6 +384,7 @@ private:
     static const long ID_GRID_MNU_REPLACE;
     static const long ID_GRID_MNU_ADD_SHIMMER;
     static const long ID_GRID_MNU_REMOVE_SHIMMER;
+    static const long ID_GRID_MNU_CREATE_ALTERNATING_PHONEMES;
     static const long ID_GRID_MNU_RANDOM_EFFECTS;
     static const long ID_GRID_MNU_DESCRIPTION;
     static const long ID_GRID_MNU_RESETEFFECT;
