@@ -58,6 +58,7 @@
 #define EFFECT_RESIZE_LEFT_EDGE 4
 #define EFFECT_RESIZE_RIGHT_EDGE 5
 #define TIMING_ALPHA (0x60)
+#define DRAG_THRESHOLD 3  // Minimum pixels to move before triggering drag/resize
 
 // Dialog for creating alternating phonemes
 class AlternatingPhonemesDialog : public wxDialog
@@ -289,6 +290,7 @@ EffectsGrid::EffectsGrid(MainSequencer* parent, wxWindowID id, const wxPoint& po
     mParent = parent;
     mDragging = false;
     mResizing = false;
+    mDragThresholdExceeded = false;
     mDragDropping = false;
     mDropStartX = 0;
     mDropEndX = 0;
@@ -1892,30 +1894,41 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
     bool out_of_bounds = rowIndex < 0 || (rowIndex >= mSequenceElements->GetVisibleRowInformationSize());
 
     if (mResizing) {
-        // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
-        // logger_base.debug("EffectsGrid::mouseMoved sizing or moving effects.");
+        // Resize() will check threshold for MOVE operations internally
+        // For edge resizing, Resize() allows immediate response
         Resize(event.GetX(), event.AltDown(), event.ControlDown());
         Draw();
     } else if (mDragging) {
-        // Only update Y when transferring between timing rows and model rows if the top model row is visible or the start point is in the same timing vs non timing as the new end
-        // This prevents unexpected elements being selected on rows between the top model row and the timing rows when the elasic
-        // band cross from timing to models
-        if ((IsMouseOverTiming(mDragEndY) && IsMouseOverTiming(event.GetY())) ||
-            (IsMouseOverTiming(event.GetY()) && IsMouseOverTiming(mDragStartY)) ||
-            (!IsMouseOverTiming(mDragEndY) && !IsMouseOverTiming(event.GetY())) ||
-            (!IsMouseOverTiming(event.GetY()) && !IsMouseOverTiming(mDragStartY)) ||
-            IsTopModelVisible()) {
-            mDragEndX = event.GetX();
-            mDragEndY = event.GetY();
-            UpdateSelectionRectangle();
+        // Check if mouse has moved beyond threshold before updating drag selection
+        if (!mDragThresholdExceeded) {
+            int dx = abs(event.GetX() - mDragStartX);
+            int dy = abs(event.GetY() - mDragStartY);
+            if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+                mDragThresholdExceeded = true;
+            }
         }
-        else
-        {
-            // We still update X but not Y
-            mDragEndX = event.GetX();
-            UpdateSelectionRectangle();
+
+        if (mDragThresholdExceeded) {
+            // Only update Y when transferring between timing rows and model rows if the top model row is visible or the start point is in the same timing vs non timing as the new end
+            // This prevents unexpected elements being selected on rows between the top model row and the timing rows when the elasic
+            // band cross from timing to models
+            if ((IsMouseOverTiming(mDragEndY) && IsMouseOverTiming(event.GetY())) ||
+                (IsMouseOverTiming(event.GetY()) && IsMouseOverTiming(mDragStartY)) ||
+                (!IsMouseOverTiming(mDragEndY) && !IsMouseOverTiming(event.GetY())) ||
+                (!IsMouseOverTiming(event.GetY()) && !IsMouseOverTiming(mDragStartY)) ||
+                IsTopModelVisible()) {
+                mDragEndX = event.GetX();
+                mDragEndY = event.GetY();
+                UpdateSelectionRectangle();
+            }
+            else
+            {
+                // We still update X but not Y
+                mDragEndX = event.GetX();
+                UpdateSelectionRectangle();
+            }
+            Draw();
         }
-        Draw();
     } else if (m_wheel_down) {
         if (event.Dragging()) {
             if (xlights->CurrentSeqXmlFile == nullptr)
@@ -2079,6 +2092,7 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
 void EffectsGrid::ClearSelection() {
     mDragging = false;
     mResizing = false;
+    mDragThresholdExceeded = false;
     mDragDropping = false;
     mDropStartX = 0;
     mDropEndX = 0;
@@ -2213,6 +2227,7 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
     if (mResizingMode != EFFECT_RESIZE_NO) {
         if (selectedEffect != nullptr) {
             mResizing = true;
+            mDragThresholdExceeded = false;  // Reset threshold flag on new resize
             mResizeEffectIndex = effectIndex;
             CaptureMouse();
             Draw();
@@ -2230,6 +2245,7 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
                 }
             }
             mDragging = true;
+            mDragThresholdExceeded = false;  // Reset threshold flag on new drag
             mDragEndX = event.GetX();
             mDragEndY = event.GetY();
             if (event.ShiftDown()) {
@@ -3800,6 +3816,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
     if (mDragging && xlights->IsACActive()) {
         ReleaseMouse();
         mDragging = false;
+        mDragThresholdExceeded = false;  // Reset threshold flag when AC drag ends
 
         if (DoACDraw()) {
             mRangeCursorCol = mRangeStartCol;
@@ -3900,6 +3917,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
         } else if (mDragging) {
             UnsetToolTip();
             mDragging = false;
+            mDragThresholdExceeded = false;  // Reset threshold flag when drag ends
             if ((mDragStartX == event.GetX() && mDragStartY == event.GetY()) || (mSequenceElements->GetNumberOfActiveTimingEffects() > 0)) {
                 checkForEmptyCell = true;
             }
@@ -3952,6 +3970,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
         }
 
         mResizing = false;
+        mDragThresholdExceeded = false;  // Reset threshold flag when resize ends
         mDragDropping = false;
         Draw();
         mSequenceElements->get_undo_mgr().SetCaptureUndo(false);
@@ -4002,6 +4021,15 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
 
     if (!xlights->AbortRender())
         return;
+
+    // Check drag threshold for MOVE operations (not edge resizing)
+    if (mResizingMode == EFFECT_RESIZE_MOVE && !mDragThresholdExceeded) {
+        int dx = abs(position - mTimeline->GetPositionFromTimeMS(mStartResizeTimeMS));
+        if (dx < DRAG_THRESHOLD) {
+            return; // Don't resize until threshold exceeded
+        }
+        mDragThresholdExceeded = true;
+    }
 
     int new_time = -1;
 
