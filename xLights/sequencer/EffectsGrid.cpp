@@ -58,6 +58,7 @@
 #define EFFECT_RESIZE_LEFT_EDGE 4
 #define EFFECT_RESIZE_RIGHT_EDGE 5
 #define TIMING_ALPHA (0x60)
+#define DRAG_THRESHOLD 3  // Minimum pixels to move before triggering drag/resize
 
 BEGIN_EVENT_TABLE(EffectsGrid, GRAPHICS_BASE_CLASS)
 EVT_MOTION(EffectsGrid::mouseMoved)
@@ -1709,30 +1710,40 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
     bool out_of_bounds = rowIndex < 0 || (rowIndex >= mSequenceElements->GetVisibleRowInformationSize());
 
     if (mResizing) {
-        // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
-        // logger_base.debug("EffectsGrid::mouseMoved sizing or moving effects.");
-        Resize(event.GetX(), event.AltDown(), event.ControlDown());
-        Draw();
+        // Check if mouse has moved beyond threshold before actually resizing
+        int dx = abs(event.GetX() - mDragStartX);
+        int dy = abs(event.GetY() - mDragStartY);
+        if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+            // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+            // logger_base.debug("EffectsGrid::mouseMoved sizing or moving effects.");
+            Resize(event.GetX(), event.AltDown(), event.ControlDown());
+            Draw();
+        }
     } else if (mDragging) {
-        // Only update Y when transferring between timing rows and model rows if the top model row is visible or the start point is in the same timing vs non timing as the new end
-        // This prevents unexpected elements being selected on rows between the top model row and the timing rows when the elasic
-        // band cross from timing to models
-        if ((IsMouseOverTiming(mDragEndY) && IsMouseOverTiming(event.GetY())) ||
-            (IsMouseOverTiming(event.GetY()) && IsMouseOverTiming(mDragStartY)) ||
-            (!IsMouseOverTiming(mDragEndY) && !IsMouseOverTiming(event.GetY())) ||
-            (!IsMouseOverTiming(event.GetY()) && !IsMouseOverTiming(mDragStartY)) ||
-            IsTopModelVisible()) {
-            mDragEndX = event.GetX();
-            mDragEndY = event.GetY();
-            UpdateSelectionRectangle();
+        // Check if mouse has moved beyond threshold before updating drag selection
+        int dx = abs(event.GetX() - mDragStartX);
+        int dy = abs(event.GetY() - mDragStartY);
+        if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+            // Only update Y when transferring between timing rows and model rows if the top model row is visible or the start point is in the same timing vs non timing as the new end
+            // This prevents unexpected elements being selected on rows between the top model row and the timing rows when the elasic
+            // band cross from timing to models
+            if ((IsMouseOverTiming(mDragEndY) && IsMouseOverTiming(event.GetY())) ||
+                (IsMouseOverTiming(event.GetY()) && IsMouseOverTiming(mDragStartY)) ||
+                (!IsMouseOverTiming(mDragEndY) && !IsMouseOverTiming(event.GetY())) ||
+                (!IsMouseOverTiming(event.GetY()) && !IsMouseOverTiming(mDragStartY)) ||
+                IsTopModelVisible()) {
+                mDragEndX = event.GetX();
+                mDragEndY = event.GetY();
+                UpdateSelectionRectangle();
+            }
+            else
+            {
+                // We still update X but not Y
+                mDragEndX = event.GetX();
+                UpdateSelectionRectangle();
+            }
+            Draw();
         }
-        else
-        {
-            // We still update X but not Y
-            mDragEndX = event.GetX();
-            UpdateSelectionRectangle();
-        }
-        Draw();
     } else if (m_wheel_down) {
         if (event.Dragging()) {
             if (xlights->CurrentSeqXmlFile == nullptr)
