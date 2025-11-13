@@ -575,6 +575,22 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
             }
             else if (type == "PHONEME_L") {
                 SetTimingLabel("L");
+            }
+            else if (type == "DUPLICATE_RIGHT") {
+                PanelEffectGrid->DuplicateEffectRight();
+                PanelEffectGrid->ForceRefresh();
+            }
+            else if (type == "DUPLICATE_LEFT") {
+                PanelEffectGrid->DuplicateEffectLeft();
+                PanelEffectGrid->ForceRefresh();
+            }
+            else if (type == "DUPLICATE_UP") {
+                PanelEffectGrid->DuplicateEffectUp();
+                PanelEffectGrid->ForceRefresh();
+            }
+            else if (type == "DUPLICATE_DOWN") {
+                PanelEffectGrid->DuplicateEffectDown();
+                PanelEffectGrid->ForceRefresh();
             } else if (type == "EFFECTS_TO_TIMING") {
                 PanelEffectGrid->CreateTimingFromSelectedEffects();
             } else if (type == "SELECT_TIMING_1") {
