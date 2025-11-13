@@ -8306,19 +8306,29 @@ void EffectsGrid::DuplicateEffectDown() {
     // Group effects by their row to determine target rows
     std::map<int, std::vector<Effect*>> effectsByRow;
     for (Effect* effect : selectedEffects) {
+        bool found = false;
         // Find which row this effect is on
-        for (int row = 0; row < mSequenceElements->GetVisibleRowInformationSize(); row++) {
+        for (int row = 0; row < mSequenceElements->GetVisibleRowInformationSize() && !found; row++) {
             EffectLayer* layer = mSequenceElements->GetVisibleEffectLayer(row);
             if (layer == nullptr) continue;
 
             for (int i = 0; i < layer->GetEffectCount(); i++) {
                 if (layer->GetEffect(i) == effect) {
                     effectsByRow[row].push_back(effect);
+                    fprintf(stderr, "  Found effect at row %d, time %ldms-%ldms\n",
+                        row, effect->GetStartTimeMS(), effect->GetEndTimeMS());
+                    found = true;
                     break;
                 }
             }
         }
+        if (!found) {
+            fprintf(stderr, "  Warning: Could not find row for effect at %ldms-%ldms\n",
+                effect->GetStartTimeMS(), effect->GetEndTimeMS());
+        }
     }
+
+    fprintf(stderr, "DuplicateEffectDown: Grouped into %zu row(s)\n", effectsByRow.size());
 
     if (paste_by_cell) {
         tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
@@ -8330,17 +8340,26 @@ void EffectsGrid::DuplicateEffectDown() {
 
     // Duplicate each effect to the row below
     for (const auto& [sourceRow, effects] : effectsByRow) {
+        fprintf(stderr, "DuplicateEffectDown: Processing source row %d with %zu effect(s)\n",
+            sourceRow, effects.size());
+
         int target_row = sourceRow + 1;
         if (target_row >= mSequenceElements->GetVisibleRowInformationSize()) {
+            fprintf(stderr, "  Target row %d out of bounds (max: %d)\n",
+                target_row, mSequenceElements->GetVisibleRowInformationSize());
             logger_base.debug("DuplicateEffectDown: Target row %d out of bounds for source row %d", target_row, sourceRow);
             continue;
         }
 
         EffectLayer* target_el = mSequenceElements->GetVisibleEffectLayer(target_row);
         if (target_el == nullptr) {
+            fprintf(stderr, "  Target layer is null for row %d\n", target_row);
             logger_base.debug("DuplicateEffectDown: Target layer is null for row %d", target_row);
             continue;
         }
+
+        fprintf(stderr, "  Target row %d is valid, duplicating %zu effect(s)\n",
+            target_row, effects.size());
 
         for (Effect* source_effect : effects) {
             long start = source_effect->GetStartTimeMS();
@@ -8373,13 +8392,18 @@ void EffectsGrid::DuplicateEffectDown() {
                 long newstart = mTimeline->RoundToMultipleOfPeriod(start, mSequenceElements->GetFrequency());
                 long newEnd = mTimeline->RoundToMultipleOfPeriod(end, mSequenceElements->GetFrequency());
 
+                fprintf(stderr, "    Attempting to duplicate effect %ldms-%ldms to row %d at %ldms-%ldms\n",
+                    start, end, target_row, newstart, newEnd);
+
                 if (!target_el->HasEffectsInTimeRange(newstart, newEnd)) {
                     Effect* newef = target_el->AddEffect(0, xlights->GetEffectManager().GetEffectName(source_effect->GetEffectIndex()),
                         source_effect->GetSettingsAsString(), source_effect->GetPaletteAsString(),
                         newstart, newEnd, EFFECT_SELECTED, false);
                     mSequenceElements->get_undo_mgr().CaptureAddedEffect(target_el->GetParentElement()->GetName(), target_el->GetIndex(), newef->GetID());
+                    fprintf(stderr, "    SUCCESS: Created effect at %ldms-%ldms\n", newstart, newEnd);
                     logger_base.debug("DuplicateEffectDown: Effect created successfully at %ldms-%ldms (paste by time)", newstart, newEnd);
                 } else {
+                    fprintf(stderr, "    SKIP: Target range %ldms-%ldms already has effects\n", newstart, newEnd);
                     logger_base.debug("DuplicateEffectDown: Target range %ldms-%ldms already has effects", newstart, newEnd);
                 }
             }
