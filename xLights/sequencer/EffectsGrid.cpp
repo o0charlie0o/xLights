@@ -8099,6 +8099,15 @@ void EffectsGrid::DuplicateEffectUp() {
         }
     }
 
+    // Calculate the offset: find the lowest and highest selected rows
+    // If we have effects on rows 3, 4, 5, we want to duplicate to rows 0, 1, 2 (not 2, 3, 4)
+    int minRow = effectsByRow.begin()->first;
+    int maxRow = effectsByRow.rbegin()->first;
+    int rowOffset = maxRow - minRow + 1; // This is how many rows up we need to shift
+
+    fprintf(stderr, "DuplicateEffectUp: Min row=%d, Max row=%d, Offset=%d\n",
+        minRow, maxRow, rowOffset);
+
     if (paste_by_cell) {
         tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
         if (tel == nullptr) {
@@ -8107,14 +8116,9 @@ void EffectsGrid::DuplicateEffectUp() {
         }
     }
 
-    // Duplicate each effect to the row above
+    // Duplicate each effect to the row above, maintaining relative spacing
     for (const auto& [sourceRow, effects] : effectsByRow) {
-        if (sourceRow <= 0) {
-            logger_base.debug("DuplicateEffectUp: Source row %d already at top", sourceRow);
-            continue;
-        }
-
-        int target_row = sourceRow - 1;
+        int target_row = sourceRow - rowOffset;
         if (target_row < 0 || target_row >= mSequenceElements->GetVisibleRowInformationSize()) {
             logger_base.debug("DuplicateEffectUp: Target row %d out of bounds for source row %d", target_row, sourceRow);
             continue;
@@ -8330,6 +8334,15 @@ void EffectsGrid::DuplicateEffectDown() {
 
     fprintf(stderr, "DuplicateEffectDown: Grouped into %zu row(s)\n", effectsByRow.size());
 
+    // Calculate the offset: find the lowest selected row and determine where to start duplicating
+    // If we have effects on rows 1, 2, 3, we want to duplicate to rows 4, 5, 6 (not 2, 3, 4)
+    int minRow = effectsByRow.begin()->first;
+    int maxRow = effectsByRow.rbegin()->first;
+    int rowOffset = maxRow - minRow + 1; // This is how many rows down we need to shift
+
+    fprintf(stderr, "DuplicateEffectDown: Min row=%d, Max row=%d, Offset=%d\n",
+        minRow, maxRow, rowOffset);
+
     if (paste_by_cell) {
         tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
         if (tel == nullptr) {
@@ -8338,12 +8351,12 @@ void EffectsGrid::DuplicateEffectDown() {
         }
     }
 
-    // Duplicate each effect to the row below
+    // Duplicate each effect to the row below, maintaining relative spacing
     for (const auto& [sourceRow, effects] : effectsByRow) {
         fprintf(stderr, "DuplicateEffectDown: Processing source row %d with %zu effect(s)\n",
             sourceRow, effects.size());
 
-        int target_row = sourceRow + 1;
+        int target_row = sourceRow + rowOffset;
         if (target_row >= mSequenceElements->GetVisibleRowInformationSize()) {
             fprintf(stderr, "  Target row %d out of bounds (max: %d)\n",
                 target_row, mSequenceElements->GetVisibleRowInformationSize());
