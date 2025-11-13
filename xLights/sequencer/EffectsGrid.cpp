@@ -8270,8 +8270,12 @@ void EffectsGrid::DuplicateEffectDown() {
         }
 
         if (paste_by_cell) {
-            tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+            int selectedTimingRow = mSequenceElements->GetSelectedTimingRow();
+            fprintf(stderr, "  Selected timing row: %d\n", selectedTimingRow);
+
+            tel = mSequenceElements->GetVisibleEffectLayer(selectedTimingRow);
             if (tel == nullptr) {
+                fprintf(stderr, "  ERROR: Timing layer is null! Cannot duplicate in paste-by-cell mode without a timing track.\n");
                 return;
             }
 
@@ -8280,6 +8284,7 @@ void EffectsGrid::DuplicateEffectDown() {
 
             fprintf(stderr, "DuplicateEffectDown: Range selected (paste by cell), cols %d-%d, rows %d-%d\n",
                 startCol, endCol, startRow, endRow);
+            fprintf(stderr, "  Timing track has %d effects\n", tel->GetEffectCount());
 
             // Duplicate each effect in the range downward
             for (int col = startCol; col <= endCol; col++) {
