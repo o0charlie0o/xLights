@@ -60,6 +60,101 @@
 #define TIMING_ALPHA (0x60)
 #define DRAG_THRESHOLD 3  // Minimum pixels to move before triggering drag/resize
 
+// Dialog for creating alternating phonemes
+class AlternatingPhonemesDialog : public wxDialog
+{
+public:
+    AlternatingPhonemesDialog(wxWindow* parent, const std::string& currentPhoneme)
+        : wxDialog(parent, wxID_ANY, "Create Alternating Phonemes", wxDefaultPosition, wxDefaultSize)
+    {
+        wxBoxSizer* mainSizer = new wxBoxSizer(wxVERTICAL);
+
+        // Info text
+        wxStaticText* infoText = new wxStaticText(this, wxID_ANY,
+            "Create alternating phoneme labels by subdividing the selected timing mark:");
+        mainSizer->Add(infoText, 0, wxALL, 10);
+
+        // Phoneme choices
+        wxArrayString phonemeChoices;
+        phonemeChoices.Add("AI");
+        phonemeChoices.Add("E");
+        phonemeChoices.Add("O");
+        phonemeChoices.Add("etc");
+        phonemeChoices.Add("WQ");
+        phonemeChoices.Add("FV");
+        phonemeChoices.Add("MBP");
+        phonemeChoices.Add("rest");
+        phonemeChoices.Add("L");
+
+        // First phoneme
+        wxBoxSizer* phoneme1Sizer = new wxBoxSizer(wxHORIZONTAL);
+        wxStaticText* phoneme1Label = new wxStaticText(this, wxID_ANY, "First Phoneme:");
+        phoneme1Sizer->Add(phoneme1Label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+        m_phoneme1Choice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, phonemeChoices);
+        phoneme1Sizer->Add(m_phoneme1Choice, 1, wxALL, 5);
+        mainSizer->Add(phoneme1Sizer, 0, wxEXPAND | wxALL, 5);
+
+        // Second phoneme
+        wxBoxSizer* phoneme2Sizer = new wxBoxSizer(wxHORIZONTAL);
+        wxStaticText* phoneme2Label = new wxStaticText(this, wxID_ANY, "Second Phoneme:");
+        phoneme2Sizer->Add(phoneme2Label, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+        m_phoneme2Choice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, phonemeChoices);
+        phoneme2Sizer->Add(m_phoneme2Choice, 1, wxALL, 5);
+        mainSizer->Add(phoneme2Sizer, 0, wxEXPAND | wxALL, 5);
+
+        // Number of alternations
+        wxBoxSizer* countSizer = new wxBoxSizer(wxHORIZONTAL);
+        wxStaticText* countLabel = new wxStaticText(this, wxID_ANY, "Number of Alternations:");
+        countSizer->Add(countLabel, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+        m_countSpin = new wxSpinCtrl(this, wxID_ANY, "8", wxDefaultPosition, wxDefaultSize,
+                                      wxSP_ARROW_KEYS, 2, 100, 8);
+        countSizer->Add(m_countSpin, 0, wxALL, 5);
+        mainSizer->Add(countSizer, 0, wxEXPAND | wxALL, 5);
+
+        // Set defaults
+        // First phoneme defaults to current phoneme if available, otherwise AI
+        int phoneme1Index = phonemeChoices.Index(currentPhoneme);
+        if (phoneme1Index == wxNOT_FOUND) {
+            phoneme1Index = 0; // AI
+        }
+        m_phoneme1Choice->SetSelection(phoneme1Index);
+
+        // Second phoneme defaults to E if first is AI, otherwise AI
+        if (phonemeChoices[phoneme1Index] == "AI") {
+            m_phoneme2Choice->SetStringSelection("E");
+        } else {
+            m_phoneme2Choice->SetStringSelection("AI");
+        }
+
+        // Handle phoneme1 selection changes to update phoneme2 default
+        m_phoneme1Choice->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+            wxString selected = m_phoneme1Choice->GetStringSelection();
+            if (selected == "AI") {
+                m_phoneme2Choice->SetStringSelection("E");
+            } else {
+                m_phoneme2Choice->SetStringSelection("AI");
+            }
+        });
+
+        // OK/Cancel buttons
+        wxSizer* buttonSizer = CreateButtonSizer(wxOK | wxCANCEL);
+        mainSizer->Add(buttonSizer, 0, wxALIGN_CENTER | wxALL, 10);
+
+        SetSizer(mainSizer);
+        Fit();
+        CenterOnParent();
+    }
+
+    std::string GetFirstPhoneme() const { return m_phoneme1Choice->GetStringSelection().ToStdString(); }
+    std::string GetSecondPhoneme() const { return m_phoneme2Choice->GetStringSelection().ToStdString(); }
+    int GetAlternationCount() const { return m_countSpin->GetValue(); }
+
+private:
+    wxChoice* m_phoneme1Choice;
+    wxChoice* m_phoneme2Choice;
+    wxSpinCtrl* m_countSpin;
+};
+
 BEGIN_EVENT_TABLE(EffectsGrid, GRAPHICS_BASE_CLASS)
 EVT_MOTION(EffectsGrid::mouseMoved)
 EVT_MAGNIFY(EffectsGrid::magnify)
@@ -86,6 +181,7 @@ const long EffectsGrid::ID_GRID_MNU_FIND_PREVIOUS = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_REPLACE = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_ADD_SHIMMER = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_REMOVE_SHIMMER = wxNewId();
+const long EffectsGrid::ID_GRID_MNU_CREATE_ALTERNATING_PHONEMES = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_RANDOM_EFFECTS = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_RESETEFFECT = wxNewId();
 const long EffectsGrid::ID_GRID_MNU_DESCRIPTION = wxNewId();
@@ -552,6 +648,7 @@ void EffectsGrid::rightClick(wxMouseEvent& event) {
             if (ri->layerIndex == 2) {
                 mnuLayer.Append(ID_GRID_MNU_ADD_SHIMMER, "Add \"-shimmer\"");
                 mnuLayer.Append(ID_GRID_MNU_REMOVE_SHIMMER, "Remove \"-shimmer\"");
+                mnuLayer.Append(ID_GRID_MNU_CREATE_ALTERNATING_PHONEMES, "Create Alternating Phonemes");
             }
             mSelectedEffect = selectedEffect;
         }
@@ -702,6 +799,90 @@ void EffectsGrid::RemoveShimmer() {
             }
         }
     }
+}
+
+void EffectsGrid::CreateAlternatingPhonemes() {
+    if (mSelectedEffect == nullptr) {
+        wxMessageBox("No timing mark selected. Please select a timing mark first.", "No Selection", wxOK | wxICON_WARNING);
+        return;
+    }
+
+    // Check if it's a timing element
+    if (mSelectedEffect->GetParentEffectLayer()->GetParentElement()->GetType() != ElementType::ELEMENT_TYPE_TIMING) {
+        wxMessageBox("Selected effect is not a timing mark.", "Invalid Selection", wxOK | wxICON_WARNING);
+        return;
+    }
+
+    // Check if it's a fixed timing layer
+    if (mSelectedEffect->GetParentEffectLayer()->IsFixedTimingLayer()) {
+        if (wxMessageBox("Cannot add alternating phonemes to a Fixed Timing Track.\nWould you like to convert it to a Variable Timing Track first?",
+                        "Convert Fixed Timing Track", wxYES_NO) == wxYES) {
+            TimingElement* te = dynamic_cast<TimingElement*>(mSelectedEffect->GetParentEffectLayer()->GetParentElement());
+            te->SetFixedTiming(0);
+        } else {
+            return;
+        }
+    }
+
+    // Get current phoneme label
+    std::string currentPhoneme = mSelectedEffect->GetEffectName();
+
+    // Show dialog
+    AlternatingPhonemesDialog dialog(this, currentPhoneme);
+    if (dialog.ShowModal() != wxID_OK) {
+        return;
+    }
+
+    // Get dialog values
+    std::string phoneme1 = dialog.GetFirstPhoneme();
+    std::string phoneme2 = dialog.GetSecondPhoneme();
+    int alternationCount = dialog.GetAlternationCount();
+
+    if (alternationCount < 2) {
+        wxMessageBox("Number of alternations must be at least 2.", "Invalid Count", wxOK | wxICON_WARNING);
+        return;
+    }
+
+    // Get timing information from selected effect
+    long startTime = mSelectedEffect->GetStartTimeMS();
+    long endTime = mSelectedEffect->GetEndTimeMS();
+    long duration = endTime - startTime;
+
+    if (duration <= 0) {
+        wxMessageBox("Selected timing mark has invalid duration.", "Error", wxOK | wxICON_ERROR);
+        return;
+    }
+
+    // Calculate subdivision duration
+    float subdivisionDuration = (float)duration / (float)alternationCount;
+
+    // Get the effect layer to add new effects
+    EffectLayer* effectLayer = mSelectedEffect->GetParentEffectLayer();
+
+    // Create undo step
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
+
+    // Remove the original effect
+    effectLayer->DeleteEffect(mSelectedEffect->GetID());
+
+    // Create alternating timing marks with phoneme labels
+    for (int i = 0; i < alternationCount; i++) {
+        long newStart = startTime + (long)(subdivisionDuration * i);
+        long newEnd = (i == alternationCount - 1) ? endTime : startTime + (long)(subdivisionDuration * (i + 1));
+
+        // Alternate between phoneme1 and phoneme2
+        std::string phonemeLabel = (i % 2 == 0) ? phoneme1 : phoneme2;
+
+        if (newStart < newEnd) {
+            effectLayer->AddEffect(0, phonemeLabel, "", "", newStart, newEnd, EFFECT_NOT_SELECTED, false);
+        }
+    }
+
+    // Refresh the grid
+    ForceRefresh();
+
+    wxCommandEvent eventRowHeaderChanged(EVT_ROW_HEADINGS_CHANGED);
+    wxPostEvent(mParent, eventRowHeaderChanged);
 }
 
 void EffectsGrid::Find() {
@@ -1392,6 +1573,8 @@ void EffectsGrid::OnGridPopup(wxCommandEvent& event) {
         AddShimmer();
     } else if (id == ID_GRID_MNU_REMOVE_SHIMMER) {
         RemoveShimmer();
+    } else if (id == ID_GRID_MNU_CREATE_ALTERNATING_PHONEMES) {
+        CreateAlternatingPhonemes();
     }
     Draw();
 }
