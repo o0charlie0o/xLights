@@ -1711,30 +1711,10 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
     bool out_of_bounds = rowIndex < 0 || (rowIndex >= mSequenceElements->GetVisibleRowInformationSize());
 
     if (mResizing) {
-        // Only apply drag threshold when moving entire effect (not when resizing from edges)
-        if (mResizingMode == EFFECT_RESIZE_MOVE) {
-            // Check if mouse has moved beyond threshold before actually moving
-            if (!mDragThresholdExceeded) {
-                int dx = abs(event.GetX() - mDragStartX);
-                int dy = abs(event.GetY() - mDragStartY);
-                if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
-                    mDragThresholdExceeded = true;
-                    fprintf(stderr, "[mouseMoved] MOVE threshold exceeded - dx=%d, dy=%d\n", dx, dy);
-                }
-            }
-
-            if (mDragThresholdExceeded) {
-                Resize(event.GetX(), event.AltDown(), event.ControlDown());
-                Draw();
-            } else {
-                fprintf(stderr, "[mouseMoved] MOVE blocked - threshold not exceeded yet\n");
-            }
-        } else {
-            // Resizing from edges - no threshold, immediate response
-            fprintf(stderr, "[mouseMoved] Edge resize - mode=%d (no threshold)\n", mResizingMode);
-            Resize(event.GetX(), event.AltDown(), event.ControlDown());
-            Draw();
-        }
+        // Resize() will check threshold for MOVE operations internally
+        // For edge resizing, Resize() allows immediate response
+        Resize(event.GetX(), event.AltDown(), event.ControlDown());
+        Draw();
     } else if (mDragging) {
         // Check if mouse has moved beyond threshold before updating drag selection
         if (!mDragThresholdExceeded) {
@@ -3864,6 +3844,18 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
 
     if (!xlights->AbortRender())
         return;
+
+    // Check drag threshold for MOVE operations (not edge resizing)
+    if (mResizingMode == EFFECT_RESIZE_MOVE && !mDragThresholdExceeded) {
+        int dx = abs(position - mTimeline->GetPositionFromTimeMS(mStartResizeTimeMS));
+        int start_y = 0; // We don't track Y for resize, only X position matters
+        if (dx < DRAG_THRESHOLD) {
+            fprintf(stderr, "[Resize] MOVE blocked in Resize() - dx=%d < threshold\n", dx);
+            return; // Don't resize until threshold exceeded
+        }
+        mDragThresholdExceeded = true;
+        fprintf(stderr, "[Resize] MOVE threshold exceeded in Resize() - dx=%d\n", dx);
+    }
 
     int new_time = -1;
 
