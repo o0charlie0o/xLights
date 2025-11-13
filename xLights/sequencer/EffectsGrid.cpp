@@ -7535,6 +7535,9 @@ void EffectsGrid::DuplicateSelectedEffects() {
 }
 
 void EffectsGrid::DuplicateEffectRight() {
+    // Create a single undo step for all duplicated effects
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
+
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
 
@@ -7683,6 +7686,14 @@ void EffectsGrid::DuplicateEffectRight() {
                 }
             }
         }
+
+        // Move the selection range to the duplicated area for easy repeated duplication
+        int rangeWidth = GetEndColumn() - GetStartColumn() + 1;
+        mRangeStartCol += rangeWidth;
+        mRangeEndCol += rangeWidth;
+        fprintf(stderr, "DuplicateEffectRight: Moved selection to cols %d-%d\n",
+            GetStartColumn(), GetEndColumn());
+
         return;
     }
 
@@ -7777,6 +7788,9 @@ void EffectsGrid::DuplicateEffectRight() {
 }
 
 void EffectsGrid::DuplicateEffectLeft() {
+    // Create a single undo step for all duplicated effects
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
+
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
 
@@ -7930,6 +7944,14 @@ void EffectsGrid::DuplicateEffectLeft() {
                 }
             }
         }
+
+        // Move the selection range to the duplicated area for easy repeated duplication
+        int rangeWidth = GetEndColumn() - GetStartColumn() + 1;
+        mRangeStartCol -= rangeWidth;
+        mRangeEndCol -= rangeWidth;
+        fprintf(stderr, "DuplicateEffectLeft: Moved selection to cols %d-%d\n",
+            GetStartColumn(), GetEndColumn());
+
         return;
     }
 
@@ -8029,6 +8051,9 @@ void EffectsGrid::DuplicateEffectLeft() {
 
 void EffectsGrid::DuplicateEffectUp() {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
+    // Create a single undo step for all duplicated effects
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
 
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
@@ -8249,11 +8274,21 @@ void EffectsGrid::DuplicateEffectUp() {
         }
     }
 
+    // Move the selection range to the duplicated area for easy repeated duplication
+    int rangeHeight = GetEndRow() - GetStartRow() + 1;
+    mRangeStartRow -= rangeHeight;
+    mRangeEndRow -= rangeHeight;
+    fprintf(stderr, "DuplicateEffectUp: Moved selection to rows %d-%d\n",
+        GetStartRow(), GetEndRow());
+
     sendRenderDirtyEvent();
 }
 
 void EffectsGrid::DuplicateEffectDown() {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
+    // Create a single undo step for all duplicated effects
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
 
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
@@ -8374,6 +8409,13 @@ void EffectsGrid::DuplicateEffectDown() {
                 }
             }
         }
+
+        // Move the selection range to the duplicated area for easy repeated duplication
+        mRangeStartRow += rangeHeight;
+        mRangeEndRow += rangeHeight;
+        fprintf(stderr, "DuplicateEffectDown: Moved selection to rows %d-%d\n",
+            GetStartRow(), GetEndRow());
+
         return;
     }
 
