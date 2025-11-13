@@ -1722,7 +1722,6 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
             int dy = abs(event.GetY() - mDragStartY);
             if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
                 mDragThresholdExceeded = true;
-                fprintf(stderr, "[mouseMoved] Selection drag threshold exceeded - dx=%d, dy=%d\n", dx, dy);
             }
         }
 
@@ -2047,7 +2046,6 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
             mResizing = true;
             mDragThresholdExceeded = false;  // Reset threshold flag on new resize
             mResizeEffectIndex = effectIndex;
-            fprintf(stderr, "[mouseDown] Starting resize - mode=%d, threshold=false\n", mResizingMode);
             CaptureMouse();
             Draw();
         }
@@ -2065,7 +2063,6 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
             }
             mDragging = true;
             mDragThresholdExceeded = false;  // Reset threshold flag on new drag
-            fprintf(stderr, "[mouseDown] Starting drag - threshold=false\n");
             mDragEndX = event.GetX();
             mDragEndY = event.GetY();
             if (event.ShiftDown()) {
@@ -3637,7 +3634,6 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
         ReleaseMouse();
         mDragging = false;
         mDragThresholdExceeded = false;  // Reset threshold flag when AC drag ends
-        fprintf(stderr, "[mouseReleased] AC drag ended - reset threshold\n");
 
         if (DoACDraw()) {
             mRangeCursorCol = mRangeStartCol;
@@ -3739,7 +3735,6 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
             UnsetToolTip();
             mDragging = false;
             mDragThresholdExceeded = false;  // Reset threshold flag when drag ends
-            fprintf(stderr, "[mouseReleased] Normal drag ended - reset threshold\n");
             if ((mDragStartX == event.GetX() && mDragStartY == event.GetY()) || (mSequenceElements->GetNumberOfActiveTimingEffects() > 0)) {
                 checkForEmptyCell = true;
             }
@@ -3793,7 +3788,6 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
 
         mResizing = false;
         mDragThresholdExceeded = false;  // Reset threshold flag when resize ends
-        fprintf(stderr, "[mouseReleased] Resize ended - reset mResizing=false, threshold=false\n");
         mDragDropping = false;
         Draw();
         mSequenceElements->get_undo_mgr().SetCaptureUndo(false);
@@ -3848,13 +3842,10 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
     // Check drag threshold for MOVE operations (not edge resizing)
     if (mResizingMode == EFFECT_RESIZE_MOVE && !mDragThresholdExceeded) {
         int dx = abs(position - mTimeline->GetPositionFromTimeMS(mStartResizeTimeMS));
-        int start_y = 0; // We don't track Y for resize, only X position matters
         if (dx < DRAG_THRESHOLD) {
-            fprintf(stderr, "[Resize] MOVE blocked in Resize() - dx=%d < threshold\n", dx);
             return; // Don't resize until threshold exceeded
         }
         mDragThresholdExceeded = true;
-        fprintf(stderr, "[Resize] MOVE threshold exceeded in Resize() - dx=%d\n", dx);
     }
 
     int new_time = -1;
