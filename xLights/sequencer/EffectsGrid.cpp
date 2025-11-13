@@ -194,6 +194,7 @@ EffectsGrid::EffectsGrid(MainSequencer* parent, wxWindowID id, const wxPoint& po
     mParent = parent;
     mDragging = false;
     mResizing = false;
+    mDragThresholdExceeded = false;
     mDragDropping = false;
     mDropStartX = 0;
     mDropEndX = 0;
@@ -1711,9 +1712,15 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
 
     if (mResizing) {
         // Check if mouse has moved beyond threshold before actually resizing
-        int dx = abs(event.GetX() - mDragStartX);
-        int dy = abs(event.GetY() - mDragStartY);
-        if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+        if (!mDragThresholdExceeded) {
+            int dx = abs(event.GetX() - mDragStartX);
+            int dy = abs(event.GetY() - mDragStartY);
+            if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+                mDragThresholdExceeded = true;
+            }
+        }
+
+        if (mDragThresholdExceeded) {
             // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
             // logger_base.debug("EffectsGrid::mouseMoved sizing or moving effects.");
             Resize(event.GetX(), event.AltDown(), event.ControlDown());
@@ -1721,9 +1728,15 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
         }
     } else if (mDragging) {
         // Check if mouse has moved beyond threshold before updating drag selection
-        int dx = abs(event.GetX() - mDragStartX);
-        int dy = abs(event.GetY() - mDragStartY);
-        if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+        if (!mDragThresholdExceeded) {
+            int dx = abs(event.GetX() - mDragStartX);
+            int dy = abs(event.GetY() - mDragStartY);
+            if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+                mDragThresholdExceeded = true;
+            }
+        }
+
+        if (mDragThresholdExceeded) {
             // Only update Y when transferring between timing rows and model rows if the top model row is visible or the start point is in the same timing vs non timing as the new end
             // This prevents unexpected elements being selected on rows between the top model row and the timing rows when the elasic
             // band cross from timing to models
@@ -1907,6 +1920,7 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
 void EffectsGrid::ClearSelection() {
     mDragging = false;
     mResizing = false;
+    mDragThresholdExceeded = false;
     mDragDropping = false;
     mDropStartX = 0;
     mDropEndX = 0;
@@ -2041,6 +2055,7 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
     if (mResizingMode != EFFECT_RESIZE_NO) {
         if (selectedEffect != nullptr) {
             mResizing = true;
+            mDragThresholdExceeded = false;  // Reset threshold flag on new resize
             mResizeEffectIndex = effectIndex;
             CaptureMouse();
             Draw();
@@ -2058,6 +2073,7 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
                 }
             }
             mDragging = true;
+            mDragThresholdExceeded = false;  // Reset threshold flag on new drag
             mDragEndX = event.GetX();
             mDragEndY = event.GetY();
             if (event.ShiftDown()) {
