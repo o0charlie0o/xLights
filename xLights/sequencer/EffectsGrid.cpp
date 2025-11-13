@@ -3651,6 +3651,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
     if (mDragging && xlights->IsACActive()) {
         ReleaseMouse();
         mDragging = false;
+        mDragThresholdExceeded = false;  // Reset threshold flag when AC drag ends
 
         if (DoACDraw()) {
             mRangeCursorCol = mRangeStartCol;
@@ -3751,6 +3752,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
         } else if (mDragging) {
             UnsetToolTip();
             mDragging = false;
+            mDragThresholdExceeded = false;  // Reset threshold flag when drag ends
             if ((mDragStartX == event.GetX() && mDragStartY == event.GetY()) || (mSequenceElements->GetNumberOfActiveTimingEffects() > 0)) {
                 checkForEmptyCell = true;
             }
@@ -3803,6 +3805,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
         }
 
         mResizing = false;
+        mDragThresholdExceeded = false;  // Reset threshold flag when resize ends
         mDragDropping = false;
         Draw();
         mSequenceElements->get_undo_mgr().SetCaptureUndo(false);
