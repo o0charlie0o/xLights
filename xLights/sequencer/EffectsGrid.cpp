@@ -1670,16 +1670,23 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
     bool out_of_bounds = rowIndex < 0 || (rowIndex >= mSequenceElements->GetVisibleRowInformationSize());
 
     if (mResizing) {
-        // Check if mouse has moved beyond threshold before actually resizing
-        if (!mDragThresholdExceeded) {
-            int dx = abs(event.GetX() - mDragStartX);
-            int dy = abs(event.GetY() - mDragStartY);
-            if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
-                mDragThresholdExceeded = true;
+        // Only apply drag threshold when moving entire effect (not when resizing from edges)
+        if (mResizingMode == EFFECT_RESIZE_MOVE) {
+            // Check if mouse has moved beyond threshold before actually moving
+            if (!mDragThresholdExceeded) {
+                int dx = abs(event.GetX() - mDragStartX);
+                int dy = abs(event.GetY() - mDragStartY);
+                if (dx >= DRAG_THRESHOLD || dy >= DRAG_THRESHOLD) {
+                    mDragThresholdExceeded = true;
+                }
             }
-        }
 
-        if (mDragThresholdExceeded) {
+            if (mDragThresholdExceeded) {
+                Resize(event.GetX(), event.AltDown(), event.ControlDown());
+                Draw();
+            }
+        } else {
+            // Resizing from edges - no threshold, immediate response
             // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
             // logger_base.debug("EffectsGrid::mouseMoved sizing or moving effects.");
             Resize(event.GetX(), event.AltDown(), event.ControlDown());
