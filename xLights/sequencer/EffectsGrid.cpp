@@ -7538,6 +7538,9 @@ void EffectsGrid::DuplicateEffectRight() {
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
 
+    fprintf(stderr, "DuplicateEffectRight: mCellRangeSelected=%d, paste_by_cell=%d\n",
+        mCellRangeSelected, paste_by_cell);
+
     // Handle cell range selection
     if (mCellRangeSelected) {
         int startRow = GetStartRow();
@@ -7776,6 +7779,9 @@ void EffectsGrid::DuplicateEffectRight() {
 void EffectsGrid::DuplicateEffectLeft() {
     bool paste_by_cell = ((MainSequencer*)mParent)->PasteByCellActive();
     EffectLayer* tel{ nullptr };
+
+    fprintf(stderr, "DuplicateEffectLeft: mCellRangeSelected=%d, paste_by_cell=%d\n",
+        mCellRangeSelected, paste_by_cell);
 
     // Handle cell range selection
     if (mCellRangeSelected) {
