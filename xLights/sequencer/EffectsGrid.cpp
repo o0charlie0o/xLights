@@ -3846,6 +3846,15 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
     if (!xlights->AbortRender())
         return;
 
+    // Handle Smart Tool modes (vertical drag for fade/brightness adjustment)
+    if (mResizingMode == EFFECT_RESIZE_SMART_FADE) {
+        AdjustEffectFade(position);
+        return;
+    } else if (mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS) {
+        AdjustEffectBrightness(position);
+        return;
+    }
+
     int new_time = -1;
 
     // Snap to timing marks logic
@@ -3930,6 +3939,98 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
     // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     // logger_base.debug("EffectsGrid::Resize would have sent render dirty event");
     // sendRenderDirtyEvent();
+}
+
+void EffectsGrid::AdjustEffectFade(int yPosition) {
+    // Calculate drag delta from initial Y position
+    // Negative because drag up = increase value (screen Y increases downward)
+    int dragDelta = mSmartToolDragStartY - yPosition;
+
+    // Convert drag distance to fade amount (100 pixels = 1.0 second)
+    float fadeDelta = dragDelta / 100.0f;
+
+    // Calculate new fade value
+    float newFade = mSmartToolInitialValue + fadeDelta;
+
+    // Clamp to valid range (0.0 to 10.0 seconds)
+    newFade = std::max(0.0f, std::min(10.0f, newFade));
+
+    // Determine which fade parameter to adjust
+    std::string fadeKey = (mSmartToolInitialZone == HitLocation::SMART_FADE_IN) ? "T_TEXTCTRL_Fadein" : "T_TEXTCTRL_Fadeout";
+
+    // Update all selected effects
+    for (int row = 0; row < mSequenceElements->GetRowInformationSize(); row++) {
+        EffectLayer* el = mSequenceElements->GetEffectLayer(row);
+        if (el != nullptr) {
+            for (int ef = 0; ef < el->GetEffectCount(); ef++) {
+                Effect* effect = el->GetEffect(ef);
+                if (effect != nullptr && effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                    SettingsMap& settings = effect->GetSettings();
+                    settings[fadeKey] = wxString::Format("%.2f", newFade).ToStdString();
+                }
+            }
+        }
+    }
+
+    // Trigger render update
+    sendRenderDirtyEvent();
+}
+
+void EffectsGrid::AdjustEffectBrightness(int yPosition) {
+    // Calculate drag delta from initial Y position
+    // Negative because drag up = increase value (screen Y increases downward)
+    int dragDelta = mSmartToolDragStartY - yPosition;
+
+    // Convert to brightness change (2 pixels = 1% brightness)
+    float brightnessDelta = dragDelta / 2.0f;
+
+    // Calculate new brightness value
+    float newBrightness = mSmartToolInitialValue + brightnessDelta;
+
+    // Clamp to valid range (0 to 100)
+    newBrightness = std::max(0.0f, std::min(100.0f, newBrightness));
+
+    // Update all selected effects
+    for (int row = 0; row < mSequenceElements->GetRowInformationSize(); row++) {
+        EffectLayer* el = mSequenceElements->GetEffectLayer(row);
+        if (el != nullptr) {
+            for (int ef = 0; ef < el->GetEffectCount(); ef++) {
+                Effect* effect = el->GetEffect(ef);
+                if (effect != nullptr && effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                    SettingsMap& settings = effect->GetSettings();
+
+                    // Check if using On effect brightness or regular brightness
+                    if (settings.Contains("E_TEXTCTRL_Eff_On_Start")) {
+                        // Adjust both start and end by same amount to maintain ramp
+                        int oldStart = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_Start", "100"));
+                        int oldEnd = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_End", "100"));
+
+                        // Calculate average offset from initial value
+                        float oldAverage = (oldStart + oldEnd) / 2.0f;
+                        float offset = newBrightness - oldAverage;
+
+                        // Apply offset to both start and end
+                        int newStart = std::max(0, std::min(100, (int)(oldStart + offset)));
+                        int newEnd = std::max(0, std::min(100, (int)(oldEnd + offset)));
+
+                        settings["E_TEXTCTRL_Eff_On_Start"] = std::to_string(newStart);
+                        settings["E_TEXTCTRL_Eff_On_End"] = std::to_string(newEnd);
+                    } else if (!settings.Get("C_VALUECURVE_Brightness", "").empty() &&
+                               settings.Get("C_VALUECURVE_Brightness", "").find("Active=TRUE") != std::string::npos) {
+                        // Value curve is active - skip brightness adjustment
+                        // Smart Tool doesn't support value curves
+                        continue;
+                    } else {
+                        // Use regular brightness slider
+                        settings["C_SLIDER_Brightness"] = std::to_string((int)newBrightness);
+                    }
+                }
+            }
+        }
+    }
+
+    // Trigger render update
+    sendRenderDirtyEvent();
 }
 
 void EffectsGrid::ScrollBy(int by) {
