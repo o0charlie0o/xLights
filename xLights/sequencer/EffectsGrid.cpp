@@ -1842,13 +1842,13 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
 
                 fprintf(stderr, "    Zones: topZoneBottom=%d, bottomZoneTop=%d\n", topZoneBottom, bottomZoneTop);
 
-                // Define horizontal boundaries for brightness zone
-                int leftBoundary = startPos + (endPos - startPos) * 0.1;   // 10% from left
-                int rightBoundary = startPos + (endPos - startPos) * 0.9;  // 10% from right
+                // For fade zones, use the full width horizontally
+                // For brightness zone, exclude just the edges (leave room for resize handles)
+                int edgeThreshold = 12;  // Match the EDGE_DISCONNECT threshold from normal detection
 
                 // Check vertical zones
                 if (yPos < topZoneBottom) {
-                    // TOP ZONE - Fade In/Out
+                    // TOP ZONE - Fade In/Out (full width)
                     fprintf(stderr, "    TOP ZONE detected\n");
                     if (position < mid) {
                         selectionType = HitLocation::SMART_FADE_IN;
@@ -1858,13 +1858,15 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
                         fprintf(stderr, "    -> SMART_FADE_OUT\n");
                     }
                 } else if (yPos < bottomZoneTop) {
-                    // MIDDLE ZONE - Check if in center horizontally for brightness
+                    // MIDDLE ZONE - Brightness (avoid edges for resize handles)
+                    int leftBoundary = startPos + edgeThreshold;
+                    int rightBoundary = endPos - edgeThreshold;
                     fprintf(stderr, "    MIDDLE ZONE: position=%d, left=%d, right=%d\n", position, leftBoundary, rightBoundary);
-                    if (position > leftBoundary && position < rightBoundary) {
+                    if (position >= leftBoundary && position <= rightBoundary) {
                         selectionType = HitLocation::SMART_BRIGHTNESS;
                         fprintf(stderr, "    -> SMART_BRIGHTNESS\n");
                     } else {
-                        // Fall through to existing horizontal zone logic below
+                        // Near edge - fall through to existing horizontal zone logic
                         fprintf(stderr, "    -> Edge of middle zone, fall through\n");
                         altDown = false;  // Disable Smart Tool for this edge case
                     }
