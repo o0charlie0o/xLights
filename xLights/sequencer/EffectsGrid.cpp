@@ -1812,7 +1812,6 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
         logger_base.crit("EffectsGrid::GetEffectAtRowAndTime effectLayer is nullptr ... this is going to crash.");
     }
 
-    extern int DEFAULT_ROW_HEADING_HEIGHT;
     Effect* eff = nullptr;
     selectionType = HitLocation::NONE;
     if (effectLayer->HitTestEffectByTime(ms, index)) {
