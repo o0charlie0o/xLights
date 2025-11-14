@@ -45,7 +45,11 @@ enum class HitLocation {
     CENTER,
     RIGHT,
     RIGHT_EDGE_DISCONNECT,
-    RIGHT_EDGE
+    RIGHT_EDGE,
+    // Smart Tool zones (only active when Option/Alt key held)
+    SMART_FADE_IN,
+    SMART_FADE_OUT,
+    SMART_BRIGHTNESS
 };
 
 enum EFF_ALIGN_MODE {
@@ -211,8 +215,12 @@ protected:
     int m_previous_mouse_x = 0;
 
 private:
-    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType);
+    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType, int yPos = -1, bool altDown = false);
     int GetClippedPositionFromTimeMS(int ms) const;
+
+    // Smart Tool functions
+    void AdjustEffectFade(int yPosition);
+    void AdjustEffectBrightness(int yPosition);
 
     void DrawFadeHints(Effect* e, int x1, int y1, int x2, int y2, xlVertexColorAccumulator *backgrounds) const;
     void CreateEffectForFile(int x, int y, const std::string& effectName, const std::string& filename);
@@ -343,6 +351,11 @@ private:
     int mDragEndX;
     int mDragEndY;
     float magSinceLast;
+
+    // Smart Tool state variables
+    int mSmartToolDragStartY;
+    float mSmartToolInitialValue;
+    HitLocation mSmartToolInitialZone;
 
     EffectLayer* mEffectLayer;
     int mResizeEffectIndex;

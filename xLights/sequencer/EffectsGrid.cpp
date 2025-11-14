@@ -57,6 +57,8 @@
 #define EFFECT_RESIZE_MOVE 3
 #define EFFECT_RESIZE_LEFT_EDGE 4
 #define EFFECT_RESIZE_RIGHT_EDGE 5
+#define EFFECT_RESIZE_SMART_FADE 6
+#define EFFECT_RESIZE_SMART_BRIGHTNESS 7
 #define TIMING_ALPHA (0x60)
 
 BEGIN_EVENT_TABLE(EffectsGrid, GRAPHICS_BASE_CLASS)
@@ -1802,7 +1804,7 @@ int MapHitLocationToEffectSelection(HitLocation location) {
     return EFFECT_NOT_SELECTED;
 }
 
-Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocation& selectionType) {
+Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocation& selectionType, int yPos, bool altDown) {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     EffectLayer* effectLayer = mSequenceElements->GetVisibleEffectLayer(row);
 
@@ -1810,6 +1812,7 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
         logger_base.crit("EffectsGrid::GetEffectAtRowAndTime effectLayer is nullptr ... this is going to crash.");
     }
 
+    extern int DEFAULT_ROW_HEADING_HEIGHT;
     Effect* eff = nullptr;
     selectionType = HitLocation::NONE;
     if (effectLayer->HitTestEffectByTime(ms, index)) {
@@ -1822,28 +1825,66 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
         if (effectLayer->IsFixedTimingLayer()) {
             selectionType = HitLocation::NONE;
         } else if (!eff->IsLocked()) {
-            if ((endPos - startPos) < 8) {
-                // too small to really differentiate, just
-                // provide ability to make the effect larger
-                if (position < mid) {
-                    selectionType = HitLocation::LEFT_EDGE;
-                } else {
-                    selectionType = HitLocation::RIGHT_EDGE;
+            // Smart Tool zone detection (only when Alt/Option held and yPos provided)
+            if (altDown && yPos >= 0) {
+                // Calculate effect boundaries on screen
+                int y1 = row * DEFAULT_ROW_HEADING_HEIGHT;
+                int y2 = (row + 1) * DEFAULT_ROW_HEADING_HEIGHT;
+                int effectHeight = y2 - y1;
+
+                // Define zone boundaries
+                int topZoneBottom = y1 + (effectHeight * 0.15);    // Top 15%
+                int bottomZoneTop = y2 - (effectHeight * 0.15);     // Bottom 15%
+
+                // Define horizontal boundaries for brightness zone
+                int leftBoundary = startPos + (endPos - startPos) * 0.1;   // 10% from left
+                int rightBoundary = startPos + (endPos - startPos) * 0.9;  // 10% from right
+
+                // Check vertical zones
+                if (yPos < topZoneBottom) {
+                    // TOP ZONE - Fade In/Out
+                    if (position < mid) {
+                        selectionType = HitLocation::SMART_FADE_IN;
+                    } else {
+                        selectionType = HitLocation::SMART_FADE_OUT;
+                    }
+                } else if (yPos < bottomZoneTop) {
+                    // MIDDLE ZONE - Check if in center horizontally for brightness
+                    if (position > leftBoundary && position < rightBoundary) {
+                        selectionType = HitLocation::SMART_BRIGHTNESS;
+                    } else {
+                        // Fall through to existing horizontal zone logic below
+                        altDown = false;  // Disable Smart Tool for this edge case
+                    }
                 }
-            } else if (position > endPos - 6) {
-                selectionType = HitLocation::RIGHT_EDGE;
-            } else if (position > endPos - 12) {
-                selectionType = HitLocation::RIGHT_EDGE_DISCONNECT;
-            } else if (position > mid + 8) {
-                selectionType = HitLocation::RIGHT;
-            } else if (position < startPos + 6) {
-                selectionType = HitLocation::LEFT_EDGE;
-            } else if (position < startPos + 12) {
-                selectionType = HitLocation::LEFT_EDGE_DISCONNECT;
-            } else if (position < mid - 8) {
-                selectionType = HitLocation::LEFT;
-            } else {
-                selectionType = HitLocation::CENTER;
+                // If in bottom zone, fall through to existing edge resize logic
+            }
+
+            // Existing horizontal zone detection (only if Smart Tool didn't detect a zone)
+            if (!altDown || selectionType == HitLocation::NONE) {
+                if ((endPos - startPos) < 8) {
+                    // too small to really differentiate, just
+                    // provide ability to make the effect larger
+                    if (position < mid) {
+                        selectionType = HitLocation::LEFT_EDGE;
+                    } else {
+                        selectionType = HitLocation::RIGHT_EDGE;
+                    }
+                } else if (position > endPos - 6) {
+                    selectionType = HitLocation::RIGHT_EDGE;
+                } else if (position > endPos - 12) {
+                    selectionType = HitLocation::RIGHT_EDGE_DISCONNECT;
+                } else if (position > mid + 8) {
+                    selectionType = HitLocation::RIGHT;
+                } else if (position < startPos + 6) {
+                    selectionType = HitLocation::LEFT_EDGE;
+                } else if (position < startPos + 12) {
+                    selectionType = HitLocation::LEFT_EDGE_DISCONNECT;
+                } else if (position < mid - 8) {
+                    selectionType = HitLocation::LEFT;
+                } else {
+                    selectionType = HitLocation::CENTER;
+                }
             }
         } else {
             selectionType = HitLocation::CENTER;
@@ -1990,6 +2031,32 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
         if (selectedEffect != nullptr) {
             mResizing = true;
             mResizeEffectIndex = effectIndex;
+
+            // Initialize Smart Tool state if using Smart Tool modes
+            if (mResizingMode == EFFECT_RESIZE_SMART_FADE || mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS) {
+                mSmartToolDragStartY = event.GetY();
+                mSmartToolInitialZone = selectionType;
+
+                // Get initial value for the selected effect
+                SettingsMap& settings = selectedEffect->GetSettings();
+                if (mResizingMode == EFFECT_RESIZE_SMART_FADE) {
+                    if (selectionType == HitLocation::SMART_FADE_IN) {
+                        mSmartToolInitialValue = wxAtof(settings.Get("T_TEXTCTRL_Fadein", "0.0"));
+                    } else {  // SMART_FADE_OUT
+                        mSmartToolInitialValue = wxAtof(settings.Get("T_TEXTCTRL_Fadeout", "0.0"));
+                    }
+                } else {  // EFFECT_RESIZE_SMART_BRIGHTNESS
+                    // Check for On effect brightness first
+                    if (settings.Contains("E_TEXTCTRL_Eff_On_Start")) {
+                        int start = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_Start", "100"));
+                        int end = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_End", "100"));
+                        mSmartToolInitialValue = (start + end) / 2.0f;  // Use average
+                    } else {
+                        mSmartToolInitialValue = wxAtoi(settings.Get("C_SLIDER_Brightness", "100"));
+                    }
+                }
+            }
+
             CaptureMouse();
             Draw();
         }
@@ -6000,7 +6067,11 @@ void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y) {
 
     int time = mTimeline->GetRawTimeMSfromPosition(x);
     HitLocation selectionType = HitLocation::NONE;
-    Effect* eff = GetEffectAtRowAndTime(rowIndex, time, effectIndex, selectionType);
+
+    // Check if Alt/Option key is held for Smart Tool
+    bool altDown = wxGetKeyState(WXK_ALT);
+
+    Effect* eff = GetEffectAtRowAndTime(rowIndex, time, effectIndex, selectionType, y, altDown);
     if (eff != nullptr) {
         mResizeEffectIndex = effectIndex;
         switch (selectionType) {
@@ -6032,6 +6103,15 @@ void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y) {
         case HitLocation::CENTER:
             SetCursor(wxCURSOR_HAND);
             mResizingMode = EFFECT_RESIZE_MOVE;
+            break;
+        case HitLocation::SMART_FADE_IN:
+        case HitLocation::SMART_FADE_OUT:
+            SetCursor(wxCURSOR_SIZENS);  // Vertical resize cursor
+            mResizingMode = EFFECT_RESIZE_SMART_FADE;
+            break;
+        case HitLocation::SMART_BRIGHTNESS:
+            SetCursor(wxCURSOR_SIZENS);  // Vertical resize cursor
+            mResizingMode = EFFECT_RESIZE_SMART_BRIGHTNESS;
             break;
             // update effect details
         }
