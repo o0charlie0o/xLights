@@ -1826,14 +1826,21 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
         } else if (!eff->IsLocked()) {
             // Smart Tool zone detection (only when Alt/Option held and yPos provided)
             if (altDown && yPos >= 0) {
+                fprintf(stderr, "    Smart Tool active: row=%d, yPos=%d, position=%d\n", row, yPos, position);
+
                 // Calculate effect boundaries on screen
                 int y1 = row * DEFAULT_ROW_HEADING_HEIGHT;
                 int y2 = (row + 1) * DEFAULT_ROW_HEADING_HEIGHT;
                 int effectHeight = y2 - y1;
 
+                fprintf(stderr, "    Zone calc: y1=%d, y2=%d, height=%d, DEFAULT_ROW_HEADING_HEIGHT=%d\n",
+                        y1, y2, effectHeight, DEFAULT_ROW_HEADING_HEIGHT);
+
                 // Define zone boundaries
                 int topZoneBottom = y1 + (effectHeight * 0.15);    // Top 15%
                 int bottomZoneTop = y2 - (effectHeight * 0.15);     // Bottom 15%
+
+                fprintf(stderr, "    Zones: topZoneBottom=%d, bottomZoneTop=%d\n", topZoneBottom, bottomZoneTop);
 
                 // Define horizontal boundaries for brightness zone
                 int leftBoundary = startPos + (endPos - startPos) * 0.1;   // 10% from left
@@ -1842,19 +1849,27 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
                 // Check vertical zones
                 if (yPos < topZoneBottom) {
                     // TOP ZONE - Fade In/Out
+                    fprintf(stderr, "    TOP ZONE detected\n");
                     if (position < mid) {
                         selectionType = HitLocation::SMART_FADE_IN;
+                        fprintf(stderr, "    -> SMART_FADE_IN\n");
                     } else {
                         selectionType = HitLocation::SMART_FADE_OUT;
+                        fprintf(stderr, "    -> SMART_FADE_OUT\n");
                     }
                 } else if (yPos < bottomZoneTop) {
                     // MIDDLE ZONE - Check if in center horizontally for brightness
+                    fprintf(stderr, "    MIDDLE ZONE: position=%d, left=%d, right=%d\n", position, leftBoundary, rightBoundary);
                     if (position > leftBoundary && position < rightBoundary) {
                         selectionType = HitLocation::SMART_BRIGHTNESS;
+                        fprintf(stderr, "    -> SMART_BRIGHTNESS\n");
                     } else {
                         // Fall through to existing horizontal zone logic below
+                        fprintf(stderr, "    -> Edge of middle zone, fall through\n");
                         altDown = false;  // Disable Smart Tool for this edge case
                     }
+                } else {
+                    fprintf(stderr, "    BOTTOM ZONE - fall through to normal resize\n");
                 }
                 // If in bottom zone, fall through to existing edge resize logic
             }
@@ -6171,7 +6186,11 @@ void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y) {
     // Check if Alt/Option key is held for Smart Tool
     bool altDown = wxGetKeyState(WXK_ALT);
 
+    fprintf(stderr, "RunMouseOverHitTests: row=%d, x=%d, y=%d, altDown=%d\n", rowIndex, x, y, altDown);
+
     Effect* eff = GetEffectAtRowAndTime(rowIndex, time, effectIndex, selectionType, y, altDown);
+
+    fprintf(stderr, "  -> selectionType=%d, eff=%p\n", (int)selectionType, (void*)eff);
     if (eff != nullptr) {
         mResizeEffectIndex = effectIndex;
         switch (selectionType) {
