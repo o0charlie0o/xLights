@@ -8169,6 +8169,13 @@ void EffectsGrid::DuplicateEffectUp() {
                 }
             }
         }
+
+        // Move the selection range to the duplicated area for easy repeated duplication
+        mRangeStartRow -= rangeHeight;
+        mRangeEndRow -= rangeHeight;
+        fprintf(stderr, "DuplicateEffectUp: Moved selection to rows %d-%d\n",
+            GetStartRow(), GetEndRow());
+
         return;
     }
 
@@ -8273,13 +8280,6 @@ void EffectsGrid::DuplicateEffectUp() {
             }
         }
     }
-
-    // Move the selection range to the duplicated area for easy repeated duplication
-    int rangeHeight = GetEndRow() - GetStartRow() + 1;
-    mRangeStartRow -= rangeHeight;
-    mRangeEndRow -= rangeHeight;
-    fprintf(stderr, "DuplicateEffectUp: Moved selection to rows %d-%d\n",
-        GetStartRow(), GetEndRow());
 
     sendRenderDirtyEvent();
 }
