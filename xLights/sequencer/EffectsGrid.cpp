@@ -1847,7 +1847,7 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
                 int edgeThreshold = 12;  // Match the EDGE_DISCONNECT threshold from normal detection
 
                 // Check vertical zones
-                if (yPos < topZoneBottom) {
+                if (yPos <= topZoneBottom) {
                     // TOP ZONE - Fade In/Out (full width)
                     fprintf(stderr, "    TOP ZONE detected\n");
                     if (position < mid) {
@@ -1866,18 +1866,19 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
                         selectionType = HitLocation::SMART_BRIGHTNESS;
                         fprintf(stderr, "    -> SMART_BRIGHTNESS\n");
                     } else {
-                        // Near edge - fall through to existing horizontal zone logic
-                        fprintf(stderr, "    -> Edge of middle zone, fall through\n");
-                        altDown = false;  // Disable Smart Tool for this edge case
+                        // Near edge in middle zone - don't allow resize when Alt is held
+                        fprintf(stderr, "    -> Edge of middle zone, no action when Alt held\n");
+                        selectionType = HitLocation::NONE;
                     }
                 } else {
-                    fprintf(stderr, "    BOTTOM ZONE - fall through to normal resize\n");
+                    // BOTTOM ZONE - when Alt is held, no action (don't fall through to resize)
+                    fprintf(stderr, "    BOTTOM ZONE - no action when Alt held\n");
+                    selectionType = HitLocation::NONE;
                 }
-                // If in bottom zone, fall through to existing edge resize logic
             }
 
-            // Existing horizontal zone detection (only if Smart Tool didn't detect a zone)
-            if (!altDown || selectionType == HitLocation::NONE) {
+            // Existing horizontal zone detection (only if Smart Tool was NOT active)
+            if (!altDown) {
                 if ((endPos - startPos) < 8) {
                     // too small to really differentiate, just
                     // provide ability to make the effect larger
