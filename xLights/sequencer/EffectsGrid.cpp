@@ -1828,52 +1828,31 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
             if (altDown && yPos >= 0) {
                 fprintf(stderr, "    Smart Tool active: row=%d, yPos=%d, position=%d\n", row, yPos, position);
 
-                // Calculate effect boundaries on screen
-                int y1 = row * DEFAULT_ROW_HEADING_HEIGHT;
-                int y2 = (row + 1) * DEFAULT_ROW_HEADING_HEIGHT;
-                int effectHeight = y2 - y1;
+                // Define horizontal zones based on position along effect width
+                int effectWidth = endPos - startPos;
+                int edgeWidth = std::max(12, effectWidth / 5);  // Edge zones are 20% of width or 12px minimum
 
-                fprintf(stderr, "    Zone calc: y1=%d, y2=%d, height=%d, DEFAULT_ROW_HEADING_HEIGHT=%d\n",
-                        y1, y2, effectHeight, DEFAULT_ROW_HEADING_HEIGHT);
+                int leftEdgeEnd = startPos + edgeWidth;
+                int rightEdgeStart = endPos - edgeWidth;
 
-                // Define zone boundaries
-                int topZoneBottom = y1 + (effectHeight * 0.15);    // Top 15%
-                int bottomZoneTop = y2 - (effectHeight * 0.15);     // Bottom 15%
+                fprintf(stderr, "    Effect: start=%d, end=%d, width=%d, edgeWidth=%d\n",
+                        startPos, endPos, effectWidth, edgeWidth);
+                fprintf(stderr, "    Zones: leftEdge=<%d, rightEdge=>%d, center=%d-%d\n",
+                        leftEdgeEnd, rightEdgeStart, leftEdgeEnd, rightEdgeStart);
 
-                fprintf(stderr, "    Zones: topZoneBottom=%d, bottomZoneTop=%d\n", topZoneBottom, bottomZoneTop);
-
-                // For fade zones, use the full width horizontally
-                // For brightness zone, exclude just the edges (leave room for resize handles)
-                int edgeThreshold = 12;  // Match the EDGE_DISCONNECT threshold from normal detection
-
-                // Check vertical zones
-                if (yPos <= topZoneBottom) {
-                    // TOP ZONE - Fade In/Out (full width)
-                    fprintf(stderr, "    TOP ZONE detected\n");
-                    if (position < mid) {
-                        selectionType = HitLocation::SMART_FADE_IN;
-                        fprintf(stderr, "    -> SMART_FADE_IN\n");
-                    } else {
-                        selectionType = HitLocation::SMART_FADE_OUT;
-                        fprintf(stderr, "    -> SMART_FADE_OUT\n");
-                    }
-                } else if (yPos < bottomZoneTop) {
-                    // MIDDLE ZONE - Brightness (avoid edges for resize handles)
-                    int leftBoundary = startPos + edgeThreshold;
-                    int rightBoundary = endPos - edgeThreshold;
-                    fprintf(stderr, "    MIDDLE ZONE: position=%d, left=%d, right=%d\n", position, leftBoundary, rightBoundary);
-                    if (position >= leftBoundary && position <= rightBoundary) {
-                        selectionType = HitLocation::SMART_BRIGHTNESS;
-                        fprintf(stderr, "    -> SMART_BRIGHTNESS\n");
-                    } else {
-                        // Near edge in middle zone - don't allow resize when Alt is held
-                        fprintf(stderr, "    -> Edge of middle zone, no action when Alt held\n");
-                        selectionType = HitLocation::NONE;
-                    }
+                // Check horizontal zones
+                if (position < leftEdgeEnd) {
+                    // LEFT EDGE - Fade In
+                    selectionType = HitLocation::SMART_FADE_IN;
+                    fprintf(stderr, "    -> SMART_FADE_IN\n");
+                } else if (position > rightEdgeStart) {
+                    // RIGHT EDGE - Fade Out
+                    selectionType = HitLocation::SMART_FADE_OUT;
+                    fprintf(stderr, "    -> SMART_FADE_OUT\n");
                 } else {
-                    // BOTTOM ZONE - when Alt is held, no action (don't fall through to resize)
-                    fprintf(stderr, "    BOTTOM ZONE - no action when Alt held\n");
-                    selectionType = HitLocation::NONE;
+                    // CENTER - Brightness
+                    selectionType = HitLocation::SMART_BRIGHTNESS;
+                    fprintf(stderr, "    -> SMART_BRIGHTNESS\n");
                 }
             }
 
