@@ -1814,12 +1814,20 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
 
     Effect* eff = nullptr;
     selectionType = HitLocation::NONE;
-    if (effectLayer->HitTestEffectByTime(ms, index)) {
+
+    fprintf(stderr, "GetEffectAtRowAndTime: row=%d, ms=%d, altDown=%d\n", row, ms, altDown);
+    bool hitTest = effectLayer->HitTestEffectByTime(ms, index);
+    fprintf(stderr, "  HitTestEffectByTime returned: %d, index=%d\n", hitTest, index);
+
+    if (hitTest) {
         eff = effectLayer->GetEffect(index);
         int startPos = GetClippedPositionFromTimeMS(eff->GetStartTimeMS());
         int endPos = GetClippedPositionFromTimeMS(eff->GetEndTimeMS());
         int position = GetClippedPositionFromTimeMS(ms);
         int mid = (startPos + endPos) / 2;
+
+        fprintf(stderr, "  Effect found: startTime=%d, endTime=%d, startPos=%d, endPos=%d, position=%d\n",
+                eff->GetStartTimeMS(), eff->GetEndTimeMS(), startPos, endPos, position);
 
         if (effectLayer->IsFixedTimingLayer()) {
             selectionType = HitLocation::NONE;
