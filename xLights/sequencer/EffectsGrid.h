@@ -219,7 +219,7 @@ private:
     int GetClippedPositionFromTimeMS(int ms) const;
 
     // Smart Tool functions
-    void AdjustEffectFade(int yPosition);
+    void AdjustEffectFade(int xPosition);
     void AdjustEffectBrightness(int yPosition);
 
     void DrawFadeHints(Effect* e, int x1, int y1, int x2, int y2, xlVertexColorAccumulator *backgrounds) const;
@@ -353,9 +353,15 @@ private:
     float magSinceLast;
 
     // Smart Tool state variables
-    int mSmartToolDragStartY;
+    int mSmartToolDragStartX;           // For fade adjustments (horizontal drag)
+    int mSmartToolDragStartY;           // For brightness adjustments (vertical drag)
     float mSmartToolInitialValue;
     HitLocation mSmartToolInitialZone;
+    Effect* mSmartToolModifiedEffect;   // Track effect modified by Smart Tool brightness
+
+    // Smart Tool custom cursors
+    wxCursor mCursorFade;               // Custom fade cursor (triangle ramp)
+    wxCursor mCursorBrightness;         // Custom brightness cursor (sun icon)
 
     EffectLayer* mEffectLayer;
     int mResizeEffectIndex;
