@@ -1075,6 +1075,128 @@ AudioManager* audio = frame->GetMedia();
 
 ---
 
+## 16. Code Style & Contribution Guidelines
+
+### Commit Message Style
+
+When contributing to xLights, keep commit messages **concise and focused**:
+
+**Good commit message format:**
+```
+Add confirmation dialog for viewpoint deletion
+
+Prevents accidental deletion of 3D and 2D viewpoints by requiring
+user confirmation before deletion.
+```
+
+**Principles:**
+- **Short title** (50-72 characters) describing what was done
+- **Brief description** (1-3 sentences) explaining why/what problem it solves
+- **No excessive detail** - code changes speak for themselves
+- **No attribution footers** - Git already tracks authorship
+- Avoid long bullet-point lists in commit messages
+
+**Bad practices to avoid:**
+```
+Add confirmation dialog for viewpoint deletion
+
+Prevents accidental deletion of 3D and 2D viewpoints by requiring
+user confirmation before deletion. Addresses user feedback about
+accidentally clicking "Delete Viewpoint" when intending to click
+"Load Viewpoint".
+
+Changes:
+- Added wxMessageBox confirmation dialog before deleting 3D viewpoints
+- Added wxMessageBox confirmation dialog before deleting 2D viewpoints
+- Dialog shows viewpoint name and warns action cannot be undone
+- Uses wxYES_NO with wxNO_DEFAULT to prevent accidental confirmation
+- Displays appropriate icon (wxICON_QUESTION) for confirmation prompt
+
+Location: xLights/LayoutPanel.cpp
+- Line 5158-5165: 3D viewpoint deletion confirmation
+- Line 5175-5182: 2D viewpoint deletion confirmation
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+### Code Comment Guidelines
+
+**When NOT to add comments:**
+- Avoid obvious comments that just restate what the code does
+- Don't add comments explaining simple, self-evident operations
+- The xLights codebase generally has minimal inline comments for straightforward code
+
+**Example - Unnecessary comment:**
+```cpp
+} else if (event.GetId() == xlights->viewpoint_mgr.GetCamera3D(i)->GetDeleteMenuId()) {
+    // Confirm deletion to prevent accidental deletion  ❌ DON'T DO THIS
+    std::string viewpointName = xlights->viewpoint_mgr.GetCamera3D(i)->GetName();
+```
+
+**Better - Let the code speak:**
+```cpp
+} else if (event.GetId() == xlights->viewpoint_mgr.GetCamera3D(i)->GetDeleteMenuId()) {
+    std::string viewpointName = xlights->viewpoint_mgr.GetCamera3D(i)->GetName();
+    wxString message = wxString::Format("Are you sure you want to delete the 3D viewpoint '%s'?\n\nThis action cannot be undone.", viewpointName);
+    if (wxMessageBox(message, "Confirm Delete Viewpoint", wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION, this) == wxYES) {
+        xlights->viewpoint_mgr.DeleteCamera3D(i);
+    }
+}
+```
+
+**When TO add comments:**
+- Complex algorithms or non-obvious logic
+- Workarounds for platform-specific bugs
+- Performance-critical sections explaining optimization choices
+- Public API documentation (class/method headers)
+
+### Code Consistency
+
+From CONTRIBUTING.md:
+> "Our code is not spectacularly consistent in structure or format ... do your best to be consistent with the code nearby your change."
+
+**Key principles:**
+1. **Match surrounding style** - Look at the file you're editing and follow its patterns
+2. **Keep changes focused** - Don't reformat or refactor unrelated code
+3. **No cosmetic-only PRs** - Don't submit PRs that only fix whitespace or formatting
+4. **Indent consistently** - Match tabs vs spaces with the existing file
+
+### Pull Request Guidelines
+
+Before submitting a PR:
+
+1. **Test your changes** - Verify functionality works as expected
+2. **Clear problem statement** - Explain what issue you're solving
+3. **Concise solution description** - Describe how your change fixes it
+4. **Reference issues** - Link to GitHub issue if applicable
+5. **Community value** - Ensure feature benefits broader community, not just personal use
+6. **Avoid complexity** - Don't add UI complexity for niche features
+
+**PR Description Format:**
+```markdown
+## Problem
+Users accidentally delete viewpoints when clicking near "Load Viewpoint" button.
+
+## Solution
+Added confirmation dialog before deleting 3D/2D viewpoints.
+
+## Testing
+- Verified confirmation appears for both 3D and 2D viewpoint deletion
+- Verified "No" cancels deletion
+- Verified "Yes" proceeds with deletion
+```
+
+### Before Opening PRs
+
+1. Ask for feedback on significant features before implementing
+2. Listen to developer warnings about complex areas of code
+3. Understand that some areas are off-limits until you're more familiar with codebase
+4. Be prepared to discuss design decisions
+
+---
+
 ## Summary
 
 xLights is a sophisticated multi-application suite with a well-architected separation between:
