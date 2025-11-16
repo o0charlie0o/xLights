@@ -22,6 +22,7 @@
 #include "SequenceElements.h"
 #include "../xLightsMain.h"
 #include "../JukeboxPanel.h"
+#include "../ColorPanel.h"
 #include "TimeLine.h"
 #include "../UtilFunctions.h"
 #include "../xLightsVersion.h"
@@ -847,6 +848,46 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
                 wxPostEvent(GetParent(), eventEffectUpdated);
             }
             else if (type == "COLOR_UPDATE") {
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_1") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(0);
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_2") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(1);
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_3") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(2);
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_4") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(3);
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_5") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(4);
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_6") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(5);
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_7") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(6);
+                wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
+                wxPostEvent(GetParent(), eventEffectUpdated);
+            }
+            else if (type == "SET_COLOR_8") {
+                mSequenceElements->GetXLightsFrame()->GetColorPanel()->SetSinglePaletteColor(7);
                 wxCommandEvent eventEffectUpdated(EVT_EFFECT_PALETTE_UPDATED);
                 wxPostEvent(GetParent(), eventEffectUpdated);
             }
