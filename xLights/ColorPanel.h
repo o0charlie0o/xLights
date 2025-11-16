@@ -74,6 +74,7 @@ public:
         wxString GetRandomColorString();
         void SetSupports(bool linear, bool radial);
         void ValidateWindow();
+        void SetSinglePaletteColor(int colorIndex);
 
         bool PaletteChanged;
         bool EffectChanged;

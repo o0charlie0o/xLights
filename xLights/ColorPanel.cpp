@@ -1025,6 +1025,24 @@ wxButton* ColorPanel::GetPaletteButton(int idx)
     return buttons[0]; //0;
 }
 
+void ColorPanel::SetSinglePaletteColor(int colorIndex)
+{
+    // Uncheck all palette colors
+    for (int i = 0; i < checkBoxes.size(); i++) {
+        checkBoxes[i]->SetValue(false);
+    }
+
+    // Check only the requested color (colorIndex is 0-based)
+    if (colorIndex >= 0 && colorIndex < checkBoxes.size()) {
+        checkBoxes[colorIndex]->SetValue(true);
+    }
+
+    // Fire change event to notify that palette has changed
+    FireChangeEvent();
+    Refresh();
+    ValidateWindow();
+}
+
 void ColorPanel::SetDefaultSettings(bool optionbased)
 {
     if (!optionbased)
