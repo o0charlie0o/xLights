@@ -39,12 +39,17 @@
 #include "../effects/RenderableEffect.h"
 #include "../xLightsMain.h"
 #include "../xLightsXmlFile.h"
+#include "../ColorPanel.h"
 #include "effects/GlediatorEffect.h"
 #include "effects/PicturesEffect.h"
 #include "effects/ShaderEffect.h"
 #include "effects/VideoEffect.h"
 #include "models/Model.h"
 #include "utils/string_utils.h"
+
+// Smart Tool custom cursors - use wxImage with PNG for macOS compatibility
+#include <wx/image.h>
+#include <wx/stdpaths.h>
 
 #include <cmath>
 #include <limits>
@@ -57,6 +62,9 @@
 #define EFFECT_RESIZE_MOVE 3
 #define EFFECT_RESIZE_LEFT_EDGE 4
 #define EFFECT_RESIZE_RIGHT_EDGE 5
+#define EFFECT_RESIZE_SMART_FADE 6
+#define EFFECT_RESIZE_SMART_BRIGHTNESS 7
+#define EFFECT_RESIZE_SMART_SPARKLES 8
 #define TIMING_ALPHA (0x60)
 #define DRAG_THRESHOLD 3  // Minimum pixels to move before triggering drag/resize
 
@@ -314,6 +322,57 @@ EffectsGrid::EffectsGrid(MainSequencer* parent, wxWindowID id, const wxPoint& po
     mLastFoundEffectIndex = -1;
     mSearchRow = -1;
 
+    // Initialize Smart Tool state
+    mSmartToolDragStartX = 0;
+    mSmartToolDragStartY = 0;
+    mSmartToolInitialValue = 0.0f;
+    mSmartToolInitialZone = HitLocation::NONE;
+    mSmartToolModifiedEffect = nullptr;
+
+    // Initialize Smart Tool custom cursors from PNG files
+    // Note: wxCursor does not support Retina/HiDPI on macOS, so cursors will appear non-Retina
+    // This is a limitation of wxWidgets - native NSCursor would be needed for Retina support
+    wxString resourcesDir = wxStandardPaths::Get().GetResourcesDir();
+
+    // Try to load fade cursor from PNG
+    wxImage fadeCursorImg;
+    if (fadeCursorImg.LoadFile(resourcesDir + "/cursor_fade.png", wxBITMAP_TYPE_PNG)) {
+        fadeCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_X, 16);
+        fadeCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_Y, 16);
+        mCursorFade = wxCursor(fadeCursorImg);
+    }
+
+    // Fall back to stock cursor if PNG load failed
+    if (!mCursorFade.IsOk()) {
+        mCursorFade = wxCursor(wxCURSOR_SIZEWE);
+    }
+
+    // Try to load brightness cursor from PNG
+    wxImage brightnessCursorImg;
+    if (brightnessCursorImg.LoadFile(resourcesDir + "/cursor_brightness.png", wxBITMAP_TYPE_PNG)) {
+        brightnessCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_X, 16);
+        brightnessCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_Y, 16);
+        mCursorBrightness = wxCursor(brightnessCursorImg);
+    }
+
+    // Fall back to stock cursor if PNG load failed
+    if (!mCursorBrightness.IsOk()) {
+        mCursorBrightness = wxCursor(wxCURSOR_SIZENS);
+    }
+
+    // Try to load sparkles cursor from PNG
+    wxImage sparklesCursorImg;
+    if (sparklesCursorImg.LoadFile(resourcesDir + "/cursor_sparkle.png", wxBITMAP_TYPE_PNG)) {
+        sparklesCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_X, 16);
+        sparklesCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_Y, 16);
+        mCursorSparkles = wxCursor(sparklesCursorImg);
+    }
+
+    // Fall back to stock cursor if PNG load failed
+    if (!mCursorSparkles.IsOk()) {
+        mCursorSparkles = wxCursor(wxCURSOR_SIZENS);
+    }
+
     SetBackgroundStyle(wxBG_STYLE_CUSTOM);
 
     SetDropTarget(new EffectDropTarget(this));
@@ -330,6 +389,8 @@ EffectsGrid::~EffectsGrid() {
 void EffectsGrid::UnselectEffect(bool force) {
     if (mSelectedEffect != nullptr || force) {
         mSelectedEffect = nullptr;
+        // Clear Smart Tool modified flag when deselecting
+        mSmartToolModifiedEffect = nullptr;
         wxCommandEvent eventUnSelected(EVT_UNSELECTED_EFFECT);
         mParent->ProcessWindowEvent(eventUnSelected);
         Draw();
@@ -1894,9 +1955,17 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
     bool out_of_bounds = rowIndex < 0 || (rowIndex >= mSequenceElements->GetVisibleRowInformationSize());
 
     if (mResizing) {
-        // Resize() will check threshold for MOVE operations internally
-        // For edge resizing, Resize() allows immediate response
-        Resize(event.GetX(), event.AltDown(), event.ControlDown());
+        // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+        // logger_base.debug("EffectsGrid::mouseMoved sizing or moving effects.");
+
+        // For Smart Tool brightness and sparkles modes, use Y position for vertical drag
+        // For Smart Tool fade mode, use X position for horizontal drag (like DAW fade handles)
+        // Otherwise use X position for normal horizontal resize
+        if (mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS || mResizingMode == EFFECT_RESIZE_SMART_SPARKLES) {
+            Resize(event.GetY(), event.AltDown(), event.ControlDown());
+        } else {
+            Resize(event.GetX(), event.AltDown(), event.ControlDown());
+        }
         Draw();
     } else if (mDragging) {
         // Check if mouse has moved beyond threshold before updating drag selection
@@ -1950,7 +2019,7 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
             if (!out_of_bounds) {
                 Element* element = mSequenceElements->GetVisibleRowInformation(rowIndex)->element;
                 if (element != nullptr) {
-                    RunMouseOverHitTests(rowIndex, event.GetX(), event.GetY());
+                    RunMouseOverHitTests(rowIndex, event.GetX(), event.GetY(), event.AltDown(), event.ShiftDown());
                 }
             }
         } else {
@@ -2039,7 +2108,7 @@ int MapHitLocationToEffectSelection(HitLocation location) {
     return EFFECT_NOT_SELECTED;
 }
 
-Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocation& selectionType) {
+Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocation& selectionType, int yPos, bool altDown, bool shiftDown) {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     EffectLayer* effectLayer = mSequenceElements->GetVisibleEffectLayer(row);
 
@@ -2049,7 +2118,10 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
 
     Effect* eff = nullptr;
     selectionType = HitLocation::NONE;
-    if (effectLayer->HitTestEffectByTime(ms, index)) {
+
+    bool hitTest = effectLayer->HitTestEffectByTime(ms, index);
+
+    if (hitTest) {
         eff = effectLayer->GetEffect(index);
         int startPos = GetClippedPositionFromTimeMS(eff->GetStartTimeMS());
         int endPos = GetClippedPositionFromTimeMS(eff->GetEndTimeMS());
@@ -2059,28 +2131,59 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
         if (effectLayer->IsFixedTimingLayer()) {
             selectionType = HitLocation::NONE;
         } else if (!eff->IsLocked()) {
-            if ((endPos - startPos) < 8) {
-                // too small to really differentiate, just
-                // provide ability to make the effect larger
-                if (position < mid) {
-                    selectionType = HitLocation::LEFT_EDGE;
+            // Smart Tool zone detection (only when Alt/Option held and yPos provided)
+            if (altDown && yPos >= 0) {
+                // Define horizontal zones based on position along effect width
+                int effectWidth = endPos - startPos;
+                int edgeWidth = std::max(12, effectWidth / 5);  // Edge zones are 20% of width or 12px minimum
+
+                int leftEdgeEnd = startPos + edgeWidth;
+                int rightEdgeStart = endPos - edgeWidth;
+
+                // Check horizontal zones
+                if (position < leftEdgeEnd) {
+                    // LEFT EDGE - Fade In
+                    selectionType = HitLocation::SMART_FADE_IN;
+                } else if (position > rightEdgeStart) {
+                    // RIGHT EDGE - Fade Out
+                    selectionType = HitLocation::SMART_FADE_OUT;
                 } else {
-                    selectionType = HitLocation::RIGHT_EDGE;
+                    // CENTER - Check modifier keys to determine which property to adjust
+                    if (shiftDown) {
+                        // Alt+Shift - Sparkles
+                        selectionType = HitLocation::SMART_SPARKLES;
+                    } else {
+                        // Alt only - Brightness
+                        selectionType = HitLocation::SMART_BRIGHTNESS;
+                    }
                 }
-            } else if (position > endPos - 6) {
-                selectionType = HitLocation::RIGHT_EDGE;
-            } else if (position > endPos - 12) {
-                selectionType = HitLocation::RIGHT_EDGE_DISCONNECT;
-            } else if (position > mid + 8) {
-                selectionType = HitLocation::RIGHT;
-            } else if (position < startPos + 6) {
-                selectionType = HitLocation::LEFT_EDGE;
-            } else if (position < startPos + 12) {
-                selectionType = HitLocation::LEFT_EDGE_DISCONNECT;
-            } else if (position < mid - 8) {
-                selectionType = HitLocation::LEFT;
-            } else {
-                selectionType = HitLocation::CENTER;
+            }
+
+            // Existing horizontal zone detection (only if Smart Tool was NOT active)
+            if (!altDown) {
+                if ((endPos - startPos) < 8) {
+                    // too small to really differentiate, just
+                    // provide ability to make the effect larger
+                    if (position < mid) {
+                        selectionType = HitLocation::LEFT_EDGE;
+                    } else {
+                        selectionType = HitLocation::RIGHT_EDGE;
+                    }
+                } else if (position > endPos - 6) {
+                    selectionType = HitLocation::RIGHT_EDGE;
+                } else if (position > endPos - 12) {
+                    selectionType = HitLocation::RIGHT_EDGE_DISCONNECT;
+                } else if (position > mid + 8) {
+                    selectionType = HitLocation::RIGHT;
+                } else if (position < startPos + 6) {
+                    selectionType = HitLocation::LEFT_EDGE;
+                } else if (position < startPos + 12) {
+                    selectionType = HitLocation::LEFT_EDGE_DISCONNECT;
+                } else if (position < mid - 8) {
+                    selectionType = HitLocation::LEFT;
+                } else {
+                    selectionType = HitLocation::CENTER;
+                }
             }
         } else {
             selectionType = HitLocation::CENTER;
@@ -2143,7 +2246,7 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
     int effectIndex;
     HitLocation selectionType;
     int time = mTimeline->GetRawTimeMSfromPosition(event.GetX());
-    Effect* selectedEffect = GetEffectAtRowAndTime(row, time, effectIndex, selectionType);
+    Effect* selectedEffect = GetEffectAtRowAndTime(row, time, effectIndex, selectionType, event.GetY(), event.AltDown(), event.ShiftDown());
     if (selectedEffect != nullptr) {
         logger_base.debug("EffectsGrid::mouseDown effect selected %s.", (const char*)selectedEffect->GetEffectName().c_str());
         switch (selectionType) {
@@ -2207,7 +2310,15 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
             if (element->GetType() != ElementType::ELEMENT_TYPE_TIMING) {
                 if (selectedEffect != mSelectedEffect) {
                     mSelectedEffect = selectedEffect;
-                    RaiseSelectedEffectChanged(mSelectedEffect, false);
+
+                    // Check if this is an effect that was just modified by Smart Tool brightness
+                    if (mSelectedEffect == mSmartToolModifiedEffect) {
+                        // Clear the flag so future selections work normally
+                        mSmartToolModifiedEffect = nullptr;
+                    } else {
+                        // Normal effect selection - reload UI panels
+                        RaiseSelectedEffectChanged(mSelectedEffect, false);
+                    }
                 }
                 RaisePlayModelEffect(element, mSelectedEffect, false);
                 if (row != mSelectedRow) {
@@ -2229,6 +2340,53 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
             mResizing = true;
             mDragThresholdExceeded = false;  // Reset threshold flag on new resize
             mResizeEffectIndex = effectIndex;
+
+            // Initialize Smart Tool state if using Smart Tool modes
+            if (mResizingMode == EFFECT_RESIZE_SMART_FADE || mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS || mResizingMode == EFFECT_RESIZE_SMART_SPARKLES) {
+                mSmartToolDragStartX = event.GetX();
+                mSmartToolDragStartY = event.GetY();
+                mSmartToolInitialZone = selectionType;
+
+                // Get initial value for the selected effect
+                SettingsMap& settings = selectedEffect->GetSettings();
+                if (mResizingMode == EFFECT_RESIZE_SMART_FADE) {
+                    if (selectionType == HitLocation::SMART_FADE_IN) {
+                        mSmartToolInitialValue = wxAtof(settings.Get("T_TEXTCTRL_Fadein", "0.0"));
+                    } else {  // SMART_FADE_OUT
+                        mSmartToolInitialValue = wxAtof(settings.Get("T_TEXTCTRL_Fadeout", "0.0"));
+                    }
+                } else if (mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS) {
+                    // CRITICAL: Stop the EffectSettingsTimer to prevent it from overwriting our changes
+                    xlights->EffectSettingsTimer.Stop();
+
+                    // Check for On effect brightness first
+                    if (settings.Contains("E_TEXTCTRL_Eff_On_Start")) {
+                        int start = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_Start", "100"));
+                        int end = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_End", "100"));
+                        mSmartToolInitialValue = (start + end) / 2.0f;  // Use average
+                    } else {
+                        std::string brightnessStr = settings.Get("C_SLIDER_Brightness", "100");
+                        // If brightness doesn't exist in SettingsMap, initialize it
+                        if (brightnessStr.empty()) {
+                            brightnessStr = "100";
+                            selectedEffect->SetSetting("C_SLIDER_Brightness", "100");
+                        }
+                        mSmartToolInitialValue = wxAtoi(brightnessStr);
+                    }
+                } else if (mResizingMode == EFFECT_RESIZE_SMART_SPARKLES) {
+                    // CRITICAL: Stop the EffectSettingsTimer to prevent it from overwriting our changes
+                    xlights->EffectSettingsTimer.Stop();
+
+                    std::string sparklesStr = settings.Get("C_SLIDER_SparkleFrequency", "0");
+                    // If sparkles doesn't exist in SettingsMap, initialize it
+                    if (sparklesStr.empty()) {
+                        sparklesStr = "0";
+                        selectedEffect->SetSetting("C_SLIDER_SparkleFrequency", "0");
+                    }
+                    mSmartToolInitialValue = wxAtoi(sparklesStr);
+                }
+            }
+
             CaptureMouse();
             Draw();
         }
@@ -3969,10 +4127,50 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
             }
         }
 
+        // Update UI panel after Smart Tool drag completes
+        if (mResizing && (mResizingMode == EFFECT_RESIZE_SMART_FADE || mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS || mResizingMode == EFFECT_RESIZE_SMART_SPARKLES)) {
+            // Only call RaiseSelectedEffectChanged for fade adjustments
+            // For brightness and sparkles: RaiseSelectedEffectChanged resets the value back to defaults,
+            // so we skip it. The value is already saved in SettingsMap and rendering
+            // is already triggered by sendRenderDirtyEvent() in AdjustEffectBrightness/AdjustEffectSparkles
+            if (mResizingMode == EFFECT_RESIZE_SMART_FADE && mSelectedEffect != nullptr) {
+                RaiseSelectedEffectChanged(mSelectedEffect, false, false);
+            }
+
+            // Clear the status bar that was showing brightness or sparkles value during drag
+            if ((mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS || mResizingMode == EFFECT_RESIZE_SMART_SPARKLES) && mSelectedEffect != nullptr) {
+                // Clear the status text (use same field/format as during drag)
+                xlights->SetStatusText("");  // Clear temporary status text
+                // Also restore the filename/directory in the filename field
+                if (xlights->GetFilename() != "") {
+                    xlights->SetStatusText(xlights->GetFilename(), true);
+                } else {
+                    xlights->SetStatusText(xlights->CurrentDir, true);
+                }
+
+                // Track this effect so we don't reload its settings when it's re-selected
+                mSmartToolModifiedEffect = mSelectedEffect;
+
+                // CRITICAL: Restart the EffectSettingsTimer that we stopped in mouseDown()
+                xlights->EffectSettingsTimer.Start(25);
+
+                // DON'T call RaiseSelectedEffectChanged or sendRenderDirtyEvent
+                // Both of these seem to reset the SettingsMap back to original values
+                // Just let the changes persist in the SettingsMap and Draw() will display them
+            }
+
+            // Reset Smart Tool state variables
+            mSmartToolDragStartX = 0;
+            mSmartToolDragStartY = 0;
+            mSmartToolInitialValue = 0.0f;
+            mSmartToolInitialZone = HitLocation::NONE;
+        }
+
         mResizing = false;
         mDragThresholdExceeded = false;  // Reset threshold flag when resize ends
         mDragDropping = false;
         Draw();
+
         mSequenceElements->get_undo_mgr().SetCaptureUndo(false);
         mSequenceElements->get_undo_mgr().RemoveUnusedMarkers();
     }
@@ -4021,6 +4219,18 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
 
     if (!xlights->AbortRender())
         return;
+
+    // Handle Smart Tool modes
+    if (mResizingMode == EFFECT_RESIZE_SMART_FADE) {
+        AdjustEffectFade(position);
+        return;
+    } else if (mResizingMode == EFFECT_RESIZE_SMART_BRIGHTNESS) {
+        AdjustEffectBrightness(position);
+        return;
+    } else if (mResizingMode == EFFECT_RESIZE_SMART_SPARKLES) {
+        AdjustEffectSparkles(position);
+        return;
+    }
 
     // Check drag threshold for MOVE operations (not edge resizing)
     if (mResizingMode == EFFECT_RESIZE_MOVE && !mDragThresholdExceeded) {
@@ -4114,6 +4324,176 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
     // drag events to try to help us identify why we miss rendering when we do
     // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     // logger_base.debug("EffectsGrid::Resize would have sent render dirty event");
+    // sendRenderDirtyEvent();
+}
+
+void EffectsGrid::AdjustEffectFade(int xPosition) {
+    // Calculate drag delta from initial X position
+    int dragDelta = xPosition - mSmartToolDragStartX;
+
+    // For fade in (left edge): drag right (+) should increase fade duration - no inversion
+    // For fade out (right edge): drag left (-) should increase fade duration - need inversion
+    // "Drag toward center = increase fade" is the paradigm
+    if (mSmartToolInitialZone == HitLocation::SMART_FADE_OUT) {
+        dragDelta = -dragDelta;
+    }
+
+    // Convert drag distance to fade amount (100 pixels = 1.0 second)
+    float fadeDelta = dragDelta / 100.0f;
+
+    // Calculate new fade value
+    float newFade = mSmartToolInitialValue + fadeDelta;
+
+    // Clamp to valid range (0.0 to 10.0 seconds)
+    newFade = std::max(0.0f, std::min(10.0f, newFade));
+
+    // Determine which fade parameter to adjust
+    std::string fadeKey = (mSmartToolInitialZone == HitLocation::SMART_FADE_IN) ? "T_TEXTCTRL_Fadein" : "T_TEXTCTRL_Fadeout";
+
+    // Note: No tooltip needed for fades - the visual fade indicators on the effect provide feedback
+
+    // Update all selected effects
+    for (int row = 0; row < mSequenceElements->GetRowInformationSize(); row++) {
+        EffectLayer* el = mSequenceElements->GetEffectLayer(row);
+        if (el != nullptr) {
+            for (int ef = 0; ef < el->GetEffectCount(); ef++) {
+                Effect* effect = el->GetEffect(ef);
+                if (effect != nullptr && effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                    SettingsMap& settings = effect->GetSettings();
+                    settings[fadeKey] = wxString::Format("%.2f", newFade).ToStdString();
+                }
+            }
+        }
+    }
+
+    // Trigger render update
+    sendRenderDirtyEvent();
+}
+
+void EffectsGrid::AdjustEffectBrightness(int yPosition) {
+    // Calculate drag delta from initial Y position
+    // Negative because drag up = increase value (screen Y increases downward)
+    int dragDelta = mSmartToolDragStartY - yPosition;
+
+    // Convert to brightness change (2 pixels = 1% brightness)
+    float brightnessDelta = dragDelta / 2.0f;
+
+    // Calculate new brightness value
+    float newBrightness = mSmartToolInitialValue + brightnessDelta;
+
+    // Clamp to valid range (0 to 100)
+    newBrightness = std::max(0.0f, std::min(100.0f, newBrightness));
+
+    // Update status bar to show current brightness value during drag
+    xlights->SetStatusText(wxString::Format("Brightness: %d%%", (int)newBrightness));
+
+    // Update all selected effects
+    for (int row = 0; row < mSequenceElements->GetRowInformationSize(); row++) {
+        EffectLayer* el = mSequenceElements->GetEffectLayer(row);
+        if (el != nullptr) {
+            for (int ef = 0; ef < el->GetEffectCount(); ef++) {
+                Effect* effect = el->GetEffect(ef);
+                if (effect != nullptr && effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                    SettingsMap& settings = effect->GetSettings();
+
+                    // Check if using On effect brightness or regular brightness
+                    if (settings.Contains("E_TEXTCTRL_Eff_On_Start")) {
+                        // Adjust both start and end by same amount to maintain ramp
+                        int oldStart = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_Start", "100"));
+                        int oldEnd = wxAtoi(settings.Get("E_TEXTCTRL_Eff_On_End", "100"));
+
+                        // Calculate average offset from initial value
+                        float oldAverage = (oldStart + oldEnd) / 2.0f;
+                        float offset = newBrightness - oldAverage;
+
+                        // Apply offset to both start and end
+                        int newStart = std::max(0, std::min(100, (int)(oldStart + offset)));
+                        int newEnd = std::max(0, std::min(100, (int)(oldEnd + offset)));
+
+                        effect->SetSetting("E_TEXTCTRL_Eff_On_Start", std::to_string(newStart));
+                        effect->SetSetting("E_TEXTCTRL_Eff_On_End", std::to_string(newEnd));
+                    } else if (!settings.Get("C_VALUECURVE_Brightness", "").empty() &&
+                               settings.Get("C_VALUECURVE_Brightness", "").find("Active=TRUE") != std::string::npos) {
+                        // Value curve is active - skip brightness adjustment
+                        // Smart Tool doesn't support value curves
+                        continue;
+                    } else {
+                        // Use regular brightness slider
+                        effect->SetSetting("C_SLIDER_Brightness", std::to_string((int)newBrightness));
+                    }
+                }
+            }
+        }
+    }
+
+    // CRITICAL: Update the UI controls to match the new brightness value
+    // This prevents the timer from reading the old value from the UI and overwriting our change
+    ColorPanel* colorPanel = xlights->GetColorPanel();
+    if (colorPanel != nullptr && colorPanel->Slider_Brightness != nullptr) {
+        colorPanel->Slider_Brightness->SetValue((int)newBrightness);
+    }
+    if (colorPanel != nullptr && colorPanel->txtCtlBrightness != nullptr) {
+        colorPanel->txtCtlBrightness->SetValue(std::to_string((int)newBrightness));
+    }
+
+    // Don't call sendRenderDirtyEvent() during drag - it can cause effect reload with defaults
+    // Will be called once in mouseReleased() instead
+    // sendRenderDirtyEvent();
+}
+
+void EffectsGrid::AdjustEffectSparkles(int yPosition) {
+    // Calculate drag delta from initial Y position
+    // Negative because drag up = increase value (screen Y increases downward)
+    int dragDelta = mSmartToolDragStartY - yPosition;
+
+    // Convert to sparkles change (1 pixel = 1 sparkle unit, range 0-200)
+    float sparklesDelta = dragDelta / 1.0f;
+
+    // Calculate new sparkles value
+    float newSparkles = mSmartToolInitialValue + sparklesDelta;
+
+    // Clamp to valid range (0 to 200)
+    newSparkles = std::max(0.0f, std::min(200.0f, newSparkles));
+
+    // Update status bar to show current sparkles value during drag
+    xlights->SetStatusText(wxString::Format("Sparkles: %d", (int)newSparkles));
+
+    // Update all selected effects
+    for (int row = 0; row < mSequenceElements->GetRowInformationSize(); row++) {
+        EffectLayer* el = mSequenceElements->GetEffectLayer(row);
+        if (el != nullptr) {
+            for (int ef = 0; ef < el->GetEffectCount(); ef++) {
+                Effect* effect = el->GetEffect(ef);
+                if (effect != nullptr && effect->GetSelected() != EFFECT_NOT_SELECTED) {
+                    SettingsMap& settings = effect->GetSettings();
+
+                    // Check if value curve is active
+                    if (!settings.Get("C_VALUECURVE_SparkleFrequency", "").empty() &&
+                        settings.Get("C_VALUECURVE_SparkleFrequency", "").find("Active=TRUE") != std::string::npos) {
+                        // Value curve is active - skip sparkles adjustment
+                        // Smart Tool doesn't support value curves
+                        continue;
+                    } else {
+                        // Use regular sparkles slider
+                        effect->SetSetting("C_SLIDER_SparkleFrequency", std::to_string((int)newSparkles));
+                    }
+                }
+            }
+        }
+    }
+
+    // CRITICAL: Update the UI controls to match the new sparkles value
+    // This prevents the timer from reading the old value from the UI and overwriting our change
+    ColorPanel* colorPanel = xlights->GetColorPanel();
+    if (colorPanel != nullptr && colorPanel->Slider_SparkleFrequency != nullptr) {
+        colorPanel->Slider_SparkleFrequency->SetValue((int)newSparkles);
+    }
+    if (colorPanel != nullptr && colorPanel->txtCtrlSparkleFreq != nullptr) {
+        colorPanel->txtCtrlSparkleFreq->SetValue(std::to_string((int)newSparkles));
+    }
+
+    // Don't call sendRenderDirtyEvent() during drag - it can cause effect reload with defaults
+    // Will be called once in mouseReleased() instead
     // sendRenderDirtyEvent();
 }
 
@@ -6247,12 +6627,17 @@ void EffectsGrid::ResizeSingleEffectMS(int timems) {
     UpdateZoomPosition(time);
 }
 
-void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y) {
+void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown, bool shiftDown) {
     int effectIndex;
 
     int time = mTimeline->GetRawTimeMSfromPosition(x);
     HitLocation selectionType = HitLocation::NONE;
-    Effect* eff = GetEffectAtRowAndTime(rowIndex, time, effectIndex, selectionType);
+
+    // Use the passed modifier key states from the mouse event
+    // This is more reliable than wxGetKeyState on macOS
+
+    Effect* eff = GetEffectAtRowAndTime(rowIndex, time, effectIndex, selectionType, y, altDown, shiftDown);
+
     if (eff != nullptr) {
         mResizeEffectIndex = effectIndex;
         switch (selectionType) {
@@ -6284,6 +6669,19 @@ void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y) {
         case HitLocation::CENTER:
             SetCursor(wxCURSOR_HAND);
             mResizingMode = EFFECT_RESIZE_MOVE;
+            break;
+        case HitLocation::SMART_FADE_IN:
+        case HitLocation::SMART_FADE_OUT:
+            SetCursor(mCursorFade);  // Custom fade cursor (triangle ramp icon)
+            mResizingMode = EFFECT_RESIZE_SMART_FADE;
+            break;
+        case HitLocation::SMART_BRIGHTNESS:
+            SetCursor(mCursorBrightness);  // Custom brightness cursor (sun icon)
+            mResizingMode = EFFECT_RESIZE_SMART_BRIGHTNESS;
+            break;
+        case HitLocation::SMART_SPARKLES:
+            SetCursor(mCursorSparkles);  // Custom sparkles cursor (sparkle icon)
+            mResizingMode = EFFECT_RESIZE_SMART_SPARKLES;
             break;
             // update effect details
         }

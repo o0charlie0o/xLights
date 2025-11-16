@@ -45,7 +45,12 @@ enum class HitLocation {
     CENTER,
     RIGHT,
     RIGHT_EDGE_DISCONNECT,
-    RIGHT_EDGE
+    RIGHT_EDGE,
+    // Smart Tool zones (only active when Option/Alt key held)
+    SMART_FADE_IN,
+    SMART_FADE_OUT,
+    SMART_BRIGHTNESS,
+    SMART_SPARKLES
 };
 
 enum EFF_ALIGN_MODE {
@@ -215,8 +220,13 @@ protected:
     int m_previous_mouse_x = 0;
 
 private:
-    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType);
+    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType, int yPos = -1, bool altDown = false, bool shiftDown = false);
     int GetClippedPositionFromTimeMS(int ms) const;
+
+    // Smart Tool functions
+    void AdjustEffectFade(int xPosition);
+    void AdjustEffectBrightness(int yPosition);
+    void AdjustEffectSparkles(int yPosition);
 
     void DrawFadeHints(Effect* e, int x1, int y1, int x2, int y2, xlVertexColorAccumulator *backgrounds) const;
     void CreateEffectForFile(int x, int y, const std::string& effectName, const std::string& filename);
@@ -249,7 +259,7 @@ private:
     void DrawPlayMarker(xlGraphicsContext *ctx) const;
     bool AdjustDropLocations(int x, EffectLayer* el);
     void Resize(int position, bool offset, bool control);
-    void RunMouseOverHitTests(int rowIndex, int x,int y);
+    void RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown = false, bool shiftDown = false);
     void UpdateTimePosition(int time) const;
     void UpdateZoomPosition(int time) const;
     void EstablishSelectionRectangle();
@@ -349,6 +359,18 @@ private:
     int mDragEndX;
     int mDragEndY;
     float magSinceLast;
+
+    // Smart Tool state variables
+    int mSmartToolDragStartX;           // For fade adjustments (horizontal drag)
+    int mSmartToolDragStartY;           // For brightness adjustments (vertical drag)
+    float mSmartToolInitialValue;
+    HitLocation mSmartToolInitialZone;
+    Effect* mSmartToolModifiedEffect;   // Track effect modified by Smart Tool brightness
+
+    // Smart Tool custom cursors
+    wxCursor mCursorFade;               // Custom fade cursor (triangle ramp)
+    wxCursor mCursorBrightness;         // Custom brightness cursor (sun icon)
+    wxCursor mCursorSparkles;           // Custom sparkles cursor (sparkle icon)
 
     EffectLayer* mEffectLayer;
     int mResizeEffectIndex;
