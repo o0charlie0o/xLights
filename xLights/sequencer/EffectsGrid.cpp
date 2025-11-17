@@ -4217,8 +4217,7 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
     if (mSequenceElements == nullptr)
         return;
 
-    if (!xlights->AbortRender())
-        return;
+    xlights->AbortRender();
 
     // Handle Smart Tool modes
     if (mResizingMode == EFFECT_RESIZE_SMART_FADE) {
