@@ -26,6 +26,7 @@ static  std::vector<std::pair<std::string, KBSCOPE>> KeyBindingTypes =
 {
     { "TIMING_ADD", KBSCOPE::Sequence },
     { "TIMING_SPLIT", KBSCOPE::Sequence },
+    { "AUTO_ETC_PHONEME", KBSCOPE::Sequence },
     { "ZOOM_IN", KBSCOPE::Sequence },
     { "ZOOM_OUT", KBSCOPE::Sequence },
     { "ZOOM_SEL", KBSCOPE::Sequence },
@@ -157,6 +158,7 @@ static  std::vector<std::pair<std::string, KBSCOPE>> KeyBindingTypes =
 static  std::vector<std::pair<std::string, std::string>> keyBindingTips = {
     { "TIMING_ADD", "Add a timing mark." },
     { "TIMING_SPLIT", "Split a timing mark." },
+    { "AUTO_ETC_PHONEME", "Split selected phoneme timing in half, setting first half to 'etc'." },
     { "ZOOM_IN", "Zoom into the effects grid." },
     { "ZOOM_OUT", "Zoom out of the effects grid." },
     { "ZOOM_SEL", "Zoom so selected timeline fills the screen." },
@@ -332,6 +334,7 @@ const std::vector<KeyBinding> DefaultBindings =
     KeyBinding("", true, "SAVEAS_SEQUENCE", true, false, true),
     KeyBinding("t", false, "TIMING_ADD"),
     KeyBinding("s", false, "TIMING_SPLIT"),
+    KeyBinding("", false, "AUTO_ETC_PHONEME"),
     KeyBinding("+", false, "ZOOM_IN"),
     KeyBinding("-", false, "ZOOM_OUT"),
     KeyBinding("", false, "ZOOM_SEL"),

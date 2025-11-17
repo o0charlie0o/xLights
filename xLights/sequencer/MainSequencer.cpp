@@ -548,6 +548,9 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
             }
             else if (type == "TIMING_SPLIT") {
                 SplitTimingMark();
+            }
+            else if (type == "AUTO_ETC_PHONEME") {
+                AutoEtcPhoneme();
             } else if (type == "EFFECTS_TO_TIMING") {
                 PanelEffectGrid->CreateTimingFromSelectedEffects();
             } else if (type == "SELECT_TIMING_1") {
@@ -1855,6 +1858,88 @@ void MainSequencer::SplitTimingMark()
             }
         }
     }
+}
+
+void MainSequencer::AutoEtcPhoneme()
+{
+    log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
+    Effect* selectedEffect = PanelEffectGrid->GetSelectedEffect();
+
+    if (selectedEffect == nullptr)
+    {
+        logger_base.debug("MainSequencer::AutoEtcPhoneme No effect selected.");
+        return;
+    }
+
+    // Check if it's a timing element
+    if (selectedEffect->GetParentEffectLayer()->GetParentElement()->GetType() != ElementType::ELEMENT_TYPE_TIMING)
+    {
+        logger_base.debug("MainSequencer::AutoEtcPhoneme Selected effect is not a timing element.");
+        return;
+    }
+
+    // Check if it's a fixed timing layer
+    if (selectedEffect->GetParentEffectLayer()->IsFixedTimingLayer())
+    {
+        if (wxMessageBox("Cannot modify a Fixed Timing Track.\nWould you like to convert it to a Variable Timing Track first?",
+                        "Convert Fixed Timing Track", wxYES_NO) == wxYES)
+        {
+            TimingElement* te = dynamic_cast<TimingElement*>(selectedEffect->GetParentEffectLayer()->GetParentElement());
+            te->SetFixedTiming(0);
+        }
+        else
+        {
+            return;
+        }
+    }
+
+    // Get the original phoneme label
+    std::string originalLabel = selectedEffect->GetEffectName();
+
+    // Get timing information
+    long startTime = selectedEffect->GetStartTimeMS();
+    long endTime = selectedEffect->GetEndTimeMS();
+    long duration = endTime - startTime;
+
+    if (duration <= 1)
+    {
+        logger_base.warn("MainSequencer::AutoEtcPhoneme Timing mark too short to split.");
+        return;
+    }
+
+    // Calculate midpoint
+    long midTime = startTime + (duration / 2);
+
+    // Get the effect layer
+    EffectLayer* effectLayer = selectedEffect->GetParentEffectLayer();
+
+    // Create undo step
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
+
+    // Capture the original effect for undo
+    mSequenceElements->get_undo_mgr().CaptureModifiedEffect(effectLayer->GetParentElement()->GetModelName(),
+                                                             effectLayer->GetIndex(),
+                                                             selectedEffect->GetID(),
+                                                             selectedEffect->GetSettingsAsString(),
+                                                             selectedEffect->GetPaletteAsString());
+
+    // Modify the original effect to end at midpoint and set label to "etc"
+    selectedEffect->SetEndTimeMS(midTime);
+    selectedEffect->SetEffectName("etc");
+
+    // Create new effect for second half with original label
+    Effect* newEffect = effectLayer->AddEffect(0, originalLabel, "", "", midTime, endTime, EFFECT_SELECTED, false);
+
+    if (newEffect != nullptr)
+    {
+        mSequenceElements->get_undo_mgr().CaptureAddedEffect(effectLayer->GetParentElement()->GetName(),
+                                                              effectLayer->GetIndex(),
+                                                              newEffect->GetID());
+    }
+
+    // Refresh the grid
+    PanelEffectGrid->ForceRefresh();
 }
 
 void MainSequencer::OnScrollBarEffectsHorizontalScrollLineUp(wxScrollEvent& event)
