@@ -569,6 +569,33 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
             }
             else if (type == "TIMING_DIVIDE_16") {
                 DivideTimingTrack(16);
+            }
+            else if (type == "PHONEME_ETC") {
+                SetTimingLabel("etc");
+            }
+            else if (type == "PHONEME_AI") {
+                SetTimingLabel("AI");
+            }
+            else if (type == "PHONEME_E") {
+                SetTimingLabel("E");
+            }
+            else if (type == "PHONEME_O") {
+                SetTimingLabel("O");
+            }
+            else if (type == "PHONEME_WQ") {
+                SetTimingLabel("WQ");
+            }
+            else if (type == "PHONEME_FV") {
+                SetTimingLabel("FV");
+            }
+            else if (type == "PHONEME_MBP") {
+                SetTimingLabel("MBP");
+            }
+            else if (type == "PHONEME_REST") {
+                SetTimingLabel("rest");
+            }
+            else if (type == "PHONEME_L") {
+                SetTimingLabel("L");
             } else if (type == "EFFECTS_TO_TIMING") {
                 PanelEffectGrid->CreateTimingFromSelectedEffects();
             } else if (type == "SELECT_TIMING_1") {
@@ -1936,6 +1963,110 @@ void MainSequencer::DivideTimingTrack(int divisor)
         }
         PanelEffectGrid->ForceRefresh();
     }
+}
+
+void MainSequencer::SetTimingLabel(const std::string& label)
+{
+    log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
+    // Get the currently selected effect
+    Effect* selectedEffect = PanelEffectGrid->GetSelectedEffect();
+    Effect* effectToLabel = nullptr;
+
+    // If an effect is selected, use it
+    if (selectedEffect != nullptr)
+    {
+        // Check if the selected effect is a timing element
+        if (selectedEffect->GetParentEffectLayer()->GetParentElement()->GetType() != ElementType::ELEMENT_TYPE_TIMING)
+        {
+            logger_base.debug("MainSequencer::SetTimingLabel Selected effect is not a timing element.");
+            return;
+        }
+        effectToLabel = selectedEffect;
+    }
+    else
+    {
+        // No effect selected, try to find one under the mouse cursor without selecting it
+        logger_base.debug("MainSequencer::SetTimingLabel No effect selected, checking mouse position.");
+
+        // Get the mouse position relative to the EffectsGrid
+        wxPoint mousePos = wxGetMouseState().GetPosition();
+        wxPoint gridPos = PanelEffectGrid->ScreenToClient(mousePos);
+
+        // Check if mouse is within the grid bounds
+        wxSize gridSize = PanelEffectGrid->GetSize();
+        if (gridPos.x >= 0 && gridPos.y >= 0 && gridPos.x < gridSize.GetWidth() && gridPos.y < gridSize.GetHeight())
+        {
+            // Convert mouse position to row and time
+            int row = gridPos.y / DEFAULT_ROW_HEADING_HEIGHT;
+            int timeMS = PanelTimeLine->GetRawTimeMSfromPosition(gridPos.x);
+
+            // Try to get the effect at this position
+            int effectIndex;
+            HitLocation selectionType;
+            Effect* effectUnderMouse = PanelEffectGrid->GetEffectAtRowAndTime(row, timeMS, effectIndex, selectionType);
+
+            if (effectUnderMouse != nullptr)
+            {
+                // Check if it's a timing element
+                if (effectUnderMouse->GetParentEffectLayer()->GetParentElement()->GetType() == ElementType::ELEMENT_TYPE_TIMING)
+                {
+                    logger_base.debug("MainSequencer::SetTimingLabel Found timing mark under mouse (not selecting).");
+                    // Use this effect but DO NOT select it
+                    effectToLabel = effectUnderMouse;
+                }
+                else
+                {
+                    logger_base.debug("MainSequencer::SetTimingLabel Effect under mouse is not a timing element.");
+                    return;
+                }
+            }
+            else
+            {
+                logger_base.debug("MainSequencer::SetTimingLabel No effect found under mouse.");
+                return;
+            }
+        }
+        else
+        {
+            logger_base.debug("MainSequencer::SetTimingLabel Mouse is not over the EffectsGrid.");
+            return;
+        }
+    }
+
+    // At this point, effectToLabel is the timing mark we want to label (either selected or under mouse)
+    if (effectToLabel == nullptr)
+    {
+        logger_base.debug("MainSequencer::SetTimingLabel No effect to label.");
+        return;
+    }
+
+    // Check if it's a fixed timing layer
+    if (effectToLabel->GetParentEffectLayer()->IsFixedTimingLayer())
+    {
+        if (wxMessageBox("Cannot Add Labels to a Fixed Timing Track.\nWould You Like to convert it to a Variable Timing Track First?",
+                        "Convert Fixed Timing Track First", wxYES_NO) == wxYES)
+        {
+            TimingElement* te = dynamic_cast<TimingElement*>(effectToLabel->GetParentEffectLayer()->GetParentElement());
+            te->SetFixedTiming(0);
+        }
+        else
+        {
+            return;
+        }
+    }
+
+    // Set the label
+    effectToLabel->SetEffectName(label);
+
+    // If we have a fixed timing track and we add a label, we can no longer store it as a fixed timing track
+    TimingElement* te = dynamic_cast<TimingElement*>(effectToLabel->GetParentEffectLayer()->GetParentElement());
+    if (label != "" && te->GetFixedTiming() != 0)
+    {
+        te->SetFixedTiming(0);
+    }
+
+    PanelEffectGrid->ForceRefresh();
 }
 
 void MainSequencer::OnScrollBarEffectsHorizontalScrollLineUp(wxScrollEvent& event)

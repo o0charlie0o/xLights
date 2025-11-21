@@ -145,6 +145,7 @@ class MainSequencer: public wxPanel
         void InsertTimingMarkFromRange();
         void SplitTimingMark();
         void DivideTimingTrack(int divisor);
+        void SetTimingLabel(const std::string& label);
         void SetHandlers(wxWindow *);
 
         void ScrollRight( wxCommandEvent& event);
