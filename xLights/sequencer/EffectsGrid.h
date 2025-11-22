@@ -215,12 +215,13 @@ public:
         return mSequenceElements;
     }
 
+    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType, int yPos = -1, bool altDown = false, bool shiftDown = false);
+
 protected:
     bool m_wheel_down = false;
     int m_previous_mouse_x = 0;
 
 private:
-    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType, int yPos = -1, bool altDown = false, bool shiftDown = false);
     int GetClippedPositionFromTimeMS(int ms) const;
 
     // Smart Tool functions
