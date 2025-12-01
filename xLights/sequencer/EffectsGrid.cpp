@@ -66,7 +66,7 @@
 #define EFFECT_RESIZE_SMART_BRIGHTNESS 7
 #define EFFECT_RESIZE_SMART_SPARKLES 8
 #define TIMING_ALPHA (0x60)
-#define DRAG_THRESHOLD 3  // Minimum pixels to move before triggering drag/resize
+#define DRAG_THRESHOLD 3
 
 // Dialog for creating alternating phonemes
 class AlternatingPhonemesDialog : public wxDialog
@@ -1955,9 +1955,6 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
     bool out_of_bounds = rowIndex < 0 || (rowIndex >= mSequenceElements->GetVisibleRowInformationSize());
 
     if (mResizing) {
-        // static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
-        // logger_base.debug("EffectsGrid::mouseMoved sizing or moving effects.");
-
         // For Smart Tool brightness and sparkles modes, use Y position for vertical drag
         // For Smart Tool fade mode, use X position for horizontal drag (like DAW fade handles)
         // Otherwise use X position for normal horizontal resize
@@ -1992,7 +1989,6 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
             }
             else
             {
-                // We still update X but not Y
                 mDragEndX = event.GetX();
                 UpdateSelectionRectangle();
             }
@@ -2338,7 +2334,7 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
     if (mResizingMode != EFFECT_RESIZE_NO) {
         if (selectedEffect != nullptr) {
             mResizing = true;
-            mDragThresholdExceeded = false;  // Reset threshold flag on new resize
+            mDragThresholdExceeded = false;
             mResizeEffectIndex = effectIndex;
 
             // Initialize Smart Tool state if using Smart Tool modes
@@ -2403,7 +2399,7 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
                 }
             }
             mDragging = true;
-            mDragThresholdExceeded = false;  // Reset threshold flag on new drag
+            mDragThresholdExceeded = false;
             mDragEndX = event.GetX();
             mDragEndY = event.GetY();
             if (event.ShiftDown()) {
@@ -3974,7 +3970,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
     if (mDragging && xlights->IsACActive()) {
         ReleaseMouse();
         mDragging = false;
-        mDragThresholdExceeded = false;  // Reset threshold flag when AC drag ends
+        mDragThresholdExceeded = false;
 
         if (DoACDraw()) {
             mRangeCursorCol = mRangeStartCol;
@@ -4075,7 +4071,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
         } else if (mDragging) {
             UnsetToolTip();
             mDragging = false;
-            mDragThresholdExceeded = false;  // Reset threshold flag when drag ends
+            mDragThresholdExceeded = false;
             if ((mDragStartX == event.GetX() && mDragStartY == event.GetY()) || (mSequenceElements->GetNumberOfActiveTimingEffects() > 0)) {
                 checkForEmptyCell = true;
             }
@@ -4167,7 +4163,7 @@ void EffectsGrid::mouseReleased(wxMouseEvent& event) {
         }
 
         mResizing = false;
-        mDragThresholdExceeded = false;  // Reset threshold flag when resize ends
+        mDragThresholdExceeded = false;
         mDragDropping = false;
         Draw();
 
@@ -4236,6 +4232,14 @@ void EffectsGrid::Resize(int position, bool offset, bool control) {
         int dx = abs(position - mTimeline->GetPositionFromTimeMS(mStartResizeTimeMS));
         if (dx < DRAG_THRESHOLD) {
             return; // Don't resize until threshold exceeded
+        }
+        mDragThresholdExceeded = true;
+    }
+
+    if (mResizingMode == EFFECT_RESIZE_MOVE && !mDragThresholdExceeded) {
+        int dx = abs(position - mTimeline->GetPositionFromTimeMS(mStartResizeTimeMS));
+        if (dx < DRAG_THRESHOLD) {
+            return;
         }
         mDragThresholdExceeded = true;
     }

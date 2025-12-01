@@ -353,7 +353,7 @@ private:
     int mStartResizeTimeMS;
     bool mResizing;
     bool mDragging;
-    bool mDragThresholdExceeded;  // Tracks if mouse moved beyond threshold
+    bool mDragThresholdExceeded;
     int mDragStartRow;
     int mDragStartX;
     int mDragStartY;
