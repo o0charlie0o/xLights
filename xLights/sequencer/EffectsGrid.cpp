@@ -6298,7 +6298,7 @@ Effect* EffectsGrid::Paste(const wxString& data, const wxString& pasteDataVersio
             }
         }
     } else if (mCellRangeSelected) {
-        if (number_of_timings == 0 && number_of_effects == 1) { // only single effect paste allowed for range
+        if (number_of_timings == 0 && number_of_effects >= 1) { // single or multi-effect paste for range
             // we refer to all_efdata[1] below so make sure it is there
             if (all_efdata.size() < 2)
                 return res;
@@ -6322,58 +6322,99 @@ Effect* EffectsGrid::Paste(const wxString& data, const wxString& pasteDataVersio
                 if (col1 > col2) {
                     std::swap(col1, col2);
                 }
-                logger_base.info("row1: %d   row2: %d   col1: %d   col2: %d", row1, row2, col1, col2);
+                logger_base.info("row1: %d   row2: %d   col1: %d   col2: %d   number_of_effects: %d", row1, row2, col1, col2, number_of_effects);
 
-                for (int row = row1; row <= row2; row++) {
-                    EffectLayer* tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
-                    if (tel->GetEffect(col1) == nullptr) {
-                        logger_base.info("No start time");
-                        break;
-                    }
-                    int start_time = tel->GetEffect(col1)->GetStartTimeMS();
-                    if (tel->GetEffect(col2) == nullptr) {
-                        logger_base.info("No end time");
-                        break;
-                    }
-                    int end_time = tel->GetEffect(col2)->GetEndTimeMS();
-                    if (!paste_by_cell) { // use original effect length if paste by time
-                        if (efdata.size() < 5)
-                            return res;
-                        int drop_time_offset = wxAtoi(efdata[3]);
-                        drop_time_offset = mDropStartTimeMS - drop_time_offset;
-                        end_time = wxAtoi(efdata[4]);
-                        end_time += drop_time_offset;
-                    }
-                    EffectLayer* el = mSequenceElements->GetEffectLayer(row);
-                    if (el != nullptr && el->GetRangeIsClearMS(start_time, end_time)) {
-                        int effectIndex = xlights->GetEffectManager().GetEffectIndex(efdata[0].ToStdString());
-                        if (effectIndex >= 0) {
-                            Effect* ef = el->AddEffect(0,
-                                                       efdata[0].ToStdString(),
-                                                       efdata[1].ToStdString(),
-                                                       efdata[2].ToStdString(),
-                                                       start_time,
-                                                       end_time,
-                                                       EFFECT_SELECTED,
-                                                       false);
+                EffectLayer* tel = mSequenceElements->GetVisibleEffectLayer(mSequenceElements->GetSelectedTimingRow());
+                if (tel == nullptr) {
+                    return res;
+                }
 
-                            if (res == nullptr)
-                                res = ef;
+                // Get the base row from the first effect in the preset for calculating row offsets
+                int base_row = wxAtoi(efdata[5]);
 
-                            if (ef != nullptr) {
-                                ef->SetLocked(false);
-                                logger_base.info("(3) Created effect %s  %s  %s  %d %d -->  %X",
-                                                 (const char*)efdata[0].c_str(),
-                                                 (const char*)efdata[1].Left(128).c_str(),
-                                                 (const char*)efdata[2].c_str(),
-                                                 mDropStartTimeMS,
-                                                 end_time, ef);
-                                if (xlights->GetEffectManager().GetEffect(efdata[0].ToStdString()) != nullptr && xlights->GetEffectManager().GetEffect(efdata[0].ToStdString())->needToAdjustSettings(pasteDataVersion.ToStdString())) {
-                                    xlights->GetEffectManager().GetEffect(efdata[0].ToStdString())->adjustSettings(pasteDataVersion.ToStdString(), ef, false);
+                // For multi-effect presets, we need to iterate through timing cells
+                // and for each cell, paste all effects at the appropriate row offsets
+                for (int col = col1; col <= col2; col++) {
+                    if (tel->GetEffect(col) == nullptr) {
+                        logger_base.info("No timing effect at column %d", col);
+                        continue;
+                    }
+                    int cell_start_time = tel->GetEffect(col)->GetStartTimeMS();
+                    int cell_end_time = tel->GetEffect(col)->GetEndTimeMS();
+
+                    // Get time offset for this cell based on first effect's original timing
+                    int original_start_time = wxAtoi(efdata[3]);
+                    int original_end_time = wxAtoi(efdata[4]);
+                    int original_duration = original_end_time - original_start_time;
+                    int cell_duration = cell_end_time - cell_start_time;
+                    if (original_duration <= 0)
+                        original_duration = 1; // Avoid divide by zero
+
+                    // Paste all effects in the preset for this timing cell
+                    for (size_t i = 1; i < all_efdata.size() - 1; i++) {
+                        wxArrayString eff_data = wxSplit(all_efdata[i], '\t', wxT('\0'));
+                        if (eff_data.size() < 7)
+                            continue;
+
+                        bool is_timing_effect = (eff_data.size() > 7 && eff_data[7] == "TIMING_EFFECT");
+                        if (is_timing_effect)
+                            continue; // Skip timing effects
+
+                        int eff_row = wxAtoi(eff_data[5]);
+                        int row_offset = eff_row - base_row;
+                        int target_row = row1 + row_offset;
+
+                        // Check if target row is within the selected range or if we should extend
+                        // For multi-layer presets, we allow extending beyond row2
+                        if (target_row < row1)
+                            continue;
+
+                        int eff_start = wxAtoi(eff_data[3]);
+                        int eff_end = wxAtoi(eff_data[4]);
+
+                        int new_start_time, new_end_time;
+                        if (paste_by_cell) {
+                            // Scale effect timing to fit within the timing cell
+                            double start_ratio = (double)(eff_start - original_start_time) / original_duration;
+                            double end_ratio = (double)(eff_end - original_start_time) / original_duration;
+                            new_start_time = cell_start_time + (int)(start_ratio * cell_duration);
+                            new_end_time = cell_start_time + (int)(end_ratio * cell_duration);
+                        } else {
+                            // Paste by time - use original duration with offset
+                            int time_offset = cell_start_time - original_start_time;
+                            new_start_time = eff_start + time_offset;
+                            new_end_time = eff_end + time_offset;
+                        }
+
+                        EffectLayer* el = mSequenceElements->GetEffectLayer(target_row);
+                        if (el != nullptr && el->GetRangeIsClearMS(new_start_time, new_end_time)) {
+                            int effectIndex = xlights->GetEffectManager().GetEffectIndex(eff_data[0].ToStdString());
+                            if (effectIndex >= 0) {
+                                Effect* ef = el->AddEffect(0,
+                                                           eff_data[0].ToStdString(),
+                                                           eff_data[1].ToStdString(),
+                                                           eff_data[2].ToStdString(),
+                                                           new_start_time,
+                                                           new_end_time,
+                                                           EFFECT_NOT_SELECTED,
+                                                           false);
+
+                                if (res == nullptr)
+                                    res = ef;
+
+                                if (ef != nullptr) {
+                                    ef->SetLocked(false);
+                                    logger_base.info("(3) Created effect %s  %s  %s  %d %d -->  %X",
+                                                     (const char*)eff_data[0].c_str(),
+                                                     (const char*)eff_data[1].Left(128).c_str(),
+                                                     (const char*)eff_data[2].c_str(),
+                                                     new_start_time,
+                                                     new_end_time, ef);
+                                    if (xlights->GetEffectManager().GetEffect(eff_data[0].ToStdString()) != nullptr && xlights->GetEffectManager().GetEffect(eff_data[0].ToStdString())->needToAdjustSettings(pasteDataVersion.ToStdString())) {
+                                        xlights->GetEffectManager().GetEffect(eff_data[0].ToStdString())->adjustSettings(pasteDataVersion.ToStdString(), ef, false);
+                                    }
+                                    mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetModelName(), el->GetIndex(), ef->GetID());
                                 }
-                                mSequenceElements->get_undo_mgr().CaptureAddedEffect(el->GetParentElement()->GetModelName(), el->GetIndex(), ef->GetID());
-                                RaiseSelectedEffectChanged(ef, true);
-                                mSelectedEffect = ef;
                             }
                         }
                     }

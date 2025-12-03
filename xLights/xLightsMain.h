@@ -591,6 +591,7 @@ public:
     void OnMenuItem_VQuietVolSelected(wxCommandEvent& event);
     void TogglePresetsPanel();
     void ShowPresetsPanel();
+    void ApplySelectedPreset();
     uint64_t BadDriveAccess(const std::list<std::string>& files, std::list<std::pair<std::string, uint64_t>>& slow, uint64_t thresholdUS);
     void OnMenuItemSelectEffectSelected(wxCommandEvent& event);
     void OnMenuItemShowHideVideoPreview(wxCommandEvent& event);

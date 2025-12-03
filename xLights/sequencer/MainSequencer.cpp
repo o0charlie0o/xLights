@@ -851,6 +851,9 @@ bool MainSequencer::HandleSequencerKeyBinding(wxKeyEvent& event)
             else if (type == "PRESETS_TOGGLE") {
                 mSequenceElements->GetXLightsFrame()->TogglePresetsPanel();
             }
+            else if (type == "APPLY_SELECTED_PRESET") {
+                mSequenceElements->GetXLightsFrame()->ApplySelectedPreset();
+            }
             else if (type == "VALUECURVES_TOGGLE") {
                 wxCommandEvent e;
                 mSequenceElements->GetXLightsFrame()->OnMenuItem_ValueCurvesSelected(e);

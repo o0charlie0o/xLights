@@ -51,6 +51,7 @@
 #include "ConvertDialog.h"
 #include "EffectAssist.h"
 #include "EffectIconPanel.h"
+#include "EffectTreeDialog.h"
 #include "EffectsPanel.h"
 #include "EmailDialog.h"
 #include "ExportSettings.h"
@@ -9277,6 +9278,13 @@ void xLightsFrame::TogglePresetsPanel()
         EffectTreeDlg = nullptr;
     } else {
         EffectTreeDlg->Show();
+    }
+}
+
+void xLightsFrame::ApplySelectedPreset()
+{
+    if (EffectTreeDlg != nullptr && EffectTreeDlg->IsVisible()) {
+        EffectTreeDlg->ApplyEffect();
     }
 }
 

@@ -67,7 +67,8 @@ class EffectTreeDialog : public wxDialog
         static const long ID_GRID_MNU_SORT_ALL_ASC;
         void MoveNode(wxTreeItemId& srcItem, wxTreeItemId& destItem, bool selSrc);
         void SortTreeCtrl(wxTreeCtrl* treeCtrl, const wxTreeItemId& itemId);
-  
+        void ApplyEffect(bool dblClick=false);
+
 	protected:
 
 		//(*Identifiers(EffectTreeDialog)
@@ -129,7 +130,6 @@ class EffectTreeDialog : public wxDialog
         void OnGridPopup(wxCommandEvent& event);
         void AddTreeElementsRecursive(wxXmlNode *EffectsNode, wxTreeItemId curGroupID);
         wxXmlNode* CreateEffectGroupNode(wxString& name);
-        void ApplyEffect(bool dblClick=false);
         void AddEffect(wxXmlNode* ele, wxTreeItemId curGroupID);
         void AddGroup(wxXmlNode* ele, wxTreeItemId curGroupID);
         void EffectsFileDirty();

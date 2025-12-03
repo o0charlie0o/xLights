@@ -140,6 +140,7 @@ static  std::vector<std::pair<std::string, KBSCOPE>> KeyBindingTypes =
     { "CANCEL_RENDER", KBSCOPE::Sequence },
     { "TOGGLE_RENDER", KBSCOPE::Sequence },
     { "PRESETS_TOGGLE", KBSCOPE::Sequence },
+    { "APPLY_SELECTED_PRESET", KBSCOPE::Sequence },
     { "FOCUS_SEQUENCER", KBSCOPE::All }, // This forces focus to the sequencer for situations where keys dont seem to work. It must be mapped to function key
     { "VALUECURVES_TOGGLE", KBSCOPE::Sequence },
     { "COLOR_DROPPER_TOGGLE", KBSCOPE::Sequence },
@@ -280,6 +281,7 @@ static  std::vector<std::pair<std::string, std::string>> keyBindingTips = {
     { "CANCEL_RENDER", "Cancel current rendering activity." },
     { "TOGGLE_RENDER", "Toggle background rendering." },
     { "PRESETS_TOGGLE", "Toggle display of the presets panel." },
+    { "APPLY_SELECTED_PRESET", "Apply the currently selected preset in the presets panel." },
     { "FOCUS_SEQUENCER", "Force keyboard focus to the effects gid." }, // This forces focus to the sequencer for situations where keys dont seem to work. It must be mapped to function key
     { "VALUECURVES_TOGGLE", "Toggle display of the value curves droppper panel." },
     { "COLOR_DROPPER_TOGGLE", "Toggle display of the color dropper panel." },
@@ -408,6 +410,7 @@ const std::vector<KeyBinding> DefaultBindings =
     KeyBinding(std::string("X"), false, "TOGGLE_ELEMENT_EXPAND", true, false, true),
     KeyBinding("", false, "SHOW_PRESETS"),
     KeyBinding("F10", false, "PRESETS_TOGGLE", true),
+    KeyBinding("", false, "APPLY_SELECTED_PRESET"),
     KeyBinding("F12", false, "VALUECURVES_TOGGLE", false, true),
     KeyBinding("F11", false, "COLOR_DROPPER_TOGGLE", false, true),
     KeyBinding("F12", false, "FOCUS_SEQUENCER"),
