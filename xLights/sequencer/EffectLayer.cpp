@@ -59,6 +59,7 @@ EffectLayer::~EffectLayer()
 std::unique_lock<std::recursive_mutex> EffectLayer::acquireLockWaitForRender() {
     if (wxThread::IsMain()) {
         std::unique_lock<std::recursive_mutex> locker(lock, std::try_to_lock);
+        int loopCount = 0;
         while (!locker.owns_lock()) {
             // could not get the lock, we'll render any main thread effects
             // and then try again, possibly yielding to allow the background
@@ -66,7 +67,15 @@ std::unique_lock<std::recursive_mutex> EffectLayer::acquireLockWaitForRender() {
             xLightsApp::GetFrame()->RenderMainThreadEffects();
             UNUSED(locker.try_lock());
             if (!locker.owns_lock()) {
-                std::this_thread::yield();
+                loopCount++;
+                // After 25 iterations (~250ms), call wxYield to keep the UI responsive.
+                // This prevents the UI from locking up completely when waiting for
+                // a long-running render to release the lock.
+                if (loopCount > 25) {
+                    wxYield();
+                    loopCount = 0;
+                }
+                wxMilliSleep(10);
                 UNUSED(locker.try_lock());
             }
         }
