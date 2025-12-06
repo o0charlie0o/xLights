@@ -96,6 +96,7 @@ void SequenceElements::Clear() {
     mRowInformation.clear();
     mSelectedRanges.clear();
     undo_mgr.Clear();
+    _effectSymbolManager.Clear();
     mSelectedTimingRow = -1;
     mTimingRowCount = 0;
     mFirstVisibleModelRow = 0;
@@ -713,8 +714,15 @@ int SequenceElements::LoadEffects(EffectLayer* effectLayer,
                     pal = colorPalettes[palette];
                 }
                 if (effectName != "Random") { // we dont load random effects ... they should not be there
-                    effectLayer->AddEffect(id, effectName, settings, pal,
+                    Effect* newEffect = effectLayer->AddEffect(id, effectName, settings, pal,
                                            startTime, endTime, EFFECT_NOT_SELECTED, bProtected, false, importing);
+                    // Check for linked symbol
+                    if (newEffect != nullptr && effect->HasAttribute("linkedSymbol")) {
+                        std::string symbolId = effect->GetAttribute("linkedSymbol").ToStdString();
+                        if (!symbolId.empty() && _effectSymbolManager.SymbolExists(symbolId)) {
+                            newEffect->LinkToSymbol(symbolId);
+                        }
+                    }
                 } else {
                     logger_base.warn("Random effect not loaded on element %s layer %d (%0.02f-%0.02f)", (const char*)effectLayer->GetParentElement()->GetName().c_str(), effectLayer->GetLayerNumber(), startTime / 1000, endTime / 1000);
                 }
@@ -828,6 +836,8 @@ bool SequenceElements::LoadSequencerFile(xLightsXmlFile& xml_file, const wxStrin
             }
         } else if (e->GetName() == "Jukebox") {
             xframe->LoadJukebox(e);
+        } else if (e->GetName() == "EffectSymbols") {
+            _effectSymbolManager.LoadFromXml(e);
         } else if (e->GetName() == "ElementEffects") {
             int count = 0;
             for (wxXmlNode* elementNode = e->GetChildren(); elementNode != NULL; elementNode = elementNode->GetNext()) {

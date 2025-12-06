@@ -237,6 +237,8 @@
 		<Unit filename="EffectIconPanel.h" />
 		<Unit filename="EffectListDialog.cpp" />
 		<Unit filename="EffectListDialog.h" />
+		<Unit filename="EffectSymbolDialog.cpp" />
+		<Unit filename="EffectSymbolDialog.h" />
 		<Unit filename="EffectTimingDialog.cpp" />
 		<Unit filename="EffectTimingDialog.h" />
 		<Unit filename="EffectTreeDialog.cpp" />
@@ -1096,6 +1098,10 @@
 		<Unit filename="sequencer/DragEffectBitmapButton.h" />
 		<Unit filename="sequencer/Effect.cpp" />
 		<Unit filename="sequencer/Effect.h" />
+		<Unit filename="sequencer/EffectSymbol.cpp" />
+		<Unit filename="sequencer/EffectSymbol.h" />
+		<Unit filename="sequencer/EffectSymbolManager.cpp" />
+		<Unit filename="sequencer/EffectSymbolManager.h" />
 		<Unit filename="sequencer/EffectDropTarget.cpp" />
 		<Unit filename="sequencer/EffectDropTarget.h" />
 		<Unit filename="sequencer/EffectLayer.cpp" />
