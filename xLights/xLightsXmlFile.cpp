@@ -30,6 +30,7 @@
 #include "xLightsVersion.h"
 #include "UtilFunctions.h"
 #include "sequencer/TimeLine.h"
+#include "sequencer/Effect.h"
 #include "Vixen3.h"
 #include "ExternalHooks.h"
 
@@ -2589,6 +2590,9 @@ void xLightsXmlFile::WriteEffects(EffectLayer *layer,
         }
         effect_node->AddAttribute("startTime", string_format("%d", effect->GetStartTimeMS()));
         effect_node->AddAttribute("endTime", string_format("%d", effect->GetEndTimeMS()));
+        if (effect->IsLinkedToSymbol()) {
+            effect_node->AddAttribute("linkedSymbol", effect->GetLinkedSymbolId());
+        }
         wxString palette = effect->GetPaletteAsString();
         if (palette != "") {
             size = colorPalettes.size();
@@ -2654,6 +2658,7 @@ bool xLightsXmlFile::SaveToDoc(SequenceElements& seq_elements) {
             e->GetName() == "ColorPalettes" ||
             e->GetName() == "EffectDB" ||
             e->GetName() == "TimingTags" ||
+            e->GetName() == "EffectSymbols" ||
             e->GetName() == "lastView") {
             wxXmlNode* node_to_delete = e;
             e = e->GetNext();
@@ -2675,6 +2680,12 @@ bool xLightsXmlFile::SaveToDoc(SequenceElements& seq_elements) {
     wxXmlNode* elements_node = AddChildXmlNode(root, "ElementEffects");
     wxXmlNode* last_view_node = AddChildXmlNode(root, "lastView");
     wxXmlNode* timing_tags_node = AddChildXmlNode(root, "TimingTags");
+
+    // Save effect symbols
+    if (seq_elements.GetEffectSymbolManager().GetSymbolCount() > 0) {
+        wxXmlNode* symbols_node = seq_elements.GetEffectSymbolManager().SaveToXml();
+        root->AddChild(symbols_node);
+    }
 
     SetNodeContent(last_view_node, wxString::Format("%d", seq_elements.GetCurrentView()));
 
@@ -2756,6 +2767,9 @@ bool xLightsXmlFile::SaveToDoc(SequenceElements& seq_elements) {
                         }
                         effect_node->AddAttribute("startTime", string_format("%d", effect->GetStartTimeMS()));
                         effect_node->AddAttribute("endTime", string_format("%d", effect->GetEndTimeMS()));
+                        if (effect->IsLinkedToSymbol()) {
+                            effect_node->AddAttribute("linkedSymbol", effect->GetLinkedSymbolId());
+                        }
                     }
                 }
             }

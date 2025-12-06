@@ -311,6 +311,11 @@ private:
     void RemoveShimmer();
     void CreateAlternatingPhonemes();
 
+    // Effect Symbol methods
+    void CreateSymbolFromEffect();
+    void UnlinkEffectFromSymbol();
+    void LinkEffectToSymbol(int symbolIndex);
+
     SequenceElements* mSequenceElements = nullptr;
     bool mIsDrawing = false;
     bool mGridIconBackgrounds;
@@ -443,6 +448,9 @@ private:
     static const long ID_GRID_MNU_DUPLICATE_UP;
     static const long ID_GRID_MNU_DUPLICATE_DOWN;
     static const long ID_GRID_MNU_CREATE_TIMING_FROM_EFFECT;
+    static const long ID_GRID_MNU_CREATE_SYMBOL;
+    static const long ID_GRID_MNU_UNLINK_SYMBOL;
+    static const long ID_GRID_MNU_LINK_SYMBOL_BASE;
     EventPlayEffectArgs* playArgs = nullptr;
 
     const SequenceData *seqData = nullptr;

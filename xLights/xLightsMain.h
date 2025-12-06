@@ -631,6 +631,8 @@ public:
     void OnMenuItemRunScriptSelected(wxCommandEvent& event);
     void OnButton_ChangeTemporarilyAgainClick(wxCommandEvent& event);
     void OnMenuItem_ColorReplaceSelected(wxCommandEvent& event);
+    void OnMenuItem_EffectSymbolsSelected(wxCommandEvent& event);
+    void OnMenuItem_ConvertSymbolsSelected(wxCommandEvent& event);
     void OnMenuItemFindDataSelected(wxCommandEvent& event);
     void OnMenuItemSearchEffectsSelected(wxCommandEvent& event);
     void OnMenuItem_SilentVolSelected(wxCommandEvent& event);
@@ -774,6 +776,8 @@ public:
     static const wxWindowID ID_SHIFT_EFFECTS;
     static const wxWindowID ID_MNU_SHIFT_SELECTED_EFFECTS;
     static const wxWindowID ID_MNU_COLOURREPLACE;
+    static const wxWindowID ID_MNU_EFFECTSYMBOLS;
+    static const wxWindowID ID_MNU_CONVERTSYMBOLS;
     static const wxWindowID ID_MENUITEM13;
     static const wxWindowID ID_MNU_CHECKSEQ;
     static const wxWindowID ID_MNU_CLEANUPFILE;
@@ -980,6 +984,8 @@ public:
     wxMenuItem* MenuItem_ACLIghts;
     wxMenuItem* MenuItem_CleanupFileLocations;
     wxMenuItem* MenuItem_ColorReplace;
+    wxMenuItem* MenuItem_ConvertSymbols;
+    wxMenuItem* MenuItem_EffectSymbols;
     wxMenuItem* MenuItem_CrashXLights;
     wxMenuItem* MenuItem_Donate;
     wxMenuItem* MenuItem_DownloadSequences;
