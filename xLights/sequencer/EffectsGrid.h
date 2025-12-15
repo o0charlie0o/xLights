@@ -457,6 +457,7 @@ private:
     xLightsFrame *xlights = nullptr;
     Row_Information_Struct* _findDataRI = nullptr;
     uint32_t _findDataMS = 0xFFFFFFFF;
+    Effect* _rightClickEffect = nullptr;  // Effect under cursor during right-click
 
 	DECLARE_EVENT_TABLE()
 };

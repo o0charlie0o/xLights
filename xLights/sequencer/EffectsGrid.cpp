@@ -532,6 +532,12 @@ void EffectsGrid::rightClick(wxMouseEvent& event) {
     if (element == nullptr)
         logger_base.crit("EffectsGrid::rightClick No row element ... this is not going to end well.");
     if (element->GetType() != ElementType::ELEMENT_TYPE_TIMING) {
+        // Get the effect under the cursor (if any) for operations that can work on right-clicked effect
+        int effectIndex;
+        HitLocation selectionType;
+        int clickTimeMS = mTimeline->GetAbsoluteTimeMSfromPosition(event.GetX());
+        _rightClickEffect = GetEffectAtRowAndTime(mSelectedRow, clickTimeMS, effectIndex, selectionType);
+
         wxMenu mnuLayer;
         // Copy / Paste / Delete
         wxMenuItem* menu_cut = mnuLayer.Append(ID_GRID_MNU_CUT, "Cut");
@@ -682,29 +688,48 @@ void EffectsGrid::rightClick(wxMouseEvent& event) {
         // Effect Symbols
         mnuLayer.AppendSeparator();
         EffectSymbolManager& symbolManager = mSequenceElements->GetEffectSymbolManager();
-        bool hasSelectedEffect = (mSelectedEffect != nullptr);
-        bool isLinkedToSymbol = hasSelectedEffect && mSelectedEffect->IsLinkedToSymbol();
+
+        // Determine which effect(s) to work with for symbol operations
+        // Priority: right-clicked effect, then selected effect, then multiple selected effects
+        Effect* symbolTargetEffect = _rightClickEffect != nullptr ? _rightClickEffect : mSelectedEffect;
+        bool hasEffectForSymbol = (symbolTargetEffect != nullptr) || MultipleEffectsSelected() || AtLeastOneEffectSelected();
+        bool hasSingleEffectForSymbol = (symbolTargetEffect != nullptr) && !MultipleEffectsSelected();
+
+        // Check if any effect (right-clicked or selected) is linked to a symbol
+        bool anyEffectLinkedToSymbol = false;
+        if (symbolTargetEffect != nullptr && symbolTargetEffect->IsLinkedToSymbol()) {
+            anyEffectLinkedToSymbol = true;
+        }
+        if (!anyEffectLinkedToSymbol) {
+            auto selectedEffects = GetSelectedEffects();
+            for (Effect* eff : selectedEffects) {
+                if (eff != nullptr && eff->IsLinkedToSymbol()) {
+                    anyEffectLinkedToSymbol = true;
+                    break;
+                }
+            }
+        }
 
         wxMenuItem* menu_create_symbol = mnuLayer.Append(ID_GRID_MNU_CREATE_SYMBOL, "Create Symbol from Effect...");
-        menu_create_symbol->Enable(hasSelectedEffect && !MultipleEffectsSelected());
+        menu_create_symbol->Enable(hasSingleEffectForSymbol);
 
-        if (isLinkedToSymbol) {
+        if (anyEffectLinkedToSymbol) {
             mnuLayer.Append(ID_GRID_MNU_UNLINK_SYMBOL, "Unlink from Symbol");
-        } else {
-            // Link to Symbol submenu
-            std::vector<EffectSymbol*> symbols = symbolManager.GetAllSymbols();
-            if (!symbols.empty()) {
-                wxMenu* mnuLinkSymbol = new wxMenu();
-                int symbolIndex = 0;
-                for (EffectSymbol* sym : symbols) {
-                    wxString label = wxString::Format("%s (%s)", sym->GetName(), sym->GetEffectType());
-                    mnuLinkSymbol->Append(ID_GRID_MNU_LINK_SYMBOL_BASE + symbolIndex, label);
-                    symbolIndex++;
-                }
-                mnuLinkSymbol->Connect(wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&EffectsGrid::OnGridPopup, nullptr, this);
-                wxMenuItem* linkSubmenu = mnuLayer.AppendSubMenu(mnuLinkSymbol, "Link to Symbol");
-                linkSubmenu->Enable(hasSelectedEffect && !MultipleEffectsSelected());
+        }
+
+        // Link to Symbol submenu - available for single or multiple effects
+        std::vector<EffectSymbol*> symbols = symbolManager.GetAllSymbols();
+        if (!symbols.empty()) {
+            wxMenu* mnuLinkSymbol = new wxMenu();
+            int symbolIndex = 0;
+            for (EffectSymbol* sym : symbols) {
+                wxString label = wxString::Format("%s (%s)", sym->GetName(), sym->GetEffectType());
+                mnuLinkSymbol->Append(ID_GRID_MNU_LINK_SYMBOL_BASE + symbolIndex, label);
+                symbolIndex++;
             }
+            mnuLinkSymbol->Connect(wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&EffectsGrid::OnGridPopup, nullptr, this);
+            wxMenuItem* linkSubmenu = mnuLayer.AppendSubMenu(mnuLinkSymbol, "Link to Symbol");
+            linkSubmenu->Enable(hasEffectForSymbol);
         }
 
         wxMenuItem* menu_effect_timing = mnuLayer.Append(ID_GRID_MNU_TIMING, "Timing");
@@ -9263,7 +9288,10 @@ void EffectsGrid::DuplicateEffectDown() {
 
 void EffectsGrid::CreateSymbolFromEffect()
 {
-    if (mSelectedEffect == nullptr) {
+    // Use right-clicked effect if available, otherwise use selected effect
+    Effect* targetEffect = _rightClickEffect != nullptr ? _rightClickEffect : mSelectedEffect;
+
+    if (targetEffect == nullptr) {
         return;
     }
 
@@ -9272,7 +9300,7 @@ void EffectsGrid::CreateSymbolFromEffect()
 
     // Prompt user for symbol name
     wxTextEntryDialog dlg(this, "Enter a name for the effect symbol:", "Create Effect Symbol",
-        xlights->GetEffectManager().GetEffectName(mSelectedEffect->GetEffectIndex()) + " Symbol");
+        xlights->GetEffectManager().GetEffectName(targetEffect->GetEffectIndex()) + " Symbol");
 
     if (dlg.ShowModal() != wxID_OK) {
         return;
@@ -9291,14 +9319,14 @@ void EffectsGrid::CreateSymbolFromEffect()
         return;
     }
 
-    // Create the symbol from the selected effect
-    EffectSymbol* symbol = symbolMgr.CreateSymbol(symbolName, mSelectedEffect);
+    // Create the symbol from the target effect
+    EffectSymbol* symbol = symbolMgr.CreateSymbol(symbolName, targetEffect);
     if (symbol != nullptr) {
-        // Link the selected effect to the new symbol
-        mSelectedEffect->LinkToSymbol(symbol->GetId());
-        symbolMgr.RegisterLinkedEffect(mSelectedEffect, symbol->GetId());
+        // Link the target effect to the new symbol
+        targetEffect->LinkToSymbol(symbol->GetId());
+        symbolMgr.RegisterLinkedEffect(targetEffect, symbol->GetId());
 
-        wxMessageBox(wxString::Format("Symbol '%s' created successfully.\nThe selected effect is now linked to this symbol.",
+        wxMessageBox(wxString::Format("Symbol '%s' created successfully.\nThe effect is now linked to this symbol.",
             symbolName), "Symbol Created", wxOK | wxICON_INFORMATION, this);
     }
 }
@@ -9324,6 +9352,20 @@ void EffectsGrid::UnlinkEffectFromSymbol()
         }
     }
 
+    // Include right-clicked effect if not already in the list
+    if (_rightClickEffect != nullptr) {
+        bool found = false;
+        for (const auto& ef : selectedEffects) {
+            if (ef == _rightClickEffect) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            selectedEffects.push_back(_rightClickEffect);
+        }
+    }
+
     // Unlink all selected effects that are linked to symbols
     for (Effect* effect : selectedEffects) {
         if (effect != nullptr && effect->IsLinkedToSymbol()) {
@@ -9337,10 +9379,6 @@ void EffectsGrid::UnlinkEffectFromSymbol()
 
 void EffectsGrid::LinkEffectToSymbol(int symbolIndex)
 {
-    if (mSelectedEffect == nullptr) {
-        return;
-    }
-
     EffectSymbolManager& symbolMgr = mSequenceElements->GetEffectSymbolManager();
     std::vector<EffectSymbol*> symbols = symbolMgr.GetAllSymbols();
 
@@ -9354,19 +9392,65 @@ void EffectsGrid::LinkEffectToSymbol(int symbolIndex)
         return;
     }
 
-    // If already linked to a different symbol, unlink first
-    if (mSelectedEffect->IsLinkedToSymbol()) {
-        symbolMgr.UnregisterLinkedEffect(mSelectedEffect);
-        mSelectedEffect->UnlinkFromSymbol();
+    // Collect all effects to link: right-clicked effect, selected effects, and mSelectedEffect
+    std::vector<Effect*> effectsToLink;
+
+    // Add right-clicked effect if present
+    if (_rightClickEffect != nullptr) {
+        effectsToLink.push_back(_rightClickEffect);
     }
 
-    // Apply the symbol's settings FIRST, before linking
-    // This prevents the effect's current settings from propagating to the symbol
-    mSelectedEffect->ApplySymbolSettings(symbol);
+    // Add all selected effects
+    auto selectedEffects = GetSelectedEffects();
+    for (Effect* eff : selectedEffects) {
+        if (eff != nullptr) {
+            bool found = false;
+            for (Effect* existing : effectsToLink) {
+                if (existing == eff) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                effectsToLink.push_back(eff);
+            }
+        }
+    }
 
-    // Now link to the symbol (after settings are already applied)
-    mSelectedEffect->LinkToSymbol(symbol->GetId());
-    symbolMgr.RegisterLinkedEffect(mSelectedEffect, symbol->GetId());
+    // Add mSelectedEffect if not already included
+    if (mSelectedEffect != nullptr) {
+        bool found = false;
+        for (Effect* existing : effectsToLink) {
+            if (existing == mSelectedEffect) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            effectsToLink.push_back(mSelectedEffect);
+        }
+    }
+
+    if (effectsToLink.empty()) {
+        return;
+    }
+
+    // Link all collected effects to the symbol
+    for (Effect* effect : effectsToLink) {
+        // If already linked to a different symbol, unlink first
+        if (effect->IsLinkedToSymbol()) {
+            symbolMgr.UnregisterLinkedEffect(effect);
+            effect->UnlinkFromSymbol();
+        }
+
+        // Apply the symbol's settings FIRST, before linking
+        // This prevents the effect's current settings from propagating to the symbol
+        effect->ApplySymbolSettings(symbol);
+
+        // Now link to the symbol (after settings are already applied)
+        effect->LinkToSymbol(symbol->GetId());
+        symbolMgr.RegisterLinkedEffect(effect, symbol->GetId());
+    }
 
     sendRenderDirtyEvent();
 }
