@@ -645,7 +645,7 @@ static inline void addString(std::vector<uint8_t> &buffer, const std::string &st
 }
 
 int FPP::PostJSONToURL(const std::string& url, const nlohmann::json& val) {
-    std::string const str = val.dump(3);
+    std::string const str = val.dump(3, ' ', false, nlohmann::json::error_handler_t::replace);
     std::vector<uint8_t> memBuffPost;
     addString(memBuffPost, str);
     return PostToURL(url, memBuffPost, "application/json");
@@ -654,7 +654,7 @@ int FPP::PostJSONToURLAsFormData(const std::string& url, const std::string& extr
     std::vector<uint8_t> memBuffPost;
     addString(memBuffPost, extra);
     addString(memBuffPost, "&data={");
-    std::string const str = val.dump(3);
+    std::string const str = val.dump(3, ' ', false, nlohmann::json::error_handler_t::replace);
     addString(memBuffPost, str);
     addString(memBuffPost, "}");
     return PostToURL(url, memBuffPost, "application/x-www-form-urlencoded; charset=UTF-8");
@@ -662,8 +662,18 @@ int FPP::PostJSONToURLAsFormData(const std::string& url, const std::string& extr
 
 void FPP::DumpJSON(const nlohmann::json& json) const {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
-    std::string const str = json.dump(3);
-    logger_base.debug(str);
+
+    std::string str;
+    try {
+        str = json.dump(3, ' ', false, nlohmann::json::error_handler_t::replace);
+        logger_base.debug(str);
+    } catch (const nlohmann::json::type_error& e) {
+        logger_base.error("JSON type_error during dump: " + std::string(e.what()));
+    } catch (const std::exception& e) {
+        logger_base.error("Other exception during JSON dump: " + std::string(e.what()));
+    } catch (...) {
+        logger_base.error("Unknown exception during JSON dump");
+    }
 }
 
 int FPP::PostToURL(const std::string& url, const std::string& val, const std::string& contentType) const {
@@ -1386,6 +1396,21 @@ bool FPP::UploadPlaylist(const std::string &name) {
     return false;
 }
 
+std::vector<std::string> FPP::GetPlaylistItems(const std::string& name) {
+    nlohmann::json origJson;
+    GetURLAsJSON("/api/playlist/" + URLEncode(name), origJson, false);
+    std::vector<std::string> items;
+    if (!origJson.is_object()) {
+        return items;
+    }
+    for (int x = 0; x < origJson["mainPlaylist"].size(); x++) {
+        nlohmann::json entry = origJson["mainPlaylist"][x];
+        auto seq = GetJSONStringValue(entry, "sequenceName");
+        items.push_back(seq);
+    }
+    return items;
+}
+
 bool FPP::UploadModels(const nlohmann::json &models) {
     PostJSONToURL("/api/models", models);
     return false;
@@ -1904,7 +1929,19 @@ nlohmann::json FPP::CreateUniverseFile(const std::list<Controller*>& selected, b
                     universes = nlohmann::json::array();
                 }
             } else if (it->GetType() == OUTPUT_ARTNET) {
-                universe["type"] = (int)((eth->GetIP() != "MULTICAST") + 2);
+                ArtNetOutput* ano = dynamic_cast<ArtNetOutput*>(it);
+                if (IsVersionAtLeast(9, 5, 0)) {
+                    bool isForcePort = ano->isForceSourcePort();
+                    if (eth->GetIP() == "MULTICAST") {
+                        universe["type"] = 2;
+                    } else if (isForcePort) {
+                        universe["type"] = 3;
+                    } else {
+                        universe["type"] = 9;
+                    }
+                } else {
+                    universe["type"] = (int)((eth->GetIP() != "MULTICAST") + 2);
+                }
                 if (!input && (it->GetIP() != "MULTICAST")) {
                     universe["address"] = it->GetIP();
                 }
@@ -1916,7 +1953,6 @@ nlohmann::json FPP::CreateUniverseFile(const std::list<Controller*>& selected, b
                     universes.push_back(universe);
                     break;
                 }
-                //ArtNetOutput* ano = dynamic_cast<ArtNetOutput*>(it);
                 universe["universeCount"] = 1;
                 universes.push_back(universe);
             } else if (it->GetType() == OUTPUT_KINET) {
