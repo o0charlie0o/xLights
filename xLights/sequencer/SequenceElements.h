@@ -179,9 +179,9 @@ public:
 
     std::vector<std::string> GetUsedColours(bool selectedOnly) const;
     int ReplaceColours(xLightsFrame* frame, const std::string& from, const std::string& to, bool selectedOnly);
-    int SelectEffectsInRowAndTimeRange(int startRow, int endRow, int startMS, int endMS);
-    int SelectVisibleEffectsInRowAndTimeRange(int startRow, int endRow, int startMS, int endMS);
-    int SelectEffectsInRowAndColumnRange(int startRow, int endRow, int startCol, int endCol);
+    int SelectEffectsInRowAndTimeRange(int startRow, int endRow, int startMS, int endMS, AlternateSelect alternateSelect = AlternateSelect::ALL);
+    int SelectVisibleEffectsInRowAndTimeRange(int startRow, int endRow, int startMS, int endMS, AlternateSelect alternateSelect = AlternateSelect::ALL);
+    int SelectEffectsInRowAndColumnRange(int startRow, int endRow, int startCol, int endCol, AlternateSelect alternateSelect = AlternateSelect::ALL);
     void SelectAllEffects();
     void SelectAllEffectsNoTiming();
     void SelectAllEffectsInRow(int row);

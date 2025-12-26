@@ -50,7 +50,8 @@ enum class HitLocation {
     SMART_FADE_IN,
     SMART_FADE_OUT,
     SMART_BRIGHTNESS,
-    SMART_SPARKLES
+    SMART_SPARKLES,
+    SMART_SPLIT  // Option+Command click to split at timing marks
 };
 
 enum EFF_ALIGN_MODE {
@@ -128,6 +129,7 @@ public:
     void PlayLoopedEffect(Effect* eff, bool loop);
 
     void DeleteSelectedEffects();
+    void SplitEffectAtTimingMarks(Effect* effect);
     void SetEffectsDescription();
     void ResetEffect();
     void SetEffectsTiming();
@@ -215,7 +217,7 @@ public:
         return mSequenceElements;
     }
 
-    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType, int yPos = -1, bool altDown = false, bool shiftDown = false);
+    Effect* GetEffectAtRowAndTime(int row, int ms,int &index, HitLocation &selectionType, int yPos = -1, bool altDown = false, bool shiftDown = false, bool cmdDown = false);
 
 protected:
     bool m_wheel_down = false;
@@ -260,7 +262,7 @@ private:
     void DrawPlayMarker(xlGraphicsContext *ctx) const;
     bool AdjustDropLocations(int x, EffectLayer* el);
     void Resize(int position, bool offset, bool control);
-    void RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown = false, bool shiftDown = false);
+    void RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown = false, bool shiftDown = false, bool cmdDown = false);
     void UpdateTimePosition(int time) const;
     void UpdateZoomPosition(int time) const;
     void EstablishSelectionRectangle();
@@ -377,6 +379,7 @@ private:
     wxCursor mCursorFade;               // Custom fade cursor (triangle ramp)
     wxCursor mCursorBrightness;         // Custom brightness cursor (sun icon)
     wxCursor mCursorSparkles;           // Custom sparkles cursor (sparkle icon)
+    wxCursor mCursorSplit;              // Scissors cursor for split at timing marks
 
     EffectLayer* mEffectLayer;
     int mResizeEffectIndex;
@@ -398,6 +401,7 @@ private:
     int mRangeEndRow;
     int mRangeCursorRow;
     int mRangeCursorCol;
+    AlternateSelect mAlternateSelect;  // Odd/even effect selection mode
 
     std::string mSearchText;
     int mLastFoundEffectIndex;
