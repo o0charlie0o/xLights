@@ -67,6 +67,7 @@
 #define EFFECT_RESIZE_SMART_FADE 6
 #define EFFECT_RESIZE_SMART_BRIGHTNESS 7
 #define EFFECT_RESIZE_SMART_SPARKLES 8
+#define EFFECT_RESIZE_SMART_SPLIT 9
 #define TIMING_ALPHA (0x60)
 #define DRAG_THRESHOLD 3
 
@@ -309,6 +310,7 @@ EffectsGrid::EffectsGrid(MainSequencer* parent, wxWindowID id, const wxPoint& po
     mDropEndX = 0;
     mCellRangeSelected = false;
     mPartialCellSelected = false;
+    mAlternateSelect = AlternateSelect::ALL;
     mDragStartRow = 0;
     mDragStartX = -1;
     mDragStartY = -1;
@@ -376,6 +378,19 @@ EffectsGrid::EffectsGrid(MainSequencer* parent, wxWindowID id, const wxPoint& po
     // Fall back to stock cursor if PNG load failed
     if (!mCursorSparkles.IsOk()) {
         mCursorSparkles = wxCursor(wxCURSOR_SIZENS);
+    }
+
+    // Try to load split cursor from PNG
+    wxImage splitCursorImg;
+    if (splitCursorImg.LoadFile(resourcesDir + "/cursor_split.png", wxBITMAP_TYPE_PNG)) {
+        splitCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_X, 16);
+        splitCursorImg.SetOption(wxIMAGE_OPTION_CUR_HOTSPOT_Y, 16);
+        mCursorSplit = wxCursor(splitCursorImg);
+    }
+
+    // Fall back to stock cursor if PNG load failed
+    if (!mCursorSplit.IsOk()) {
+        mCursorSplit = wxCursor(wxCURSOR_BULLSEYE);
     }
 
     SetBackgroundStyle(wxBG_STYLE_CUSTOM);
@@ -2083,7 +2098,7 @@ void EffectsGrid::mouseMoved(wxMouseEvent& event) {
             if (!out_of_bounds) {
                 Element* element = mSequenceElements->GetVisibleRowInformation(rowIndex)->element;
                 if (element != nullptr) {
-                    RunMouseOverHitTests(rowIndex, event.GetX(), event.GetY(), event.AltDown(), event.ShiftDown());
+                    RunMouseOverHitTests(rowIndex, event.GetX(), event.GetY(), event.AltDown(), event.ShiftDown(), event.CmdDown());
                 }
             }
         } else {
@@ -2172,7 +2187,7 @@ int MapHitLocationToEffectSelection(HitLocation location) {
     return EFFECT_NOT_SELECTED;
 }
 
-Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocation& selectionType, int yPos, bool altDown, bool shiftDown) {
+Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocation& selectionType, int yPos, bool altDown, bool shiftDown, bool cmdDown) {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
     EffectLayer* effectLayer = mSequenceElements->GetVisibleEffectLayer(row);
 
@@ -2195,8 +2210,12 @@ Effect* EffectsGrid::GetEffectAtRowAndTime(int row, int ms, int& index, HitLocat
         if (effectLayer->IsFixedTimingLayer()) {
             selectionType = HitLocation::NONE;
         } else if (!eff->IsLocked()) {
-            // Smart Tool zone detection (only when Alt/Option held and yPos provided)
-            if (altDown && yPos >= 0) {
+            // Alt+Cmd - Split at timing marks (takes priority over other smart tool zones)
+            if (altDown && cmdDown) {
+                selectionType = HitLocation::SMART_SPLIT;
+            }
+            // Smart Tool zone detection (only when Alt/Option held WITHOUT Cmd and yPos provided)
+            else if (altDown && yPos >= 0) {
                 // Define horizontal zones based on position along effect width
                 int effectWidth = endPos - startPos;
                 int edgeWidth = std::max(12, effectWidth / 5);  // Edge zones are 20% of width or 12px minimum
@@ -2310,7 +2329,14 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
     int effectIndex;
     HitLocation selectionType;
     int time = mTimeline->GetRawTimeMSfromPosition(event.GetX());
-    Effect* selectedEffect = GetEffectAtRowAndTime(row, time, effectIndex, selectionType, event.GetY(), event.AltDown(), event.ShiftDown());
+    Effect* selectedEffect = GetEffectAtRowAndTime(row, time, effectIndex, selectionType, event.GetY(), event.AltDown(), event.ShiftDown(), event.CmdDown());
+
+    // Handle Option+Command click to split at timing marks
+    if (selectionType == HitLocation::SMART_SPLIT && selectedEffect != nullptr) {
+        SplitEffectAtTimingMarks(selectedEffect);
+        return;
+    }
+
     if (selectedEffect != nullptr) {
         logger_base.debug("EffectsGrid::mouseDown effect selected %s.", (const char*)selectedEffect->GetEffectName().c_str());
         switch (selectionType) {
@@ -2470,6 +2496,17 @@ void EffectsGrid::mouseDown(wxMouseEvent& event) {
             mDragThresholdExceeded = false;
             mDragEndX = event.GetX();
             mDragEndY = event.GetY();
+
+            // Set alternating selection mode based on modifier keys
+            // Option = odd effects, Option+Command = even effects
+            if (event.AltDown() && event.CmdDown()) {
+                mAlternateSelect = AlternateSelect::EVEN;
+            } else if (event.AltDown()) {
+                mAlternateSelect = AlternateSelect::ODD;
+            } else {
+                mAlternateSelect = AlternateSelect::ALL;
+            }
+
             if (event.ShiftDown()) {
                 UpdateSelectionRectangle();
             } else {
@@ -5424,6 +5461,112 @@ void EffectsGrid::DeleteSelectedEffects() {
     wxPostEvent(this, eventRowHeaderChanged);
 }
 
+void EffectsGrid::SplitEffectAtTimingMarks(Effect* effect) {
+    static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+
+    if (effect == nullptr || effect->IsLocked()) {
+        return;
+    }
+
+    EffectLayer* el = effect->GetParentEffectLayer();
+    if (el == nullptr) {
+        return;
+    }
+
+    long effectStart = effect->GetStartTimeMS();
+    long effectEnd = effect->GetEndTimeMS();
+
+    // Check if effect is long enough to split
+    if (effectEnd - effectStart <= mSequenceElements->GetFrameMS()) {
+        return;
+    }
+
+    // Get timing layer
+    int selectedTimingRow = mSequenceElements->GetSelectedTimingRow();
+    EffectLayer* tel = nullptr;
+
+    if (selectedTimingRow >= 0) {
+        tel = mSequenceElements->GetVisibleEffectLayer(selectedTimingRow);
+    }
+
+    // Collect split points from timing marks
+    std::vector<long> splitPoints;
+
+    if (tel != nullptr) {
+        // Find all timing cell boundaries within the effect
+        for (int i = 0; i < tel->GetEffectCount(); i++) {
+            Effect* timingEffect = tel->GetEffect(i);
+            long timingEnd = timingEffect->GetEndTimeMS();
+
+            // Add timing boundary if it's inside the effect (not at start or end)
+            if (timingEnd > effectStart && timingEnd < effectEnd) {
+                splitPoints.push_back(timingEnd);
+            }
+        }
+    }
+
+    // If no timing marks found or no split points, fall back to splitting in half
+    if (splitPoints.empty()) {
+        long midpoint = TimeLine::RoundToMultipleOfPeriod((effectStart + effectEnd) / 2, mSequenceElements->GetFrameMS());
+        if (midpoint > effectStart && midpoint < effectEnd) {
+            splitPoints.push_back(midpoint);
+        }
+    }
+
+    // If still no valid split points, nothing to do
+    if (splitPoints.empty()) {
+        return;
+    }
+
+    // Sort split points
+    std::sort(splitPoints.begin(), splitPoints.end());
+
+    logger_base.debug("SplitEffectAtTimingMarks - splitting effect at %d points", (int)splitPoints.size());
+
+    // Create undo step
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
+    mSequenceElements->get_undo_mgr().CaptureModifiedEffect(
+        el->GetParentElement()->GetModelName(), el->GetIndex(),
+        effect->GetID(), effect->GetSettingsAsString(), effect->GetPaletteAsString());
+    mSequenceElements->get_undo_mgr().CaptureEffectToBeMoved(
+        el->GetParentElement()->GetModelName(), el->GetIndex(),
+        effect->GetID(), effect->GetStartTimeMS(), effect->GetEndTimeMS());
+
+    // Get effect info for creating new effects
+    std::string effectName = xlights->GetEffectManager().GetEffectName(effect->GetEffectIndex());
+    std::string settings = effect->GetSettingsAsString();
+    std::string palette = effect->GetPaletteAsString();
+    int effectIndex = effect->GetEffectIndex();
+
+    // Adjust original effect to end at first split point
+    long originalEnd = effectEnd;
+    effect->SetEndTimeMS(splitPoints[0]);
+
+    // Create new effects for each segment
+    Effect* previousEffect = effect;
+    for (size_t i = 0; i < splitPoints.size(); i++) {
+        long newStart = splitPoints[i];
+        long newEnd = (i + 1 < splitPoints.size()) ? splitPoints[i + 1] : originalEnd;
+
+        Effect* newEffect = el->AddEffect(0, effectName, settings, palette, newStart, newEnd, EFFECT_NOT_SELECTED, false);
+
+        // Call effect-specific split handler
+        xlights->GetEffectManager().GetEffect(effectIndex)->AdjustSettingsAfterSplit(previousEffect, newEffect);
+
+        mSequenceElements->get_undo_mgr().CaptureAddedEffect(
+            el->GetParentElement()->GetName(), el->GetIndex(), newEffect->GetID());
+
+        previousEffect = newEffect;
+    }
+
+    mSequenceElements->get_undo_mgr().CreateUndoStep();
+    mSequenceElements->get_undo_mgr().CaptureModifiedEffect(
+        el->GetParentElement()->GetModelName(), el->GetIndex(), effect);
+
+    sendRenderDirtyEvent();
+    ForceRefresh();
+}
+
 void EffectsGrid::AlignSelectedEffects(EFF_ALIGN_MODE align_mode) {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
 
@@ -6745,7 +6888,7 @@ void EffectsGrid::ResizeSingleEffectMS(int timems) {
     UpdateZoomPosition(time);
 }
 
-void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown, bool shiftDown) {
+void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown, bool shiftDown, bool cmdDown) {
     int effectIndex;
 
     int time = mTimeline->GetRawTimeMSfromPosition(x);
@@ -6754,7 +6897,7 @@ void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown,
     // Use the passed modifier key states from the mouse event
     // This is more reliable than wxGetKeyState on macOS
 
-    Effect* eff = GetEffectAtRowAndTime(rowIndex, time, effectIndex, selectionType, y, altDown, shiftDown);
+    Effect* eff = GetEffectAtRowAndTime(rowIndex, time, effectIndex, selectionType, y, altDown, shiftDown, cmdDown);
 
     if (eff != nullptr) {
         mResizeEffectIndex = effectIndex;
@@ -6801,7 +6944,10 @@ void EffectsGrid::RunMouseOverHitTests(int rowIndex, int x, int y, bool altDown,
             SetCursor(mCursorSparkles);  // Custom sparkles cursor (sparkle icon)
             mResizingMode = EFFECT_RESIZE_SMART_SPARKLES;
             break;
-            // update effect details
+        case HitLocation::SMART_SPLIT:
+            SetCursor(mCursorSplit);  // Scissors cursor for split at timing marks
+            mResizingMode = EFFECT_RESIZE_SMART_SPLIT;
+            break;
         }
         SetEffectStatusText(eff);
     } else {
@@ -7013,7 +7159,7 @@ void EffectsGrid::EstablishSelectionRectangle() {
     if (mRangeStartCol >= 0 && mRangeStartRow >= 0) {
         UpdateSelectedEffects();
     } else {
-        mSequenceElements->SelectEffectsInRowAndTimeRange(row1 - first_row, row2 - first_row, startTime, endTime);
+        mSequenceElements->SelectEffectsInRowAndTimeRange(row1 - first_row, row2 - first_row, startTime, endTime, mAlternateSelect);
     }
     SetRCToolTip();
 }
@@ -7058,7 +7204,7 @@ void EffectsGrid::UpdateSelectionRectangle() {
 
         int startTime = mTimeline->GetAbsoluteTimeMSfromPosition(start_x);
         int endTime = mTimeline->GetAbsoluteTimeMSfromPosition(end_x);
-        if (mSequenceElements->SelectEffectsInRowAndTimeRange(row1, row2, startTime, endTime)) {
+        if (mSequenceElements->SelectEffectsInRowAndTimeRange(row1, row2, startTime, endTime, mAlternateSelect)) {
             SetFirstEffectSelected();
         }
     }
@@ -7101,7 +7247,7 @@ void EffectsGrid::UpdateSelectedEffects() {
         }
         int adjusted_start_row = std::max(start_row, mSequenceElements->GetNumberOfTimingRows());
         if (end_row >= adjusted_start_row) {
-            int num_selected = mSequenceElements->SelectEffectsInRowAndColumnRange(adjusted_start_row, end_row, start_col, end_col);
+            int num_selected = mSequenceElements->SelectEffectsInRowAndColumnRange(adjusted_start_row, end_row, start_col, end_col, mAlternateSelect);
             if (num_selected != 1) // we don't know what to preview unless only 1 effect is selected
             {
                 UnselectEffect(true);

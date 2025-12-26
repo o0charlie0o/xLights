@@ -23,6 +23,13 @@
 
 #define NO_MAX 1000000
 
+// Selection mode for alternating effect selection
+enum class AlternateSelect {
+    ALL,     // Select all effects (default)
+    ODD,     // Select odd effects (1st, 3rd, 5th, etc.)
+    EVEN     // Select even effects (2nd, 4th, 6th, etc.)
+};
+
 class Element;
 class Model;
 class ValueCurve;
@@ -82,7 +89,7 @@ public:
     bool GetRangeIsClearMS(int startTimeMS, int endTimeMS, bool ignore_selected = false);
 
     void GetMaximumRangeOfMovementForSelectedEffects(int& toLeft, int& toRight);
-    int SelectEffectsInTimeRange(int startTimeMS, int endTimeMS);
+    int SelectEffectsInTimeRange(int startTimeMS, int endTimeMS, AlternateSelect alternateSelect = AlternateSelect::ALL);
     bool HasEffectsInTimeRange(int startTimeMS, int endTimeMS);
     bool HasEffects();
     bool HasEffectsByType(const std::string& type) const;

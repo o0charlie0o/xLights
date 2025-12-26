@@ -508,40 +508,67 @@ bool EffectLayer::HasEffectsByType(const std::string& type) const
     return false;
 }
 
-int EffectLayer::SelectEffectsInTimeRange(int startTimeMS, int endTimeMS)
+int EffectLayer::SelectEffectsInTimeRange(int startTimeMS, int endTimeMS, AlternateSelect alternateSelect)
 {
     int num_selected = 0;
+    int position = 0;  // 0-based position counter for effects in range
+
     for (int i = 0; i < mEffects.size(); i++)
     {
         int midpoint = mEffects[i]->GetStartTimeMS() + ((mEffects[i]->GetEndTimeMS() - mEffects[i]->GetStartTimeMS()) / 2);
+        int selectionType = EFFECT_NOT_SELECTED;
+
+        // Determine if effect is in range and what selection type
         if (mEffects[i]->GetStartTimeMS() >= startTimeMS && mEffects[i]->GetStartTimeMS() < endTimeMS)
         {
             if (endTimeMS < midpoint)
             {
-                mEffects[i]->SetSelected(EFFECT_LT_SELECTED);
+                selectionType = EFFECT_LT_SELECTED;
             }
             else
             {
-                mEffects[i]->SetSelected(EFFECT_SELECTED);
+                selectionType = EFFECT_SELECTED;
             }
-            num_selected++;
         }
         else if (mEffects[i]->GetEndTimeMS() <= endTimeMS && mEffects[i]->GetEndTimeMS() > startTimeMS)
         {
             if (startTimeMS > midpoint)
             {
-                mEffects[i]->SetSelected(EFFECT_RT_SELECTED);
+                selectionType = EFFECT_RT_SELECTED;
             }
             else
             {
-                mEffects[i]->SetSelected(EFFECT_SELECTED);
+                selectionType = EFFECT_SELECTED;
             }
-            num_selected++;
         }
-        else if (mEffects[i]->GetEndTimeMS() > endTimeMS &&  mEffects[i]->GetStartTimeMS() < startTimeMS)
+        else if (mEffects[i]->GetEndTimeMS() > endTimeMS && mEffects[i]->GetStartTimeMS() < startTimeMS)
         {
-            mEffects[i]->SetSelected(EFFECT_SELECTED);
-            num_selected++;
+            selectionType = EFFECT_SELECTED;
+        }
+
+        // If effect would be selected, apply alternating filter
+        if (selectionType != EFFECT_NOT_SELECTED)
+        {
+            bool shouldSelect = true;
+
+            if (alternateSelect == AlternateSelect::ODD)
+            {
+                // Select 1st, 3rd, 5th... (position 0, 2, 4... in 0-based)
+                shouldSelect = (position % 2 == 0);
+            }
+            else if (alternateSelect == AlternateSelect::EVEN)
+            {
+                // Select 2nd, 4th, 6th... (position 1, 3, 5... in 0-based)
+                shouldSelect = (position % 2 == 1);
+            }
+
+            if (shouldSelect)
+            {
+                mEffects[i]->SetSelected(selectionType);
+                num_selected++;
+            }
+
+            position++;  // Increment position for each effect in range
         }
     }
     return num_selected;

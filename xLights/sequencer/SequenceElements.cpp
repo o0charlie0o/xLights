@@ -1519,7 +1519,7 @@ void SequenceElements::DeactivateAllTimingElements()
     }
 }
 
-int SequenceElements::SelectEffectsInRowAndTimeRange(int startRow, int endRow, int startMS, int endMS)
+int SequenceElements::SelectEffectsInRowAndTimeRange(int startRow, int endRow, int startMS, int endMS, AlternateSelect alternateSelect)
 {
     int num_selected = 0;
     if(startRow<mRowInformation.size())
@@ -1531,13 +1531,13 @@ int SequenceElements::SelectEffectsInRowAndTimeRange(int startRow, int endRow, i
         for(int i=startRow;i<=endRow;i++)
         {
             EffectLayer* effectLayer = GetEffectLayer(&mRowInformation[i]);
-            num_selected += effectLayer->SelectEffectsInTimeRange(startMS,endMS);
+            num_selected += effectLayer->SelectEffectsInTimeRange(startMS, endMS, alternateSelect);
         }
     }
     return num_selected;
 }
 
-int SequenceElements::SelectVisibleEffectsInRowAndTimeRange(int startRow, int endRow, int startMS,int endMS)
+int SequenceElements::SelectVisibleEffectsInRowAndTimeRange(int startRow, int endRow, int startMS, int endMS, AlternateSelect alternateSelect)
 {
     int num_selected = 0;
     if(startRow<mVisibleRowInformation.size())
@@ -1549,13 +1549,13 @@ int SequenceElements::SelectVisibleEffectsInRowAndTimeRange(int startRow, int en
         for(int i=startRow;i<=endRow;i++)
         {
             EffectLayer* effectLayer = GetEffectLayer(&mVisibleRowInformation[i]);
-            num_selected += effectLayer->SelectEffectsInTimeRange(startMS,endMS);
+            num_selected += effectLayer->SelectEffectsInTimeRange(startMS, endMS, alternateSelect);
         }
     }
     return num_selected;
 }
 
-int SequenceElements::SelectEffectsInRowAndColumnRange(int startRow, int endRow, int startCol,int endCol)
+int SequenceElements::SelectEffectsInRowAndColumnRange(int startRow, int endRow, int startCol, int endCol, AlternateSelect alternateSelect)
 {
     int num_selected = 0;
     EffectLayer* tel = GetVisibleEffectLayer(GetSelectedTimingRow());
@@ -1567,7 +1567,7 @@ int SequenceElements::SelectEffectsInRowAndColumnRange(int startRow, int endRow,
         {
             int startMS = eff1->GetStartTimeMS();
             int endMS = eff2->GetEndTimeMS();
-            num_selected = SelectEffectsInRowAndTimeRange(startRow, endRow, startMS, endMS);
+            num_selected = SelectEffectsInRowAndTimeRange(startRow, endRow, startMS, endMS, alternateSelect);
         }
     }
     return num_selected;
