@@ -167,7 +167,7 @@ void xLightsFrame::CreateSequencer()
 
     m_mgr->AddPane(perspectivePanel,wxAuiPaneInfo().Name(wxT("Perspectives")).Caption(wxT("Perspectives")).Left().Layer(1).Hide());
     m_mgr->AddPane(effectsPnl,wxAuiPaneInfo().Name(wxT("Effect")).Caption(wxT("Effect Settings")).
-                   Left().Layer(0).Row(1));
+                   Left().Layer(0).Row(1).MinSize(wxSize(20, -1)));
 
     logger_base.debug("CreateSequencer: Adding Select Effects Panel.");
     _selectPanel = new SelectPanel(&_sequenceElements, mainSequencer, PanelSequencer);
@@ -183,9 +183,9 @@ void xLightsFrame::CreateSequencer()
     m_mgr->AddPane(_coloursPanel, wxAuiPaneInfo().Name(wxT("ColourDropper")).Caption(wxT("Colours")).Top().Layer(0).Hide());
     m_mgr->AddPane(jukeboxPanel,wxAuiPaneInfo().Name(wxT("Jukebox")).Caption(wxT("Jukebox")).Top().Layer(0).Hide());
     m_mgr->AddPane(_findDataPanel, wxAuiPaneInfo().Name(wxT("FindData")).Caption(wxT("Find Data")).Top().Layer(0).Hide());
-    m_mgr->AddPane(colorPanel, wxAuiPaneInfo().Name(wxT("Color")).Caption(wxT("Color")).Top().Layer(0));
-    m_mgr->AddPane(timingPanel,wxAuiPaneInfo().Name(wxT("LayerTiming")).Caption(wxT("Layer Blending")).Top().Layer(0));
-    m_mgr->AddPane(bufferPanel,wxAuiPaneInfo().Name(wxT("LayerSettings")).Caption(wxT("Layer Settings")).Top().Layer(0));
+    m_mgr->AddPane(colorPanel, wxAuiPaneInfo().Name(wxT("Color")).Caption(wxT("Color")).Top().Layer(0).MinSize(wxSize(-1, 20)));
+    m_mgr->AddPane(timingPanel,wxAuiPaneInfo().Name(wxT("LayerTiming")).Caption(wxT("Layer Blending")).Top().Layer(0).MinSize(wxSize(-1, 20)));
+    m_mgr->AddPane(bufferPanel,wxAuiPaneInfo().Name(wxT("LayerSettings")).Caption(wxT("Layer Settings")).Top().Layer(0).MinSize(wxSize(-1, 20)));
 
     logger_base.debug( "        Sequence Video." );
     sequenceVideoPanel = new SequenceVideoPanel( this );
