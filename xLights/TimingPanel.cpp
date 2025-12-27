@@ -404,7 +404,7 @@ void TimingPanel::OnResize(wxSizeEvent& event)
     Panel_Sizer->SetSize(s);
     Panel_Sizer->SetMinSize(s);
     Panel_Sizer->SetMaxSize(s);
-    Panel_Sizer->Refresh();
+        
 
     ScrolledWindowTiming->SetSize(s);
     ScrolledWindowTiming->SetMinSize(s);
