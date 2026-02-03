@@ -33,16 +33,17 @@ static void DecodeTag(NSInteger tag, NSInteger *paramIndex, XLControlType *type)
 }
 
 @interface XLEffectPanelView () <NSTextFieldDelegate>
+
+@property (nonatomic, strong) NSScrollView *scrollView;
+@property (nonatomic, strong) NSStackView *mainStack;
+@property (nonatomic, copy) NSString *currentEffectName;
+@property (nonatomic, assign) const XLEffectPanelDef *currentDef;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSControl *> *controlMap;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *lockedParams;
+
 @end
 
-@implementation XLEffectPanelView {
-    NSScrollView *_scrollView;
-    NSStackView *_mainStack;
-    NSString *_currentEffectName;
-    const XLEffectPanelDef *_currentDef;
-    NSMutableDictionary<NSString *, NSControl *> *_controlMap;  // key -> control
-    NSMutableDictionary<NSString *, NSNumber *> *_lockedParams; // key -> BOOL
-}
+@implementation XLEffectPanelView
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
@@ -266,11 +267,19 @@ static void DecodeTag(NSInteger tag, NSInteger *paramIndex, XLControlType *type)
 - (void)clearPanel {
     _currentEffectName = nil;
     _currentDef = NULL;
-    [_controlMap removeAllObjects];
 
-    for (NSView *view in [_mainStack.arrangedSubviews copy]) {
-        [_mainStack removeArrangedSubview:view];
-        [view removeFromSuperview];
+    // Re-initialize control map if nil (may happen if view wasn't properly set up)
+    if (!_controlMap) {
+        _controlMap = [NSMutableDictionary dictionary];
+    } else {
+        [_controlMap removeAllObjects];
+    }
+
+    if (_mainStack) {
+        for (NSView *view in [_mainStack.arrangedSubviews copy]) {
+            [_mainStack removeArrangedSubview:view];
+            [view removeFromSuperview];
+        }
     }
 
     [self showPlaceholder:@"Select an effect"];
