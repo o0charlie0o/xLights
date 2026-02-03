@@ -618,6 +618,8 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
 
     xLightsApp::__frame = this;
 
+    _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(this);
+
     ValueCurve::SetSequenceElements(&_sequenceElements);
 
     _exiting = false;

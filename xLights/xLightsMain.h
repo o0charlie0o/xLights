@@ -90,6 +90,7 @@
 
 #include "ai/aiType.h"
 #include "ai/ServiceManager.h"
+#include "engine/SequenceEngine.h"
 
 class wxDebugReport;
 
@@ -1563,6 +1564,7 @@ public:
 
     void EnableSequenceControls(bool enable);
     SequenceElements& GetSequenceElements() { return _sequenceElements; }
+    xlEngine::SequenceEngine* GetSequenceEngine() { return _sequenceEngine.get(); }
     TimingElement* AddTimingElement(const std::string& name, const std::string &subType = "");
     void DeleteTimingElement(const std::string& name);
     void RenameTimingElement(const std::string& old_name, const std::string& new_name);
@@ -1792,6 +1794,7 @@ private:
     wxXmlNode* mCurrentPerpective = nullptr;
     std::map<wxString, bool> savedPaneShown;
     SequenceElements _sequenceElements;
+    std::unique_ptr<xlEngine::SequenceEngine> _sequenceEngine;
     MainSequencer* mainSequencer = nullptr;
     ModelPreview * _modelPreviewPanel = nullptr;
     HousePreviewPanel *_housePreviewPanel = nullptr;
