@@ -1,10 +1,11 @@
 #import "XLAppDelegate.h"
 #import "XLDocumentController.h"
+#import "XLToolbarExtensions.h"
+#import "preferences/XLPreferencesWindowController.h"
 
 @interface XLAppDelegate ()
 
 @property (nonatomic, strong) XLDocumentController *documentController;
-@property (nonatomic, strong) NSWindowController *preferencesWindowController;
 
 @end
 
@@ -20,7 +21,8 @@
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
-    // Additional setup after launch
+    // Build the full menu bar
+    [XLMenuBuilder buildMenuBarForApplication:[NSApplication sharedApplication] target:self];
 
     // Check for last open show folder in user defaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -68,18 +70,7 @@
 #pragma mark - Actions
 
 - (IBAction)showPreferences:(id)sender {
-    if (!_preferencesWindowController) {
-        // TODO: Create preferences window controller (Phase 1D)
-        // For now, show a placeholder alert
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"Preferences";
-        alert.informativeText = @"Preferences window not yet implemented.\n\nThis will be added in Phase 1D.";
-        alert.alertStyle = NSAlertStyleInformational;
-        [alert runModal];
-        return;
-    }
-
-    [_preferencesWindowController showWindow:sender];
+    [[XLPreferencesWindowController sharedController] showWindow:sender];
 }
 
 - (IBAction)openRecentShow:(id)sender {

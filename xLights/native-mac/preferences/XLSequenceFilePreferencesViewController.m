@@ -14,7 +14,7 @@
 @property (nonatomic, strong) NSPopUpButton *renderCachePopup;
 @property (nonatomic, strong) NSPopUpButton *autoSaveIntervalPopup;
 @property (nonatomic, strong) NSPopUpButton *fseqVersionPopup;
-@property (nonatomic, strong) NSButton *renderCacheUseSh owFolderCheckbox;
+@property (nonatomic, strong) NSButton *renderCacheUseShowFolderCheckbox;
 @property (nonatomic, strong) NSPathControl *renderCachePathControl;
 @property (nonatomic, strong) NSPopUpButton *maxRenderCacheSizePopup;
 @property (nonatomic, strong) NSButton *fseqUseShowFolderCheckbox;

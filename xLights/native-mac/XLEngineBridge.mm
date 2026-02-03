@@ -12,11 +12,11 @@
 
 // Include C++ engine headers
 // During transition period, these will delegate to the existing xLightsFrame
-#include "engine/SequenceEngine.h"
-#include "engine/ModelEngine.h"
-#include "engine/OutputEngine.h"
-#include "engine/RenderEngine.h"
-#include "engine/EffectEngine.h"
+#include "../engine/SequenceEngine.h"
+#include "../engine/ModelEngine.h"
+#include "../engine/OutputEngine.h"
+#include "../engine/RenderEngine.h"
+#include "../engine/EffectEngine.h"
 
 #include <string>
 #include <vector>

@@ -24,6 +24,8 @@
 #include <mutex>
 #include <cstdint>
 
+#include "EngineTypes.h"
+
 class ModelManager;
 class Model;
 
@@ -102,13 +104,6 @@ public:
     virtual void onModelRenamed(const ModelChangeEvent& event) {}
     virtual void onModelPropertyChanged(const ModelChangeEvent& event) {}
     virtual void onError(const std::string& message) {}
-};
-
-// Result type for operations that can fail.
-// Shared pattern across all engine APIs.
-struct OperationResult {
-    bool success = false;
-    std::string message;
 };
 
 // ModelEngine provides a pure C++ API for model management.

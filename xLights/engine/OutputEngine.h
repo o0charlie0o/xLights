@@ -23,6 +23,8 @@
 #include <memory>
 #include <atomic>
 
+#include "EngineTypes.h"
+
 class OutputManager;
 class Controller;
 
@@ -205,12 +207,6 @@ using DiscoveryCallback = std::function<void(bool success, const std::vector<Dis
 using UploadCallback = std::function<void(bool success, const std::string& message)>;
 using PingCallback = std::function<void(const std::string& controllerId, PingState state)>;
 using ErrorCallback = std::function<void(const std::string& message)>;
-
-// Result type for operations that can fail
-struct OperationResult {
-    bool success = false;
-    std::string message;
-};
 
 class OutputEngine {
 public:
