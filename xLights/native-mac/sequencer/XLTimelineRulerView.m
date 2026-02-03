@@ -19,12 +19,12 @@ static const CGFloat kDefaultZoomLevel = 0.1; // pixels per ms
 static const CGFloat kMinZoomLevel = 0.001;
 static const CGFloat kMaxZoomLevel = 10.0;
 
-// Background and drawing colors
-static NSColor *_backgroundColor = nil;
-static NSColor *_tickColor = nil;
-static NSColor *_labelColor = nil;
-static NSColor *_playheadColor = nil;
-static NSColor *_selectionColor = nil;
+// Background and drawing colors (s prefix avoids shadowing private NSView ivars)
+static NSColor *sRulerBackgroundColor = nil;
+static NSColor *sRulerTickColor = nil;
+static NSColor *sRulerLabelColor = nil;
+static NSColor *sRulerPlayheadColor = nil;
+static NSColor *sRulerSelectionColor = nil;
 
 @interface XLTimelineRulerView ()
 
@@ -41,11 +41,11 @@ static NSColor *_selectionColor = nil;
 
 + (void)initialize {
     if (self == [XLTimelineRulerView class]) {
-        _backgroundColor = [NSColor colorWithRed:0.118 green:0.118 blue:0.118 alpha:1.0]; // #1E1E1E
-        _tickColor = [NSColor colorWithWhite:0.55 alpha:1.0];
-        _labelColor = [NSColor whiteColor];
-        _playheadColor = [NSColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:1.0];
-        _selectionColor = [NSColor colorWithRed:0.4 green:0.4 blue:0.6 alpha:0.3];
+        sRulerBackgroundColor = [NSColor colorWithRed:0.118 green:0.118 blue:0.118 alpha:1.0]; // #1E1E1E
+        sRulerTickColor = [NSColor colorWithWhite:0.55 alpha:1.0];
+        sRulerLabelColor = [NSColor whiteColor];
+        sRulerPlayheadColor = [NSColor colorWithRed:1.0 green:0.2 blue:0.2 alpha:1.0];
+        sRulerSelectionColor = [NSColor colorWithRed:0.4 green:0.4 blue:0.6 alpha:0.3];
     }
 }
 
@@ -137,8 +137,8 @@ static NSColor *_selectionColor = nil;
     CGFloat midX = CGRectGetMidX(bounds);
     CGFloat height = CGRectGetHeight(bounds);
 
-    CGContextSetFillColorWithColor(ctx, _playheadColor.CGColor);
-    CGContextSetStrokeColorWithColor(ctx, _playheadColor.CGColor);
+    CGContextSetFillColorWithColor(ctx, sRulerPlayheadColor.CGColor);
+    CGContextSetStrokeColorWithColor(ctx, sRulerPlayheadColor.CGColor);
 
     // Triangle at top
     CGFloat triSize = kPlayheadTriangleSize;
@@ -170,7 +170,7 @@ static NSColor *_selectionColor = nil;
     CGFloat height = CGRectGetHeight(bounds);
 
     // Background
-    CGContextSetFillColorWithColor(ctx, _backgroundColor.CGColor);
+    CGContextSetFillColorWithColor(ctx, sRulerBackgroundColor.CGColor);
     CGContextFillRect(ctx, bounds);
 
     // Bottom border
@@ -196,7 +196,7 @@ static NSColor *_selectionColor = nil;
     if (endTime > _sequenceDuration) endTime = _sequenceDuration;
 
     // Draw minor ticks
-    CGContextSetStrokeColorWithColor(ctx, [_tickColor colorWithAlphaComponent:0.4].CGColor);
+    CGContextSetStrokeColorWithColor(ctx, [sRulerTickColor colorWithAlphaComponent:0.4].CGColor);
     CGContextSetLineWidth(ctx, 0.5);
 
     NSTimeInterval minorStart = floor(startTime / minorInterval) * minorInterval;
@@ -216,12 +216,12 @@ static NSColor *_selectionColor = nil;
     }
 
     // Draw major ticks and labels
-    CGContextSetStrokeColorWithColor(ctx, _tickColor.CGColor);
+    CGContextSetStrokeColorWithColor(ctx, sRulerTickColor.CGColor);
     CGContextSetLineWidth(ctx, 1.0);
 
     NSDictionary *textAttrs = @{
         NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:9.0 weight:NSFontWeightRegular],
-        NSForegroundColorAttributeName: _labelColor,
+        NSForegroundColorAttributeName: sRulerLabelColor,
     };
 
     NSTimeInterval majorStart = floor(startTime / majorInterval) * majorInterval;
