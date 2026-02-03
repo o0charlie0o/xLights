@@ -13,7 +13,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class XLEngineBridge;
-@class XLTimelineRulerView;
+@class XLEffectsGridView;
 
 /// View controller for the Sequencer tab.
 ///
@@ -26,7 +26,7 @@
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 
-/// The timeline ruler at the top of the sequencer.
-@property (nonatomic, strong, readonly) XLTimelineRulerView *timelineRuler;
+/// The Metal-backed effects grid (the core timeline view).
+@property (nonatomic, strong, readonly) XLEffectsGridView *effectsGridView;
 
 @end
