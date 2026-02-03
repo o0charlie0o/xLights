@@ -150,11 +150,16 @@ static NSString * const kColumnController = @"ControllerColumn";
 }
 
 - (void)setupConstraints:(NSView *)container {
+    // Trailing constraint at lower priority to avoid conflict during initial
+    // NSSplitView layout when the container may momentarily have width 0
+    NSLayoutConstraint *searchTrailing = [_searchField.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-4];
+    searchTrailing.priority = NSLayoutPriorityDefaultHigh;
+
     [NSLayoutConstraint activateConstraints:@[
         // Search field
         [_searchField.topAnchor constraintEqualToAnchor:container.topAnchor constant:4],
         [_searchField.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:4],
-        [_searchField.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-4],
+        searchTrailing,
         [_searchField.heightAnchor constraintEqualToConstant:22],
 
         // Scroll view

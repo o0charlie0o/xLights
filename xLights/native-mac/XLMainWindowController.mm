@@ -239,8 +239,11 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
         _tabSelector.action = @selector(tabSelectorChanged:);
 
         item.view = _tabSelector;
-        item.minSize = NSMakeSize(250, 28);
-        item.maxSize = NSMakeSize(250, 28);
+
+        // Use constraints instead of deprecated minSize/maxSize
+        _tabSelector.translatesAutoresizingMaskIntoConstraints = NO;
+        [_tabSelector.widthAnchor constraintEqualToConstant:250].active = YES;
+        [_tabSelector.heightAnchor constraintEqualToConstant:28].active = YES;
     }
     else if ([itemIdentifier isEqualToString:@"Play"]) {
         item.label = @"Play";
