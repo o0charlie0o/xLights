@@ -33,6 +33,7 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
 @property (nonatomic, strong) NSSplitViewController *mainSplitController;
 @property (nonatomic, strong) NSSplitViewController *verticalSplitController;
+@property (nonatomic, strong) NSViewController *contentWrapperController;
 @property (nonatomic, strong) NSSegmentedControl *tabSelector;
 @property (nonatomic, strong) NSView *contentContainer;
 @property (nonatomic, strong) NSView *bottomPanelContainer;
@@ -118,9 +119,12 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
     // Content container (holds tab views)
     _contentContainer = [[NSView alloc] initWithFrame:NSZeroRect];
-    NSSplitViewItem *contentItem = [NSSplitViewItem splitViewItemWithViewController:
-                                    [self wrapViewInController:_contentContainer]];
+    _contentWrapperController = [self wrapViewInController:_contentContainer];
+    _contentWrapperController.preferredContentSize = NSMakeSize(800, 400);
+    NSSplitViewItem *contentItem = [NSSplitViewItem splitViewItemWithViewController:_contentWrapperController];
     contentItem.canCollapse = NO;
+    contentItem.minimumThickness = 200.0;
+    contentItem.holdingPriority = NSLayoutPriorityDefaultHigh;
     [_verticalSplitController addSplitViewItem:contentItem];
 
     // Bottom panel container
@@ -137,6 +141,7 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     // Add vertical split to main split
     NSSplitViewItem *leftItem = [NSSplitViewItem splitViewItemWithViewController:_verticalSplitController];
     leftItem.canCollapse = NO;
+    leftItem.holdingPriority = NSLayoutPriorityDefaultHigh;
     [_mainSplitController addSplitViewItem:leftItem];
 
     // Inspector (right side)
@@ -154,6 +159,13 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 }
 
 - (void)setupTabViews {
+    // Add tab VCs as children of the content VC so they stay in the
+    // view controller containment chain (prevents zombie crashes during
+    // fullscreen transitions and appearance changes).
+    [_contentWrapperController addChildViewController:_setupViewController];
+    [_contentWrapperController addChildViewController:_layoutViewController];
+    [_contentWrapperController addChildViewController:_sequencerViewController];
+
     [self addViewToContainer:_setupViewController.view];
     [self addViewToContainer:_layoutViewController.view];
     [self addViewToContainer:_sequencerViewController.view];
@@ -372,10 +384,13 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 - (void)restoreWindowState {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-    // Restore window frame
+    // Restore window frame (enforce minimum size since setFrame: bypasses minSize)
     NSString *frameString = [defaults stringForKey:kXLWindowFrameKey];
     if (frameString) {
         NSRect frame = NSRectFromString(frameString);
+        NSSize minSize = self.window.minSize;
+        if (frame.size.width < minSize.width) frame.size.width = minSize.width;
+        if (frame.size.height < minSize.height) frame.size.height = minSize.height;
         [self.window setFrame:frame display:YES];
     }
 

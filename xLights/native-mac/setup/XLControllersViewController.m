@@ -91,6 +91,11 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
     return self;
 }
 
+- (void)dealloc {
+    _tableView.dataSource = nil;
+    _tableView.delegate = nil;
+}
+
 - (void)loadView {
     NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 700, 400)];
     container.wantsLayer = YES;
@@ -186,11 +191,11 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 - (void)setupFooter {
     _footerView = [[NSView alloc] initWithFrame:NSZeroRect];
     _footerView.wantsLayer = YES;
-    _footerView.layer.backgroundColor = [[NSColor windowBackgroundColor] CGColor];
+    _footerView.layer.backgroundColor = CGColorCreateGenericGray(0.18, 1.0);
 
     NSView *separator = [[NSView alloc] initWithFrame:NSZeroRect];
     separator.wantsLayer = YES;
-    separator.layer.backgroundColor = [[NSColor separatorColor] CGColor];
+    separator.layer.backgroundColor = CGColorCreateGenericGray(0.3, 1.0);
     separator.translatesAutoresizingMaskIntoConstraints = NO;
     [_footerView addSubview:separator];
 
@@ -340,13 +345,13 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 #pragma mark - NSTableViewDataSource
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    return _controllers.count;
+    return _controllers ? (NSInteger)_controllers.count : 0;
 }
 
 - (id)tableView:(NSTableView *)tableView
     objectValueForTableColumn:(NSTableColumn *)tableColumn
     row:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_controllers.count) return nil;
+    if (!_controllers || row < 0 || row >= (NSInteger)_controllers.count) return nil;
     return _controllers[row][tableColumn.identifier];
 }
 
@@ -355,7 +360,7 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 - (NSView *)tableView:(NSTableView *)tableView
     viewForTableColumn:(NSTableColumn *)tableColumn
                    row:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_controllers.count) return nil;
+    if (!_controllers || row < 0 || row >= (NSInteger)_controllers.count) return nil;
 
     NSString *identifier = tableColumn.identifier;
     NSDictionary *controller = _controllers[row];
