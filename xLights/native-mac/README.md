@@ -4,7 +4,14 @@ This directory contains the native macOS UI implementation for xLights,
 separate from the existing wxWidgets codebase. Both UIs can coexist
 during the transition period.
 
-See `IMPLEMENTATION_GUIDE.md` in the repo root for the full rebuild plan.
+## Documentation
+
+| Document | Audience | Description |
+|----------|----------|-------------|
+| [USER_GUIDE.md](USER_GUIDE.md) | End Users | How to enable and use the native UI |
+| [ENGINE_API.md](ENGINE_API.md) | Developers | Complete XLEngineBridge API reference |
+| [dialogs/README.md](dialogs/README.md) | Developers | Dialog migration patterns and wxWidgets replacement guide |
+| [IMPLEMENTATION_GUIDE.md](../IMPLEMENTATION_GUIDE.md) | Developers | Full rebuild plan and architecture |
 
 ## File Conventions
 
