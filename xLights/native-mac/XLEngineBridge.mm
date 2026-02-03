@@ -46,6 +46,9 @@
     // The EffectEngine instance - wraps EffectManager/SequenceElements
     std::unique_ptr<xlEngine::EffectEngine> _effectEngine;
 
+    // The RenderEngine instance - wraps rendering pipeline
+    std::unique_ptr<xlEngine::RenderEngine> _renderEngine;
+
     // Track whether we've initialized the engine
     BOOL _engineInitialized;
 }
@@ -77,8 +80,10 @@
         _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(frame);
         _modelEngine = std::make_unique<xlEngine::ModelEngine>(frame->AllModels);
         _outputEngine = std::make_unique<xlEngine::OutputEngine>();
-        _outputEngine->initialize(frame->GetOutputManager());
+        // Pass frame to OutputEngine so it can properly toggle output checkbox state
+        _outputEngine->initialize(frame->GetOutputManager(), frame);
         _effectEngine = std::make_unique<xlEngine::EffectEngine>(frame);
+        _renderEngine = std::make_unique<xlEngine::RenderEngine>(frame);
         _engineInitialized = YES;
         NSLog(@"XLEngineBridge: All engines created successfully");
     }
@@ -297,24 +302,36 @@
 #pragma mark - Rendering
 
 - (void)renderAll {
-    // TODO: Call into RenderEngine
-    // _renderEngine->renderAll(nullptr);
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        NSLog(@"XLEngineBridge: Cannot render - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] renderAll");
+    _renderEngine->renderAll(nullptr);
+    NSLog(@"XLEngineBridge: renderAll()");
 }
 
 - (void)renderRange:(NSInteger)startMS endMS:(NSInteger)endMS {
-    // TODO: Call into RenderEngine
-    // _renderEngine->renderRange((int)startMS, (int)endMS, false, nullptr);
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        NSLog(@"XLEngineBridge: Cannot render - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] renderRange: %ld - %ld ms", (long)startMS, (long)endMS);
+    _renderEngine->renderRange((int)startMS, (int)endMS, false, nullptr);
+    NSLog(@"XLEngineBridge: renderRange(%ld - %ld ms)", (long)startMS, (long)endMS);
 }
 
 - (void)abortRender {
-    // TODO: Call into RenderEngine
-    // _renderEngine->abortRender();
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        NSLog(@"XLEngineBridge: Cannot abort render - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] abortRender");
+    bool aborted = _renderEngine->abortRender();
+    NSLog(@"XLEngineBridge: abortRender() = %s", aborted ? "YES" : "NO");
 }
 
 #pragma mark - Model Operations
@@ -852,15 +869,70 @@
         properties:(NSDictionary *)properties {
     if (!controllerName || !properties) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot update port - engine not available");
+        return NO;
+    }
+
     std::string stdName = [controllerName UTF8String];
 
-    // TODO: Call into OutputEngine
-    // xlEngine::PortConfig config = _outputEngine->getPortConfig(stdName, (int)portNumber);
-    // Apply properties to config...
-    // return _outputEngine->setPortConfig(stdName, (int)portNumber, config).success;
+    // Get current port configuration
+    std::vector<xlEngine::PortConfig> ports = _outputEngine->getControllerPorts(stdName);
+    if (portNumber < 1 || portNumber > (NSInteger)ports.size()) {
+        NSLog(@"XLEngineBridge: Port %ld not found on controller %@", (long)portNumber, controllerName);
+        return NO;
+    }
 
-    NSLog(@"[Stub] updatePort %@ port %ld: %@", controllerName, (long)portNumber, properties);
-    return YES; // stub
+    // Find the port config (port numbers are 1-indexed)
+    xlEngine::PortConfig config = ports[portNumber - 1];
+
+    // Apply properties from the dictionary
+    if (properties[@"protocol"]) {
+        config.protocol = [properties[@"protocol"] UTF8String];
+    }
+    if (properties[@"startChannel"]) {
+        config.startChannel = [properties[@"startChannel"] intValue];
+    }
+    if (properties[@"channelCount"] || properties[@"channels"]) {
+        NSNumber *channels = properties[@"channelCount"] ?: properties[@"channels"];
+        config.channels = [channels intValue];
+    }
+    if (properties[@"brightness"]) {
+        config.brightness = [properties[@"brightness"] intValue];
+    }
+    if (properties[@"gamma"]) {
+        config.gamma = [properties[@"gamma"] floatValue];
+    }
+    if (properties[@"nullPixelsStart"] || properties[@"nullPixels"]) {
+        NSNumber *nullPx = properties[@"nullPixelsStart"] ?: properties[@"nullPixels"];
+        config.nullPixels = [nullPx intValue];
+    }
+    if (properties[@"nullPixelsEnd"]) {
+        config.endNullPixels = [properties[@"nullPixelsEnd"] intValue];
+    }
+    if (properties[@"colorOrder"]) {
+        config.colorOrder = [properties[@"colorOrder"] UTF8String];
+    }
+    if (properties[@"groupCount"]) {
+        config.groupCount = [properties[@"groupCount"] intValue];
+    }
+    if (properties[@"reverse"]) {
+        config.reverse = [properties[@"reverse"] boolValue];
+    }
+    if (properties[@"zigZag"]) {
+        config.zigZag = [properties[@"zigZag"] intValue];
+    }
+    if (properties[@"smartRemoteType"]) {
+        config.smartRemoteType = [properties[@"smartRemoteType"] UTF8String];
+    }
+
+    xlEngine::OperationResult result = _outputEngine->setPortConfig(stdName, (int)portNumber, config);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to update port %ld on %@: %s",
+              (long)portNumber, controllerName, result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 - (BOOL)assignModel:(NSString *)modelName
@@ -868,26 +940,62 @@
                port:(NSInteger)portNumber {
     if (!modelName || !controllerName) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot assign model - engine not available");
+        return NO;
+    }
+
     std::string stdModel = [modelName UTF8String];
     std::string stdController = [controllerName UTF8String];
 
-    // TODO: Call into OutputEngine/ModelEngine
-    // This would update the model's controller assignment and port
+    // Update the model's Controller property to assign it to a controller:port
+    // Format: "ControllerName:port" (e.g. "Falcon F48:1")
+    std::string controllerSpec = stdController + ":" + std::to_string(portNumber);
+    xlEngine::OperationResult result = _modelEngine->updateModelProperty(stdModel, "Controller", controllerSpec);
 
-    NSLog(@"[Stub] assignModel %@ to %@ port %ld", modelName, controllerName, (long)portNumber);
-    return YES; // stub
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to assign model %@ to %@:%ld: %s",
+              modelName, controllerName, (long)portNumber, result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 - (BOOL)removeModelFromController:(NSString *)controllerName
                              port:(NSInteger)portNumber {
     if (!controllerName) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_modelEngine || !_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot remove model from controller - engine not available");
+        return NO;
+    }
+
     std::string stdController = [controllerName UTF8String];
 
-    // TODO: Call into OutputEngine/ModelEngine
+    // To remove a model from a controller port, we need to find which model
+    // is assigned to this controller:port and clear its Controller property.
+    // Find the model assigned to this controller and port
+    std::string controllerSpec = stdController + ":" + std::to_string(portNumber);
 
-    NSLog(@"[Stub] removeModel from %@ port %ld", controllerName, (long)portNumber);
-    return YES; // stub
+    // Search all models to find one assigned to this controller:port
+    std::vector<std::string> modelNames = _modelEngine->getModelNames();
+    for (const auto& name : modelNames) {
+        std::string assignedController = _modelEngine->getModelProperty(name, "Controller", "");
+        if (assignedController == controllerSpec) {
+            // Clear the model's controller assignment
+            xlEngine::OperationResult result = _modelEngine->updateModelProperty(name, "Controller", "");
+            if (!result.success) {
+                NSLog(@"XLEngineBridge: Failed to remove model %s from %@:%ld: %s",
+                      name.c_str(), controllerName, (long)portNumber, result.message.c_str());
+                return NO;
+            }
+            return YES;
+        }
+    }
+
+    // No model found on that port - nothing to remove
+    return YES;
 }
 
 - (NSDictionary *)getControllerCapabilities:(NSString *)controllerName {
@@ -902,6 +1010,243 @@
     std::string stdName = [controllerName UTF8String];
     xlEngine::ControllerCapabilities caps = _outputEngine->getControllerCapabilities(stdName);
     return [self dictFromControllerCapabilities:caps];
+}
+
+- (NSInteger)getTotalChannels {
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        return 0;
+    }
+
+    return (NSInteger)_outputEngine->getTotalChannels();
+}
+
+- (BOOL)isOutputDirty {
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        return NO;
+    }
+
+    return _outputEngine->isDirty() ? YES : NO;
+}
+
+- (BOOL)saveOutputConfiguration {
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot save output configuration - engine not available");
+        return NO;
+    }
+
+    xlEngine::OperationResult result = _outputEngine->save();
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to save output configuration: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+#pragma mark - Controller Discovery
+
+- (void)discoverControllers:(void (^)(BOOL success, NSArray<NSDictionary *> *controllers))completion {
+    if (!completion) return;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot discover controllers - engine not available");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(NO, @[]);
+        });
+        return;
+    }
+
+    // Capture self for the callback block
+    __weak typeof(self) weakSelf = self;
+
+    _outputEngine->discoverControllers([weakSelf, completion](bool success, const std::vector<xlEngine::DiscoveredController>& controllers) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(NO, @[]);
+            });
+            return;
+        }
+
+        NSMutableArray *result = [NSMutableArray arrayWithCapacity:controllers.size()];
+        for (const auto &controller : controllers) {
+            [result addObject:[strongSelf dictFromDiscoveredController:controller]];
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(success ? YES : NO, result);
+        });
+    });
+}
+
+- (BOOL)addDiscoveredController:(NSDictionary *)discoveredInfo {
+    if (!discoveredInfo) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot add discovered controller - engine not available");
+        return NO;
+    }
+
+    // Convert NSDictionary back to DiscoveredController struct
+    xlEngine::DiscoveredController discovered;
+    discovered.ip = discoveredInfo[@"ip"] ? [discoveredInfo[@"ip"] UTF8String] : "";
+    discovered.hostname = discoveredInfo[@"hostname"] ? [discoveredInfo[@"hostname"] UTF8String] : "";
+    discovered.vendor = discoveredInfo[@"vendor"] ? [discoveredInfo[@"vendor"] UTF8String] : "";
+    discovered.model = discoveredInfo[@"model"] ? [discoveredInfo[@"model"] UTF8String] : "";
+    discovered.variant = discoveredInfo[@"variant"] ? [discoveredInfo[@"variant"] UTF8String] : "";
+    discovered.description = discoveredInfo[@"description"] ? [discoveredInfo[@"description"] UTF8String] : "";
+    discovered.version = discoveredInfo[@"version"] ? [discoveredInfo[@"version"] UTF8String] : "";
+    discovered.mode = discoveredInfo[@"mode"] ? [discoveredInfo[@"mode"] UTF8String] : "";
+    discovered.platform = discoveredInfo[@"platform"] ? [discoveredInfo[@"platform"] UTF8String] : "";
+    discovered.platformModel = discoveredInfo[@"platformModel"] ? [discoveredInfo[@"platformModel"] UTF8String] : "";
+    discovered.uuid = discoveredInfo[@"uuid"] ? [discoveredInfo[@"uuid"] UTF8String] : "";
+    discovered.proxy = discoveredInfo[@"proxy"] ? [discoveredInfo[@"proxy"] UTF8String] : "";
+    discovered.majorVersion = discoveredInfo[@"majorVersion"] ? [discoveredInfo[@"majorVersion"] intValue] : 0;
+    discovered.minorVersion = discoveredInfo[@"minorVersion"] ? [discoveredInfo[@"minorVersion"] intValue] : 0;
+    discovered.patchVersion = discoveredInfo[@"patchVersion"] ? [discoveredInfo[@"patchVersion"] intValue] : 0;
+
+    xlEngine::OperationResult result = _outputEngine->addDiscoveredController(discovered);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to add discovered controller: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (void)testController:(NSString *)controllerName completion:(void (^)(NSString *pingState))completion {
+    if (!controllerName || !completion) return;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot test controller - engine not available");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(@"Unknown");
+        });
+        return;
+    }
+
+    std::string stdName = [controllerName UTF8String];
+
+    _outputEngine->testController(stdName, [completion](const std::string& controllerId, xlEngine::PingState state) {
+        NSString *stateStr = @"Unknown";
+        switch (state) {
+            case xlEngine::PingState::OK: stateStr = @"OK"; break;
+            case xlEngine::PingState::WebOK: stateStr = @"WebOK"; break;
+            case xlEngine::PingState::Open: stateStr = @"Open"; break;
+            case xlEngine::PingState::Opened: stateStr = @"Opened"; break;
+            case xlEngine::PingState::AllFailed: stateStr = @"AllFailed"; break;
+            case xlEngine::PingState::Unavailable: stateStr = @"Unavailable"; break;
+            default: break;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(stateStr);
+        });
+    });
+}
+
+- (void)testAllControllers:(void (^)(NSString *controllerName, NSString *pingState))completion {
+    if (!completion) return;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot test controllers - engine not available");
+        return;
+    }
+
+    _outputEngine->testAllControllers([completion](const std::string& controllerId, xlEngine::PingState state) {
+        NSString *nameStr = [NSString stringWithUTF8String:controllerId.c_str()];
+        NSString *stateStr = @"Unknown";
+        switch (state) {
+            case xlEngine::PingState::OK: stateStr = @"OK"; break;
+            case xlEngine::PingState::WebOK: stateStr = @"WebOK"; break;
+            case xlEngine::PingState::Open: stateStr = @"Open"; break;
+            case xlEngine::PingState::Opened: stateStr = @"Opened"; break;
+            case xlEngine::PingState::AllFailed: stateStr = @"AllFailed"; break;
+            case xlEngine::PingState::Unavailable: stateStr = @"Unavailable"; break;
+            default: break;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(nameStr, stateStr);
+        });
+    });
+}
+
+#pragma mark - Controller Upload
+
+- (void)uploadToController:(NSString *)controllerName
+                completion:(void (^)(BOOL success, NSString *message))completion {
+    if (!controllerName || !completion) return;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot upload to controller - engine not available");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(NO, @"Engine not available");
+        });
+        return;
+    }
+
+    std::string stdName = [controllerName UTF8String];
+
+    _outputEngine->uploadToController(stdName, [completion](bool success, const std::string& message) {
+        NSString *msgStr = [NSString stringWithUTF8String:message.c_str()];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(success ? YES : NO, msgStr);
+        });
+    });
+}
+
+- (void)uploadInputToController:(NSString *)controllerName
+                     completion:(void (^)(BOOL success, NSString *message))completion {
+    if (!controllerName || !completion) return;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot upload input to controller - engine not available");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(NO, @"Engine not available");
+        });
+        return;
+    }
+
+    std::string stdName = [controllerName UTF8String];
+
+    _outputEngine->uploadInputToController(stdName, [completion](bool success, const std::string& message) {
+        NSString *msgStr = [NSString stringWithUTF8String:message.c_str()];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(success ? YES : NO, msgStr);
+        });
+    });
+}
+
+- (void)uploadOutputToController:(NSString *)controllerName
+                      completion:(void (^)(BOOL success, NSString *message))completion {
+    if (!controllerName || !completion) return;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot upload output to controller - engine not available");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(NO, @"Engine not available");
+        });
+        return;
+    }
+
+    std::string stdName = [controllerName UTF8String];
+
+    _outputEngine->uploadOutputToController(stdName, [completion](bool success, const std::string& message) {
+        NSString *msgStr = [NSString stringWithUTF8String:message.c_str()];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(success ? YES : NO, msgStr);
+        });
+    });
 }
 
 #pragma mark - Sequence Elements (for Sequencer View)
@@ -1085,6 +1430,288 @@
         NSLog(@"XLEngineBridge: Failed to delete effect %ld", (long)effectId);
     }
     return result ? YES : NO;
+}
+
+- (NSDictionary *)getEffect:(NSInteger)effectId {
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return nil;
+    }
+
+    xlEngine::EffectInfo info;
+    if (!_effectEngine->getEffect((int)effectId, info)) {
+        return nil;
+    }
+
+    return [self dictFromEffectInfo:info];
+}
+
+- (NSDictionary *)getEffectTypeInfo:(NSString *)effectType {
+    if (!effectType) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return nil;
+    }
+
+    std::string stdType = [effectType UTF8String];
+    xlEngine::EffectTypeInfo info;
+    if (!_effectEngine->getEffectTypeInfo(stdType, info)) {
+        return nil;
+    }
+
+    return @{
+        @"id": @(info.id),
+        @"name": [NSString stringWithUTF8String:info.name.c_str()],
+        @"tooltip": [NSString stringWithUTF8String:info.tooltip.c_str()],
+        @"canBeRandom": @(info.canBeRandom),
+        @"canRenderPartialTime": @(info.canRenderPartialTime),
+        @"maxColorCount": @(info.maxColorCount),
+        @"appropriateOnNodes": @(info.appropriateOnNodes),
+    };
+}
+
+- (NSArray<NSDictionary *> *)getEffectParameters:(NSString *)effectType {
+    if (!effectType) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return @[];
+    }
+
+    std::string stdType = [effectType UTF8String];
+    std::vector<xlEngine::ParameterDefinition> params = _effectEngine->getEffectParameters(stdType);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:params.size()];
+    for (const auto &param : params) {
+        NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+        dict[@"key"] = [NSString stringWithUTF8String:param.key.c_str()];
+        dict[@"displayLabel"] = [NSString stringWithUTF8String:param.displayLabel.c_str()];
+        dict[@"type"] = @((int)param.type);
+        dict[@"group"] = [NSString stringWithUTF8String:param.group.c_str()];
+        dict[@"minValue"] = @(param.minValue);
+        dict[@"maxValue"] = @(param.maxValue);
+        dict[@"defaultValue"] = @(param.defaultValue);
+        dict[@"supportsValueCurve"] = @(param.supportsValueCurve);
+
+        NSMutableArray *choices = [NSMutableArray arrayWithCapacity:param.choices.size()];
+        for (const auto &choice : param.choices) {
+            [choices addObject:[NSString stringWithUTF8String:choice.c_str()]];
+        }
+        dict[@"choices"] = choices;
+
+        [result addObject:dict];
+    }
+    return result;
+}
+
+- (BOOL)setEffectParameter:(NSInteger)effectId key:(NSString *)key value:(NSString *)value {
+    if (!key || !value) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return NO;
+    }
+
+    std::string stdKey = [key UTF8String];
+    std::string stdValue = [value UTF8String];
+    return _effectEngine->setEffectParameter((int)effectId, stdKey, stdValue) ? YES : NO;
+}
+
+- (NSString *)getEffectParameter:(NSInteger)effectId key:(NSString *)key {
+    if (!key) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return nil;
+    }
+
+    std::string stdKey = [key UTF8String];
+    std::string value = _effectEngine->getEffectParameter((int)effectId, stdKey);
+    return [NSString stringWithUTF8String:value.c_str()];
+}
+
+- (BOOL)setEffectSettings:(NSInteger)effectId settings:(NSString *)settings {
+    if (!settings) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return NO;
+    }
+
+    std::string stdSettings = [settings UTF8String];
+    return _effectEngine->setEffectSettings((int)effectId, stdSettings) ? YES : NO;
+}
+
+- (NSString *)getEffectSettings:(NSInteger)effectId {
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return nil;
+    }
+
+    std::string settings = _effectEngine->getEffectSettings((int)effectId);
+    return [NSString stringWithUTF8String:settings.c_str()];
+}
+
+- (BOOL)setEffectPalette:(NSInteger)effectId palette:(NSString *)palette {
+    if (!palette) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return NO;
+    }
+
+    std::string stdPalette = [palette UTF8String];
+    return _effectEngine->setEffectPalette((int)effectId, stdPalette) ? YES : NO;
+}
+
+- (NSString *)getEffectPalette:(NSInteger)effectId {
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return nil;
+    }
+
+    std::string palette = _effectEngine->getEffectPalette((int)effectId);
+    return [NSString stringWithUTF8String:palette.c_str()];
+}
+
+- (BOOL)moveEffect:(NSInteger)effectId startTimeMS:(NSInteger)startMS endTimeMS:(NSInteger)endMS {
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return NO;
+    }
+
+    return _effectEngine->moveEffect((int)effectId, (int)startMS, (int)endMS) ? YES : NO;
+}
+
+- (NSArray<NSDictionary *> *)getEffectsForModel:(NSString *)modelName {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return @[];
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::vector<xlEngine::EffectInfo> effects = _effectEngine->getEffectsForModel(stdModel);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:effects.size()];
+    for (const auto &info : effects) {
+        [result addObject:[self dictFromEffectInfo:info]];
+    }
+    return result;
+}
+
+- (NSArray<NSDictionary *> *)getEffectsAtTime:(NSString *)modelName timeMS:(NSInteger)timeMS {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return @[];
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::vector<xlEngine::EffectInfo> effects = _effectEngine->getEffectsAtTime(stdModel, (int)timeMS);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:effects.size()];
+    for (const auto &info : effects) {
+        [result addObject:[self dictFromEffectInfo:info]];
+    }
+    return result;
+}
+
+- (NSArray<NSDictionary *> *)getEffectsForLayer:(NSString *)modelName layer:(NSInteger)layer {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return @[];
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::vector<xlEngine::EffectInfo> effects = _effectEngine->getEffectsForLayer(stdModel, (int)layer);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:effects.size()];
+    for (const auto &info : effects) {
+        [result addObject:[self dictFromEffectInfo:info]];
+    }
+    return result;
+}
+
+- (NSInteger)getLayerCount:(NSString *)modelName {
+    if (!modelName) return 0;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return 0;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    return _effectEngine->getLayerCount(stdModel);
+}
+
+- (NSInteger)addLayer:(NSString *)modelName {
+    if (!modelName) return -1;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return -1;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    return _effectEngine->addLayer(stdModel);
+}
+
+- (BOOL)removeLayer:(NSString *)modelName layer:(NSInteger)layer {
+    if (!modelName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return NO;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    return _effectEngine->removeLayer(stdModel, (int)layer) ? YES : NO;
+}
+
+- (BOOL)selectEffect:(NSInteger)effectId {
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return NO;
+    }
+
+    return _effectEngine->selectEffect((int)effectId) ? YES : NO;
+}
+
+- (void)deselectAllEffects {
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return;
+    }
+
+    _effectEngine->deselectAllEffects();
+}
+
+- (NSArray<NSNumber *> *)getSelectedEffectIds {
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return @[];
+    }
+
+    std::vector<int> ids = _effectEngine->getSelectedEffectIds();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:ids.size()];
+    for (int effectId : ids) {
+        [result addObject:@(effectId)];
+    }
+    return result;
+}
+
+- (BOOL)convertEffectType:(NSInteger)effectId newType:(NSString *)newType {
+    if (!newType) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return NO;
+    }
+
+    std::string stdType = [newType UTF8String];
+    return _effectEngine->convertEffectType((int)effectId, stdType) ? YES : NO;
 }
 
 #pragma mark - Utility Conversion Methods
@@ -1275,6 +1902,64 @@
         @"serialProtocols": serialProtocols,
         @"inputProtocols": inputProtocols,
     };
+}
+
+- (NSDictionary *)dictFromDiscoveredController:(const xlEngine::DiscoveredController &)discovered {
+    return @{
+        @"ip": [NSString stringWithUTF8String:discovered.ip.c_str()],
+        @"hostname": [NSString stringWithUTF8String:discovered.hostname.c_str()],
+        @"vendor": [NSString stringWithUTF8String:discovered.vendor.c_str()],
+        @"model": [NSString stringWithUTF8String:discovered.model.c_str()],
+        @"variant": [NSString stringWithUTF8String:discovered.variant.c_str()],
+        @"description": [NSString stringWithUTF8String:discovered.description.c_str()],
+        @"version": [NSString stringWithUTF8String:discovered.version.c_str()],
+        @"mode": [NSString stringWithUTF8String:discovered.mode.c_str()],
+        @"platform": [NSString stringWithUTF8String:discovered.platform.c_str()],
+        @"platformModel": [NSString stringWithUTF8String:discovered.platformModel.c_str()],
+        @"uuid": [NSString stringWithUTF8String:discovered.uuid.c_str()],
+        @"proxy": [NSString stringWithUTF8String:discovered.proxy.c_str()],
+        @"majorVersion": @(discovered.majorVersion),
+        @"minorVersion": @(discovered.minorVersion),
+        @"patchVersion": @(discovered.patchVersion),
+        @"alreadyConfigured": @(discovered.alreadyConfigured),
+        @"existingName": [NSString stringWithUTF8String:discovered.existingName.c_str()],
+    };
+}
+
+- (NSDictionary *)dictFromEffectInfo:(const xlEngine::EffectInfo &)info {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+
+    result[@"id"] = @(info.id);
+    result[@"effectType"] = [NSString stringWithUTF8String:info.effectType.c_str()];
+    result[@"effectIndex"] = @(info.effectIndex);
+    result[@"modelName"] = [NSString stringWithUTF8String:info.modelName.c_str()];
+    result[@"layerIndex"] = @(info.layerIndex);
+    result[@"startTimeMS"] = @(info.startTimeMS);
+    result[@"endTimeMS"] = @(info.endTimeMS);
+    result[@"isSelected"] = @(info.isSelected);
+    result[@"isProtected"] = @(info.isProtected);
+    result[@"isLocked"] = @(info.isLocked);
+    result[@"isRenderDisabled"] = @(info.isRenderDisabled);
+
+    // Convert settings map
+    NSMutableDictionary *settings = [NSMutableDictionary dictionaryWithCapacity:info.settings.size()];
+    for (const auto &pair : info.settings) {
+        NSString *key = [NSString stringWithUTF8String:pair.first.c_str()];
+        NSString *value = [NSString stringWithUTF8String:pair.second.c_str()];
+        settings[key] = value;
+    }
+    result[@"settings"] = settings;
+
+    // Convert palette map
+    NSMutableDictionary *palette = [NSMutableDictionary dictionaryWithCapacity:info.palette.size()];
+    for (const auto &pair : info.palette) {
+        NSString *key = [NSString stringWithUTF8String:pair.first.c_str()];
+        NSString *value = [NSString stringWithUTF8String:pair.second.c_str()];
+        palette[key] = value;
+    }
+    result[@"palette"] = palette;
+
+    return result;
 }
 
 @end
