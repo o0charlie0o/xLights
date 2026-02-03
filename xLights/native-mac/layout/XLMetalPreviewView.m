@@ -10,6 +10,7 @@
 
 #import "XLMetalPreviewView.h"
 #import "XLCameraController.h"
+#import "XLManipulationHandlesRenderer.h"
 #import <QuartzCore/CVDisplayLink.h>
 
 static const NSUInteger kDefaultMSAASampleCount = 4;
@@ -25,6 +26,11 @@ typedef struct {
 } XLGridVertex;
 
 #pragma mark - CVDisplayLink Callback
+
+// Forward declaration for the C callback
+@interface XLMetalPreviewView (DisplayLinkPrivate)
+- (void)displayLinkFired:(const CVTimeStamp *)outputTime;
+@end
 
 static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                                     const CVTimeStamp *inNow,
@@ -65,8 +71,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 @property (nonatomic, assign) NSPoint lastDragPoint;
 @property (nonatomic, assign) BOOL isDragging;
 @property (nonatomic, assign) BOOL isRightDragging;
+@property (nonatomic, assign) BOOL isManipulatingHandle;
+@property (nonatomic, assign) XLHandleType activeHandleType;
 
 @property (nonatomic, assign) CFAbsoluteTime lastFrameTime;
+
+@property (nonatomic, strong) XLManipulationHandlesRenderer *handles;
 
 @end
 
@@ -105,10 +115,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _lastFrameTime = CFAbsoluteTimeGetCurrent();
 
     _backgroundColor = [NSColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
+    _isManipulatingHandle = NO;
+    _activeHandleType = XLHandleTypeNone;
 
     [self setupDepthStencilState];
     [self buildGridPipeline];
     [self buildGridVertices];
+
+    // Initialize manipulation handles renderer
+    _handles = [[XLManipulationHandlesRenderer alloc] initWithDevice:_device];
+    _handles.is3D = _show3D;
 
     // Accept mouse events
     NSTrackingArea *trackingArea = [[NSTrackingArea alloc]
@@ -516,6 +532,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         // the engine's render pipeline. For now, the view provides the
         // drawable surface and camera state.
 
+        // Render manipulation handles
+        if (_handles && _selectedModelName) {
+            [_handles renderWithEncoder:encoder
+                         viewProjection:viewProjection
+                                   zoom:(float)_cameraController.distance
+                                  scale:1];
+        }
+
         [encoder endEncoding];
 
         [commandBuffer presentDrawable:drawable];
@@ -558,12 +582,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _contentDirty = YES;
 }
 
-- (void)setShow3D:(BOOL)show3D {
-    _show3D = show3D;
-    _cameraController.perspective = show3D;
-    _contentDirty = YES;
-}
-
 - (void)setShowGrid:(BOOL)showGrid {
     _showGrid = showGrid;
     _contentDirty = YES;
@@ -602,22 +620,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _isRightDragging = YES;
 }
 
-- (void)mouseDragged:(NSEvent *)event {
-    NSPoint current = [self convertPoint:event.locationInWindow fromView:nil];
-    float dx = (float)(current.x - _lastDragPoint.x);
-    float dy = (float)(current.y - _lastDragPoint.y);
-    _lastDragPoint = current;
-    _isDragging = YES;
-
-    // Left drag = orbit
-    [_cameraController orbitByDeltaX:dx deltaY:dy sensitivity:0.005f];
-    _contentDirty = YES;
-
-    if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
-        [_delegate previewView:self didChangeCamera:_cameraController];
-    }
-}
-
 - (void)rightMouseDragged:(NSEvent *)event {
     NSPoint current = [self convertPoint:event.locationInWindow fromView:nil];
     float dx = (float)(current.x - _lastDragPoint.x);
@@ -633,13 +635,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
-- (void)mouseUp:(NSEvent *)event {
-    if (!_isDragging && event.clickCount == 1) {
-        [self handleClickAtEvent:event];
-    }
-    _isDragging = NO;
-}
-
 - (void)rightMouseUp:(NSEvent *)event {
     _isRightDragging = NO;
 }
@@ -647,6 +642,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)mouseExited:(NSEvent *)event {
     _isDragging = NO;
     _isRightDragging = NO;
+    _isManipulatingHandle = NO;
 }
 
 - (void)scrollWheel:(NSEvent *)event {
@@ -703,6 +699,70 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             [_cameraController setTopDownView];
             _contentDirty = YES;
             break;
+
+        // Tool mode keys
+        case 0x11: // 't' key - translate mode
+            _handles.toolMode = XLToolModeTranslate;
+            _contentDirty = YES;
+            break;
+        case 0x01: // 's' key - scale mode
+            _handles.toolMode = XLToolModeScale;
+            _contentDirty = YES;
+            break;
+        case 0x0F: // 'r' key - rotate mode
+            _handles.toolMode = XLToolModeRotate;
+            _contentDirty = YES;
+            break;
+        case 0x31: // space key - toggle tool mode
+            [self toggleToolMode];
+            break;
+
+        // Axis constraint keys
+        case 0x07: // 'x' key - X axis
+            if (_handles.activeAxis == XLActiveAxisX) {
+                _handles.activeAxis = XLActiveAxisNone;
+            } else {
+                _handles.activeAxis = XLActiveAxisX;
+            }
+            _contentDirty = YES;
+            break;
+        case 0x10: // 'y' key - Y axis
+            if (_handles.activeAxis == XLActiveAxisY) {
+                _handles.activeAxis = XLActiveAxisNone;
+            } else {
+                _handles.activeAxis = XLActiveAxisY;
+            }
+            _contentDirty = YES;
+            break;
+        case 0x06: // 'z' key - Z axis
+            if (_handles.activeAxis == XLActiveAxisZ) {
+                _handles.activeAxis = XLActiveAxisNone;
+            } else {
+                _handles.activeAxis = XLActiveAxisZ;
+            }
+            _contentDirty = YES;
+            break;
+
+        // Delete key - clear selection
+        case 0x33: // delete/backspace
+        case 0x75: // forward delete
+            if (_selectedModelName) {
+                [self clearModelSelection];
+            }
+            break;
+
+        // Escape key - clear selection or cancel manipulation
+        case 0x35: // escape
+            if (_isManipulatingHandle) {
+                [_handles endDrag];
+                _isManipulatingHandle = NO;
+                _activeHandleType = XLHandleTypeNone;
+                _contentDirty = YES;
+            } else if (_selectedModelName) {
+                [self clearModelSelection];
+            }
+            break;
+
         default:
             [super keyDown:event];
             break;
@@ -750,9 +810,267 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         [self frameAllModels];
         return;
     }
+
     _lastDragPoint = [self convertPoint:event.locationInWindow fromView:nil];
     _isDragging = NO;
     _isRightDragging = NO;
+    _isManipulatingHandle = NO;
+
+    // Check if clicking on a manipulation handle
+    if (_selectedModelName && _handles) {
+        simd_float3 rayOrigin, rayDir;
+        [self rayFromScreenPoint:_lastDragPoint rayOrigin:&rayOrigin rayDirection:&rayDir];
+
+        XLHandleType hitHandle = [_handles hitTestWithRayOrigin:rayOrigin
+                                                   rayDirection:rayDir
+                                                           zoom:(float)_cameraController.distance
+                                                          scale:1];
+
+        if (hitHandle != XLHandleTypeNone) {
+            _isManipulatingHandle = YES;
+            _activeHandleType = hitHandle;
+            _handles.activeHandle = hitHandle;
+
+            // Calculate world point for drag start
+            simd_float3 worldPoint = [self worldPointFromScreenPoint:_lastDragPoint onPlane:_handles.modelTransform.position];
+            [_handles beginDragAtPoint:worldPoint forHandle:hitHandle];
+
+            if ([_delegate respondsToSelector:@selector(previewView:didBeginManipulatingModel:)]) {
+                [_delegate previewView:self didBeginManipulatingModel:_selectedModelName];
+            }
+
+            _contentDirty = YES;
+            return;
+        }
+    }
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    NSPoint current = [self convertPoint:event.locationInWindow fromView:nil];
+    float dx = (float)(current.x - _lastDragPoint.x);
+    float dy = (float)(current.y - _lastDragPoint.y);
+    _lastDragPoint = current;
+
+    if (_isManipulatingHandle && _handles) {
+        // Handle manipulation mode
+        simd_float3 worldPoint = [self worldPointFromScreenPoint:current onPlane:_handles.modelTransform.position];
+
+        BOOL shiftHeld = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+        BOOL optionHeld = (event.modifierFlags & NSEventModifierFlagOption) != 0;
+        BOOL cmdHeld = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+
+        simd_float3 delta = [_handles updateDragToPoint:worldPoint
+                                              shiftHeld:shiftHeld
+                                             optionHeld:optionHeld
+                                                cmdHeld:cmdHeld];
+
+        if ([_delegate respondsToSelector:@selector(previewView:didManipulateModelWithDelta:)]) {
+            [_delegate previewView:self didManipulateModelWithDelta:delta];
+        }
+
+        _contentDirty = YES;
+        return;
+    }
+
+    // Camera orbit mode
+    _isDragging = YES;
+    [_cameraController orbitByDeltaX:dx deltaY:dy sensitivity:0.005f];
+    _contentDirty = YES;
+
+    if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
+        [_delegate previewView:self didChangeCamera:_cameraController];
+    }
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    if (_isManipulatingHandle) {
+        [_handles endDrag];
+        _isManipulatingHandle = NO;
+        _activeHandleType = XLHandleTypeNone;
+
+        if ([_delegate respondsToSelector:@selector(previewView:didEndManipulatingModel:)]) {
+            [_delegate previewView:self didEndManipulatingModel:_selectedModelName];
+        }
+
+        _contentDirty = YES;
+        return;
+    }
+
+    if (!_isDragging && event.clickCount == 1) {
+        [self handleClickAtEvent:event];
+    }
+    _isDragging = NO;
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    // Update highlighted handle on mouse move
+    if (_selectedModelName && _handles) {
+        NSPoint localPoint = [self convertPoint:event.locationInWindow fromView:nil];
+        simd_float3 rayOrigin, rayDir;
+        [self rayFromScreenPoint:localPoint rayOrigin:&rayOrigin rayDirection:&rayDir];
+
+        XLHandleType hitHandle = [_handles hitTestWithRayOrigin:rayOrigin
+                                                   rayDirection:rayDir
+                                                           zoom:(float)_cameraController.distance
+                                                          scale:1];
+
+        if (hitHandle != _handles.highlightedHandle) {
+            _handles.highlightedHandle = hitHandle;
+            _contentDirty = YES;
+
+            // Update cursor
+            if (hitHandle != XLHandleTypeNone) {
+                NSString *cursorType = [_handles cursorForHandle:hitHandle rotation:_handles.modelTransform.rotation.z];
+                [self updateCursorForType:cursorType];
+            } else {
+                [[NSCursor arrowCursor] set];
+            }
+        }
+    }
+}
+
+#pragma mark - Ray Casting Utilities
+
+- (void)rayFromScreenPoint:(NSPoint)screenPoint rayOrigin:(simd_float3 *)rayOrigin rayDirection:(simd_float3 *)rayDirection {
+    CGSize drawableSize = _mlayer.drawableSize;
+    CGFloat scale = self.window.backingScaleFactor ?: 1.0;
+
+    float ndcX = (float)(screenPoint.x * scale / drawableSize.width) * 2.0f - 1.0f;
+    float ndcY = (float)(screenPoint.y * scale / drawableSize.height) * 2.0f - 1.0f;
+
+    float aspect = (float)drawableSize.width / (float)drawableSize.height;
+    simd_float4x4 viewMatrix = _cameraController.viewMatrix;
+    simd_float4x4 projMatrix = [_cameraController projectionMatrixForAspect:aspect];
+    simd_float4x4 viewProj = simd_mul(projMatrix, viewMatrix);
+    simd_float4x4 invViewProj = simd_inverse(viewProj);
+
+    simd_float4 nearPoint = simd_mul(invViewProj, (simd_float4){ndcX, ndcY, 0.0f, 1.0f});
+    simd_float4 farPoint = simd_mul(invViewProj, (simd_float4){ndcX, ndcY, 1.0f, 1.0f});
+
+    *rayOrigin = (simd_float3){nearPoint.x, nearPoint.y, nearPoint.z} / nearPoint.w;
+    simd_float3 rayEnd = (simd_float3){farPoint.x, farPoint.y, farPoint.z} / farPoint.w;
+    *rayDirection = simd_normalize(rayEnd - *rayOrigin);
+}
+
+- (simd_float3)worldPointFromScreenPoint:(NSPoint)screenPoint onPlane:(simd_float3)planePoint {
+    simd_float3 rayOrigin, rayDir;
+    [self rayFromScreenPoint:screenPoint rayOrigin:&rayOrigin rayDirection:&rayDir];
+
+    // Intersect ray with plane through planePoint, facing camera
+    simd_float3 planeNormal = simd_normalize(_cameraController.eyePosition - planePoint);
+
+    float denom = simd_dot(planeNormal, rayDir);
+    if (fabs(denom) < 0.0001f) {
+        return planePoint; // Ray parallel to plane
+    }
+
+    float t = simd_dot(planePoint - rayOrigin, planeNormal) / denom;
+    return rayOrigin + rayDir * t;
+}
+
+- (void)updateCursorForType:(NSString *)cursorType {
+    if ([cursorType isEqualToString:@"move"]) {
+        [[NSCursor openHandCursor] set];
+    } else if ([cursorType isEqualToString:@"rotate"]) {
+        [[NSCursor crosshairCursor] set];
+    } else if ([cursorType isEqualToString:@"resize-nwse"]) {
+        [[NSCursor resizeUpDownCursor] set]; // Approximation
+    } else if ([cursorType isEqualToString:@"resize-nesw"]) {
+        [[NSCursor resizeLeftRightCursor] set]; // Approximation
+    } else if ([cursorType isEqualToString:@"resize-ew"]) {
+        [[NSCursor resizeLeftRightCursor] set];
+    } else if ([cursorType isEqualToString:@"resize-ns"]) {
+        [[NSCursor resizeUpDownCursor] set];
+    } else {
+        [[NSCursor arrowCursor] set];
+    }
+}
+
+#pragma mark - Manipulation Handles Public API
+
+- (XLManipulationHandlesRenderer *)handlesRenderer {
+    return _handles;
+}
+
+- (void)setModelTransformWithPosition:(simd_float3)position
+                                scale:(simd_float3)scale
+                             rotation:(simd_float3)rotation
+                       boundingBoxMin:(simd_float3)boundingBoxMin
+                       boundingBoxMax:(simd_float3)boundingBoxMax
+                          renderWidth:(float)renderWidth
+                         renderHeight:(float)renderHeight
+                          renderDepth:(float)renderDepth
+                             isLocked:(BOOL)isLocked
+                     supportsZScaling:(BOOL)supportsZScaling {
+
+    XLModelTransform transform;
+    transform.position = position;
+    transform.scale = scale;
+    transform.rotation = rotation;
+    transform.boundingBoxMin = boundingBoxMin;
+    transform.boundingBoxMax = boundingBoxMax;
+    transform.renderWidth = renderWidth;
+    transform.renderHeight = renderHeight;
+    transform.renderDepth = renderDepth;
+    transform.isLocked = isLocked;
+    transform.supportsZScaling = supportsZScaling;
+
+    [_handles setModelTransform:transform];
+    _contentDirty = YES;
+}
+
+- (void)clearModelSelection {
+    _selectedModelName = nil;
+    [_handles clearSelection];
+    _isManipulatingHandle = NO;
+    _activeHandleType = XLHandleTypeNone;
+    _contentDirty = YES;
+}
+
+- (void)setToolMode:(NSInteger)mode {
+    _handles.toolMode = (XLToolMode)mode;
+    _contentDirty = YES;
+}
+
+- (void)setActiveAxis:(NSInteger)axis {
+    _handles.activeAxis = (XLActiveAxis)axis;
+    _contentDirty = YES;
+}
+
+- (void)toggleToolMode {
+    XLToolMode current = _handles.toolMode;
+    switch (current) {
+        case XLToolModeTranslate:
+            _handles.toolMode = XLToolModeScale;
+            break;
+        case XLToolModeScale:
+            _handles.toolMode = XLToolModeRotate;
+            break;
+        case XLToolModeRotate:
+        default:
+            _handles.toolMode = XLToolModeTranslate;
+            break;
+    }
+    _contentDirty = YES;
+}
+
+- (void)setGridSnapSize:(float)snapSize {
+    _handles.gridSnapSize = snapSize;
+}
+
+- (void)setAngleSnapDegrees:(float)angleDegrees {
+    _handles.angleSnapDegrees = angleDegrees;
+}
+
+- (void)setEdgeSnapEnabled:(BOOL)enabled {
+    _handles.edgeSnapEnabled = enabled;
+}
+
+- (void)setShow3D:(BOOL)show3D {
+    _show3D = show3D;
+    _cameraController.perspective = show3D;
+    _handles.is3D = show3D;
+    _contentDirty = YES;
 }
 
 @end

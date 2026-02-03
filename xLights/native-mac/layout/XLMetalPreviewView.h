@@ -15,11 +15,12 @@
 
 @class XLCameraController;
 @class XLMetalPreviewView;
+@class XLManipulationHandlesRenderer;
 
 /// Delegate protocol for the Metal preview view.
 ///
 /// Informs the layout controller about user interactions:
-/// model selection and camera changes.
+/// model selection, camera changes, and handle manipulation.
 @protocol XLMetalPreviewDelegate <NSObject>
 @optional
 
@@ -28,6 +29,15 @@
 
 /// Called when the camera position or orientation changes
 - (void)previewView:(XLMetalPreviewView *)view didChangeCamera:(XLCameraController *)camera;
+
+/// Called when a handle manipulation begins
+- (void)previewView:(XLMetalPreviewView *)view didBeginManipulatingModel:(NSString *)modelName;
+
+/// Called during handle manipulation with transform delta
+- (void)previewView:(XLMetalPreviewView *)view didManipulateModelWithDelta:(simd_float3)delta;
+
+/// Called when handle manipulation ends
+- (void)previewView:(XLMetalPreviewView *)view didEndManipulatingModel:(NSString *)modelName;
 
 @end
 
@@ -123,5 +133,58 @@
 
 /// MSAA sample count (default: 4)
 @property (nonatomic, assign) NSUInteger sampleCount;
+
+#pragma mark - Manipulation Handles
+
+/// The manipulation handles renderer
+@property (nonatomic, strong, readonly) XLManipulationHandlesRenderer *handlesRenderer;
+
+/// Name of the currently selected model (nil if none)
+@property (nonatomic, strong, nullable) NSString *selectedModelName;
+
+/// Set model transform for manipulation handles
+/// @param position World position of the model center
+/// @param scale Scale factors (x, y, z)
+/// @param rotation Rotation angles in degrees (x, y, z)
+/// @param boundingBoxMin Minimum corner of model bounding box (local space)
+/// @param boundingBoxMax Maximum corner of model bounding box (local space)
+/// @param renderWidth Width of model in render units
+/// @param renderHeight Height of model in render units
+/// @param renderDepth Depth of model in render units
+/// @param isLocked Whether the model is locked
+/// @param supportsZScaling Whether the model supports Z scaling
+- (void)setModelTransformWithPosition:(simd_float3)position
+                                scale:(simd_float3)scale
+                             rotation:(simd_float3)rotation
+                       boundingBoxMin:(simd_float3)boundingBoxMin
+                       boundingBoxMax:(simd_float3)boundingBoxMax
+                          renderWidth:(float)renderWidth
+                         renderHeight:(float)renderHeight
+                          renderDepth:(float)renderDepth
+                             isLocked:(BOOL)isLocked
+                     supportsZScaling:(BOOL)supportsZScaling;
+
+/// Clear model selection (hides manipulation handles)
+- (void)clearModelSelection;
+
+/// Set the current manipulation tool mode
+/// 0 = Translate, 1 = Scale, 2 = Rotate
+- (void)setToolMode:(NSInteger)mode;
+
+/// Set the active manipulation axis
+/// -1 = None, 0 = X, 1 = Y, 2 = Z
+- (void)setActiveAxis:(NSInteger)axis;
+
+/// Toggle between tool modes (translate -> scale -> rotate -> translate)
+- (void)toggleToolMode;
+
+/// Set grid snap size (0 = disabled)
+- (void)setGridSnapSize:(float)snapSize;
+
+/// Set angle snap increment in degrees (0 = disabled)
+- (void)setAngleSnapDegrees:(float)angleDegrees;
+
+/// Enable/disable edge snapping to other models
+- (void)setEdgeSnapEnabled:(BOOL)enabled;
 
 @end

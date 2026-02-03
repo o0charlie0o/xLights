@@ -14,6 +14,7 @@
 #import "layout/XLModelTreeNode.h"
 #import "layout/XLModelCreationSheet.h"
 #import "layout/XLModelImportSheet.h"
+#import "layout/XLManipulationHandlesRenderer.h"
 
 static const CGFloat kModelTreeMinWidth = 200.0;
 static const CGFloat kModelTreeDefaultWidth = 280.0;
@@ -208,6 +209,132 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
         }
         weakSelf.modelImportSheet = nil;
     }];
+}
+
+#pragma mark - Model Selection and Manipulation
+
+- (void)selectModel:(NSString *)modelName {
+    if (!modelName) {
+        [self clearSelection];
+        return;
+    }
+
+    _previewView.selectedModelName = modelName;
+
+    // Get model info from engine bridge and set up handles
+    NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
+    if (modelInfo) {
+        // Extract position
+        simd_float3 position = simd_make_float3(
+            [modelInfo[@"WorldPosX"] floatValue],
+            [modelInfo[@"WorldPosY"] floatValue],
+            [modelInfo[@"WorldPosZ"] floatValue]
+        );
+
+        // Extract scale
+        simd_float3 scale = simd_make_float3(
+            [modelInfo[@"ScaleX"] floatValue] ?: 1.0f,
+            [modelInfo[@"ScaleY"] floatValue] ?: 1.0f,
+            [modelInfo[@"ScaleZ"] floatValue] ?: 1.0f
+        );
+
+        // Extract rotation
+        simd_float3 rotation = simd_make_float3(
+            [modelInfo[@"RotateX"] floatValue],
+            [modelInfo[@"RotateY"] floatValue],
+            [modelInfo[@"RotateZ"] floatValue]
+        );
+
+        // Extract render dimensions
+        float renderWidth = [modelInfo[@"RenderWidth"] floatValue] ?: 100.0f;
+        float renderHeight = [modelInfo[@"RenderHeight"] floatValue] ?: 100.0f;
+        float renderDepth = [modelInfo[@"RenderDepth"] floatValue] ?: 100.0f;
+
+        BOOL isLocked = [modelInfo[@"Locked"] boolValue];
+        BOOL supportsZScaling = [modelInfo[@"SupportsZScaling"] boolValue];
+
+        // Bounding box (use render dimensions as approximation)
+        simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
+        simd_float3 bbMax = simd_make_float3(renderWidth/2, renderHeight/2, renderDepth/2);
+
+        [_previewView setModelTransformWithPosition:position
+                                              scale:scale
+                                           rotation:rotation
+                                     boundingBoxMin:bbMin
+                                     boundingBoxMax:bbMax
+                                        renderWidth:renderWidth
+                                       renderHeight:renderHeight
+                                        renderDepth:renderDepth
+                                           isLocked:isLocked
+                                   supportsZScaling:supportsZScaling];
+    }
+
+    [_modelTreeController selectModelWithName:modelName];
+}
+
+- (void)clearSelection {
+    _previewView.selectedModelName = nil;
+    [_previewView clearModelSelection];
+}
+
+- (void)setToolMode:(NSInteger)mode {
+    [_previewView setToolMode:mode];
+}
+
+- (void)setActiveAxis:(NSInteger)axis {
+    [_previewView setActiveAxis:axis];
+}
+
+- (void)toggleToolMode {
+    [_previewView toggleToolMode];
+}
+
+- (void)toggle2D3DMode {
+    _previewView.show3D = !_previewView.show3D;
+}
+
+- (void)setGridSnapSize:(float)snapSize {
+    [_previewView setGridSnapSize:snapSize];
+}
+
+- (void)setAngleSnapDegrees:(float)angleDegrees {
+    [_previewView setAngleSnapDegrees:angleDegrees];
+}
+
+- (void)setEdgeSnapEnabled:(BOOL)enabled {
+    [_previewView setEdgeSnapEnabled:enabled];
+}
+
+#pragma mark - XLMetalPreviewDelegate (Manipulation)
+
+- (void)previewView:(XLMetalPreviewView *)view didBeginManipulatingModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Begin manipulating model '%@'", modelName);
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didManipulateModelWithDelta:(simd_float3)delta {
+    NSString *modelName = _previewView.selectedModelName;
+    if (!modelName) return;
+
+    // Get current transform from handles renderer
+    XLManipulationHandlesRenderer *handles = _previewView.handlesRenderer;
+    XLModelTransform transform = [handles modelTransform];
+
+    // Update model via engine bridge
+    [_engineBridge updateModelProperty:modelName key:@"WorldPosX" value:@(transform.position.x)];
+    [_engineBridge updateModelProperty:modelName key:@"WorldPosY" value:@(transform.position.y)];
+    [_engineBridge updateModelProperty:modelName key:@"WorldPosZ" value:@(transform.position.z)];
+    [_engineBridge updateModelProperty:modelName key:@"ScaleX" value:@(transform.scale.x)];
+    [_engineBridge updateModelProperty:modelName key:@"ScaleY" value:@(transform.scale.y)];
+    [_engineBridge updateModelProperty:modelName key:@"ScaleZ" value:@(transform.scale.z)];
+    [_engineBridge updateModelProperty:modelName key:@"RotateX" value:@(transform.rotation.x)];
+    [_engineBridge updateModelProperty:modelName key:@"RotateY" value:@(transform.rotation.y)];
+    [_engineBridge updateModelProperty:modelName key:@"RotateZ" value:@(transform.rotation.z)];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didEndManipulatingModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: End manipulating model '%@'", modelName);
+    // Trigger a full refresh to ensure model state is synced
+    [_modelTreeController reloadData];
 }
 
 @end
