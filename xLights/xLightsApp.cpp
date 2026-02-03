@@ -48,6 +48,10 @@
 #include <log4cpp/PropertyConfigurator.hh>
 #include <log4cpp/Configurator.hh>
 
+#ifdef __APPLE__
+extern "C" int XLTryLaunchNativeWindow(void);
+#endif
+
 #ifdef LINUX
 #include <GL/glut.h>
 #endif
@@ -758,6 +762,12 @@ bool xLightsApp::OnInit()
     #endif
 
     logger_base.info("XLightsApp OnInit Done.");
+
+#ifdef __APPLE__
+    if (XLTryLaunchNativeWindow()) {
+        logger_base.info("Native macOS preview window launched via -nativeUI flag.");
+    }
+#endif
 
     return wxsOK;
 }
