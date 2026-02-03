@@ -26,6 +26,12 @@
 /// Called when the zoom level changes.
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didChangeZoomLevel:(CGFloat)pixelsPerMillisecond;
 
+/// Called when the zoom level changes with a center point for the zoom operation.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didChangeZoomLevel:(CGFloat)pixelsPerMillisecond centeredOnPointX:(CGFloat)pointX;
+
+/// Called when the scroll offset changes (e.g. from momentum scrolling).
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didChangeScrollOffset:(CGFloat)scrollOffset;
+
 /// Called when the user begins scrubbing (mouse down + drag).
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didBeginScrubbing:(NSTimeInterval)positionSeconds;
 

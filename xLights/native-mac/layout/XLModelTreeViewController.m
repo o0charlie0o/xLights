@@ -547,6 +547,15 @@ static NSString * const kColumnController = @"ControllerColumn";
 
     [menu addItem:[NSMenuItem separatorItem]];
 
+    NSMenuItem *importItem = [[NSMenuItem alloc] initWithTitle:@"Import Model..."
+                                                        action:@selector(contextImportModel:)
+                                                 keyEquivalent:@"i"];
+    importItem.target = self;
+    importItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [menu addItem:importItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
     NSMenuItem *duplicateItem = [[NSMenuItem alloc] initWithTitle:@"Duplicate Model"
                                                           action:@selector(contextDuplicate:)
                                                    keyEquivalent:@"d"];
@@ -619,6 +628,12 @@ static NSString * const kColumnController = @"ControllerColumn";
 - (void)contextAddGroup:(id)sender {
     if ([_delegate respondsToSelector:@selector(modelTree:didRequestAddModelOfType:)]) {
         [_delegate modelTree:self didRequestAddModelOfType:@"Group"];
+    }
+}
+
+- (void)contextImportModel:(id)sender {
+    if ([_delegate respondsToSelector:@selector(modelTreeDidRequestImportModel:)]) {
+        [_delegate modelTreeDidRequestImportModel:self];
     }
 }
 

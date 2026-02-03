@@ -37,10 +37,15 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 
 #pragma mark - XLRowHeadingsView
 
-@interface XLRowHeadingsView () <NSDraggingSource>
+@interface XLRowHeadingsView () <NSDraggingSource> {
+    // C array of row cell layers - immune to wxWidgets heap corruption for count access.
+    // The layers themselves are still ObjC objects, but array indexing is pure C.
+    __strong XLRowCellLayer **_rowCellLayersData;
+    NSUInteger _rowCellLayersCount;
+    NSUInteger _rowCellLayersCapacity;
+}
 
 @property (nonatomic, assign) NSInteger cachedRowCount;
-@property (nonatomic, strong) NSMutableArray<XLRowCellLayer *> *rowCellLayers;
 @property (nonatomic, strong) CALayer *insertionIndicatorLayer;
 @property (nonatomic, assign) NSInteger dragSourceRow;
 @property (nonatomic, assign) NSInteger dragTargetRow;
@@ -60,9 +65,13 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         _verticalScrollOffset = 0.0;
         _selectedRow = -1;
         _cachedRowCount = 0;
-        _rowCellLayers = [NSMutableArray array];
         _dragSourceRow = -1;
         _dragTargetRow = -1;
+
+        // Initialize C array for row cell layers
+        _rowCellLayersCapacity = 64;
+        _rowCellLayersCount = 0;
+        _rowCellLayersData = (__strong XLRowCellLayer **)calloc(_rowCellLayersCapacity, sizeof(XLRowCellLayer *));
 
         _insertionIndicatorLayer = [CALayer layer];
         _insertionIndicatorLayer.backgroundColor = CGColorCreateGenericRGB(0.3, 0.6, 1.0, 1.0);
@@ -72,6 +81,17 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         [self registerForDraggedTypes:@[NSPasteboardTypeString]];
     }
     return self;
+}
+
+- (void)dealloc {
+    if (_rowCellLayersData) {
+        // Clear strong references before freeing
+        for (NSUInteger i = 0; i < _rowCellLayersCount; i++) {
+            _rowCellLayersData[i] = nil;
+        }
+        free(_rowCellLayersData);
+        _rowCellLayersData = NULL;
+    }
 }
 
 - (void)updateTrackingAreas {
@@ -127,15 +147,32 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 #pragma mark - Row Cell Management
 
 - (void)rebuildRowCells {
-    for (XLRowCellLayer *cell in _rowCellLayers) {
-        [cell removeFromSuperlayer];
+    // Remove existing cells
+    for (NSUInteger i = 0; i < _rowCellLayersCount; i++) {
+        XLRowCellLayer *cell = _rowCellLayersData[i];
+        if (cell) {
+            [cell removeFromSuperlayer];
+            _rowCellLayersData[i] = nil;
+        }
     }
-    [_rowCellLayers removeAllObjects];
+    _rowCellLayersCount = 0;
 
+    // Ensure capacity for new cells
+    NSUInteger needed = (NSUInteger)_cachedRowCount;
+    if (needed > _rowCellLayersCapacity) {
+        NSUInteger newCapacity = needed + 32;
+        __strong XLRowCellLayer **newData = (__strong XLRowCellLayer **)calloc(newCapacity, sizeof(XLRowCellLayer *));
+        // No need to copy - we cleared everything above
+        free(_rowCellLayersData);
+        _rowCellLayersData = newData;
+        _rowCellLayersCapacity = newCapacity;
+    }
+
+    // Create new cells
     for (NSInteger i = 0; i < _cachedRowCount; i++) {
         XLRowCellLayer *cell = [self createCellForRow:i];
         [self.layer addSublayer:cell];
-        [_rowCellLayers addObject:cell];
+        _rowCellLayersData[_rowCellLayersCount++] = cell;
     }
 
     [self.layer addSublayer:_insertionIndicatorLayer];
@@ -173,10 +210,11 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
 
-    for (NSInteger i = 0; i < (NSInteger)_rowCellLayers.count; i++) {
-        XLRowCellLayer *cell = _rowCellLayers[i];
-        if (i >= firstVisible && i <= lastVisible) {
-            CGFloat y = i * _rowHeight - _verticalScrollOffset;
+    for (NSUInteger i = 0; i < _rowCellLayersCount; i++) {
+        XLRowCellLayer *cell = _rowCellLayersData[i];
+        if (!cell) continue;
+        if ((NSInteger)i >= firstVisible && (NSInteger)i <= lastVisible) {
+            CGFloat y = (CGFloat)i * _rowHeight - _verticalScrollOffset;
             cell.frame = CGRectMake(0, y, viewWidth, _rowHeight);
             cell.hidden = NO;
             [cell setNeedsDisplay];
@@ -191,7 +229,9 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 - (void)updateRowAppearance {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    for (XLRowCellLayer *cell in _rowCellLayers) {
+    for (NSUInteger i = 0; i < _rowCellLayersCount; i++) {
+        XLRowCellLayer *cell = _rowCellLayersData[i];
+        if (!cell) continue;
         BOOL shouldBeSelected = (cell.row == _selectedRow);
         if (cell.isSelected != shouldBeSelected) {
             cell.isSelected = shouldBeSelected;
@@ -206,8 +246,11 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 - (void)viewDidChangeBackingProperties {
     [super viewDidChangeBackingProperties];
     CGFloat scale = self.window.backingScaleFactor ?: 2.0;
-    for (XLRowCellLayer *cell in _rowCellLayers) {
-        cell.contentsScale = scale;
+    for (NSUInteger i = 0; i < _rowCellLayersCount; i++) {
+        XLRowCellLayer *cell = _rowCellLayersData[i];
+        if (cell) {
+            cell.contentsScale = scale;
+        }
     }
 }
 
@@ -713,8 +756,20 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 #pragma mark - Scroll Wheel
 
 - (void)scrollWheel:(NSEvent *)event {
-    // Forward scroll events to allow parent to handle or sync with grid
-    [self.nextResponder scrollWheel:event];
+    // Vertical scrolling for row headings
+    CGFloat dy = event.scrollingDeltaY;
+
+    if (fabs(dy) > 0.01) {
+        _verticalScrollOffset = fmax(0, _verticalScrollOffset - dy);
+        [self layoutRowCells];
+
+        if ([_delegate respondsToSelector:@selector(rowHeadings:didChangeVerticalScrollOffset:)]) {
+            [_delegate rowHeadings:self didChangeVerticalScrollOffset:_verticalScrollOffset];
+        }
+    } else {
+        // Forward any other scroll events (horizontal) to parent
+        [self.nextResponder scrollWheel:event];
+    }
 }
 
 @end

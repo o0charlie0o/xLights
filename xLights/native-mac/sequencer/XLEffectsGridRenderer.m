@@ -39,6 +39,20 @@ static const NSInteger kMaxEffectVertices = 32768;
 static const CGFloat kEffectBlockCornerRadius = 3.0;
 static const CGFloat kEffectBlockInset = 1.0;
 
+/// Per-frame scalar rendering parameters, passed by value to sub-draw methods.
+/// All data stays on the stack (no heap/ivar involvement) to avoid stale or
+/// corrupted pointer reads.
+typedef struct {
+    CGSize viewSize;
+    CGPoint scrollOffset;
+    CGFloat zoomLevel;
+    CGFloat rowHeight;
+    NSInteger totalRows;
+    CGFloat sequenceLengthMS;
+    NSInteger selectedEffectID;
+    CGFloat playbackPositionMS;
+} XLGridFrameParams;
+
 @interface XLEffectsGridRenderer ()
 
 @property (nonatomic, strong) id<MTLDevice> device;
@@ -287,23 +301,40 @@ static const CGFloat kEffectBlockInset = 1.0;
           rowHeight:(CGFloat)rowHeight
           totalRows:(NSInteger)totalRows
    sequenceLengthMS:(CGFloat)sequenceLengthMS
-            effects:(NSArray<NSValue *> *)effects
+            effects:(const XLEffectRenderInfo *)effects
+        effectCount:(NSUInteger)effectCount
    selectedEffectID:(NSInteger)selectedEffectID
  playbackPositionMS:(CGFloat)playbackPositionMS
-      timingMarksMS:(NSArray<NSNumber *> *)timingMarksMS
+   timingMarkValues:(const CGFloat *)timingMarkValues
+    timingMarkCount:(NSUInteger)timingMarkCount
 {
     id<CAMetalDrawable> drawable = [layer nextDrawable];
     if (!drawable) return;
+
+    // All per-frame state lives on the stack — no ivars, no heap pointers
+    // that could become stale due to concurrent mutation.
+    XLGridFrameParams fp = {
+        .viewSize = viewSize,
+        .scrollOffset = scrollOffset,
+        .zoomLevel = zoomLevel,
+        .rowHeight = rowHeight,
+        .totalRows = totalRows,
+        .sequenceLengthMS = sequenceLengthMS,
+        .selectedEffectID = selectedEffectID,
+        .playbackPositionMS = playbackPositionMS,
+    };
 
     MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
     passDesc.colorAttachments[0].texture = drawable.texture;
     passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
     passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-    // Dark background matching Logic Pro X style
     passDesc.colorAttachments[0].clearColor = MTLClearColorMake(0.118, 0.118, 0.118, 1.0);
 
     id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
+    if (!commandBuffer) return;
+
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
+    if (!encoder) return;
 
     EffectsGridUniforms uniforms;
     uniforms.viewportSize = simd_make_float2(viewSize.width, viewSize.height);
@@ -313,34 +344,11 @@ static const CGFloat kEffectBlockInset = 1.0;
     uniforms.padding0 = 0;
     uniforms.padding1 = 0;
 
-    // Draw grid lines
-    [self drawGridLinesWithEncoder:encoder
-                          uniforms:uniforms
-                          viewSize:viewSize
-                      scrollOffset:scrollOffset
-                         zoomLevel:zoomLevel
-                         rowHeight:rowHeight
-                         totalRows:totalRows
-                  sequenceLengthMS:sequenceLengthMS
-                     timingMarksMS:timingMarksMS];
-
-    // Draw effect blocks
-    [self drawEffectBlocksWithEncoder:encoder
-                             uniforms:uniforms
-                             viewSize:viewSize
-                         scrollOffset:scrollOffset
-                            zoomLevel:zoomLevel
-                            rowHeight:rowHeight
-                              effects:effects
-                     selectedEffectID:selectedEffectID];
-
-    // Draw playback position indicator
-    [self drawPlaybackIndicatorWithEncoder:encoder
-                                  uniforms:uniforms
-                                  viewSize:viewSize
-                              scrollOffset:scrollOffset
-                                 zoomLevel:zoomLevel
-                        playbackPositionMS:playbackPositionMS];
+    [self drawGridLinesWithEncoder:encoder uniforms:uniforms params:fp
+                  timingMarkValues:timingMarkValues timingMarkCount:timingMarkCount];
+    [self drawEffectBlocksWithEncoder:encoder uniforms:uniforms params:fp
+                              effects:effects effectCount:effectCount];
+    [self drawPlaybackIndicatorWithEncoder:encoder uniforms:uniforms params:fp];
 
     [encoder endEncoding];
     [commandBuffer presentDrawable:drawable];
@@ -351,14 +359,17 @@ static const CGFloat kEffectBlockInset = 1.0;
 
 - (void)drawGridLinesWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                         uniforms:(EffectsGridUniforms)uniforms
-                        viewSize:(CGSize)viewSize
-                    scrollOffset:(CGPoint)scrollOffset
-                       zoomLevel:(CGFloat)zoomLevel
-                       rowHeight:(CGFloat)rowHeight
-                       totalRows:(NSInteger)totalRows
-                sequenceLengthMS:(CGFloat)sequenceLengthMS
-                   timingMarksMS:(NSArray<NSNumber *> *)timingMarksMS
+                          params:(XLGridFrameParams)fp
+                timingMarkValues:(const CGFloat *)timingMarkValues
+                 timingMarkCount:(NSUInteger)timingMarkCount
 {
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+    NSInteger totalRows = fp.totalRows;
+    CGFloat sequenceLengthMS = fp.sequenceLengthMS;
+
     NSMutableData *vertexData = [NSMutableData dataWithCapacity:kMaxGridLineVertices * sizeof(SimpleVertex)];
 
     // Horizontal row separator lines
@@ -379,11 +390,9 @@ static const CGFloat kEffectBlockInset = 1.0;
     }
 
     // Vertical time division lines
-    // Calculate appropriate time grid spacing based on zoom level
     CGFloat msPerPixel = 1.0 / zoomLevel;
     CGFloat visibleMS = viewSize.width * msPerPixel;
 
-    // Choose grid interval: 100ms, 250ms, 500ms, 1s, 5s, 10s, 30s, 60s
     CGFloat gridIntervals[] = { 50, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000 };
     NSInteger numIntervals = sizeof(gridIntervals) / sizeof(gridIntervals[0]);
     CGFloat gridIntervalMS = gridIntervals[numIntervals - 1];
@@ -418,16 +427,19 @@ static const CGFloat kEffectBlockInset = 1.0;
     }
 
     // Timing mark lines (from active timing track)
-    simd_float4 timingColor = simd_make_float4(0.4, 0.6, 0.4, 0.6);
-    for (NSNumber *markMS in timingMarksMS) {
-        CGFloat t = markMS.doubleValue;
-        CGFloat x = t * zoomLevel - scrollOffset.x;
-        if (x < -1 || x > viewSize.width + 1) continue;
+    // Uses a plain C array — no ObjC message sends, no ARC, no isa dereferences.
+    if (timingMarkValues && timingMarkCount > 0) {
+        simd_float4 timingColor = simd_make_float4(0.4, 0.6, 0.4, 0.6);
+        for (NSUInteger mi = 0; mi < timingMarkCount; mi++) {
+            CGFloat t = timingMarkValues[mi];
+            CGFloat x = t * zoomLevel - scrollOffset.x;
+            if (x < -1 || x > viewSize.width + 1) continue;
 
-        SimpleVertex v0 = { simd_make_float2(x, 0), timingColor };
-        SimpleVertex v1 = { simd_make_float2(x, viewSize.height), timingColor };
-        [vertexData appendBytes:&v0 length:sizeof(SimpleVertex)];
-        [vertexData appendBytes:&v1 length:sizeof(SimpleVertex)];
+            SimpleVertex v0 = { simd_make_float2(x, 0), timingColor };
+            SimpleVertex v1 = { simd_make_float2(x, viewSize.height), timingColor };
+            [vertexData appendBytes:&v0 length:sizeof(SimpleVertex)];
+            [vertexData appendBytes:&v1 length:sizeof(SimpleVertex)];
+        }
     }
 
     if (vertexData.length == 0) return;
@@ -446,14 +458,16 @@ static const CGFloat kEffectBlockInset = 1.0;
 
 - (void)drawEffectBlocksWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                            uniforms:(EffectsGridUniforms)uniforms
-                           viewSize:(CGSize)viewSize
-                       scrollOffset:(CGPoint)scrollOffset
-                          zoomLevel:(CGFloat)zoomLevel
-                          rowHeight:(CGFloat)rowHeight
-                            effects:(NSArray<NSValue *> *)effects
-                   selectedEffectID:(NSInteger)selectedEffectID
+                             params:(XLGridFrameParams)fp
+                            effects:(const XLEffectRenderInfo *)effects
+                        effectCount:(NSUInteger)effectCount
 {
-    if (effects.count == 0) return;
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+
+    if (!effects || effectCount == 0) return;
 
     NSMutableData *blockVertexData = [NSMutableData data];
     NSMutableData *outlineVertexData = [NSMutableData data];
@@ -464,9 +478,8 @@ static const CGFloat kEffectBlockInset = 1.0;
     CGFloat visibleStartRow = scrollOffset.y / rowHeight;
     CGFloat visibleEndRow = (scrollOffset.y + viewSize.height) / rowHeight;
 
-    for (NSValue *effectValue in effects) {
-        XLEffectRenderInfo info;
-        [effectValue getValue:&info];
+    for (NSUInteger ei = 0; ei < effectCount; ei++) {
+        XLEffectRenderInfo info = effects[ei];
 
         // Frustum culling: skip effects outside visible region
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
@@ -482,10 +495,11 @@ static const CGFloat kEffectBlockInset = 1.0;
         if (x2 - x1 < 2.0) continue;
 
         simd_float4 color;
-        if (info.color) {
-            CGFloat r, g, b, a;
-            NSColor *rgbColor = [info.color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
-            [rgbColor getRed:&r green:&g blue:&b alpha:&a];
+        if (info.colorARGB != 0) {
+            float a = ((info.colorARGB >> 24) & 0xFF) / 255.0f;
+            float r = ((info.colorARGB >> 16) & 0xFF) / 255.0f;
+            float g = ((info.colorARGB >>  8) & 0xFF) / 255.0f;
+            float b = ((info.colorARGB      ) & 0xFF) / 255.0f;
             color = simd_make_float4(r, g, b, a);
         } else {
             color = [self simdColorForEffectIndex:info.effectIndex];
@@ -574,11 +588,13 @@ static const CGFloat kEffectBlockInset = 1.0;
 
 - (void)drawPlaybackIndicatorWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                                 uniforms:(EffectsGridUniforms)uniforms
-                                viewSize:(CGSize)viewSize
-                            scrollOffset:(CGPoint)scrollOffset
-                               zoomLevel:(CGFloat)zoomLevel
-                      playbackPositionMS:(CGFloat)playbackPositionMS
+                                  params:(XLGridFrameParams)fp
 {
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat playbackPositionMS = fp.playbackPositionMS;
+
     if (playbackPositionMS < 0) return;
 
     CGFloat x = playbackPositionMS * zoomLevel - scrollOffset.x;
@@ -605,56 +621,62 @@ static const CGFloat kEffectBlockInset = 1.0;
 
 #pragma mark - Color Palette
 
+// Static C array of effect colors - immune to ObjC heap corruption.
+// No NSArray, no isa pointer, no ARC - just plain data in the DATA segment.
+typedef struct {
+    float r, g, b, a;
+} XLEffectColorEntry;
+
+static const XLEffectColorEntry kEffectColorPalette[] = {
+    {0.30f, 0.55f, 0.85f, 0.85f}, // 0  Bars (blue)
+    {0.85f, 0.50f, 0.20f, 0.85f}, // 1  Butterfly (orange)
+    {0.90f, 0.35f, 0.25f, 0.85f}, // 2  Candle (red-orange)
+    {0.40f, 0.70f, 0.40f, 0.85f}, // 3  Circles (green)
+    {0.55f, 0.35f, 0.75f, 0.85f}, // 4  ColorWash (purple)
+    {0.75f, 0.45f, 0.55f, 0.85f}, // 5  Curtain (mauve)
+    {0.35f, 0.65f, 0.65f, 0.85f}, // 6  DMX (teal)
+    {0.80f, 0.60f, 0.30f, 0.85f}, // 7  Faces (gold)
+    {0.45f, 0.55f, 0.30f, 0.85f}, // 8  Fan (olive)
+    {0.70f, 0.55f, 0.65f, 0.85f}, // 9  Fill (pink)
+    {0.85f, 0.30f, 0.20f, 0.85f}, // 10 Fire (red)
+    {0.90f, 0.45f, 0.30f, 0.85f}, // 11 Fireworks (orange-red)
+    {0.35f, 0.55f, 0.45f, 0.85f}, // 12 Galaxy (dark green)
+    {0.55f, 0.75f, 0.35f, 0.85f}, // 13 Garlands (lime)
+    {0.50f, 0.40f, 0.60f, 0.85f}, // 14 Glediator (dark purple)
+    {0.40f, 0.65f, 0.80f, 0.85f}, // 15 Kaleidoscope (sky blue)
+    {0.50f, 0.65f, 0.35f, 0.85f}, // 16 Life (green)
+    {0.70f, 0.70f, 0.35f, 0.85f}, // 17 Lightning (yellow)
+    {0.45f, 0.45f, 0.65f, 0.85f}, // 18 Lines (slate)
+    {0.55f, 0.55f, 0.55f, 0.85f}, // 19 Liquid (gray)
+    {0.65f, 0.35f, 0.55f, 0.85f}, // 20 Marquee (magenta)
+    {0.80f, 0.55f, 0.30f, 0.85f}, // 21 Meteors (amber)
+    {0.60f, 0.40f, 0.50f, 0.85f}, // 22 Morph (rose)
+    {0.45f, 0.55f, 0.75f, 0.85f}, // 23 Music (periwinkle)
+    {0.30f, 0.30f, 0.30f, 0.85f}, // 24 Off (dark gray)
+    {0.85f, 0.85f, 0.50f, 0.85f}, // 25 On (yellow)
+    {0.65f, 0.50f, 0.40f, 0.85f}, // 26 Pictures (brown)
+    {0.40f, 0.60f, 0.60f, 0.85f}, // 27 Pinwheel (cyan)
+    {0.55f, 0.45f, 0.70f, 0.85f}, // 28 Plasma (violet)
+    {0.65f, 0.40f, 0.40f, 0.85f}, // 29 Ripple (rust)
+};
+
+static const NSUInteger kEffectColorPaletteCount = sizeof(kEffectColorPalette) / sizeof(kEffectColorPalette[0]);
+
 - (simd_float4)simdColorForEffectIndex:(NSInteger)effectIndex {
-    NSColor *c = [XLEffectsGridRenderer colorForEffectIndex:effectIndex];
-    CGFloat r, g, b, a;
-    NSColor *rgbColor = [c colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
-    [rgbColor getRed:&r green:&g blue:&b alpha:&a];
-    return simd_make_float4(r, g, b, a);
+    // Direct C array access - no ObjC message sends, no heap pointers
+    NSUInteger idx = (NSUInteger)(effectIndex % (NSInteger)kEffectColorPaletteCount);
+    if (effectIndex < 0) idx = 0;
+    const XLEffectColorEntry *e = &kEffectColorPalette[idx];
+    return simd_make_float4(e->r, e->g, e->b, e->a);
 }
 
 + (NSColor *)colorForEffectIndex:(NSInteger)effectIndex {
-    // Effect color palette (matches existing xLights effect coloring conventions)
-    static NSArray<NSColor *> *palette = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        palette = @[
-            [NSColor colorWithRed:0.30 green:0.55 blue:0.85 alpha:0.85], // Bars (blue)
-            [NSColor colorWithRed:0.85 green:0.50 blue:0.20 alpha:0.85], // Butterfly (orange)
-            [NSColor colorWithRed:0.90 green:0.35 blue:0.25 alpha:0.85], // Candle (red-orange)
-            [NSColor colorWithRed:0.40 green:0.70 blue:0.40 alpha:0.85], // Circles (green)
-            [NSColor colorWithRed:0.55 green:0.35 blue:0.75 alpha:0.85], // ColorWash (purple)
-            [NSColor colorWithRed:0.75 green:0.45 blue:0.55 alpha:0.85], // Curtain (mauve)
-            [NSColor colorWithRed:0.35 green:0.65 blue:0.65 alpha:0.85], // DMX (teal)
-            [NSColor colorWithRed:0.80 green:0.60 blue:0.30 alpha:0.85], // Faces (gold)
-            [NSColor colorWithRed:0.45 green:0.55 blue:0.30 alpha:0.85], // Fan (olive)
-            [NSColor colorWithRed:0.70 green:0.55 blue:0.65 alpha:0.85], // Fill (pink)
-            [NSColor colorWithRed:0.85 green:0.30 blue:0.20 alpha:0.85], // Fire (red)
-            [NSColor colorWithRed:0.90 green:0.45 blue:0.30 alpha:0.85], // Fireworks (orange-red)
-            [NSColor colorWithRed:0.35 green:0.55 blue:0.45 alpha:0.85], // Galaxy (dark green)
-            [NSColor colorWithRed:0.55 green:0.75 blue:0.35 alpha:0.85], // Garlands (lime)
-            [NSColor colorWithRed:0.50 green:0.40 blue:0.60 alpha:0.85], // Glediator (dark purple)
-            [NSColor colorWithRed:0.40 green:0.65 blue:0.80 alpha:0.85], // Kaleidoscope (sky blue)
-            [NSColor colorWithRed:0.50 green:0.65 blue:0.35 alpha:0.85], // Life (green)
-            [NSColor colorWithRed:0.70 green:0.70 blue:0.35 alpha:0.85], // Lightning (yellow)
-            [NSColor colorWithRed:0.45 green:0.45 blue:0.65 alpha:0.85], // Lines (slate)
-            [NSColor colorWithRed:0.55 green:0.55 blue:0.55 alpha:0.85], // Liquid (gray)
-            [NSColor colorWithRed:0.65 green:0.35 blue:0.55 alpha:0.85], // Marquee (magenta)
-            [NSColor colorWithRed:0.80 green:0.55 blue:0.30 alpha:0.85], // Meteors (amber)
-            [NSColor colorWithRed:0.60 green:0.40 blue:0.50 alpha:0.85], // Morph (rose)
-            [NSColor colorWithRed:0.45 green:0.55 blue:0.75 alpha:0.85], // Music (periwinkle)
-            [NSColor colorWithRed:0.30 green:0.30 blue:0.30 alpha:0.85], // Off (dark gray)
-            [NSColor colorWithRed:0.85 green:0.85 blue:0.50 alpha:0.85], // On (yellow)
-            [NSColor colorWithRed:0.65 green:0.50 blue:0.40 alpha:0.85], // Pictures (brown)
-            [NSColor colorWithRed:0.40 green:0.60 blue:0.60 alpha:0.85], // Pinwheel (cyan)
-            [NSColor colorWithRed:0.55 green:0.45 blue:0.70 alpha:0.85], // Plasma (violet)
-            [NSColor colorWithRed:0.65 green:0.40 blue:0.40 alpha:0.85], // Ripple (rust)
-        ];
-    });
-
-    NSInteger idx = effectIndex % (NSInteger)palette.count;
-    if (idx < 0) idx = 0;
-    return palette[idx];
+    // Construct NSColor on-demand from static C data.
+    // This method is for external callers; the render path uses simdColorForEffectIndex: directly.
+    NSUInteger idx = (NSUInteger)(effectIndex % (NSInteger)kEffectColorPaletteCount);
+    if (effectIndex < 0) idx = 0;
+    const XLEffectColorEntry *e = &kEffectColorPalette[idx];
+    return [NSColor colorWithRed:e->r green:e->g blue:e->b alpha:e->a];
 }
 
 @end

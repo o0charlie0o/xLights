@@ -202,6 +202,131 @@
     return YES; // stub
 }
 
+- (BOOL)createModel:(NSString *)modelType name:(NSString *)modelName properties:(NSDictionary *)properties {
+    if (!modelType || !modelName) return NO;
+
+    std::string stdType = [modelType UTF8String];
+    std::string stdName = [modelName UTF8String];
+
+    // Convert properties to std::map
+    std::map<std::string, std::string> stdProps;
+    for (NSString *key in properties) {
+        id value = properties[key];
+        NSString *stringValue;
+        if ([value isKindOfClass:[NSString class]]) {
+            stringValue = value;
+        } else if ([value isKindOfClass:[NSNumber class]]) {
+            stringValue = [value stringValue];
+        } else {
+            stringValue = [value description];
+        }
+        stdProps[[key UTF8String]] = [stringValue UTF8String];
+    }
+
+    // TODO: Call into ModelEngine
+    // xlEngine::OperationResult result = _modelEngine->createModel(stdType, stdName, stdProps);
+    // return result.success;
+
+    NSLog(@"[Stub] createModel type=%@ name=%@ properties=%@", modelType, modelName, properties);
+    return YES; // stub
+}
+
+- (BOOL)deleteModel:(NSString *)modelName {
+    if (!modelName) return NO;
+
+    std::string stdName = [modelName UTF8String];
+
+    // TODO: Call into ModelEngine
+    // xlEngine::OperationResult result = _modelEngine->deleteModel(stdName);
+    // return result.success;
+
+    NSLog(@"[Stub] deleteModel: %@", modelName);
+    return YES; // stub
+}
+
+- (BOOL)renameModel:(NSString *)oldName toName:(NSString *)newName {
+    if (!oldName || !newName) return NO;
+
+    std::string stdOldName = [oldName UTF8String];
+    std::string stdNewName = [newName UTF8String];
+
+    // TODO: Call into ModelEngine
+    // xlEngine::OperationResult result = _modelEngine->renameModel(stdOldName, stdNewName);
+    // return result.success;
+
+    NSLog(@"[Stub] renameModel: %@ -> %@", oldName, newName);
+    return YES; // stub
+}
+
+- (BOOL)duplicateModel:(NSString *)modelName {
+    if (!modelName) return NO;
+
+    std::string stdName = [modelName UTF8String];
+
+    // TODO: Call into ModelEngine - duplicateModel would create a copy with unique name
+    // xlEngine::OperationResult result = _modelEngine->duplicateModel(stdName);
+    // return result.success;
+
+    NSLog(@"[Stub] duplicateModel: %@", modelName);
+    return YES; // stub
+}
+
+#pragma mark - Model Import Operations
+
+- (BOOL)importModelFromFile:(NSString *)filePath {
+    if (!filePath) return NO;
+
+    std::string stdPath = [filePath UTF8String];
+
+    // TODO: Call into ModelEngine
+    // xlEngine::OperationResult result = _modelEngine->importFromFile(stdPath);
+    // return result.success;
+
+    NSLog(@"[Stub] importModelFromFile: %@", filePath);
+    return YES; // stub
+}
+
+- (BOOL)importModelFromFile:(NSString *)filePath modelName:(NSString *)modelName {
+    if (!filePath || !modelName) return NO;
+
+    std::string stdPath = [filePath UTF8String];
+    std::string stdName = [modelName UTF8String];
+
+    // TODO: Call into ModelEngine
+    // xlEngine::OperationResult result = _modelEngine->importFromFile(stdPath, stdName);
+    // return result.success;
+
+    NSLog(@"[Stub] importModelFromFile: %@ modelName: %@", filePath, modelName);
+    return YES; // stub
+}
+
+- (NSArray<NSDictionary *> *)getModelsInFile:(NSString *)filePath {
+    if (!filePath) return @[];
+
+    std::string stdPath = [filePath UTF8String];
+
+    // TODO: Call into ModelEngine
+    // std::vector<xlEngine::ModelInfo> models = _modelEngine->getModelsInFile(stdPath);
+    // NSMutableArray *result = [NSMutableArray array];
+    // for (const auto& m : models) {
+    //     [result addObject:@{
+    //         @"name": [NSString stringWithUTF8String:m.name.c_str()],
+    //         @"type": [NSString stringWithUTF8String:m.type.c_str()],
+    //         @"channels": @(m.channelCount),
+    //     }];
+    // }
+    // return result;
+
+    NSLog(@"[Stub] getModelsInFile: %@", filePath);
+
+    // Stub: return sample models
+    return @[
+        @{@"name": @"Model1", @"type": @"Single Line", @"channels": @(300)},
+        @{@"name": @"Model2", @"type": @"Matrix", @"channels": @(1200)},
+        @{@"name": @"Model3", @"type": @"Tree", @"channels": @(900)},
+    ];
+}
+
 #pragma mark - Output Operations
 
 - (NSArray<NSString *> *)getControllerNames {
@@ -251,6 +376,130 @@
     // return _outputEngine->isOutputting();
 
     return NO; // stub
+}
+
+#pragma mark - Port Configuration
+
+- (NSArray<NSDictionary *> *)getPortsForController:(NSString *)controllerName {
+    if (!controllerName) return @[];
+
+    std::string stdName = [controllerName UTF8String];
+
+    // TODO: Call into OutputEngine
+    // std::vector<xlEngine::PortConfig> ports = _outputEngine->getControllerPorts(stdName);
+    // return [self arrayFromPortConfigs:ports];
+
+    // Stub: return sample port data
+    NSMutableArray *ports = [NSMutableArray array];
+
+    // Generate 16 pixel ports
+    for (int i = 1; i <= 16; i++) {
+        [ports addObject:@{
+            @"port": @(i),
+            @"type": @"pixel",
+            @"protocol": @"ws2811",
+            @"startChannel": @(0),
+            @"channelCount": @(0),
+            @"pixelCount": @(0),
+            @"brightness": @(100),
+            @"gamma": @(1.0),
+            @"colorOrder": @"RGB",
+            @"nullPixelsStart": @(0),
+            @"nullPixelsEnd": @(0),
+            @"smartRemote": @(0),
+            @"modelName": @"",
+        }];
+    }
+
+    // Generate 4 serial ports
+    for (int i = 1; i <= 4; i++) {
+        [ports addObject:@{
+            @"port": @(i),
+            @"type": @"serial",
+            @"protocol": @"DMX",
+            @"startChannel": @(0),
+            @"channelCount": @(0),
+            @"brightness": @(100),
+            @"gamma": @(1.0),
+            @"colorOrder": @"",
+            @"nullPixelsStart": @(0),
+            @"nullPixelsEnd": @(0),
+            @"smartRemote": @(0),
+            @"modelName": @"",
+        }];
+    }
+
+    return ports;
+}
+
+- (BOOL)updatePort:(NSString *)controllerName
+              port:(NSInteger)portNumber
+        properties:(NSDictionary *)properties {
+    if (!controllerName || !properties) return NO;
+
+    std::string stdName = [controllerName UTF8String];
+
+    // TODO: Call into OutputEngine
+    // xlEngine::PortConfig config = _outputEngine->getPortConfig(stdName, (int)portNumber);
+    // Apply properties to config...
+    // return _outputEngine->setPortConfig(stdName, (int)portNumber, config).success;
+
+    NSLog(@"[Stub] updatePort %@ port %ld: %@", controllerName, (long)portNumber, properties);
+    return YES; // stub
+}
+
+- (BOOL)assignModel:(NSString *)modelName
+       toController:(NSString *)controllerName
+               port:(NSInteger)portNumber {
+    if (!modelName || !controllerName) return NO;
+
+    std::string stdModel = [modelName UTF8String];
+    std::string stdController = [controllerName UTF8String];
+
+    // TODO: Call into OutputEngine/ModelEngine
+    // This would update the model's controller assignment and port
+
+    NSLog(@"[Stub] assignModel %@ to %@ port %ld", modelName, controllerName, (long)portNumber);
+    return YES; // stub
+}
+
+- (BOOL)removeModelFromController:(NSString *)controllerName
+                             port:(NSInteger)portNumber {
+    if (!controllerName) return NO;
+
+    std::string stdController = [controllerName UTF8String];
+
+    // TODO: Call into OutputEngine/ModelEngine
+
+    NSLog(@"[Stub] removeModel from %@ port %ld", controllerName, (long)portNumber);
+    return YES; // stub
+}
+
+- (NSDictionary *)getControllerCapabilities:(NSString *)controllerName {
+    if (!controllerName) return nil;
+
+    std::string stdName = [controllerName UTF8String];
+
+    // TODO: Call into OutputEngine
+    // xlEngine::ControllerCapabilities caps = _outputEngine->getControllerCapabilities(stdName);
+    // return [self dictFromCapabilities:caps];
+
+    // Stub: return typical Falcon controller capabilities
+    return @{
+        @"maxPixelPorts": @(48),
+        @"maxSerialPorts": @(4),
+        @"maxPixelPortChannels": @(1024 * 3),
+        @"maxSerialPortChannels": @(512),
+        @"supportsSmartRemotes": @(YES),
+        @"smartRemoteCount": @(6),
+        @"supportsUpload": @(YES),
+        @"supportsAutoLayout": @(YES),
+        @"supportsAutoSize": @(YES),
+        @"supportsBrightness": @(YES),
+        @"supportsGamma": @(YES),
+        @"pixelProtocols": @[@"ws2811", @"ws2801", @"apa102", @"lpd8806", @"tm1809", @"tm1804", @"sm16716"],
+        @"serialProtocols": @[@"DMX", @"LOR", @"Renard"],
+    };
 }
 
 #pragma mark - Effect Operations

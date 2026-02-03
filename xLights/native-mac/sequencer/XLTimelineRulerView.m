@@ -466,8 +466,30 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
         self.scrollOffset = newX - loc.x;
         if (_scrollOffset < 0) self.scrollOffset = 0;
 
-        if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeZoomLevel:)]) {
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeZoomLevel:centeredOnPointX:)]) {
+            [_delegate timelineRuler:self didChangeZoomLevel:_zoomLevel centeredOnPointX:loc.x];
+        } else if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeZoomLevel:)]) {
             [_delegate timelineRuler:self didChangeZoomLevel:_zoomLevel];
+        }
+
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeScrollOffset:)]) {
+            [_delegate timelineRuler:self didChangeScrollOffset:_scrollOffset];
+        }
+        return;
+    }
+
+    // Horizontal scrolling (shift+scroll or natural horizontal scroll)
+    CGFloat dx = event.scrollingDeltaX;
+    if (event.modifierFlags & NSEventModifierFlagShift) {
+        dx = event.scrollingDeltaY;
+    }
+
+    if (fabs(dx) > 0.01) {
+        CGFloat newOffset = _scrollOffset - dx;
+        self.scrollOffset = fmax(0, newOffset);
+
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeScrollOffset:)]) {
+            [_delegate timelineRuler:self didChangeScrollOffset:_scrollOffset];
         }
         return;
     }
@@ -488,8 +510,14 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     self.scrollOffset = newX - loc.x;
     if (_scrollOffset < 0) self.scrollOffset = 0;
 
-    if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeZoomLevel:)]) {
+    if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeZoomLevel:centeredOnPointX:)]) {
+        [_delegate timelineRuler:self didChangeZoomLevel:_zoomLevel centeredOnPointX:loc.x];
+    } else if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeZoomLevel:)]) {
         [_delegate timelineRuler:self didChangeZoomLevel:_zoomLevel];
+    }
+
+    if ([_delegate respondsToSelector:@selector(timelineRuler:didChangeScrollOffset:)]) {
+        [_delegate timelineRuler:self didChangeScrollOffset:_scrollOffset];
     }
 }
 

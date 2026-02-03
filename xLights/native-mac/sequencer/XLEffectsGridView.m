@@ -10,7 +10,7 @@
 
 #import "XLEffectsGridView.h"
 #import "XLEffectsGridRenderer.h"
-#import <CoreVideo/CVDisplayLink.h>
+#import "XLUndoController.h"
 
 // Pasteboard type for effect drags from the palette
 NSPasteboardType const XLEffectTypePasteboardType = @"com.xlights.effectType";
@@ -39,7 +39,21 @@ static const NSInteger kMenuTagDelete = 1004;
 static const NSInteger kMenuTagEditSettings = 1005;
 
 @interface XLEffectsGridView () {
-    CVDisplayLinkRef _displayLink;
+    dispatch_source_t _displayTimer;
+
+    // Render-path snapshot: plain C arrays copied from the ObjC collections.
+    // The render path (drawGrid → renderer) MUST NOT touch any ObjC object
+    // ivars because the wxWidgets/C++ side of the process corrupts the ObjC
+    // heap region where those pointers live.  Primitive C data is immune.
+    CGFloat *_timingMarkValues;
+    NSUInteger _timingMarkCount;
+    XLEffectRenderInfo *_renderEffects;
+    NSUInteger _renderEffectCount;
+
+    // Selection tracking as C array (immune to heap corruption)
+    BOOL *_selectedEffects;
+    NSUInteger _selectedEffectsCapacity;
+    NSUInteger _selectedEffectsCount;  // cached count for quick access
 }
 
 @property (nonatomic, strong) CAMetalLayer *metalLayer;
@@ -48,8 +62,8 @@ static const NSInteger kMenuTagEditSettings = 1005;
 // Cached data from data source
 @property (nonatomic, assign) NSInteger totalRows;
 @property (nonatomic, assign) CGFloat sequenceLengthMS;
-@property (nonatomic, strong) NSMutableArray<NSValue *> *effectRenderInfos;
-@property (nonatomic, strong) NSArray<NSNumber *> *timingMarks;
+// NOTE: effectRenderInfos and timingMarks removed - using C arrays directly
+// to avoid ObjC heap corruption from wxWidgets/C++ interop
 
 // Mouse interaction state
 @property (nonatomic, assign) BOOL isDragging;
@@ -70,12 +84,15 @@ static const NSInteger kMenuTagEditSettings = 1005;
 @property (nonatomic, assign) NSInteger dragCurrentRow;
 @property (nonatomic, assign) CGFloat dragCurrentStartMS;
 
+// Undo state - captured snapshot at drag/resize start
+@property (nonatomic, assign) XLEffectSnapshot undoSnapshot;
+@property (nonatomic, assign) BOOL hasUndoSnapshot;
+
 // Rubber band selection
 @property (nonatomic, assign) NSPoint rubberBandOrigin;
 @property (nonatomic, assign) NSPoint rubberBandCurrent;
 
-// Multi-selection
-@property (nonatomic, strong, readwrite) NSMutableIndexSet *selectedEffectIndices;
+// Multi-selection (synthesized from C array on demand for delegate callbacks)
 
 // Palette drop state
 @property (nonatomic, assign) BOOL isReceivingDrop;
@@ -88,25 +105,6 @@ static const NSInteger kMenuTagEditSettings = 1005;
 @property (nonatomic, assign) BOOL needsRedraw;
 
 @end
-
-// CVDisplayLink callback
-static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
-                                     const CVTimeStamp *inNow,
-                                     const CVTimeStamp *inOutputTime,
-                                     CVOptionFlags flagsIn,
-                                     CVOptionFlags *flagsOut,
-                                     void *displayLinkContext)
-{
-    @autoreleasepool {
-        XLEffectsGridView *view = (__bridge XLEffectsGridView *)displayLinkContext;
-        if (view.needsRedraw) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [view drawGrid];
-            });
-        }
-    }
-    return kCVReturnSuccess;
-}
 
 @implementation XLEffectsGridView
 
@@ -138,11 +136,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _selectedEffectID = -1;
     _totalRows = 0;
     _sequenceLengthMS = 0;
-    _effectRenderInfos = [NSMutableArray array];
-    _timingMarks = @[];
+    // NOTE: Using C arrays directly for effects and timing marks
+    // to avoid ObjC heap corruption from wxWidgets/C++ interop
+    _timingMarkValues = NULL;
+    _timingMarkCount = 0;
+    _renderEffects = NULL;
+    _renderEffectCount = 0;
     _needsRedraw = YES;
     _snapToTimingMarks = YES;
-    _selectedEffectIndices = [NSMutableIndexSet indexSet];
+    _selectedEffects = NULL;
+    _selectedEffectsCapacity = 0;
+    _selectedEffectsCount = 0;
 
     // Drop state
     _isReceivingDrop = NO;
@@ -170,8 +174,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         NSLog(@"XLEffectsGridView: Metal renderer unavailable, grid will not render");
     }
 
-    // Set up display link for 60fps+ rendering
-    [self setupDisplayLink];
+    // Display timer is created lazily in viewDidMoveToWindow when the view
+    // first gets a window. Starting it here (before the view has a window,
+    // proper frame, or backing layer) can cause renders with corrupt state.
 
     // Accept mouse events
     NSTrackingAreaOptions options = NSTrackingMouseEnteredAndExited
@@ -188,26 +193,127 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [self registerForDraggedTypes:@[XLEffectTypePasteboardType]];
 }
 
-- (void)setupDisplayLink {
-    CVDisplayLinkRef dl;
-    CVDisplayLinkCreateWithActiveCGDisplays(&dl);
-    CVDisplayLinkSetOutputCallback(dl, &displayLinkCallback, (__bridge void *)self);
-    CVDisplayLinkStart(dl);
-    _displayLink = dl;
+- (void)setupDisplayTimer {
+    if (_displayTimer) return;
+
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    // ~60 fps with 4ms leeway for power efficiency
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, 0),
+                              NSEC_PER_SEC / 60,
+                              NSEC_PER_MSEC * 4);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(timer, ^{
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf && strongSelf.needsRedraw && strongSelf.window) {
+            [strongSelf drawGrid];
+        }
+    });
+    dispatch_resume(timer);
+    _displayTimer = timer;
+}
+
+- (void)stopDisplayTimer {
+    if (_displayTimer) {
+        dispatch_source_cancel(_displayTimer);
+        _displayTimer = nil;
+    }
 }
 
 - (void)dealloc {
-    if (_displayLink) {
-        CVDisplayLinkStop(_displayLink);
-        CVDisplayLinkRelease(_displayLink);
-        _displayLink = NULL;
+    [self stopDisplayTimer];
+    free(_timingMarkValues);
+    _timingMarkValues = NULL;
+    _timingMarkCount = 0;
+    free(_renderEffects);
+    _renderEffects = NULL;
+    _renderEffectCount = 0;
+    free(_selectedEffects);
+    _selectedEffects = NULL;
+    _selectedEffectsCapacity = 0;
+    _selectedEffectsCount = 0;
+}
+
+#pragma mark - Selection C Array Helpers
+
+/// Ensure the selection array has capacity for at least `count` effects.
+- (void)ensureSelectionCapacity:(NSUInteger)count {
+    if (count <= _selectedEffectsCapacity) return;
+
+    NSUInteger newCapacity = MAX(count, _selectedEffectsCapacity * 2);
+    if (newCapacity < 64) newCapacity = 64;
+
+    BOOL *newArray = (BOOL *)calloc(newCapacity, sizeof(BOOL));
+    if (_selectedEffects && _selectedEffectsCapacity > 0) {
+        memcpy(newArray, _selectedEffects, _selectedEffectsCapacity * sizeof(BOOL));
+        free(_selectedEffects);
     }
+    _selectedEffects = newArray;
+    _selectedEffectsCapacity = newCapacity;
+}
+
+/// Check if an effect index is selected.
+- (BOOL)isEffectSelected:(NSUInteger)idx {
+    if (idx >= _selectedEffectsCapacity) return NO;
+    return _selectedEffects[idx];
+}
+
+/// Select an effect at the given index.
+- (void)selectEffectAtIndex:(NSUInteger)idx {
+    [self ensureSelectionCapacity:idx + 1];
+    if (!_selectedEffects[idx]) {
+        _selectedEffects[idx] = YES;
+        _selectedEffectsCount++;
+    }
+}
+
+/// Deselect an effect at the given index.
+- (void)deselectEffectAtIndex:(NSUInteger)idx {
+    if (idx >= _selectedEffectsCapacity) return;
+    if (_selectedEffects[idx]) {
+        _selectedEffects[idx] = NO;
+        _selectedEffectsCount--;
+    }
+}
+
+/// Clear all selections.
+- (void)clearAllSelections {
+    if (_selectedEffects && _selectedEffectsCapacity > 0) {
+        memset(_selectedEffects, 0, _selectedEffectsCapacity * sizeof(BOOL));
+    }
+    _selectedEffectsCount = 0;
+}
+
+/// Get the first selected index, or NSNotFound if none.
+- (NSUInteger)firstSelectedIndex {
+    for (NSUInteger i = 0; i < _selectedEffectsCapacity; i++) {
+        if (_selectedEffects[i]) return i;
+    }
+    return NSNotFound;
+}
+
+/// Synthesize an NSMutableIndexSet from the C selection array (for delegate callbacks).
+- (NSMutableIndexSet *)selectedEffectIndices {
+    NSMutableIndexSet *indices = [NSMutableIndexSet indexSet];
+    for (NSUInteger i = 0; i < _selectedEffectsCapacity; i++) {
+        if (_selectedEffects[i]) {
+            [indices addIndex:i];
+        }
+    }
+    return indices;
 }
 
 - (void)viewDidMoveToWindow {
     [super viewDidMoveToWindow];
     if (self.window) {
         _metalLayer.contentsScale = self.window.backingScaleFactor;
+        if (!_displayTimer) {
+            [self setupDisplayTimer];
+        }
+    } else {
+        [self stopDisplayTimer];
     }
 }
 
@@ -233,12 +339,31 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 #pragma mark - Data Loading
 
 - (void)reloadData {
-    [_effectRenderInfos removeAllObjects];
+    // Safety check: ensure we're on the main thread and the view is valid
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self reloadData];
+        });
+        return;
+    }
+
+    // Safety check: if the view has been deallocated or is in an invalid state, bail out
+    if (!self.window && !_metalLayer) {
+        return;
+    }
+
+    // Free old C arrays first (immune to corruption)
+    free(_timingMarkValues);
+    _timingMarkValues = NULL;
+    _timingMarkCount = 0;
+
+    free(_renderEffects);
+    _renderEffects = NULL;
+    _renderEffectCount = 0;
 
     if (!_dataSource) {
         _totalRows = 0;
         _sequenceLengthMS = 0;
-        _timingMarks = @[];
         _needsRedraw = YES;
         return;
     }
@@ -246,25 +371,56 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _totalRows = [_dataSource numberOfRowsInEffectsGrid:self];
     _sequenceLengthMS = [_dataSource sequenceLengthMSForEffectsGrid:self];
 
+    // Convert timing marks directly to a plain C array for the render path.
+    // This avoids ALL ObjC message sends / ARC retain-release during drawing,
+    // making the render path immune to heap corruption of ObjC object pointers.
+    NSArray<NSNumber *> *timingMarks = nil;
     if ([_dataSource respondsToSelector:@selector(timingMarksForEffectsGrid:)]) {
-        _timingMarks = [_dataSource timingMarksForEffectsGrid:self] ?: @[];
-    } else {
-        _timingMarks = @[];
+        timingMarks = [_dataSource timingMarksForEffectsGrid:self];
     }
 
-    // Collect all effect render infos
-    for (NSInteger row = 0; row < _totalRows; row++) {
-        NSInteger effectCount = [_dataSource effectsGrid:self numberOfEffectsInRow:row];
-        for (NSInteger i = 0; i < effectCount; i++) {
-            XLEffectRenderInfo info = [_dataSource effectsGrid:self effectInfoForRow:row atIndex:i];
-            info.row = row;
-            NSValue *val = [NSValue valueWithBytes:&info objCType:@encode(XLEffectRenderInfo)];
-            [_effectRenderInfos addObject:val];
+    NSUInteger timingCount = timingMarks.count;
+    if (timingCount > 0) {
+        _timingMarkValues = (CGFloat *)malloc(timingCount * sizeof(CGFloat));
+        if (_timingMarkValues) {
+            for (NSUInteger i = 0; i < timingCount; i++) {
+                _timingMarkValues[i] = [timingMarks[i] doubleValue];
+            }
+            _timingMarkCount = timingCount;
         }
     }
 
+    // Count total effects first to allocate C array in one shot
+    NSUInteger totalEffects = 0;
+    for (NSInteger row = 0; row < _totalRows; row++) {
+        totalEffects += [_dataSource effectsGrid:self numberOfEffectsInRow:row];
+    }
+
+    // Allocate C array for effects directly (bypassing ObjC collections entirely)
+    if (totalEffects > 0) {
+        _renderEffects = (XLEffectRenderInfo *)malloc(totalEffects * sizeof(XLEffectRenderInfo));
+        if (_renderEffects) {
+            NSUInteger idx = 0;
+            for (NSInteger row = 0; row < _totalRows; row++) {
+                NSInteger effectCount = [_dataSource effectsGrid:self numberOfEffectsInRow:row];
+                for (NSInteger i = 0; i < effectCount; i++) {
+                    XLEffectRenderInfo info = [_dataSource effectsGrid:self effectInfoForRow:row atIndex:i];
+                    info.row = row;
+                    _renderEffects[idx++] = info;
+                }
+            }
+            _renderEffectCount = totalEffects;
+        }
+    }
+
+    // Ensure selection array can accommodate all effects
+    [self ensureSelectionCapacity:_renderEffectCount];
+
     _needsRedraw = YES;
 }
+
+// syncRenderSnapshot removed - _renderEffects is now populated directly in reloadData
+// to avoid using ObjC collections (NSMutableArray) which are vulnerable to heap corruption
 
 #pragma mark - Drawing
 
@@ -273,7 +429,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)drawGrid {
-    if (!_renderer || !_metalLayer) return;
+    if (!_renderer || !_metalLayer || !self.window) return;
 
     _needsRedraw = NO;
 
@@ -285,6 +441,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     CGFloat scaledRowHeight = _rowHeight * scale;
     CGFloat scaledZoom = _zoomLevel * scale;
 
+    // Pass only plain C arrays to the renderer — no ObjC collections.
+    // The wxWidgets/C++ heap corruption overwrites ObjC object pointers
+    // stored as ivars, so we must never touch NSArray during rendering.
     [_renderer drawInLayer:_metalLayer
                   viewSize:viewSize
               scrollOffset:scaledScroll
@@ -292,10 +451,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                  rowHeight:scaledRowHeight
                  totalRows:_totalRows
           sequenceLengthMS:_sequenceLengthMS
-                   effects:_effectRenderInfos
+                   effects:_renderEffects
+              effectCount:_renderEffectCount
           selectedEffectID:_selectedEffectID
        playbackPositionMS:_playbackPositionMS
-            timingMarksMS:_timingMarks];
+         timingMarkValues:_timingMarkValues
+          timingMarkCount:_timingMarkCount];
 }
 
 #pragma mark - Coordinate Conversion
@@ -351,9 +512,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     CGFloat bestSnap = timeMS;
     CGFloat bestDistance = snapThresholdMS + 1;
 
-    // Snap to timing marks
-    for (NSNumber *mark in _timingMarks) {
-        CGFloat markMS = mark.doubleValue;
+    // Snap to timing marks (uses pre-computed C array)
+    for (NSUInteger i = 0; i < _timingMarkCount; i++) {
+        CGFloat markMS = _timingMarkValues[i];
         CGFloat dist = fabs(timeMS - markMS);
         if (dist < bestDistance) {
             bestDistance = dist;
@@ -391,27 +552,20 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 #pragma mark - Selection Management
 
 - (void)updateSelectionState {
-    // Update the selected flags on all cached render infos based on selectedEffectIndices
-    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[i] getValue:&info];
-        BOOL shouldBeSelected = [_selectedEffectIndices containsIndex:i];
-        if (info.selected != shouldBeSelected) {
-            info.selected = shouldBeSelected;
-            _effectRenderInfos[i] = [NSValue valueWithBytes:&info
-                                                    objCType:@encode(XLEffectRenderInfo)];
-        }
+    // Update the selected flags directly in the C render array — immune to heap corruption
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        _renderEffects[i].selected = [self isEffectSelected:i];
     }
 }
 
 - (void)notifySelectionChanged {
     if ([_delegate respondsToSelector:@selector(effectsGrid:didChangeSelection:)]) {
-        [_delegate effectsGrid:self didChangeSelection:[_selectedEffectIndices copy]];
+        [_delegate effectsGrid:self didChangeSelection:[self selectedEffectIndices]];
     }
 }
 
 - (void)clearSelection {
-    [_selectedEffectIndices removeAllIndexes];
+    [self clearAllSelections];
     _selectedEffectID = -1;
     [self updateSelectionState];
     [self notifySelectionChanged];
@@ -419,16 +573,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)selectAllEffectsInRow:(NSInteger)row {
-    [_selectedEffectIndices removeAllIndexes];
+    [self clearAllSelections];
     _selectedEffectID = -1;
 
-    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[i] getValue:&info];
-        if (info.row == row) {
-            [_selectedEffectIndices addIndex:i];
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        if (_renderEffects[i].row == row) {
+            [self selectEffectAtIndex:i];
             if (_selectedEffectID < 0) {
-                _selectedEffectID = i;
+                _selectedEffectID = (NSInteger)i;
             }
         }
     }
@@ -439,10 +591,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (NSInteger)rowForEffectIndex:(NSInteger)effectIndex {
-    if (effectIndex < 0 || effectIndex >= (NSInteger)_effectRenderInfos.count) return -1;
-    XLEffectRenderInfo info;
-    [_effectRenderInfos[effectIndex] getValue:&info];
-    return info.row;
+    if (effectIndex < 0 || (NSUInteger)effectIndex >= _renderEffectCount) return -1;
+    return _renderEffects[effectIndex].row;
 }
 
 #pragma mark - Mouse Events
@@ -498,31 +648,31 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                 NSInteger startIdx = MIN(_selectedEffectID, hitEffectIndex);
                 NSInteger endIdx = MAX(_selectedEffectID, hitEffectIndex);
                 for (NSInteger i = startIdx; i <= endIdx; i++) {
-                    [_selectedEffectIndices addIndex:i];
+                    [self selectEffectAtIndex:i];
                 }
             } else {
-                [_selectedEffectIndices addIndex:hitEffectIndex];
+                [self selectEffectAtIndex:hitEffectIndex];
                 _selectedEffectID = hitEffectIndex;
             }
         } else if (cmdDown) {
             // Cmd+click: toggle individual selection
-            if ([_selectedEffectIndices containsIndex:hitEffectIndex]) {
-                [_selectedEffectIndices removeIndex:hitEffectIndex];
+            if ([self isEffectSelected:hitEffectIndex]) {
+                [self deselectEffectAtIndex:hitEffectIndex];
                 if (_selectedEffectID == hitEffectIndex) {
-                    _selectedEffectID = (_selectedEffectIndices.count > 0)
-                        ? (NSInteger)_selectedEffectIndices.firstIndex
+                    _selectedEffectID = (_selectedEffectsCount > 0)
+                        ? (NSInteger)[self firstSelectedIndex]
                         : -1;
                 }
             } else {
-                [_selectedEffectIndices addIndex:hitEffectIndex];
+                [self selectEffectAtIndex:hitEffectIndex];
                 _selectedEffectID = hitEffectIndex;
             }
         } else {
             // Plain click: select only this effect (unless it's already part of multi-selection
             // and user might be about to drag)
-            if (![_selectedEffectIndices containsIndex:hitEffectIndex]) {
-                [_selectedEffectIndices removeAllIndexes];
-                [_selectedEffectIndices addIndex:hitEffectIndex];
+            if (![self isEffectSelected:hitEffectIndex]) {
+                [self clearAllSelections];
+                [self selectEffectAtIndex:hitEffectIndex];
                 _selectedEffectID = hitEffectIndex;
             }
             // If already in selection, keep multi-selection intact for potential drag.
@@ -538,10 +688,26 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
 
         // Store original timing for potential drag/resize
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[hitEffectIndex] getValue:&info];
-        _dragOriginalStartMS = info.startTimeMS;
-        _dragOriginalEndMS = info.endTimeMS;
+        if (hitEffectIndex >= 0 && (NSUInteger)hitEffectIndex < _renderEffectCount) {
+            _dragOriginalStartMS = _renderEffects[hitEffectIndex].startTimeMS;
+            _dragOriginalEndMS = _renderEffects[hitEffectIndex].endTimeMS;
+
+            // Capture undo snapshot before any changes
+            if (_undoController) {
+                XLEffectRenderInfo info = _renderEffects[hitEffectIndex];
+                _undoSnapshot.effectID = hitEffectIndex;
+                _undoSnapshot.row = info.row;
+                _undoSnapshot.layer = info.layer;
+                _undoSnapshot.startTimeMS = info.startTimeMS;
+                _undoSnapshot.endTimeMS = info.endTimeMS;
+                _undoSnapshot.effectTypeIndex = info.effectIndex;
+                _undoSnapshot.colorARGB = info.colorARGB;
+                _undoSnapshot.selected = info.selected;
+                _undoSnapshot.locked = info.locked;
+                _undoSnapshot.renderDisabled = info.renderDisabled;
+                _hasUndoSnapshot = YES;
+            }
+        }
         _dragStartTimeMS = timeMS;
     } else {
         // Clicked on empty area
@@ -607,13 +773,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             }
         }
 
-        // Update the cached info for visual feedback
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[_mouseDownEffectIndex] getValue:&info];
-        info.startTimeMS = newStart;
-        info.endTimeMS = newEnd;
-        NSValue *val = [NSValue valueWithBytes:&info objCType:@encode(XLEffectRenderInfo)];
-        _effectRenderInfos[_mouseDownEffectIndex] = val;
+        // Update the C array directly for visual feedback — immune to heap corruption
+        if ((NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
+            _renderEffects[_mouseDownEffectIndex].startTimeMS = newStart;
+            _renderEffects[_mouseDownEffectIndex].endTimeMS = newEnd;
+        }
 
         _needsRedraw = YES;
     } else if (_isDragging && _mouseDownEffectIndex >= 0) {
@@ -644,14 +808,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         _dragCurrentRow = targetRow;
         _dragCurrentStartMS = newStart;
 
-        // Update the cached info for visual feedback
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[_mouseDownEffectIndex] getValue:&info];
-        info.startTimeMS = newStart;
-        info.endTimeMS = newStart + duration;
-        info.row = targetRow;
-        NSValue *val = [NSValue valueWithBytes:&info objCType:@encode(XLEffectRenderInfo)];
-        _effectRenderInfos[_mouseDownEffectIndex] = val;
+        // Update the C array directly for visual feedback — immune to heap corruption
+        if ((NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
+            _renderEffects[_mouseDownEffectIndex].startTimeMS = newStart;
+            _renderEffects[_mouseDownEffectIndex].endTimeMS = newStart + duration;
+            _renderEffects[_mouseDownEffectIndex].row = targetRow;
+        }
 
         _needsRedraw = YES;
     } else if (_isRubberBanding) {
@@ -668,9 +830,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
 
-    if (_isResizing && _mouseDownEffectIndex >= 0) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[_mouseDownEffectIndex] getValue:&info];
+    if (_isResizing && _mouseDownEffectIndex >= 0 && (NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
+        XLEffectRenderInfo info = _renderEffects[_mouseDownEffectIndex];
+
+        // Register undo action for resize
+        if (_undoController && _hasUndoSnapshot) {
+            [_undoController captureEffectToBeResized:_undoSnapshot actionName:@"Resize Effect"];
+        }
 
         if ([_delegate respondsToSelector:@selector(effectsGrid:didResizeEffectAtRow:effectIndex:newStartTimeMS:newEndTimeMS:)]) {
             [_delegate effectsGrid:self
@@ -679,9 +845,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                     newStartTimeMS:info.startTimeMS
                       newEndTimeMS:info.endTimeMS];
         }
-    } else if (_isDragging && _mouseDownEffectIndex >= 0) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[_mouseDownEffectIndex] getValue:&info];
+    } else if (_isDragging && _mouseDownEffectIndex >= 0 && (NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
+        XLEffectRenderInfo info = _renderEffects[_mouseDownEffectIndex];
+
+        // Register undo action for move
+        if (_undoController && _hasUndoSnapshot) {
+            [_undoController captureEffectToBeMoved:_undoSnapshot actionName:@"Move Effect"];
+        }
 
         if (_dragCurrentRow != _mouseDownRow) {
             // Cross-row move
@@ -723,8 +893,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
     } else if (_mouseDownEffectIndex >= 0 && !shiftDown && !cmdDown) {
         // Plain click without drag: narrow to single selection
-        [_selectedEffectIndices removeAllIndexes];
-        [_selectedEffectIndices addIndex:_mouseDownEffectIndex];
+        [self clearAllSelections];
+        [self selectEffectAtIndex:_mouseDownEffectIndex];
         _selectedEffectID = _mouseDownEffectIndex;
         [self updateSelectionState];
         [self notifySelectionChanged];
@@ -734,6 +904,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _isResizing = NO;
     _isRubberBanding = NO;
     _dragCurrentRow = -1;
+    _hasUndoSnapshot = NO;
     _needsRedraw = YES;
 }
 
@@ -749,9 +920,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     if (hitEffectIndex >= 0) {
         // Select the right-clicked effect if not already selected
-        if (![_selectedEffectIndices containsIndex:hitEffectIndex]) {
-            [_selectedEffectIndices removeAllIndexes];
-            [_selectedEffectIndices addIndex:hitEffectIndex];
+        if (![self isEffectSelected:hitEffectIndex]) {
+            [self clearAllSelections];
+            [self selectEffectAtIndex:hitEffectIndex];
             _selectedEffectID = hitEffectIndex;
             [self updateSelectionState];
             [self notifySelectionChanged];
@@ -782,7 +953,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                                 atTimeMS:(CGFloat)timeMS {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Effects"];
 
-    BOOL hasSelection = _selectedEffectIndices.count > 0;
+    BOOL hasSelection = _selectedEffectsCount > 0;
 
     NSMenuItem *cutItem = [[NSMenuItem alloc] initWithTitle:@"Cut"
                                                     action:@selector(cut:)
@@ -873,20 +1044,19 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)performCopy {
     NSMutableArray *effectInfoArray = [NSMutableArray array];
 
-    [_selectedEffectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-        if (idx < (NSUInteger)self->_effectRenderInfos.count) {
-            XLEffectRenderInfo info;
-            [self->_effectRenderInfos[idx] getValue:&info];
+    for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+        if ([self isEffectSelected:idx]) {
+            XLEffectRenderInfo info = _renderEffects[idx];
             NSDictionary *dict = @{
                 @"index": @(idx),
                 @"row": @(info.row),
                 @"startTimeMS": @(info.startTimeMS),
                 @"endTimeMS": @(info.endTimeMS),
-                @"effectName": info.effectName ?: @""
+                @"effectIndex": @(info.effectIndex)
             };
             [effectInfoArray addObject:dict];
         }
-    }];
+    }
 
     if (effectInfoArray.count > 0) {
         NSPasteboard *pb = [NSPasteboard generalPasteboard];
@@ -901,10 +1071,36 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)performDelete {
-    if (_selectedEffectIndices.count == 0) return;
+    if (_selectedEffectsCount == 0) return;
+
+    // Capture undo snapshots for all selected effects before deletion
+    if (_undoController) {
+        NSMutableArray<NSValue *> *snapshots = [NSMutableArray array];
+        for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+            if ([self isEffectSelected:idx]) {
+                XLEffectRenderInfo info = _renderEffects[idx];
+                XLEffectSnapshot snapshot;
+                snapshot.effectID = idx;
+                snapshot.row = info.row;
+                snapshot.layer = info.layer;
+                snapshot.startTimeMS = info.startTimeMS;
+                snapshot.endTimeMS = info.endTimeMS;
+                snapshot.effectTypeIndex = info.effectIndex;
+                snapshot.colorARGB = info.colorARGB;
+                snapshot.selected = info.selected;
+                snapshot.locked = info.locked;
+                snapshot.renderDisabled = info.renderDisabled;
+                [snapshots addObject:[NSValue valueWithBytes:&snapshot objCType:@encode(XLEffectSnapshot)]];
+            }
+        }
+
+        NSString *actionName = (snapshots.count == 1) ? @"Delete Effect"
+            : [NSString stringWithFormat:@"Delete %lu Effects", (unsigned long)snapshots.count];
+        [_undoController captureEffectsToBeDeleted:snapshots actionName:actionName];
+    }
 
     if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestDeleteEffects:)]) {
-        [_delegate effectsGrid:self didRequestDeleteEffects:[_selectedEffectIndices copy]];
+        [_delegate effectsGrid:self didRequestDeleteEffects:[self selectedEffectIndices]];
     }
 
     [self clearSelection];
@@ -913,9 +1109,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (NSDictionary *)selectedEffectUserInfo {
     NSMutableArray *indices = [NSMutableArray array];
-    [_selectedEffectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-        [indices addObject:@(idx)];
-    }];
+    for (NSUInteger idx = 0; idx < _selectedEffectsCapacity; idx++) {
+        if (_selectedEffects[idx]) {
+            [indices addObject:@(idx)];
+        }
+    }
     return @{@"selectedIndices": indices};
 }
 
@@ -1119,27 +1317,99 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
-- (void)nudgeSelectedEffectsByMS:(CGFloat)deltaMS {
-    if (_selectedEffectIndices.count == 0) return;
+#pragma mark - Undo/Redo Responder Chain
 
-    [_selectedEffectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-        if (idx < (NSUInteger)self->_effectRenderInfos.count) {
-            XLEffectRenderInfo info;
-            [self->_effectRenderInfos[idx] getValue:&info];
-            CGFloat duration = info.endTimeMS - info.startTimeMS;
-            CGFloat newStart = info.startTimeMS + deltaMS;
-            newStart = MAX(0, MIN(newStart, self->_sequenceLengthMS - duration));
-            info.startTimeMS = newStart;
-            info.endTimeMS = newStart + duration;
-            self->_effectRenderInfos[idx] = [NSValue valueWithBytes:&info
-                                                            objCType:@encode(XLEffectRenderInfo)];
+- (void)undo:(id)sender {
+    if (_undoController && [_undoController canUndo]) {
+        [_undoController undo];
+    }
+}
+
+- (void)redo:(id)sender {
+    if (_undoController && [_undoController canRedo]) {
+        [_undoController redo];
+    }
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    SEL action = menuItem.action;
+
+    if (action == @selector(undo:)) {
+        if (_undoController) {
+            menuItem.title = [_undoController undoMenuItemTitle];
+            return [_undoController canUndo];
         }
-    }];
+        menuItem.title = @"Undo";
+        return NO;
+    }
+
+    if (action == @selector(redo:)) {
+        if (_undoController) {
+            menuItem.title = [_undoController redoMenuItemTitle];
+            return [_undoController canRedo];
+        }
+        menuItem.title = @"Redo";
+        return NO;
+    }
+
+    if (action == @selector(cut:) || action == @selector(copy:) || action == @selector(delete:)) {
+        return _selectedEffectsCount > 0;
+    }
+
+    if (action == @selector(paste:)) {
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        return [pb.types containsObject:XLEffectTypePasteboardType];
+    }
+
+    return YES;
+}
+
+- (NSUndoManager *)undoManager {
+    return _undoController.undoManager;
+}
+
+- (void)nudgeSelectedEffectsByMS:(CGFloat)deltaMS {
+    if (_selectedEffectsCount == 0) return;
+
+    // Capture undo snapshots before nudging
+    if (_undoController) {
+        NSMutableArray<NSValue *> *snapshots = [NSMutableArray array];
+        for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+            if ([self isEffectSelected:idx]) {
+                XLEffectRenderInfo info = _renderEffects[idx];
+                XLEffectSnapshot snapshot;
+                snapshot.effectID = idx;
+                snapshot.row = info.row;
+                snapshot.layer = info.layer;
+                snapshot.startTimeMS = info.startTimeMS;
+                snapshot.endTimeMS = info.endTimeMS;
+                snapshot.effectTypeIndex = info.effectIndex;
+                snapshot.colorARGB = info.colorARGB;
+                snapshot.selected = info.selected;
+                snapshot.locked = info.locked;
+                snapshot.renderDisabled = info.renderDisabled;
+                [snapshots addObject:[NSValue valueWithBytes:&snapshot objCType:@encode(XLEffectSnapshot)]];
+            }
+        }
+
+        NSString *actionName = (snapshots.count == 1) ? @"Nudge Effect"
+            : [NSString stringWithFormat:@"Nudge %lu Effects", (unsigned long)snapshots.count];
+        [_undoController captureEffectsToBeMoved:snapshots actionName:actionName];
+    }
+
+    for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+        if ([self isEffectSelected:idx]) {
+            CGFloat duration = _renderEffects[idx].endTimeMS - _renderEffects[idx].startTimeMS;
+            CGFloat newStart = _renderEffects[idx].startTimeMS + deltaMS;
+            newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
+            _renderEffects[idx].startTimeMS = newStart;
+            _renderEffects[idx].endTimeMS = newStart + duration;
+        }
+    }
 
     // Notify delegate about the move of the primary selection
-    if (_selectedEffectID >= 0 && _selectedEffectID < (NSInteger)_effectRenderInfos.count) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[_selectedEffectID] getValue:&info];
+    if (_selectedEffectID >= 0 && (NSUInteger)_selectedEffectID < _renderEffectCount) {
+        XLEffectRenderInfo info = _renderEffects[_selectedEffectID];
         NSInteger row = info.row;
 
         if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toTimeMS:)]) {
@@ -1154,19 +1424,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)moveSelectionToAdjacentEffect:(BOOL)forward {
-    if (_selectedEffectID < 0 || _selectedEffectID >= (NSInteger)_effectRenderInfos.count) return;
+    if (_selectedEffectID < 0 || (NSUInteger)_selectedEffectID >= _renderEffectCount) return;
 
-    XLEffectRenderInfo currentInfo;
-    [_effectRenderInfos[_selectedEffectID] getValue:&currentInfo];
+    XLEffectRenderInfo currentInfo = _renderEffects[_selectedEffectID];
     NSInteger currentRow = currentInfo.row;
 
     NSInteger bestIndex = -1;
     CGFloat bestDistance = CGFLOAT_MAX;
 
-    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
-        if (i == _selectedEffectID) continue;
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[i] getValue:&info];
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        if ((NSInteger)i == _selectedEffectID) continue;
+        XLEffectRenderInfo info = _renderEffects[i];
         if (info.row != currentRow) continue;
 
         if (forward && info.startTimeMS > currentInfo.startTimeMS) {
@@ -1185,8 +1453,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     if (bestIndex >= 0) {
-        [_selectedEffectIndices removeAllIndexes];
-        [_selectedEffectIndices addIndex:bestIndex];
+        [self clearAllSelections];
+        [self selectEffectAtIndex:bestIndex];
         _selectedEffectID = bestIndex;
         [self updateSelectionState];
         [self notifySelectionChanged];
@@ -1200,10 +1468,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)moveSelectionToAdjacentRow:(BOOL)downward {
-    if (_selectedEffectID < 0 || _selectedEffectID >= (NSInteger)_effectRenderInfos.count) return;
+    if (_selectedEffectID < 0 || (NSUInteger)_selectedEffectID >= _renderEffectCount) return;
 
-    XLEffectRenderInfo currentInfo;
-    [_effectRenderInfos[_selectedEffectID] getValue:&currentInfo];
+    XLEffectRenderInfo currentInfo = _renderEffects[_selectedEffectID];
     NSInteger currentRow = currentInfo.row;
     CGFloat currentMidTime = (currentInfo.startTimeMS + currentInfo.endTimeMS) / 2.0;
 
@@ -1213,9 +1480,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSInteger bestIndex = -1;
     CGFloat bestDistance = CGFLOAT_MAX;
 
-    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[i] getValue:&info];
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        XLEffectRenderInfo info = _renderEffects[i];
         if (info.row != targetRow) continue;
 
         CGFloat midTime = (info.startTimeMS + info.endTimeMS) / 2.0;
@@ -1227,8 +1493,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     if (bestIndex >= 0) {
-        [_selectedEffectIndices removeAllIndexes];
-        [_selectedEffectIndices addIndex:bestIndex];
+        [self clearAllSelections];
+        [self selectEffectAtIndex:bestIndex];
         _selectedEffectID = bestIndex;
         [self updateSelectionState];
         [self notifySelectionChanged];
@@ -1258,21 +1524,20 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     startRow = MAX(0, startRow);
     endRow = MIN(endRow, _totalRows - 1);
 
-    [_selectedEffectIndices removeAllIndexes];
+    [self clearAllSelections];
     _selectedEffectID = -1;
 
-    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[i] getValue:&info];
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        XLEffectRenderInfo info = _renderEffects[i];
 
         if (info.row < startRow || info.row > endRow) continue;
 
         // Effect overlaps the selection rectangle if it starts before the end
         // and ends after the start of the selection
         if (info.startTimeMS < endTimeMS && info.endTimeMS > startTimeMS) {
-            [_selectedEffectIndices addIndex:i];
+            [self selectEffectAtIndex:i];
             if (_selectedEffectID < 0) {
-                _selectedEffectID = i;
+                _selectedEffectID = (NSInteger)i;
             }
         }
     }
@@ -1296,14 +1561,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     if (row < 0 || row >= _totalRows) return;
 
-    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
-        XLEffectRenderInfo info;
-        [_effectRenderInfos[i] getValue:&info];
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        XLEffectRenderInfo info = _renderEffects[i];
 
         if (info.row != row) continue;
         if (timeMS < info.startTimeMS || timeMS > info.endTimeMS) continue;
 
-        *outEffectIndex = i;
+        *outEffectIndex = (NSInteger)i;
 
         // Determine hit location within the effect
         CGFloat x1 = info.startTimeMS * _zoomLevel - _scrollOffset.x;
@@ -1403,15 +1667,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     endMS = MIN(endMS, _sequenceLengthMS);
 
     // Snap to timing marks if within range
-    if (_snapToTimingMarks && _timingMarks.count > 0) {
+    if (_snapToTimingMarks && _timingMarkCount > 0 && _timingMarkValues) {
         CGFloat bestSnapStart = startMS;
         CGFloat bestSnapEnd = endMS;
         BOOL foundTimingSpan = NO;
 
         // Find the timing mark pair that encompasses the drop point
-        for (NSUInteger i = 0; i + 1 < _timingMarks.count; i++) {
-            CGFloat markStart = _timingMarks[i].doubleValue;
-            CGFloat markEnd = _timingMarks[i + 1].doubleValue;
+        for (NSUInteger i = 0; i + 1 < _timingMarkCount; i++) {
+            CGFloat markStart = _timingMarkValues[i];
+            CGFloat markEnd = _timingMarkValues[i + 1];
             if (timeMS >= markStart && timeMS < markEnd) {
                 bestSnapStart = markStart;
                 bestSnapEnd = markEnd;
@@ -1456,14 +1720,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (_selectedEffectID != selectedEffectID) {
         _selectedEffectID = selectedEffectID;
 
-        // Sync selectedEffectIndices with the primary selection if setting directly
+        // Sync selection with the primary selection if setting directly
         if (selectedEffectID >= 0) {
-            if (![_selectedEffectIndices containsIndex:selectedEffectID]) {
-                [_selectedEffectIndices removeAllIndexes];
-                [_selectedEffectIndices addIndex:selectedEffectID];
+            if (![self isEffectSelected:selectedEffectID]) {
+                [self clearAllSelections];
+                [self selectEffectAtIndex:selectedEffectID];
             }
         } else {
-            [_selectedEffectIndices removeAllIndexes];
+            [self clearAllSelections];
         }
 
         [self updateSelectionState];

@@ -14,6 +14,8 @@
 #import "sequencer/XLRowHeadingsView.h"
 #import "sequencer/XLWaveformView.h"
 #import "sequencer/XLTransportBarView.h"
+#import "sequencer/XLScrollCoordinator.h"
+#import "sequencer/XLUndoController.h"
 #import "XLEngineBridge.h"
 
 static const CGFloat kRowHeaderWidth = 180.0;
@@ -21,18 +23,35 @@ static const CGFloat kTimelineRulerHeight = 28.0;
 static const CGFloat kWaveformHeight = 60.0;
 static const CGFloat kTransportBarHeight = 44.0;
 
+// Demo row data stored as plain C struct - immune to wxWidgets heap corruption.
+// No ObjC objects means no isa pointer dereference, no ARC, no message dispatch.
+typedef struct {
+    const char *name;     // Static string pointer (lives in DATA segment)
+    XLElementType type;
+    BOOL expandable;
+    BOOL expanded;
+    NSInteger indent;
+} XLDemoRowEntry;
+
 @interface XLSequencerViewController () <XLTimelineRulerDelegate,
                                           XLEffectsGridDataSource,
                                           XLEffectsGridDelegate,
                                           XLTransportBarDelegate,
                                           XLWaveformViewDelegate,
                                           XLRowHeadingsDataSource,
-                                          XLRowHeadingsDelegate>
+                                          XLRowHeadingsDelegate,
+                                          XLScrollCoordinatorDelegate> {
+    // C array of demo row data - immune to heap corruption
+    XLDemoRowEntry *_demoRowData;
+    NSUInteger _demoRowCount;
+    NSUInteger _demoRowCapacity;
+}
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
 @property (nonatomic, strong) XLWaveformView *waveformView;
 @property (nonatomic, strong) XLTransportBarView *transportBar;
-@property (nonatomic, strong) NSMutableArray *demoRows;
+@property (nonatomic, strong, readwrite) XLScrollCoordinator *scrollCoordinator;
+@property (nonatomic, strong, readwrite) XLUndoController *undoController;
 
 @end
 
@@ -68,6 +87,10 @@ static const CGFloat kTransportBarHeight = 44.0;
     _effectsGridView.delegate = self;
     [view addSubview:_effectsGridView];
 
+    // Undo controller for effect operations
+    _undoController = [[XLUndoController alloc] initWithGridView:_effectsGridView];
+    _effectsGridView.undoController = _undoController;
+
     // Waveform view (below the grid)
     _waveformView = [[XLWaveformView alloc] initWithFrame:NSZeroRect];
     _waveformView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -85,6 +108,21 @@ static const CGFloat kTransportBarHeight = 44.0;
     _transportBar.engineBridge = self.engineBridge;
     _transportBar.totalDurationMS = 60000.0;
     [view addSubview:_transportBar];
+
+    // Set up scroll coordinator for synchronized scrolling
+    _scrollCoordinator = [[XLScrollCoordinator alloc] init];
+    _scrollCoordinator.timelineRulerView = _timelineRuler;
+    _scrollCoordinator.effectsGridView = _effectsGridView;
+    _scrollCoordinator.waveformView = _waveformView;
+    _scrollCoordinator.rowHeadingsView = _rowHeadingsView;
+    _scrollCoordinator.delegate = self;
+
+    // Set scroll/zoom limits based on sequence properties
+    CGFloat sequenceLengthMS = 60000.0;
+    CGFloat rowCount = (CGFloat)_demoRowCount;
+    CGFloat rowHeight = 22.0;
+    _scrollCoordinator.maxHorizontalScrollOffset = sequenceLengthMS * _scrollCoordinator.zoomLevel;
+    _scrollCoordinator.maxVerticalScrollOffset = rowCount * rowHeight;
 
     // Layout constraints
     [NSLayoutConstraint activateConstraints:@[
@@ -132,39 +170,43 @@ static const CGFloat kTransportBarHeight = 44.0;
 #pragma mark - Demo Data
 
 - (void)buildDemoData {
-    _demoRows = [NSMutableArray array];
+    // Static demo data - all strings are string literals in the DATA segment,
+    // so they're immune to heap corruption.
+    static const XLDemoRowEntry kInitialDemoRows[] = {
+        { "Beat Timing",    XLElementTypeTiming,    NO,  NO,  0 },
+        { "Phrase Timing",  XLElementTypeTiming,    NO,  NO,  0 },
+        { "Mega Tree",      XLElementTypeModel,     YES, YES, 0 },
+        { "  Strand 1",     XLElementTypeStrand,    NO,  NO,  1 },
+        { "  Strand 2",     XLElementTypeStrand,    NO,  NO,  1 },
+        { "Arches",         XLElementTypeModelGroup,YES, NO,  0 },
+        { "Matrix",         XLElementTypeModel,     YES, NO,  0 },
+        { "Roofline",       XLElementTypeModel,     NO,  NO,  0 },
+        { "Windows",        XLElementTypeModelGroup,YES, YES, 0 },
+        { "  Window Left",  XLElementTypeModel,     NO,  NO,  1 },
+        { "  Window Right", XLElementTypeModel,     NO,  NO,  1 },
+        { "  Window Top",   XLElementTypeModel,     NO,  NO,  1 },
+        { "Candy Canes",    XLElementTypeModel,     YES, NO,  0 },
+        { "Snowflakes",     XLElementTypeModel,     NO,  NO,  0 },
+        { "Star",           XLElementTypeModel,     YES, YES, 0 },
+        { "  Star Inner",   XLElementTypeSubmodel,  NO,  NO,  1 },
+        { "  Star Outer",   XLElementTypeSubmodel,  NO,  NO,  1 },
+        { "Wreath",         XLElementTypeModel,     NO,  NO,  0 },
+        { "Icicles",        XLElementTypeModel,     NO,  NO,  0 },
+        { "Ground Plane",   XLElementTypeModel,     NO,  NO,  0 },
+    };
 
-    NSArray *demoElements = @[
-        @[@"Beat Timing",       @(XLElementTypeTiming),    @NO,  @NO,  @0],
-        @[@"Phrase Timing",     @(XLElementTypeTiming),    @NO,  @NO,  @0],
-        @[@"Mega Tree",         @(XLElementTypeModel),     @YES, @YES, @0],
-        @[@"  Strand 1",        @(XLElementTypeStrand),    @NO,  @NO,  @1],
-        @[@"  Strand 2",        @(XLElementTypeStrand),    @NO,  @NO,  @1],
-        @[@"Arches",            @(XLElementTypeModelGroup),@YES, @NO,  @0],
-        @[@"Matrix",            @(XLElementTypeModel),     @YES, @NO,  @0],
-        @[@"Roofline",          @(XLElementTypeModel),     @NO,  @NO,  @0],
-        @[@"Windows",           @(XLElementTypeModelGroup),@YES, @YES, @0],
-        @[@"  Window Left",     @(XLElementTypeModel),     @NO,  @NO,  @1],
-        @[@"  Window Right",    @(XLElementTypeModel),     @NO,  @NO,  @1],
-        @[@"  Window Top",      @(XLElementTypeModel),     @NO,  @NO,  @1],
-        @[@"Candy Canes",       @(XLElementTypeModel),     @YES, @NO,  @0],
-        @[@"Snowflakes",        @(XLElementTypeModel),     @NO,  @NO,  @0],
-        @[@"Star",              @(XLElementTypeModel),     @YES, @YES, @0],
-        @[@"  Star Inner",      @(XLElementTypeSubmodel),  @NO,  @NO,  @1],
-        @[@"  Star Outer",      @(XLElementTypeSubmodel),  @NO,  @NO,  @1],
-        @[@"Wreath",            @(XLElementTypeModel),     @NO,  @NO,  @0],
-        @[@"Icicles",           @(XLElementTypeModel),     @NO,  @NO,  @0],
-        @[@"Ground Plane",      @(XLElementTypeModel),     @NO,  @NO,  @0],
-    ];
+    _demoRowCount = sizeof(kInitialDemoRows) / sizeof(kInitialDemoRows[0]);
+    _demoRowCapacity = _demoRowCount + 16; // Room for growth
+    _demoRowData = (XLDemoRowEntry *)malloc(_demoRowCapacity * sizeof(XLDemoRowEntry));
 
-    for (NSArray *elem in demoElements) {
-        NSMutableDictionary *row = [NSMutableDictionary dictionary];
-        row[@"name"]       = elem[0];
-        row[@"type"]       = elem[1];
-        row[@"expandable"] = elem[2];
-        row[@"expanded"]   = elem[3];
-        row[@"indent"]     = elem[4];
-        [_demoRows addObject:row];
+    // Copy static data to mutable C array (for expanded state toggling, reordering)
+    memcpy(_demoRowData, kInitialDemoRows, _demoRowCount * sizeof(XLDemoRowEntry));
+}
+
+- (void)dealloc {
+    if (_demoRowData) {
+        free(_demoRowData);
+        _demoRowData = NULL;
     }
 }
 
@@ -179,8 +221,18 @@ static const CGFloat kTransportBarHeight = 44.0;
 }
 
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didChangeZoomLevel:(CGFloat)pixelsPerMillisecond {
-    _effectsGridView.zoomLevel = pixelsPerMillisecond;
-    _waveformView.zoomLevel = pixelsPerMillisecond;
+    // Use scroll coordinator for synchronized zoom
+    [_scrollCoordinator viewDidChangeZoomLevel:pixelsPerMillisecond centeredOnPointX:-1 fromView:ruler];
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didChangeZoomLevel:(CGFloat)pixelsPerMillisecond centeredOnPointX:(CGFloat)pointX {
+    // Use scroll coordinator for synchronized zoom with center point
+    [_scrollCoordinator viewDidChangeZoomLevel:pixelsPerMillisecond centeredOnPointX:pointX fromView:ruler];
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didChangeScrollOffset:(CGFloat)scrollOffset {
+    // Use scroll coordinator for synchronized horizontal scroll
+    [_scrollCoordinator viewDidScrollHorizontally:scrollOffset fromView:ruler];
 }
 
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didBeginScrubbing:(NSTimeInterval)positionSeconds {
@@ -192,17 +244,18 @@ static const CGFloat kTransportBarHeight = 44.0;
 #pragma mark - XLEffectsGridDataSource
 
 - (NSInteger)numberOfRowsInEffectsGrid:(XLEffectsGridView *)gridView {
-    return (NSInteger)_demoRows.count;
+    return (NSInteger)_demoRowCount;
 }
 
 - (NSString *)effectsGrid:(XLEffectsGridView *)gridView nameForRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return @"";
-    return _demoRows[row][@"name"];
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return @"";
+    const char *name = _demoRowData[row].name;
+    return name ? [NSString stringWithUTF8String:name] : @"";
 }
 
 - (NSInteger)effectsGrid:(XLEffectsGridView *)gridView elementTypeForRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return 0;
-    return [_demoRows[row][@"type"] integerValue];
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return 0;
+    return (NSInteger)_demoRowData[row].type;
 }
 
 - (NSInteger)effectsGrid:(XLEffectsGridView *)gridView numberOfEffectsInRow:(NSInteger)row {
@@ -224,8 +277,7 @@ static const CGFloat kTransportBarHeight = 44.0;
     info.row = row;
     info.layer = 0;
     info.effectIndex = (row + effectIndex) % 30;
-    info.effectName = @"Demo";
-    info.color = nil;
+    info.colorARGB = 0;  // 0 = use palette color from effectIndex
     info.selected = NO;
     info.locked = (row == 3 && effectIndex == 0);
     info.renderDisabled = (row == 7 && effectIndex == 0);
@@ -271,78 +323,98 @@ static const CGFloat kTransportBarHeight = 44.0;
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didChangeZoomLevel:(CGFloat)zoomLevel
 {
-    _timelineRuler.zoomLevel = zoomLevel;
-    _waveformView.zoomLevel = zoomLevel;
+    // Use scroll coordinator for synchronized zoom
+    [_scrollCoordinator viewDidChangeZoomLevel:zoomLevel centeredOnPointX:-1 fromView:gridView];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didChangeScrollOffset:(CGPoint)scrollOffset
 {
-    _timelineRuler.scrollOffset = scrollOffset.x;
-    _waveformView.scrollOffsetX = scrollOffset.x;
-    _rowHeadingsView.verticalScrollOffset = scrollOffset.y;
+    // Use scroll coordinator for synchronized scroll
+    [_scrollCoordinator viewDidScrollHorizontally:scrollOffset.x fromView:gridView];
+    [_scrollCoordinator viewDidScrollVertically:scrollOffset.y fromView:gridView];
 }
 
 #pragma mark - XLRowHeadingsDataSource
 
 - (NSInteger)numberOfRowsInRowHeadings:(XLRowHeadingsView *)view {
-    return (NSInteger)_demoRows.count;
+    return (NSInteger)_demoRowCount;
 }
 
 - (NSString *)rowHeadings:(XLRowHeadingsView *)view nameForRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return @"";
-    return _demoRows[row][@"name"];
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return @"";
+    const char *name = _demoRowData[row].name;
+    return name ? [NSString stringWithUTF8String:name] : @"";
 }
 
 - (XLElementType)rowHeadings:(XLRowHeadingsView *)view elementTypeForRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return XLElementTypeModel;
-    return (XLElementType)[_demoRows[row][@"type"] integerValue];
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return XLElementTypeModel;
+    return _demoRowData[row].type;
 }
 
 - (BOOL)rowHeadings:(XLRowHeadingsView *)view isExpandableAtRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return NO;
-    return [_demoRows[row][@"expandable"] boolValue];
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return NO;
+    return _demoRowData[row].expandable;
 }
 
 - (BOOL)rowHeadings:(XLRowHeadingsView *)view isExpandedAtRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return NO;
-    return [_demoRows[row][@"expanded"] boolValue];
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return NO;
+    return _demoRowData[row].expanded;
 }
 
 - (NSInteger)rowHeadings:(XLRowHeadingsView *)view indentLevelForRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return 0;
-    return [_demoRows[row][@"indent"] integerValue];
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return 0;
+    return _demoRowData[row].indent;
 }
 
 #pragma mark - XLRowHeadingsDelegate
 
 - (void)rowHeadings:(XLRowHeadingsView *)view didToggleExpandAtRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_demoRows.count) return;
+    if (row < 0 || row >= (NSInteger)_demoRowCount || !_demoRowData) return;
 
-    BOOL current = [_demoRows[row][@"expanded"] boolValue];
-    _demoRows[row][@"expanded"] = @(!current);
-    NSLog(@"Toggled expand for row %ld: %@", (long)row, _demoRows[row][@"name"]);
+    _demoRowData[row].expanded = !_demoRowData[row].expanded;
+    NSLog(@"Toggled expand for row %ld: %s", (long)row, _demoRowData[row].name);
     [_rowHeadingsView reloadData];
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view didSelectRow:(NSInteger)row {
-    NSLog(@"Selected row heading %ld: %@", (long)row,
-          (row >= 0 && row < (NSInteger)_demoRows.count) ? _demoRows[row][@"name"] : @"(none)");
+    const char *name = (row >= 0 && row < (NSInteger)_demoRowCount && _demoRowData)
+                       ? _demoRowData[row].name : "(none)";
+    NSLog(@"Selected row heading %ld: %s", (long)row, name);
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view didReorderRow:(NSInteger)fromRow toRow:(NSInteger)toRow {
     NSLog(@"Reorder row %ld to %ld", (long)fromRow, (long)toRow);
-    if (fromRow < 0 || fromRow >= (NSInteger)_demoRows.count) return;
-    if (toRow < 0 || toRow > (NSInteger)_demoRows.count) return;
+    if (!_demoRowData) return;
+    if (fromRow < 0 || fromRow >= (NSInteger)_demoRowCount) return;
+    if (toRow < 0 || toRow > (NSInteger)_demoRowCount) return;
 
-    NSMutableDictionary *moved = _demoRows[fromRow];
-    [_demoRows removeObjectAtIndex:fromRow];
+    // Save the row being moved
+    XLDemoRowEntry moved = _demoRowData[fromRow];
+
+    // Shift elements to fill the gap
     NSInteger insertIdx = (toRow > fromRow) ? toRow - 1 : toRow;
-    if (insertIdx > (NSInteger)_demoRows.count) insertIdx = (NSInteger)_demoRows.count;
-    [_demoRows insertObject:moved atIndex:insertIdx];
+    if (insertIdx > (NSInteger)_demoRowCount - 1) insertIdx = (NSInteger)_demoRowCount - 1;
+
+    if (fromRow < insertIdx) {
+        // Moving down: shift elements up
+        memmove(&_demoRowData[fromRow], &_demoRowData[fromRow + 1],
+                (insertIdx - fromRow) * sizeof(XLDemoRowEntry));
+    } else if (fromRow > insertIdx) {
+        // Moving up: shift elements down
+        memmove(&_demoRowData[insertIdx + 1], &_demoRowData[insertIdx],
+                (fromRow - insertIdx) * sizeof(XLDemoRowEntry));
+    }
+
+    _demoRowData[insertIdx] = moved;
 
     [_rowHeadingsView reloadData];
     [_effectsGridView reloadData];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view didChangeVerticalScrollOffset:(CGFloat)offsetY {
+    // Use scroll coordinator for synchronized vertical scroll
+    [_scrollCoordinator viewDidScrollVertically:offsetY fromView:view];
 }
 
 #pragma mark - XLWaveformViewDelegate
@@ -356,8 +428,13 @@ static const CGFloat kTransportBarHeight = 44.0;
 }
 
 - (void)waveformView:(XLWaveformView *)view didChangeScrollOffset:(CGFloat)scrollOffsetX {
-    _effectsGridView.scrollOffset = CGPointMake(scrollOffsetX, _effectsGridView.scrollOffset.y);
-    _timelineRuler.scrollOffset = scrollOffsetX;
+    // Use scroll coordinator for synchronized horizontal scroll
+    [_scrollCoordinator viewDidScrollHorizontally:scrollOffsetX fromView:view];
+}
+
+- (void)waveformView:(XLWaveformView *)view didChangeZoomLevel:(CGFloat)zoomLevel centeredOnPointX:(CGFloat)pointX {
+    // Use scroll coordinator for synchronized zoom
+    [_scrollCoordinator viewDidChangeZoomLevel:zoomLevel centeredOnPointX:pointX fromView:view];
 }
 
 #pragma mark - XLTransportBarDelegate
@@ -394,6 +471,32 @@ static const CGFloat kTransportBarHeight = 44.0;
 
 - (void)transportBar:(XLTransportBarView *)bar didToggleOutput:(BOOL)outputEnabled {
     NSLog(@"Output %@", outputEnabled ? @"enabled" : @"disabled");
+}
+
+#pragma mark - XLScrollCoordinatorDelegate
+
+- (void)scrollCoordinator:(XLScrollCoordinator *)coordinator didChangeHorizontalScrollOffset:(CGFloat)offsetX {
+    // Update max scroll offset based on zoom level change
+    CGFloat sequenceLengthMS = 60000.0;
+    CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
+    CGFloat maxScroll = sequenceLengthMS * coordinator.zoomLevel - viewWidth;
+    coordinator.maxHorizontalScrollOffset = fmax(0, maxScroll);
+}
+
+- (void)scrollCoordinator:(XLScrollCoordinator *)coordinator didChangeVerticalScrollOffset:(CGFloat)offsetY {
+    // Update max scroll offset if needed
+    CGFloat rowHeight = _effectsGridView.rowHeight;
+    CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
+    CGFloat maxScroll = _demoRowCount * rowHeight - viewHeight;
+    coordinator.maxVerticalScrollOffset = fmax(0, maxScroll);
+}
+
+- (void)scrollCoordinator:(XLScrollCoordinator *)coordinator didChangeZoomLevel:(CGFloat)zoomLevel {
+    // Update max horizontal scroll offset when zoom changes
+    CGFloat sequenceLengthMS = 60000.0;
+    CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
+    CGFloat maxScroll = sequenceLengthMS * zoomLevel - viewWidth;
+    coordinator.maxHorizontalScrollOffset = fmax(0, maxScroll);
 }
 
 @end

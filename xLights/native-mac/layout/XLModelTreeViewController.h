@@ -50,6 +50,9 @@
 /// User requested renaming a model
 - (void)modelTree:(XLModelTreeViewController *)controller didRequestRenameModel:(NSString *)oldName toName:(NSString *)newName;
 
+/// User requested importing a model from file
+- (void)modelTreeDidRequestImportModel:(XLModelTreeViewController *)controller;
+
 @end
 
 /// NSOutlineView-based model hierarchy tree for the Layout tab.

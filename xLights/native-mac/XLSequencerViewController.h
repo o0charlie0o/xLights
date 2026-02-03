@@ -15,6 +15,8 @@
 @class XLEngineBridge;
 @class XLEffectsGridView;
 @class XLRowHeadingsView;
+@class XLScrollCoordinator;
+@class XLUndoController;
 
 /// View controller for the Sequencer tab.
 ///
@@ -32,5 +34,11 @@
 
 /// The row headings view (element names, expand/collapse, mute/solo).
 @property (nonatomic, strong, readonly) XLRowHeadingsView *rowHeadingsView;
+
+/// The scroll coordinator that synchronizes scrolling and zooming across all views.
+@property (nonatomic, strong, readonly) XLScrollCoordinator *scrollCoordinator;
+
+/// The undo controller for managing undo/redo operations on effects.
+@property (nonatomic, strong, readonly) XLUndoController *undoController;
 
 @end

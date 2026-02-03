@@ -25,6 +25,9 @@
 /// Called when the scroll offset changes (e.g. from scroll wheel input).
 - (void)waveformView:(XLWaveformView *)view didChangeScrollOffset:(CGFloat)scrollOffsetX;
 
+/// Called when the zoom level changes (e.g. from pinch gesture).
+- (void)waveformView:(XLWaveformView *)view didChangeZoomLevel:(CGFloat)zoomLevel centeredOnPointX:(CGFloat)pointX;
+
 @end
 
 /// CALayer-backed waveform display view for the native macOS sequencer.

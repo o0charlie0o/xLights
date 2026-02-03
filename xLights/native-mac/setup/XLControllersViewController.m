@@ -9,6 +9,8 @@
  **************************************************************/
 
 #import "XLControllersViewController.h"
+#import "XLNetworkDiscoveryController.h"
+#import "XLDiscoveryResultsViewController.h"
 #import "../XLEngineBridge.h"
 
 NSString * const XLControllerColumnName     = @"Name";
@@ -72,8 +74,14 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 @property (nonatomic, strong) NSView *footerView;
 @property (nonatomic, strong) NSButton *addButton;
 @property (nonatomic, strong) NSButton *removeButton;
+@property (nonatomic, strong) NSButton *discoverButton;
+@property (nonatomic, strong) NSProgressIndicator *discoverSpinner;
 @property (nonatomic, assign) BOOL sortAscending;
 @property (nonatomic, strong) NSString *sortColumnIdentifier;
+@property (nonatomic, strong, readwrite) XLNetworkDiscoveryController *discoveryController;
+@property (nonatomic, strong) NSPopover *discoveryPopover;
+@property (nonatomic, strong) XLDiscoveryResultsViewController *discoveryResultsViewController;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *pingStatusCache;
 
 @end
 
@@ -87,6 +95,11 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
         _controllers = @[];
         _sortAscending = YES;
         _sortColumnIdentifier = XLControllerColumnName;
+        _pingStatusCache = [NSMutableDictionary dictionary];
+
+        // Initialize discovery controller
+        _discoveryController = [[XLNetworkDiscoveryController alloc] init];
+        _discoveryController.delegate = self;
     }
     return self;
 }
@@ -94,6 +107,7 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 - (void)dealloc {
     _tableView.dataSource = nil;
     _tableView.delegate = nil;
+    [_discoveryController stopBackgroundPing];
 }
 
 - (void)loadView {
@@ -126,7 +140,16 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    _discoveryController.engineBridge = _engineBridge;
     [self reloadData];
+
+    // Start background ping monitoring
+    [_discoveryController startBackgroundPing];
+}
+
+- (void)setEngineBridge:(XLEngineBridge *)engineBridge {
+    _engineBridge = engineBridge;
+    _discoveryController.engineBridge = engineBridge;
 }
 
 #pragma mark - Table View Setup
@@ -215,8 +238,27 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
     _removeButton.bordered = NO;
     _removeButton.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // Discover button with network scanning icon
+    _discoverButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"antenna.radiowaves.left.and.right"
+                                                          accessibilityDescription:@"Discover Controllers"]
+                                         target:self
+                                         action:@selector(discoverButtonClicked:)];
+    _discoverButton.bezelStyle = NSBezelStyleSmallSquare;
+    _discoverButton.bordered = NO;
+    _discoverButton.toolTip = @"Discover controllers on the network";
+    _discoverButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // Spinner for discovery progress
+    _discoverSpinner = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    _discoverSpinner.style = NSProgressIndicatorStyleSpinning;
+    _discoverSpinner.controlSize = NSControlSizeSmall;
+    _discoverSpinner.translatesAutoresizingMaskIntoConstraints = NO;
+    _discoverSpinner.hidden = YES;
+
     [_footerView addSubview:_addButton];
     [_footerView addSubview:_removeButton];
+    [_footerView addSubview:_discoverButton];
+    [_footerView addSubview:_discoverSpinner];
 
     [NSLayoutConstraint activateConstraints:@[
         [separator.topAnchor constraintEqualToAnchor:_footerView.topAnchor],
@@ -233,6 +275,18 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
         [_removeButton.centerYAnchor constraintEqualToAnchor:_footerView.centerYAnchor],
         [_removeButton.widthAnchor constraintEqualToConstant:24.0],
         [_removeButton.heightAnchor constraintEqualToConstant:24.0],
+
+        // Discover button on the right side of the footer
+        [_discoverButton.trailingAnchor constraintEqualToAnchor:_footerView.trailingAnchor constant:-4.0],
+        [_discoverButton.centerYAnchor constraintEqualToAnchor:_footerView.centerYAnchor],
+        [_discoverButton.widthAnchor constraintEqualToConstant:24.0],
+        [_discoverButton.heightAnchor constraintEqualToConstant:24.0],
+
+        // Spinner replaces discover button icon during scanning
+        [_discoverSpinner.centerXAnchor constraintEqualToAnchor:_discoverButton.centerXAnchor],
+        [_discoverSpinner.centerYAnchor constraintEqualToAnchor:_discoverButton.centerYAnchor],
+        [_discoverSpinner.widthAnchor constraintEqualToConstant:16.0],
+        [_discoverSpinner.heightAnchor constraintEqualToConstant:16.0],
     ]];
 }
 
@@ -269,6 +323,9 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
     sortItem.submenu = sortMenu;
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItem:sortItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Discover Controllers..." action:@selector(discoverButtonClicked:) keyEquivalent:@""];
 
     return menu;
 }
@@ -432,8 +489,17 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
         ]];
     }
 
-    NSNumber *statusNumber = controller[XLControllerColumnStatus];
-    XLControllerStatus status = statusNumber ? (XLControllerStatus)statusNumber.integerValue : XLControllerStatusUnknown;
+    // Check ping status cache first, then fall back to controller data
+    NSString *name = controller[XLControllerColumnName];
+    XLControllerStatus status = XLControllerStatusUnknown;
+
+    if (name && _pingStatusCache[name]) {
+        status = (XLControllerStatus)_pingStatusCache[name].integerValue;
+    } else {
+        NSNumber *statusNumber = controller[XLControllerColumnStatus];
+        status = statusNumber ? (XLControllerStatus)statusNumber.integerValue : XLControllerStatusUnknown;
+    }
+
     cell.imageView.image = StatusDotImage(status);
 
     return cell;
@@ -688,6 +754,157 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
     }
 
     return YES;
+}
+
+#pragma mark - Network Discovery
+
+- (void)discoverButtonClicked:(id)sender {
+    [self startDiscovery];
+}
+
+- (void)startDiscovery {
+    // Show discovery popover
+    if (!_discoveryResultsViewController) {
+        _discoveryResultsViewController = [[XLDiscoveryResultsViewController alloc] init];
+        _discoveryResultsViewController.delegate = self;
+        _discoveryResultsViewController.discoveryController = _discoveryController;
+    }
+
+    if (!_discoveryPopover) {
+        _discoveryPopover = [[NSPopover alloc] init];
+        _discoveryPopover.behavior = NSPopoverBehaviorSemitransient;
+        _discoveryPopover.contentViewController = _discoveryResultsViewController;
+    }
+
+    // Show the popover anchored to the discover button
+    [_discoveryPopover showRelativeToRect:_discoverButton.bounds
+                                   ofView:_discoverButton
+                            preferredEdge:NSMaxYEdge];
+
+    // Start discovery
+    [_discoveryController startDiscovery];
+}
+
+- (void)updatePingStatus:(XLControllerStatus)status forControllerNamed:(NSString *)name {
+    if (!name) return;
+
+    _pingStatusCache[name] = @(status);
+
+    // Find the row for this controller and refresh it
+    NSInteger rowIndex = -1;
+    for (NSUInteger i = 0; i < _controllers.count; i++) {
+        if ([_controllers[i][XLControllerColumnName] isEqualToString:name]) {
+            rowIndex = (NSInteger)i;
+            break;
+        }
+    }
+
+    if (rowIndex >= 0) {
+        NSIndexSet *rowSet = [NSIndexSet indexSetWithIndex:rowIndex];
+        NSIndexSet *columnSet = [NSIndexSet indexSetWithIndex:[_tableView columnWithIdentifier:XLControllerColumnStatus]];
+        [_tableView reloadDataForRowIndexes:rowSet columnIndexes:columnSet];
+    }
+}
+
+#pragma mark - XLNetworkDiscoveryDelegate
+
+- (void)discoveryController:(XLNetworkDiscoveryController *)controller
+         didChangeState:(XLDiscoveryState)state {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        switch (state) {
+            case XLDiscoveryStateScanning:
+                self->_discoverSpinner.hidden = NO;
+                [self->_discoverSpinner startAnimation:nil];
+                self->_discoverButton.image = nil;
+                break;
+
+            case XLDiscoveryStateComplete:
+            case XLDiscoveryStateFailed:
+            case XLDiscoveryStateIdle:
+                [self->_discoverSpinner stopAnimation:nil];
+                self->_discoverSpinner.hidden = YES;
+                self->_discoverButton.image = [NSImage imageWithSystemSymbolName:@"antenna.radiowaves.left.and.right"
+                                                        accessibilityDescription:@"Discover Controllers"];
+                break;
+        }
+
+        [self->_discoveryResultsViewController setDiscoveryState:state];
+    });
+}
+
+- (void)discoveryController:(XLNetworkDiscoveryController *)controller
+   didDiscoverControllers:(const XLDiscoveredController *)controllers
+                    count:(NSUInteger)count {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_discoveryResultsViewController reloadResults];
+    });
+}
+
+- (void)discoveryController:(XLNetworkDiscoveryController *)controller
+       didFailWithError:(NSError *)error {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Discovery Failed";
+        alert.informativeText = error.localizedDescription ?: @"An unknown error occurred during network discovery.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+    });
+}
+
+- (void)discoveryController:(XLNetworkDiscoveryController *)controller
+     didUpdatePingStatus:(XLPingState)status
+       forControllerName:(NSString *)name {
+    // Convert XLPingState to XLControllerStatus
+    XLControllerStatus controllerStatus;
+    switch (status) {
+        case XLPingStateOK:
+            controllerStatus = XLControllerStatusOK;
+            break;
+        case XLPingStateWebOK:
+            controllerStatus = XLControllerStatusWebOK;
+            break;
+        case XLPingStateOpen:
+        case XLPingStateOpened:
+            controllerStatus = XLControllerStatusOpen;
+            break;
+        case XLPingStateAllFailed:
+            controllerStatus = XLControllerStatusOpenFail;
+            break;
+        case XLPingStateUnavailable:
+            controllerStatus = XLControllerStatusUnavailable;
+            break;
+        case XLPingStateUnknown:
+        default:
+            controllerStatus = XLControllerStatusUnknown;
+            break;
+    }
+
+    [self updatePingStatus:controllerStatus forControllerNamed:name];
+}
+
+#pragma mark - XLDiscoveryResultsDelegate
+
+- (void)discoveryResults:(XLDiscoveryResultsViewController *)controller
+    didRequestAddControllers:(NSArray<NSNumber *> *)controllerIndices {
+    for (NSNumber *indexNum in controllerIndices) {
+        NSUInteger index = indexNum.unsignedIntegerValue;
+        [_discoveryController addDiscoveredControllerAtIndex:index];
+    }
+
+    // Refresh controller list after adding
+    [self reloadData];
+
+    // Close the popover
+    [_discoveryPopover close];
+}
+
+- (void)discoveryResultsDidDismiss:(XLDiscoveryResultsViewController *)controller {
+    [_discoveryPopover close];
+}
+
+- (void)discoveryResultsDidRequestRescan:(XLDiscoveryResultsViewController *)controller {
+    [_discoveryController startDiscovery];
 }
 
 @end

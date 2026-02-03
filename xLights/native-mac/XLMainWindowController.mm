@@ -29,7 +29,7 @@ static NSString * const kXLInspectorWidthKey = @"XLInspectorWidth";
 static NSString * const kXLBottomPanelHeightKey = @"XLBottomPanelHeight";
 static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
-@interface XLMainWindowController ()
+@interface XLMainWindowController () <NSWindowDelegate>
 
 @property (nonatomic, strong) NSSplitViewController *mainSplitController;
 @property (nonatomic, strong) NSSplitViewController *verticalSplitController;
@@ -54,8 +54,7 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     NSWindowStyleMask style = NSWindowStyleMaskTitled
         | NSWindowStyleMaskClosable
         | NSWindowStyleMaskMiniaturizable
-        | NSWindowStyleMaskResizable
-        | NSWindowStyleMaskFullSizeContentView;
+        | NSWindowStyleMaskResizable;
 
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:style
@@ -64,9 +63,8 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
     self = [super initWithWindow:window];
     if (self) {
-        window.titlebarAppearsTransparent = YES;
-        window.titleVisibility = NSWindowTitleHidden;
         window.minSize = NSMakeSize(1024, 600);
+        window.delegate = self;
 
         // Dark appearance by default
         if (@available(macOS 10.14, *)) {
@@ -79,13 +77,87 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
         _bottomPanelHeight = kDefaultBottomPanelHeight;
         _currentTab = 2; // Default to Sequencer tab
 
+        // Register for resize notifications to trace what's changing the frame
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(debugWindowDidResize:)
+                                                     name:NSWindowDidResizeNotification
+                                                   object:window];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(debugWindowWillClose:)
+                                                     name:NSWindowWillCloseNotification
+                                                   object:window];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(debugWindowDidMiniaturize:)
+                                                     name:NSWindowDidMiniaturizeNotification
+                                                   object:window];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(debugWindowOcclusionChanged:)
+                                                     name:NSWindowDidChangeOcclusionStateNotification
+                                                   object:window];
+
+        NSLog(@"NativeUI [init]: frame after window create: %@", NSStringFromRect(window.frame));
+
         [self setupEngine];
+        NSLog(@"NativeUI [init]: frame after setupEngine: %@", NSStringFromRect(window.frame));
+
         [self setupViewControllers];
+        NSLog(@"NativeUI [init]: frame after setupViewControllers: %@", NSStringFromRect(window.frame));
+
         [self setupSplitView];
+        NSLog(@"NativeUI [init]: frame after setupSplitView: %@", NSStringFromRect(window.frame));
+
         [self setupToolbar];
+        NSLog(@"NativeUI [init]: frame after setupToolbar: %@", NSStringFromRect(window.frame));
+
         [self restoreWindowState];
+        NSLog(@"NativeUI [init]: frame after restoreWindowState: %@", NSStringFromRect(window.frame));
+
+        // Diagnostic: check resize capability
+        NSLog(@"NativeUI [init]: styleMask=%lu hasResizable=%d",
+              (unsigned long)window.styleMask,
+              (window.styleMask & NSWindowStyleMaskResizable) != 0);
+        NSLog(@"NativeUI [init]: minSize=%@ maxSize=%@",
+              NSStringFromSize(window.minSize), NSStringFromSize(window.maxSize));
+        NSLog(@"NativeUI [init]: contentMinSize=%@ contentMaxSize=%@",
+              NSStringFromSize(window.contentMinSize), NSStringFromSize(window.contentMaxSize));
     }
     return self;
+}
+
+- (void)debugWindowDidResize:(NSNotification *)note {
+    NSWindow *win = note.object;
+    // Get a backtrace to see WHO is resizing
+    NSArray *symbols = [NSThread callStackSymbols];
+    NSMutableString *trace = [NSMutableString string];
+    // Print first 10 frames (skip 0=this method, 1=notification center)
+    for (NSUInteger i = 2; i < MIN(symbols.count, 12); i++) {
+        [trace appendFormat:@"\n    %@", symbols[i]];
+    }
+    NSLog(@"NativeUI [RESIZE]: new frame=%@  stack:%@", NSStringFromRect(win.frame), trace);
+}
+
+- (void)debugWindowWillClose:(NSNotification *)note {
+    NSLog(@"NativeUI [CLOSE]: window is closing!");
+    NSArray *symbols = [NSThread callStackSymbols];
+    for (NSUInteger i = 2; i < MIN(symbols.count, 10); i++) {
+        NSLog(@"NativeUI [CLOSE]:   %@", symbols[i]);
+    }
+}
+
+- (void)debugWindowDidMiniaturize:(NSNotification *)note {
+    NSLog(@"NativeUI [MINIATURIZE]: window miniaturized");
+}
+
+- (void)debugWindowOcclusionChanged:(NSNotification *)note {
+    NSWindow *win = note.object;
+    BOOL visible = (win.occlusionState & NSWindowOcclusionStateVisible) != 0;
+    NSLog(@"NativeUI [OCCLUSION]: visible=%d  frame=%@", visible, NSStringFromRect(win.frame));
+    if (!visible) {
+        NSArray *symbols = [NSThread callStackSymbols];
+        for (NSUInteger i = 2; i < MIN(symbols.count, 10); i++) {
+            NSLog(@"NativeUI [OCCLUSION]:   %@", symbols[i]);
+        }
+    }
 }
 
 - (void)setupEngine {
@@ -111,6 +183,8 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     _mainSplitController = [[NSSplitViewController alloc] init];
     _mainSplitController.splitView.vertical = YES;
     _mainSplitController.splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    // NOTE: Do NOT set preferredContentSize on split view controllers - it causes
+    // Auto Layout to fight window resizing by snapping back to the preferred size.
 
     // Left side: vertical split for main content + bottom panel
     _verticalSplitController = [[NSSplitViewController alloc] init];
@@ -120,10 +194,9 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     // Content container (holds tab views)
     _contentContainer = [[NSView alloc] initWithFrame:NSZeroRect];
     _contentWrapperController = [self wrapViewInController:_contentContainer];
-    _contentWrapperController.preferredContentSize = NSMakeSize(800, 400);
     NSSplitViewItem *contentItem = [NSSplitViewItem splitViewItemWithViewController:_contentWrapperController];
     contentItem.canCollapse = NO;
-    contentItem.minimumThickness = 200.0;
+    contentItem.minimumThickness = 400.0;
     contentItem.holdingPriority = NSLayoutPriorityDefaultHigh;
     [_verticalSplitController addSplitViewItem:contentItem];
 
@@ -131,8 +204,8 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     _bottomPanelContainer = [[NSView alloc] initWithFrame:NSZeroRect];
     _bottomPanelContainer.wantsLayer = YES;
     _bottomPanelContainer.layer.backgroundColor = [[NSColor colorWithWhite:0.15 alpha:1.0] CGColor];
-    NSSplitViewItem *bottomItem = [NSSplitViewItem splitViewItemWithViewController:
-                                   [self wrapViewInController:_bottomPanelContainer]];
+    NSViewController *bottomVC = [self wrapViewInController:_bottomPanelContainer];
+    NSSplitViewItem *bottomItem = [NSSplitViewItem splitViewItemWithViewController:bottomVC];
     bottomItem.canCollapse = YES;
     bottomItem.minimumThickness = kMinBottomPanelHeight;
     bottomItem.maximumThickness = 500.0;
@@ -141,6 +214,7 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     // Add vertical split to main split
     NSSplitViewItem *leftItem = [NSSplitViewItem splitViewItemWithViewController:_verticalSplitController];
     leftItem.canCollapse = NO;
+    leftItem.minimumThickness = 400.0;
     leftItem.holdingPriority = NSLayoutPriorityDefaultHigh;
     [_mainSplitController addSplitViewItem:leftItem];
 
@@ -151,8 +225,19 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     inspectorItem.maximumThickness = 500.0;
     [_mainSplitController addSplitViewItem:inspectorItem];
 
-    // Set main split view as window's content
+    // Use contentViewController but disable automatic window sizing from content.
+    // This lets NSSplitViewController manage the view hierarchy properly while
+    // preventing Auto Layout from fighting window resizing.
+    NSLog(@"NativeUI [setupSplitView]: setting contentViewController");
     self.window.contentViewController = _mainSplitController;
+
+    // Disable automatic content size updates - this is the key to preventing
+    // Auto Layout from snapping the window back to content-derived sizes.
+    if (@available(macOS 10.10, *)) {
+        // The split view should not drive window size
+        _mainSplitController.splitView.translatesAutoresizingMaskIntoConstraints = YES;
+    }
+    NSLog(@"NativeUI [setupSplitView]: after contentViewController, frame=%@", NSStringFromRect(self.window.frame));
 
     // Add tab views to content container
     [self setupTabViews];
@@ -197,8 +282,8 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 - (void)setupToolbar {
     NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"XLMainToolbar"];
     toolbar.displayMode = NSToolbarDisplayModeIconAndLabel;
-    toolbar.allowsUserCustomization = YES;
-    toolbar.autosavesConfiguration = YES;
+    toolbar.allowsUserCustomization = NO;
+    toolbar.autosavesConfiguration = NO;
     toolbar.delegate = self;
     self.window.toolbar = toolbar;
 }
@@ -384,15 +469,7 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 - (void)restoreWindowState {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-    // Restore window frame (enforce minimum size since setFrame: bypasses minSize)
-    NSString *frameString = [defaults stringForKey:kXLWindowFrameKey];
-    if (frameString) {
-        NSRect frame = NSRectFromString(frameString);
-        NSSize minSize = self.window.minSize;
-        if (frame.size.width < minSize.width) frame.size.width = minSize.width;
-        if (frame.size.height < minSize.height) frame.size.height = minSize.height;
-        [self.window setFrame:frame display:YES];
-    }
+    NSLog(@"NativeUI [restore]: saved frame key = '%@'", [defaults stringForKey:kXLWindowFrameKey]);
 
     // Restore panel visibility
     if ([defaults objectForKey:kXLInspectorVisibleKey]) {
@@ -431,8 +508,30 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
 #pragma mark - Window Delegate
 
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    NSWindow *win = self.window;
+    NSLog(@"NativeUI [windowDidBecomeKey]: styleMask=%lu hasResizable=%d",
+          (unsigned long)win.styleMask,
+          (win.styleMask & NSWindowStyleMaskResizable) != 0);
+    NSLog(@"NativeUI [windowDidBecomeKey]: minSize=%@ maxSize=%@",
+          NSStringFromSize(win.minSize), NSStringFromSize(win.maxSize));
+    NSLog(@"NativeUI [windowDidBecomeKey]: frame=%@", NSStringFromRect(win.frame));
+}
+
 - (void)windowWillClose:(NSNotification *)notification {
     [self saveWindowState];
+}
+
+- (NSSize)windowWillResize:(NSWindow *)sender toSize:(NSSize)frameSize {
+    NSLog(@"NativeUI [windowWillResize]: from %@ to %@",
+          NSStringFromSize(sender.frame.size), NSStringFromSize(frameSize));
+    if (frameSize.width < sender.minSize.width || frameSize.height < sender.minSize.height) {
+        NSArray *symbols = [NSThread callStackSymbols];
+        for (NSUInteger i = 2; i < MIN(symbols.count, 12); i++) {
+            NSLog(@"NativeUI [windowWillResize]:   %@", symbols[i]);
+        }
+    }
+    return frameSize;
 }
 
 @end

@@ -32,4 +32,10 @@
 /// The model tree view controller (left sidebar)
 @property (nonatomic, strong, readonly) XLModelTreeViewController *modelTreeController;
 
+/// Show the model creation sheet for a given model type
+- (void)showModelCreationSheetForType:(NSString *)modelType;
+
+/// Show the model import sheet
+- (void)showModelImportSheet;
+
 @end

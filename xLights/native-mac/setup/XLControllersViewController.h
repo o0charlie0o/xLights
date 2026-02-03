@@ -11,6 +11,8 @@
  **************************************************************/
 
 #import <Cocoa/Cocoa.h>
+#import "XLNetworkDiscoveryController.h"
+#import "XLDiscoveryResultsViewController.h"
 
 @class XLControllersViewController;
 @class XLEngineBridge;
@@ -85,10 +87,11 @@ extern NSString * const XLControllerColumnStatus;
 /// Displays all configured controllers with columns for name, protocol,
 /// address, vendor/model, channels, active state, and connectivity status.
 /// Supports add/remove, context menu, drag-to-reorder, and column sorting.
+/// Includes network discovery integration with a Discover button in the footer.
 ///
 /// Data is loaded from XLEngineBridge and cached locally as an NSArray
 /// of NSDictionary objects keyed by the column identifiers above.
-@interface XLControllersViewController : NSViewController <NSTableViewDataSource, NSTableViewDelegate>
+@interface XLControllersViewController : NSViewController <NSTableViewDataSource, NSTableViewDelegate, XLNetworkDiscoveryDelegate, XLDiscoveryResultsDelegate>
 
 /// The table view displaying the controller list.
 @property (nonatomic, strong, readonly) NSTableView *tableView;
@@ -113,5 +116,14 @@ extern NSString * const XLControllerColumnStatus;
 
 /// Returns the name of the currently selected controller, or nil.
 - (NSString *)selectedControllerName;
+
+/// Network discovery controller for finding controllers on the network.
+@property (nonatomic, strong, readonly) XLNetworkDiscoveryController *discoveryController;
+
+/// Starts network discovery and shows results in a popover.
+- (void)startDiscovery;
+
+/// Updates the ping status indicator for a specific controller.
+- (void)updatePingStatus:(XLControllerStatus)status forControllerNamed:(NSString *)name;
 
 @end

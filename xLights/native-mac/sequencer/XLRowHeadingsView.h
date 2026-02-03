@@ -38,6 +38,7 @@ typedef NS_ENUM(NSInteger, XLElementType) {
 - (void)rowHeadings:(XLRowHeadingsView *)view didSelectRow:(NSInteger)row;
 - (void)rowHeadings:(XLRowHeadingsView *)view didReorderRow:(NSInteger)fromRow toRow:(NSInteger)toRow;
 - (NSMenu *)rowHeadings:(XLRowHeadingsView *)view contextMenuForRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view didChangeVerticalScrollOffset:(CGFloat)offsetY;
 @end
 
 @interface XLRowHeadingsView : NSView

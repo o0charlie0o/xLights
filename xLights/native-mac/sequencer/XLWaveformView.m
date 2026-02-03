@@ -535,8 +535,29 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)scrollWheel:(NSEvent *)event {
     if (event.modifierFlags & NSEventModifierFlagCommand) {
-        // Cmd+Scroll = Zoom — let parent handle it
-        [super scrollWheel:event];
+        // Cmd+Scroll = Zoom
+        NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+        CGFloat timeAtCursor = [self timeMSForPointX:loc.x];
+
+        CGFloat factor = 1.0 + event.scrollingDeltaY * 0.05;
+        factor = fmax(0.5, fmin(factor, 2.0));
+
+        CGFloat newZoom = _zoomLevel * factor;
+        newZoom = fmax(0.001, fmin(newZoom, 10.0));
+        _zoomLevel = newZoom;
+
+        // Adjust scroll to keep time under cursor stable
+        CGFloat newX = timeAtCursor * _zoomLevel - loc.x;
+        _scrollOffsetX = fmax(0, newX);
+        _needsRedraw = YES;
+
+        if ([_delegate respondsToSelector:@selector(waveformView:didChangeZoomLevel:centeredOnPointX:)]) {
+            [_delegate waveformView:self didChangeZoomLevel:_zoomLevel centeredOnPointX:loc.x];
+        }
+
+        if ([_delegate respondsToSelector:@selector(waveformView:didChangeScrollOffset:)]) {
+            [_delegate waveformView:self didChangeScrollOffset:_scrollOffsetX];
+        }
         return;
     }
 
@@ -562,6 +583,29 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
         } else {
             [super scrollWheel:event];
         }
+    }
+}
+
+- (void)magnifyWithEvent:(NSEvent *)event {
+    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    CGFloat timeAtCursor = [self timeMSForPointX:loc.x];
+
+    CGFloat factor = 1.0 + event.magnification;
+    CGFloat newZoom = _zoomLevel * factor;
+    newZoom = fmax(0.001, fmin(newZoom, 10.0));
+    _zoomLevel = newZoom;
+
+    // Adjust scroll to keep time under cursor stable
+    CGFloat newX = timeAtCursor * _zoomLevel - loc.x;
+    _scrollOffsetX = fmax(0, newX);
+    _needsRedraw = YES;
+
+    if ([_delegate respondsToSelector:@selector(waveformView:didChangeZoomLevel:centeredOnPointX:)]) {
+        [_delegate waveformView:self didChangeZoomLevel:_zoomLevel centeredOnPointX:loc.x];
+    }
+
+    if ([_delegate respondsToSelector:@selector(waveformView:didChangeScrollOffset:)]) {
+        [_delegate waveformView:self didChangeScrollOffset:_scrollOffsetX];
     }
 }
 

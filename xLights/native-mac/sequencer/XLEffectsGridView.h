@@ -14,6 +14,7 @@
 #import "XLEffectsGridRenderer.h"
 
 @class XLEffectsGridView;
+@class XLUndoController;
 
 // Drag pasteboard type for effects dragged from the palette
 extern NSPasteboardType const XLEffectTypePasteboardType;
@@ -163,6 +164,10 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 
 /// Delegate receiving interaction events.
 @property (nonatomic, weak) id<XLEffectsGridDelegate> delegate;
+
+/// Undo controller for managing undo/redo operations.
+/// If not set, undo operations will not be registered.
+@property (nonatomic, strong) XLUndoController *undoController;
 
 /// Horizontal zoom level (pixels per millisecond). Default: 0.1
 @property (nonatomic, assign) CGFloat zoomLevel;

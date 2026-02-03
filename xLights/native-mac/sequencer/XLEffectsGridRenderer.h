@@ -17,14 +17,16 @@
 @class XLEffectsGridView;
 
 /// Describes a single effect block for rendering.
+/// IMPORTANT: This struct must NOT contain ObjC object pointers (NSColor *, NSString *, etc.)
+/// because it is stored in NSValue via valueWithBytes:objCType: which bypasses ARC.
+/// Use plain C types only.
 typedef struct {
     CGFloat startTimeMS;
     CGFloat endTimeMS;
     NSInteger row;
     NSInteger layer;
     NSInteger effectIndex;
-    NSColor *color;
-    NSString *effectName;
+    uint32_t colorARGB;       // 0 means use palette color from effectIndex
     BOOL selected;
     BOOL locked;
     BOOL renderDisabled;
@@ -43,17 +45,23 @@ typedef struct {
 
 /// Full draw pass: grid lines, effect blocks, selection, playback indicator.
 /// Call from the view's display cycle.
+///
+/// Both effects and timing marks are passed as plain C arrays (pointer + count)
+/// rather than NSArrays to avoid ObjC message sends during the render path.
+/// This makes the hot path immune to heap corruption of ObjC object pointers.
 - (void)drawInLayer:(CAMetalLayer *)layer
            viewSize:(CGSize)viewSize
        scrollOffset:(CGPoint)scrollOffset
           zoomLevel:(CGFloat)zoomLevel
           rowHeight:(CGFloat)rowHeight
-        totalRows:(NSInteger)totalRows
+          totalRows:(NSInteger)totalRows
    sequenceLengthMS:(CGFloat)sequenceLengthMS
-            effects:(NSArray<NSValue *> *)effects
+            effects:(const XLEffectRenderInfo *)effects
+        effectCount:(NSUInteger)effectCount
    selectedEffectID:(NSInteger)selectedEffectID
-playbackPositionMS:(CGFloat)playbackPositionMS
-     timingMarksMS:(NSArray<NSNumber *> *)timingMarksMS;
+ playbackPositionMS:(CGFloat)playbackPositionMS
+   timingMarkValues:(const CGFloat *)timingMarkValues
+    timingMarkCount:(NSUInteger)timingMarkCount;
 
 /// Map from effect type index to display color.
 + (NSColor *)colorForEffectIndex:(NSInteger)effectIndex;
