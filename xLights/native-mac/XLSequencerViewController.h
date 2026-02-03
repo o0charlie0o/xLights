@@ -14,6 +14,7 @@
 
 @class XLEngineBridge;
 @class XLEffectsGridView;
+@class XLRowHeadingsView;
 
 /// View controller for the Sequencer tab.
 ///
@@ -28,5 +29,8 @@
 
 /// The Metal-backed effects grid (the core timeline view).
 @property (nonatomic, strong, readonly) XLEffectsGridView *effectsGridView;
+
+/// The row headings view (element names, expand/collapse, mute/solo).
+@property (nonatomic, strong, readonly) XLRowHeadingsView *rowHeadingsView;
 
 @end
