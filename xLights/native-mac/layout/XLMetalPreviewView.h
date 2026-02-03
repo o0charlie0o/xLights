@@ -16,6 +16,7 @@
 @class XLCameraController;
 @class XLMetalPreviewView;
 @class XLManipulationHandlesRenderer;
+@class XLEngineBridge;
 
 /// Delegate protocol for the Metal preview view.
 ///
@@ -104,6 +105,9 @@
 /// Delegate for user interaction callbacks
 @property (nonatomic, weak) id<XLMetalPreviewDelegate> delegate;
 
+/// Engine bridge for querying model data
+@property (nonatomic, weak) XLEngineBridge *engineBridge;
+
 #pragma mark - Render Loop
 
 /// Start the display-link-based render loop
@@ -128,6 +132,12 @@
 
 /// Highlight a specific model by name (for selection sync with model tree)
 - (void)highlightModel:(NSString *)modelName;
+
+/// Reload model data from the engine bridge
+- (void)reloadModels;
+
+/// Select a model by name
+- (void)selectModel:(NSString *)modelName;
 
 #pragma mark - MSAA
 
@@ -186,5 +196,39 @@
 
 /// Enable/disable edge snapping to other models
 - (void)setEdgeSnapEnabled:(BOOL)enabled;
+
+#pragma mark - Real-Time Preview Rendering
+
+/// Whether real-time preview rendering is active (during playback)
+@property (nonatomic, assign) BOOL previewRenderingActive;
+
+/// Current playback position in milliseconds (for preview sync)
+@property (nonatomic, assign) NSInteger playbackPositionMS;
+
+/// Sequence duration in milliseconds
+@property (nonatomic, assign) NSInteger sequenceDurationMS;
+
+/// Frame time in milliseconds
+@property (nonatomic, assign) NSInteger frameTimeMS;
+
+/// Update preview for the current playback position.
+/// Called during playback to render model pixel data at the current time.
+- (void)updatePreviewForTime:(NSInteger)timeMS;
+
+/// Set rendered pixel data for a model.
+/// @param modelName The name of the model
+/// @param pixelData RGBA pixel data
+/// @param width Width of the pixel buffer
+/// @param height Height of the pixel buffer
+- (void)setRenderedPixels:(NSData *)pixelData
+                 forModel:(NSString *)modelName
+                    width:(NSUInteger)width
+                   height:(NSUInteger)height;
+
+/// Clear all rendered pixel data (stop showing preview colors)
+- (void)clearRenderedPixels;
+
+/// Set whether to show rendered effect colors on models vs static layout colors
+@property (nonatomic, assign) BOOL showEffectColors;
 
 @end

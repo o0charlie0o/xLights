@@ -18,6 +18,7 @@
 #include "../outputs/Output.h"
 #include "../outputs/IPOutput.h"
 #include "../controllers/ControllerCaps.h"
+#include "../xLightsMain.h"
 
 #include <algorithm>
 #include <thread>
@@ -27,9 +28,10 @@ namespace xlEngine {
 OutputEngine::OutputEngine() = default;
 OutputEngine::~OutputEngine() = default;
 
-void OutputEngine::initialize(OutputManager* outputManager) {
+void OutputEngine::initialize(OutputManager* outputManager, xLightsFrame* frame) {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
     _outputManager = outputManager;
+    _frame = frame;
     _initialized = true;
 }
 
@@ -548,12 +550,29 @@ void OutputEngine::uploadToController(const std::string& name, UploadCallback ca
 bool OutputEngine::startOutput() {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
     if (!_outputManager) return false;
+
+    // If we have access to xLightsFrame, use its EnableOutputs method
+    // which properly sets the UI checkbox state and handles auto-upload
+    if (_frame) {
+        return _frame->EnableOutputs(true);
+    }
+
+    // Fallback to direct OutputManager call (checkbox state won't be updated)
     return _outputManager->StartOutput();
 }
 
 void OutputEngine::stopOutput() {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
     if (!_outputManager) return;
+
+    // If we have access to xLightsFrame, use its DisableOutputs method
+    // which properly clears the UI checkbox state
+    if (_frame) {
+        _frame->DisableOutputs();
+        return;
+    }
+
+    // Fallback to direct OutputManager call
     _outputManager->StopOutput();
 }
 

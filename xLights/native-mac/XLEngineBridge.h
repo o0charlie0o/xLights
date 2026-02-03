@@ -75,6 +75,23 @@
 - (void)renderRange:(NSInteger)startMS endMS:(NSInteger)endMS;
 - (void)abortRender;
 
+/// Render a single frame at the specified time
+- (void)renderFrame:(NSInteger)timeMS;
+
+/// Render a single model at the specified time
+- (void)renderModelFrame:(NSString *)modelName timeMS:(NSInteger)timeMS;
+
+/// Get rendered pixel data for a model
+/// Returns dictionary with: modelName, width, height, timeMS, pixels (NSData RGBA)
+- (NSDictionary *)getFrameBuffer:(NSString *)modelName;
+
+/// Get rendered node data for a model (output to hardware)
+/// Returns array of dictionaries with: startChannel, channelCount, data (NSData)
+- (NSArray<NSDictionary *> *)getNodeData:(NSString *)modelName;
+
+/// Check if rendering is in progress
+- (BOOL)isRendering;
+
 #pragma mark - Model Operations
 
 /// Get all model names (including groups)
@@ -352,6 +369,34 @@
 
 /// Convert an effect to a different type
 - (BOOL)convertEffectType:(NSInteger)effectId newType:(NSString *)newType;
+
+#pragma mark - Audio Operations
+
+/// Get the media file path for the current sequence
+/// Returns nil if no sequence is loaded or no media file is set
+- (NSString *)getMediaFilePath;
+
+/// Check if audio is loaded for the current sequence
+- (BOOL)isAudioLoaded;
+
+/// Get audio file information
+/// Returns dictionary with: filePath, durationMS, sampleRate, channels, title, artist, album
+- (NSDictionary *)getAudioInfo;
+
+/// Get raw audio samples for a time range (for waveform rendering)
+/// Returns dictionary with: leftChannel (NSData of floats), rightChannel (NSData of floats),
+///                          sampleCount, sampleRate
+- (NSDictionary *)getAudioSamples:(NSInteger)startMS endMS:(NSInteger)endMS;
+
+/// Get min/max amplitude for a time range (for quick waveform overview)
+/// Returns dictionary with: minLeft, maxLeft, minRight, maxRight
+- (NSDictionary *)getAudioAmplitudeRange:(NSInteger)startMS endMS:(NSInteger)endMS;
+
+/// Set audio playback volume (0-100)
+- (void)setAudioVolume:(NSInteger)volume;
+
+/// Get current audio playback volume
+- (NSInteger)getAudioVolume;
 
 #pragma mark - Utility
 

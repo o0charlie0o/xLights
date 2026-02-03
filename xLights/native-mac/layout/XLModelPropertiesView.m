@@ -766,11 +766,11 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 #pragma mark - Population
 
 - (void)populateFromInfo:(NSDictionary *)info isMixed:(BOOL)mixed {
-    // General
+    // General - using actual keys from XLEngineBridge
     [self setTextField:_nameField value:info[@"name"] mixed:mixed];
     [self setTextField:_typeField value:info[@"type"] mixed:mixed];
     [self setTextField:_descriptionField value:info[@"description"] mixed:mixed];
-    [self setPopUp:_displayAsPopup value:info[@"displayAs"] mixed:mixed];
+    [self setPopUp:_displayAsPopup value:info[@"PixelStyle"] ?: info[@"DisplayAs"] mixed:mixed];
 
     if (mixed) {
         _nameField.editable = NO;
@@ -778,46 +778,59 @@ static NSString * const kMixedPlaceholder = @"Mixed";
         _nameField.editable = YES;
     }
 
-    // Position
-    [self setTextField:_positionRow.field1 fromNumber:info[@"x"] mixed:mixed];
-    [self setTextField:_positionRow.field2 fromNumber:info[@"y"] mixed:mixed];
-    [self setTextField:_positionRow.field3 fromNumber:info[@"z"] mixed:mixed];
+    // Position - XLEngineBridge provides WorldPosX/Y/Z
+    [self setTextField:_positionRow.field1 fromNumber:info[@"WorldPosX"] mixed:mixed];
+    [self setTextField:_positionRow.field2 fromNumber:info[@"WorldPosY"] mixed:mixed];
+    [self setTextField:_positionRow.field3 fromNumber:info[@"WorldPosZ"] mixed:mixed];
 
-    // Size
-    [self setTextField:_sizeRow.field1 fromNumber:info[@"width"] mixed:mixed];
-    [self setTextField:_sizeRow.field2 fromNumber:info[@"height"] mixed:mixed];
-    [self setTextField:_sizeRow.field3 fromNumber:info[@"depth"] mixed:mixed];
+    // Size/Scale - ScaleX/Y/Z from model properties
+    [self setTextField:_sizeRow.field1 fromNumber:info[@"ScaleX"] ?: @(1.0) mixed:mixed];
+    [self setTextField:_sizeRow.field2 fromNumber:info[@"ScaleY"] ?: @(1.0) mixed:mixed];
+    [self setTextField:_sizeRow.field3 fromNumber:info[@"ScaleZ"] ?: @(1.0) mixed:mixed];
 
-    // Rotation
-    [self setSlider:_rotXSlider fromNumber:info[@"rotationX"] mixed:mixed];
-    [self setSlider:_rotYSlider fromNumber:info[@"rotationY"] mixed:mixed];
-    [self setSlider:_rotZSlider fromNumber:info[@"rotationZ"] mixed:mixed];
+    // Rotation - RotateX/Y/Z from model properties
+    [self setSlider:_rotXSlider fromNumber:info[@"RotateX"] mixed:mixed];
+    [self setSlider:_rotYSlider fromNumber:info[@"RotateY"] mixed:mixed];
+    [self setSlider:_rotZSlider fromNumber:info[@"RotateZ"] mixed:mixed];
 
-    // Scale
-    [self setSlider:_scaleSlider fromNumber:info[@"scale"] mixed:mixed];
+    // Scale - single uniform scale (fallback if no separate axes)
+    NSNumber *uniformScale = info[@"Scale"];
+    if (!uniformScale) {
+        // Calculate from individual scale values
+        NSNumber *sx = info[@"ScaleX"];
+        if (sx) uniformScale = sx;
+    }
+    [self setSlider:_scaleSlider fromNumber:uniformScale ?: @(1.0) mixed:mixed];
 
     // Locked
-    [self setCheckbox:_lockedCheckbox fromNumber:info[@"locked"] mixed:mixed];
+    [self setCheckbox:_lockedCheckbox fromNumber:info[@"Locked"] mixed:mixed];
 
-    // Controller
-    [self setPopUp:_controllerPopup value:info[@"controllerName"] mixed:mixed];
+    // Controller - using actual keys from XLEngineBridge
+    NSString *controllerName = info[@"controllerName"];
+    if (!controllerName || controllerName.length == 0) {
+        controllerName = @"No Controller";
+    }
+    [self setPopUp:_controllerPopup value:controllerName mixed:mixed];
+
     if (info[@"port"]) {
         NSString *portStr = [NSString stringWithFormat:@"%@", info[@"port"]];
         [self setPopUp:_portPopup value:portStr mixed:mixed];
     }
     [self setPopUp:_protocolPopup value:info[@"protocol"] mixed:mixed];
-    [self setTextField:_startChannelField fromNumber:info[@"startChannel"] mixed:mixed];
+
+    // Channel info - using actual keys from XLEngineBridge
+    [self setTextField:_startChannelField value:info[@"startChannel"] mixed:mixed];
     [self setTextField:_endChannelField fromNumber:info[@"endChannel"] mixed:mixed];
     [self setTextField:_channelCountField fromNumber:info[@"channelCount"] mixed:mixed];
 
-    // Appearance
-    [self setPopUp:_colorOrderPopup value:info[@"colorOrder"] mixed:mixed];
-    [self setSlider:_brightnessSlider fromNumber:info[@"brightness"] mixed:mixed];
-    [self setSlider:_gammaSlider fromNumber:info[@"gamma"] mixed:mixed];
-    [self setTextField:_nullPixelsField fromNumber:info[@"nullPixels"] mixed:mixed];
-    [self setCheckbox:_reverseCheckbox fromNumber:info[@"reverse"] mixed:mixed];
-    [self setTextField:_groupCountField fromNumber:info[@"groupCount"] mixed:mixed];
-    [self setTextField:_zigZagField fromNumber:info[@"zigZag"] mixed:mixed];
+    // Appearance - map to actual model properties
+    [self setPopUp:_colorOrderPopup value:info[@"ColorOrder"] mixed:mixed];
+    [self setSlider:_brightnessSlider fromNumber:info[@"Brightness"] ?: @(100) mixed:mixed];
+    [self setSlider:_gammaSlider fromNumber:info[@"Gamma"] ?: @(1.0) mixed:mixed];
+    [self setTextField:_nullPixelsField fromNumber:info[@"NullPixels"] ?: @(0) mixed:mixed];
+    [self setCheckbox:_reverseCheckbox fromNumber:info[@"Reverse"] mixed:mixed];
+    [self setTextField:_groupCountField fromNumber:info[@"GroupCount"] ?: @(1) mixed:mixed];
+    [self setTextField:_zigZagField fromNumber:info[@"ZigZag"] ?: @(0) mixed:mixed];
 }
 
 #pragma mark - Control Value Helpers
@@ -971,12 +984,49 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 
 #pragma mark - Delegate Notification
 
+- (NSString *)engineKeyForUIKey:(NSString *)uiKey {
+    // Map UI control identifiers to XLEngineBridge property keys
+    static NSDictionary *keyMap;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        keyMap = @{
+            @"x": @"WorldPosX",
+            @"y": @"WorldPosY",
+            @"z": @"WorldPosZ",
+            @"width": @"ScaleX",
+            @"height": @"ScaleY",
+            @"depth": @"ScaleZ",
+            @"rotationX": @"RotateX",
+            @"rotationY": @"RotateY",
+            @"rotationZ": @"RotateZ",
+            @"scale": @"Scale",
+            @"locked": @"Locked",
+            @"displayAs": @"DisplayAs",
+            @"controllerName": @"Controller",
+            @"port": @"ControllerPort",
+            @"protocol": @"Protocol",
+            @"startChannel": @"StartChannel",
+            @"colorOrder": @"ColorOrder",
+            @"brightness": @"Brightness",
+            @"gamma": @"Gamma",
+            @"nullPixels": @"NullPixels",
+            @"reverse": @"Reverse",
+            @"groupCount": @"GroupCount",
+            @"zigZag": @"ZigZag",
+        };
+    });
+    return keyMap[uiKey] ?: uiKey;
+}
+
 - (void)notifyPropertyChange:(NSString *)key value:(id)value {
     if (!_currentModelNames || _currentModelNames.count == 0) return;
 
+    // Map the UI key to the engine bridge key
+    NSString *engineKey = [self engineKeyForUIKey:key];
+
     if ([_delegate respondsToSelector:@selector(modelProperties:didChangeProperty:value:forModel:)]) {
         for (NSString *modelName in _currentModelNames) {
-            [_delegate modelProperties:self didChangeProperty:key value:value forModel:modelName];
+            [_delegate modelProperties:self didChangeProperty:engineKey value:value forModel:modelName];
         }
     }
 }

@@ -101,6 +101,76 @@ static pthread_mutex_t _discoveryMutex = PTHREAD_MUTEX_INITIALIZER;
     memset(_discoveredControllers, 0, sizeof(_discoveredControllers));
     pthread_mutex_unlock(&_discoveryMutex);
 
+    // Try to use the engine bridge's discovery if available (uses real xLights Discovery)
+    if (_engineBridge) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_queue_t discoveryQueue = _discoveryQueue;  // Capture queue before async block
+        [_engineBridge discoverControllers:^(BOOL success, NSArray<NSDictionary *> *controllers) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+
+            if (success && controllers.count > 0) {
+                [strongSelf processEngineDiscoveryResults:controllers];
+            } else {
+                // Fall back to native discovery if engine discovery fails
+                dispatch_async(discoveryQueue, ^{
+                    [strongSelf performNativeDiscovery];
+                });
+            }
+        }];
+        return;
+    }
+
+    // No engine bridge available, use native discovery
+    [self performNativeDiscovery];
+}
+
+- (void)processEngineDiscoveryResults:(NSArray<NSDictionary *> *)controllers {
+    pthread_mutex_lock(&_discoveryMutex);
+
+    for (NSDictionary *info in controllers) {
+        if (_discoveredCount >= XL_MAX_DISCOVERED_CONTROLLERS) break;
+
+        XLDiscoveredController *dc = &_discoveredControllers[_discoveredCount];
+        xl_init_discovered_controller(dc);
+
+        xl_safe_strcpy(dc->ip, sizeof(dc->ip), [info[@"ip"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->hostname, sizeof(dc->hostname), [info[@"hostname"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->vendor, sizeof(dc->vendor), [info[@"vendor"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->model, sizeof(dc->model), [info[@"model"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->version, sizeof(dc->version), [info[@"version"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->mode, sizeof(dc->mode), [info[@"mode"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->platform, sizeof(dc->platform), [info[@"platform"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->platformModel, sizeof(dc->platformModel), [info[@"platformModel"] UTF8String] ?: "");
+        xl_safe_strcpy(dc->description, sizeof(dc->description), [info[@"description"] UTF8String] ?: "");
+        dc->alreadyConfigured = [info[@"alreadyConfigured"] boolValue] ? 1 : 0;
+        xl_safe_strcpy(dc->existingName, sizeof(dc->existingName), [info[@"existingName"] UTF8String] ?: "");
+
+        _discoveredCount++;
+    }
+
+    NSUInteger count = _discoveredCount;
+    pthread_mutex_unlock(&_discoveryMutex);
+
+    // Complete discovery
+    self.state = XLDiscoveryStateComplete;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([self.delegate respondsToSelector:@selector(discoveryController:didChangeState:)]) {
+            [self.delegate discoveryController:self didChangeState:self.state];
+        }
+
+        if ([self.delegate respondsToSelector:@selector(discoveryController:didDiscoverControllers:count:)]) {
+            pthread_mutex_lock(&_discoveryMutex);
+            [self.delegate discoveryController:self
+                       didDiscoverControllers:_discoveredControllers
+                                        count:count];
+            pthread_mutex_unlock(&_discoveryMutex);
+        }
+    });
+}
+
+- (void)performNativeDiscovery {
     // Get local network interfaces for subnet scanning
     NSArray<NSString *> *localIPs = [self getLocalIPAddresses];
     NSArray<NSString *> *existingControllerNames = [_engineBridge getControllerNames];
@@ -456,11 +526,38 @@ static pthread_mutex_t _discoveryMutex = PTHREAD_MUTEX_INITIALIZER;
         return NO;
     }
 
-    // TODO: Once engine bridge supports addController, use it directly
-    // For now, log the action
-    NSLog(@"[XLNetworkDiscoveryController] Would add controller: %@ at IP %s", name, dc.ip);
+    if (!_engineBridge) {
+        NSLog(@"[XLNetworkDiscoveryController] Cannot add controller - engine bridge not available");
+        return NO;
+    }
 
-    return YES;
+    // Build a dictionary from the discovered controller data
+    NSDictionary *discoveredInfo = @{
+        @"ip": [NSString stringWithUTF8String:dc.ip],
+        @"hostname": name ?: [NSString stringWithUTF8String:dc.hostname],
+        @"vendor": [NSString stringWithUTF8String:dc.vendor],
+        @"model": [NSString stringWithUTF8String:dc.model],
+        @"variant": [NSString stringWithUTF8String:dc.variant],
+        @"description": [NSString stringWithUTF8String:dc.description],
+        @"version": [NSString stringWithUTF8String:dc.version],
+        @"mode": [NSString stringWithUTF8String:dc.mode],
+        @"platform": [NSString stringWithUTF8String:dc.platform],
+        @"platformModel": [NSString stringWithUTF8String:dc.platformModel],
+        @"uuid": [NSString stringWithUTF8String:dc.uuid],
+        @"proxy": [NSString stringWithUTF8String:dc.proxy],
+        @"majorVersion": @(dc.majorVersion),
+        @"minorVersion": @(dc.minorVersion),
+        @"patchVersion": @(dc.patchVersion),
+    };
+
+    BOOL success = [_engineBridge addDiscoveredController:discoveredInfo];
+    if (success) {
+        NSLog(@"[XLNetworkDiscoveryController] Added controller: %@ at IP %s", name, dc.ip);
+    } else {
+        NSLog(@"[XLNetworkDiscoveryController] Failed to add controller: %@ at IP %s", name, dc.ip);
+    }
+
+    return success;
 }
 
 #pragma mark - Ping Operations

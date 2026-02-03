@@ -11,6 +11,7 @@
 #import "XLMetalPreviewView.h"
 #import "XLCameraController.h"
 #import "XLManipulationHandlesRenderer.h"
+#import "../XLEngineBridge.h"
 #import <QuartzCore/CVDisplayLink.h>
 
 static const NSUInteger kDefaultMSAASampleCount = 4;
@@ -68,6 +69,20 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 @property (nonatomic, strong) NSString *highlightedModelName;
 
+// Model data cache from engine bridge
+@property (nonatomic, strong) NSArray<NSDictionary *> *modelDataCache;
+@property (nonatomic, strong) id<MTLBuffer> modelVertexBuffer;
+@property (nonatomic, assign) NSUInteger modelVertexCount;
+@property (nonatomic, strong) id<MTLRenderPipelineState> modelPipelineState;
+
+// Real-time preview rendering
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSData *> *renderedPixelData;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *renderedPixelWidths;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *renderedPixelHeights;
+@property (nonatomic, strong) id<MTLBuffer> previewColorBuffer;
+@property (nonatomic, assign) NSUInteger previewColorCount;
+@property (nonatomic, strong) NSLock *pixelDataLock;
+
 @property (nonatomic, assign) NSPoint lastDragPoint;
 @property (nonatomic, assign) BOOL isDragging;
 @property (nonatomic, assign) BOOL isRightDragging;
@@ -117,6 +132,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _backgroundColor = [NSColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
     _isManipulatingHandle = NO;
     _activeHandleType = XLHandleTypeNone;
+
+    // Real-time preview rendering
+    _previewRenderingActive = NO;
+    _playbackPositionMS = 0;
+    _sequenceDurationMS = 0;
+    _frameTimeMS = 50; // Default 20fps
+    _showEffectColors = NO;
+    _renderedPixelData = [[NSMutableDictionary alloc] init];
+    _renderedPixelWidths = [[NSMutableDictionary alloc] init];
+    _renderedPixelHeights = [[NSMutableDictionary alloc] init];
+    _pixelDataLock = [[NSLock alloc] init];
 
     [self setupDepthStencilState];
     [self buildGridPipeline];
@@ -525,12 +551,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             [encoder popDebugGroup];
         }
 
-        // Model rendering placeholder:
-        // The actual model rendering will be driven through XLEngineBridge,
-        // which calls into the existing xlMetalGraphicsContext pipeline.
-        // That integration requires passing this encoder/commandBuffer to
-        // the engine's render pipeline. For now, the view provides the
-        // drawable surface and camera state.
+        // Render model nodes as points
+        if (_modelVertexBuffer && _modelVertexCount > 0 && _gridPipelineState) {
+            [encoder pushDebugGroup:@"Models"];
+            [encoder setRenderPipelineState:_gridPipelineState];
+            [encoder setVertexBuffer:_modelVertexBuffer offset:0 atIndex:0];
+            [encoder setVertexBytes:&viewProjection length:sizeof(simd_float4x4) atIndex:1];
+            [encoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:_modelVertexCount];
+            [encoder popDebugGroup];
+        }
 
         // Render manipulation handles
         if (_handles && _selectedModelName) {
@@ -595,10 +624,37 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)frameAllModels {
-    // Placeholder: will query bounding box from engine bridge
-    // For now, frame a default scene volume
-    simd_float3 bbMin = {-500.0f, 0.0f, -500.0f};
-    simd_float3 bbMax = {500.0f, 500.0f, 500.0f};
+    // Calculate bounding box from all cached model data
+    simd_float3 bbMin = {FLT_MAX, FLT_MAX, FLT_MAX};
+    simd_float3 bbMax = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+
+    BOOL hasModels = NO;
+    for (NSDictionary *modelData in _modelDataCache) {
+        NSDictionary *bounds = modelData[@"bounds"];
+        if (!bounds || bounds.count == 0) continue;
+
+        hasModels = YES;
+        float minX = [bounds[@"minX"] floatValue];
+        float maxX = [bounds[@"maxX"] floatValue];
+        float minY = [bounds[@"minY"] floatValue];
+        float maxY = [bounds[@"maxY"] floatValue];
+        float minZ = [bounds[@"minZ"] floatValue];
+        float maxZ = [bounds[@"maxZ"] floatValue];
+
+        bbMin.x = fminf(bbMin.x, minX);
+        bbMin.y = fminf(bbMin.y, minY);
+        bbMin.z = fminf(bbMin.z, minZ);
+        bbMax.x = fmaxf(bbMax.x, maxX);
+        bbMax.y = fmaxf(bbMax.y, maxY);
+        bbMax.z = fmaxf(bbMax.z, maxZ);
+    }
+
+    if (!hasModels) {
+        // Default scene volume if no models
+        bbMin = (simd_float3){-500.0f, 0.0f, -500.0f};
+        bbMax = (simd_float3){500.0f, 500.0f, 500.0f};
+    }
+
     float aspect = (float)_mlayer.drawableSize.width / (float)_mlayer.drawableSize.height;
     [_cameraController frameBoundingBoxMin:bbMin max:bbMax aspect:aspect];
     _contentDirty = YES;
@@ -606,6 +662,333 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)highlightModel:(NSString *)modelName {
     _highlightedModelName = modelName;
+    _contentDirty = YES;
+}
+
+- (void)reloadModels {
+    if (!_engineBridge) {
+        _modelDataCache = @[];
+        _modelVertexBuffer = nil;
+        _modelVertexCount = 0;
+        _contentDirty = YES;
+        return;
+    }
+
+    // Get all model names and their node data
+    NSMutableArray<NSDictionary *> *modelData = [[NSMutableArray alloc] init];
+    NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
+
+    for (NSString *modelName in modelNames) {
+        NSDictionary *info = [_engineBridge getModelInfo:modelName];
+        if (!info) continue;
+
+        NSArray<NSDictionary *> *nodes = [_engineBridge getModelNodes:modelName];
+        NSDictionary *bounds = [_engineBridge getModelBounds:modelName];
+
+        if (nodes.count > 0) {
+            [modelData addObject:@{
+                @"name": modelName,
+                @"info": info,
+                @"nodes": nodes,
+                @"bounds": bounds ?: @{},
+            }];
+        }
+    }
+
+    _modelDataCache = [modelData copy];
+    [self buildModelVertices];
+    _contentDirty = YES;
+}
+
+- (void)selectModel:(NSString *)modelName {
+    _selectedModelName = modelName;
+
+    if (!modelName) {
+        [self clearModelSelection];
+        return;
+    }
+
+    // Get model info and set up manipulation handles
+    NSDictionary *info = [_engineBridge getModelInfo:modelName];
+    NSDictionary *bounds = [_engineBridge getModelBounds:modelName];
+
+    if (!info || !bounds) {
+        [self clearModelSelection];
+        return;
+    }
+
+    // Extract position from model info (may be in properties)
+    float posX = [info[@"WorldPosX"] floatValue];
+    float posY = [info[@"WorldPosY"] floatValue];
+    float posZ = [info[@"WorldPosZ"] floatValue];
+
+    // Extract scale
+    float scaleX = [info[@"ScaleX"] floatValue];
+    float scaleY = [info[@"ScaleY"] floatValue];
+    float scaleZ = [info[@"ScaleZ"] floatValue];
+    if (scaleX == 0) scaleX = 1.0f;
+    if (scaleY == 0) scaleY = 1.0f;
+    if (scaleZ == 0) scaleZ = 1.0f;
+
+    // Extract rotation
+    float rotX = [info[@"RotateX"] floatValue];
+    float rotY = [info[@"RotateY"] floatValue];
+    float rotZ = [info[@"RotateZ"] floatValue];
+
+    // Extract bounds
+    float minX = [bounds[@"minX"] floatValue];
+    float maxX = [bounds[@"maxX"] floatValue];
+    float minY = [bounds[@"minY"] floatValue];
+    float maxY = [bounds[@"maxY"] floatValue];
+    float minZ = [bounds[@"minZ"] floatValue];
+    float maxZ = [bounds[@"maxZ"] floatValue];
+
+    // Calculate render dimensions
+    float renderWidth = maxX - minX;
+    float renderHeight = maxY - minY;
+    float renderDepth = maxZ - minZ;
+
+    // Check if locked
+    BOOL isLocked = [info[@"Locked"] boolValue];
+
+    // Check if supports Z scaling (3D models)
+    BOOL supportsZScaling = _show3D && (renderDepth > 0.1f);
+
+    [self setModelTransformWithPosition:(simd_float3){posX, posY, posZ}
+                                  scale:(simd_float3){scaleX, scaleY, scaleZ}
+                               rotation:(simd_float3){rotX, rotY, rotZ}
+                         boundingBoxMin:(simd_float3){minX, minY, minZ}
+                         boundingBoxMax:(simd_float3){maxX, maxY, maxZ}
+                            renderWidth:renderWidth
+                           renderHeight:renderHeight
+                            renderDepth:renderDepth
+                               isLocked:isLocked
+                       supportsZScaling:supportsZScaling];
+
+    _contentDirty = YES;
+
+    if ([_delegate respondsToSelector:@selector(previewView:didSelectModel:)]) {
+        [_delegate previewView:self didSelectModel:modelName];
+    }
+}
+
+- (void)buildModelVertices {
+    [self buildModelVerticesWithEffectColors:_showEffectColors];
+}
+
+- (void)buildModelVerticesWithEffectColors:(BOOL)useEffectColors {
+    if (_modelDataCache.count == 0) {
+        _modelVertexBuffer = nil;
+        _modelVertexCount = 0;
+        return;
+    }
+
+    // Count total vertices needed (one per node)
+    NSUInteger totalNodes = 0;
+    for (NSDictionary *modelData in _modelDataCache) {
+        NSArray *nodes = modelData[@"nodes"];
+        totalNodes += nodes.count;
+    }
+
+    if (totalNodes == 0) {
+        _modelVertexBuffer = nil;
+        _modelVertexCount = 0;
+        return;
+    }
+
+    // Build vertex data - position + color for each node
+    NSMutableData *vertexData = [[NSMutableData alloc] initWithCapacity:totalNodes * sizeof(XLGridVertex)];
+
+    NSUInteger modelIndex = 0;
+    for (NSDictionary *modelData in _modelDataCache) {
+        NSArray<NSDictionary *> *nodes = modelData[@"nodes"];
+        NSString *modelName = modelData[@"name"];
+
+        // Check for rendered pixel data for this model
+        [_pixelDataLock lock];
+        NSData *pixelData = useEffectColors ? _renderedPixelData[modelName] : nil;
+        NSUInteger pixelWidth = [_renderedPixelWidths[modelName] unsignedIntegerValue];
+        NSUInteger pixelHeight = [_renderedPixelHeights[modelName] unsignedIntegerValue];
+        [_pixelDataLock unlock];
+
+        const uint8_t *pixels = (const uint8_t *)pixelData.bytes;
+        NSUInteger pixelCount = pixelWidth * pixelHeight;
+
+        // Determine color - highlighted models get a brighter color
+        BOOL isHighlighted = [modelName isEqualToString:_highlightedModelName];
+        BOOL isSelected = [modelName isEqualToString:_selectedModelName];
+
+        float baseGray = 0.6f;
+        if (isSelected) {
+            baseGray = 1.0f;
+        } else if (isHighlighted) {
+            baseGray = 0.9f;
+        }
+
+        // Use hue based on model index for visual distinction (fallback color)
+        float hue = fmod((float)modelIndex * 0.15f, 1.0f);
+        float defaultR, defaultG, defaultB;
+        [self hueToRGB:hue r:&defaultR g:&defaultG b:&defaultB];
+
+        NSUInteger nodeIndex = 0;
+        for (NSDictionary *node in nodes) {
+            XLGridVertex vertex;
+            vertex.position = (simd_float3){
+                [node[@"x"] floatValue],
+                [node[@"y"] floatValue],
+                [node[@"z"] floatValue],
+            };
+
+            // Get buffer position from node for pixel lookup
+            NSInteger bufX = [node[@"bufX"] integerValue];
+            NSInteger bufY = [node[@"bufY"] integerValue];
+
+            // Try to get color from rendered pixel data
+            BOOL gotPixelColor = NO;
+            if (pixels && pixelWidth > 0 && pixelHeight > 0) {
+                // Calculate pixel index in RGBA buffer
+                if (bufX >= 0 && bufX < (NSInteger)pixelWidth &&
+                    bufY >= 0 && bufY < (NSInteger)pixelHeight) {
+                    NSUInteger pixelIdx = ((NSUInteger)bufY * pixelWidth + (NSUInteger)bufX) * 4;
+                    if (pixelIdx + 3 < pixelData.length) {
+                        float r = pixels[pixelIdx + 0] / 255.0f;
+                        float g = pixels[pixelIdx + 1] / 255.0f;
+                        float b = pixels[pixelIdx + 2] / 255.0f;
+                        float a = pixels[pixelIdx + 3] / 255.0f;
+
+                        // Only use pixel color if alpha > 0 (has rendered content)
+                        if (a > 0.01f) {
+                            vertex.color = (simd_float4){r, g, b, 1.0f};
+                            gotPixelColor = YES;
+                        }
+                    }
+                }
+            }
+
+            // Fall back to layout color if no pixel data
+            if (!gotPixelColor) {
+                vertex.color = (simd_float4){
+                    baseGray * (0.3f + 0.7f * defaultR),
+                    baseGray * (0.3f + 0.7f * defaultG),
+                    baseGray * (0.3f + 0.7f * defaultB),
+                    1.0f
+                };
+            }
+
+            [vertexData appendBytes:&vertex length:sizeof(XLGridVertex)];
+            nodeIndex++;
+        }
+
+        modelIndex++;
+    }
+
+    _modelVertexCount = totalNodes;
+    _modelVertexBuffer = [_device newBufferWithBytes:vertexData.bytes
+                                              length:vertexData.length
+                                             options:MTLResourceStorageModeShared];
+    [_modelVertexBuffer setLabel:@"ModelVertices"];
+}
+
+- (void)hueToRGB:(float)hue r:(float *)r g:(float *)g b:(float *)b {
+    float h = hue * 6.0f;
+    float c = 1.0f;
+    float x = c * (1.0f - fabsf(fmodf(h, 2.0f) - 1.0f));
+
+    if (h < 1.0f) {
+        *r = c; *g = x; *b = 0;
+    } else if (h < 2.0f) {
+        *r = x; *g = c; *b = 0;
+    } else if (h < 3.0f) {
+        *r = 0; *g = c; *b = x;
+    } else if (h < 4.0f) {
+        *r = 0; *g = x; *b = c;
+    } else if (h < 5.0f) {
+        *r = x; *g = 0; *b = c;
+    } else {
+        *r = c; *g = 0; *b = x;
+    }
+}
+
+#pragma mark - Real-Time Preview Rendering
+
+- (void)setPreviewRenderingActive:(BOOL)previewRenderingActive {
+    if (_previewRenderingActive != previewRenderingActive) {
+        _previewRenderingActive = previewRenderingActive;
+
+        if (!previewRenderingActive) {
+            // When stopping preview, clear rendered pixels and rebuild with layout colors
+            [self clearRenderedPixels];
+        }
+
+        _showEffectColors = previewRenderingActive;
+        _contentDirty = YES;
+    }
+}
+
+- (void)setPlaybackPositionMS:(NSInteger)playbackPositionMS {
+    if (_playbackPositionMS != playbackPositionMS) {
+        _playbackPositionMS = playbackPositionMS;
+
+        // If preview rendering is active, mark content as dirty to trigger refresh
+        if (_previewRenderingActive) {
+            _contentDirty = YES;
+        }
+    }
+}
+
+- (void)setShowEffectColors:(BOOL)showEffectColors {
+    if (_showEffectColors != showEffectColors) {
+        _showEffectColors = showEffectColors;
+        [self buildModelVerticesWithEffectColors:showEffectColors];
+        _contentDirty = YES;
+    }
+}
+
+- (void)updatePreviewForTime:(NSInteger)timeMS {
+    _playbackPositionMS = timeMS;
+
+    // Rebuild model vertices with current pixel data
+    if (_showEffectColors) {
+        [self buildModelVerticesWithEffectColors:YES];
+    }
+
+    _contentDirty = YES;
+    [self setNeedsRender];
+}
+
+- (void)setRenderedPixels:(NSData *)pixelData
+                 forModel:(NSString *)modelName
+                    width:(NSUInteger)width
+                   height:(NSUInteger)height {
+    if (!modelName) return;
+
+    [_pixelDataLock lock];
+    if (pixelData && pixelData.length > 0) {
+        _renderedPixelData[modelName] = [pixelData copy];
+        _renderedPixelWidths[modelName] = @(width);
+        _renderedPixelHeights[modelName] = @(height);
+    } else {
+        [_renderedPixelData removeObjectForKey:modelName];
+        [_renderedPixelWidths removeObjectForKey:modelName];
+        [_renderedPixelHeights removeObjectForKey:modelName];
+    }
+    [_pixelDataLock unlock];
+
+    // Mark for rebuild if showing effect colors
+    if (_showEffectColors) {
+        _contentDirty = YES;
+    }
+}
+
+- (void)clearRenderedPixels {
+    [_pixelDataLock lock];
+    [_renderedPixelData removeAllObjects];
+    [_renderedPixelWidths removeAllObjects];
+    [_renderedPixelHeights removeAllObjects];
+    [_pixelDataLock unlock];
+
+    // Rebuild with layout colors
+    [self buildModelVerticesWithEffectColors:NO];
     _contentDirty = YES;
 }
 

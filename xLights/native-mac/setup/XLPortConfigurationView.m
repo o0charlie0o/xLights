@@ -299,35 +299,80 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
     InitPortDataSource(&_dataSource);
     SafeStringCopy(_dataSource.controllerName, XL_PORT_MAX_STRING_LEN, _controllerName);
 
-    // Get controller info and ports from engine bridge
+    // Get controller info from engine bridge
     NSDictionary *controllerInfo = [_engineBridge getControllerInfo:_controllerName];
     if (!controllerInfo) {
         [_tableView reloadData];
         return;
     }
 
-    // For now, generate stub port data based on controller type
-    // In production, this would query OutputEngine::getControllerPorts()
-    NSString *type = controllerInfo[@"type"] ?: @"Ethernet";
+    // Get real port data from the engine bridge
+    NSArray<NSDictionary *> *ports = [_engineBridge getPortsForController:_controllerName];
 
-    int pixelPorts = 16;  // Default for typical Ethernet controller
-    int serialPorts = 4;
+    if (ports.count > 0) {
+        // Populate from real port data
+        for (NSDictionary *portDict in ports) {
+            if (_dataSource.portCount >= XL_PORT_MAX_PORTS) break;
 
-    // Populate pixel ports
-    for (int i = 0; i < pixelPorts && _dataSource.portCount < XL_PORT_MAX_PORTS; i++) {
-        XLPortEntry *entry = &_dataSource.ports[_dataSource.portCount];
-        InitPortEntry(entry, i + 1, XLPortTypePixel);
-        _dataSource.portCount++;
-        _dataSource.pixelPortCount++;
-    }
+            XLPortEntry *entry = &_dataSource.ports[_dataSource.portCount];
+            memset(entry, 0, sizeof(XLPortEntry));
 
-    // Populate serial ports
-    for (int i = 0; i < serialPorts && _dataSource.portCount < XL_PORT_MAX_PORTS; i++) {
-        XLPortEntry *entry = &_dataSource.ports[_dataSource.portCount];
-        InitPortEntry(entry, i + 1, XLPortTypeSerial);
-        SafeStringCopy(entry->protocol, XL_PORT_MAX_STRING_LEN, @"DMX");
-        _dataSource.portCount++;
-        _dataSource.serialPortCount++;
+            entry->portNumber = [portDict[@"port"] intValue];
+            SafeStringCopy(entry->protocol, XL_PORT_MAX_STRING_LEN, portDict[@"protocol"]);
+            entry->startChannel = [portDict[@"startChannel"] intValue];
+            entry->channelCount = [portDict[@"channelCount"] intValue];
+            entry->endChannel = entry->startChannel + entry->channelCount - 1;
+            entry->brightness = [portDict[@"brightness"] intValue];
+            entry->gamma = [portDict[@"gamma"] floatValue];
+            entry->nullPixelsStart = [portDict[@"nullPixelsStart"] intValue];
+            entry->nullPixelsEnd = [portDict[@"nullPixelsEnd"] intValue];
+            SafeStringCopy(entry->colorOrder, XL_PORT_MAX_STRING_LEN, portDict[@"colorOrder"]);
+            entry->groupCount = [portDict[@"groupCount"] intValue];
+            entry->reverse = [portDict[@"reverse"] boolValue];
+            entry->zigZag = [portDict[@"zigZag"] intValue];
+            SafeStringCopy(entry->smartRemoteType, XL_PORT_MAX_STRING_LEN, portDict[@"smartRemoteType"]);
+
+            // Determine port type based on protocol
+            NSString *protocol = portDict[@"protocol"];
+            if ([protocol isEqualToString:@"DMX"] ||
+                [protocol isEqualToString:@"LOR"] ||
+                [protocol isEqualToString:@"Renard"] ||
+                [protocol isEqualToString:@"OpenDMX"]) {
+                entry->portType = XLPortTypeSerial;
+                _dataSource.serialPortCount++;
+            } else {
+                entry->portType = XLPortTypePixel;
+                _dataSource.pixelPortCount++;
+            }
+
+            entry->validationStatus = XLPortValidationOK;
+            _dataSource.portCount++;
+        }
+    } else {
+        // Fallback: generate port structure based on controller capabilities
+        NSDictionary *caps = [_engineBridge getControllerCapabilities:_controllerName];
+        int pixelPorts = caps ? [caps[@"maxPixelPorts"] intValue] : 16;
+        int serialPorts = caps ? [caps[@"maxSerialPorts"] intValue] : 4;
+
+        if (pixelPorts == 0) pixelPorts = 16;  // Default for typical Ethernet controller
+        if (serialPorts == 0) serialPorts = 4;
+
+        // Populate pixel ports
+        for (int i = 0; i < pixelPorts && _dataSource.portCount < XL_PORT_MAX_PORTS; i++) {
+            XLPortEntry *entry = &_dataSource.ports[_dataSource.portCount];
+            InitPortEntry(entry, i + 1, XLPortTypePixel);
+            _dataSource.portCount++;
+            _dataSource.pixelPortCount++;
+        }
+
+        // Populate serial ports
+        for (int i = 0; i < serialPorts && _dataSource.portCount < XL_PORT_MAX_PORTS; i++) {
+            XLPortEntry *entry = &_dataSource.ports[_dataSource.portCount];
+            InitPortEntry(entry, i + 1, XLPortTypeSerial);
+            SafeStringCopy(entry->protocol, XL_PORT_MAX_STRING_LEN, @"DMX");
+            _dataSource.portCount++;
+            _dataSource.serialPortCount++;
+        }
     }
 
     // Run validation

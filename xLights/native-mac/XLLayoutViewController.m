@@ -15,26 +15,30 @@
 #import "layout/XLModelCreationSheet.h"
 #import "layout/XLModelImportSheet.h"
 #import "layout/XLManipulationHandlesRenderer.h"
+#import "layout/XLModelPropertiesView.h"
 
 static const CGFloat kModelTreeMinWidth = 200.0;
 static const CGFloat kModelTreeDefaultWidth = 280.0;
+static const CGFloat kPropertiesMinWidth = 200.0;
+static const CGFloat kPropertiesDefaultWidth = 260.0;
 
 @interface XLLayoutViewController ()
 
 @property (nonatomic, strong) NSSplitView *splitView;
 @property (nonatomic, strong) XLModelCreationSheet *modelCreationSheet;
 @property (nonatomic, strong) XLModelImportSheet *modelImportSheet;
+@property (nonatomic, strong) NSScrollView *propertiesScrollView;
 
 @end
 
 @implementation XLLayoutViewController
 
 - (void)loadView {
-    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
+    NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 600)];
     view.wantsLayer = YES;
     view.layer.backgroundColor = [[NSColor colorWithWhite:0.16 alpha:1.0] CGColor];
 
-    // Split view: model tree (left) | preview (right)
+    // Split view: model tree (left) | preview (center) | properties (right)
     _splitView = [[NSSplitView alloc] initWithFrame:view.bounds];
     _splitView.translatesAutoresizingMaskIntoConstraints = NO;
     _splitView.vertical = YES;
@@ -49,7 +53,7 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
         [_splitView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
     ]];
 
-    // Model tree (left)
+    // Model tree (left sidebar)
     _modelTreeController = [[XLModelTreeViewController alloc] init];
     _modelTreeController.delegate = self;
     _modelTreeController.engineBridge = self.engineBridge;
@@ -58,7 +62,7 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
     treeView.translatesAutoresizingMaskIntoConstraints = NO;
     [_splitView addSubview:treeView];
 
-    // Preview (right)
+    // Preview (center)
     _previewView = [[XLMetalPreviewView alloc] initWithFrame:NSZeroRect];
     _previewView.translatesAutoresizingMaskIntoConstraints = NO;
     _previewView.delegate = self;
@@ -66,8 +70,36 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
     _previewView.showGrid = YES;
     [_splitView addSubview:_previewView];
 
-    // Set initial split position
+    // Properties (right sidebar) - in a scroll view
+    _propertiesView = [[XLModelPropertiesView alloc] initWithFrame:NSZeroRect];
+    _propertiesView.translatesAutoresizingMaskIntoConstraints = NO;
+    _propertiesView.delegate = self;
+    _propertiesView.engineBridge = self.engineBridge;
+
+    _propertiesScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    _propertiesScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    _propertiesScrollView.hasVerticalScroller = YES;
+    _propertiesScrollView.hasHorizontalScroller = NO;
+    _propertiesScrollView.autohidesScrollers = YES;
+    _propertiesScrollView.borderType = NSNoBorder;
+    _propertiesScrollView.drawsBackground = YES;
+    _propertiesScrollView.backgroundColor = [NSColor colorWithWhite:0.18 alpha:1.0];
+    _propertiesScrollView.documentView = _propertiesView;
+
+    // Set up document view constraints within scroll view
+    [NSLayoutConstraint activateConstraints:@[
+        [_propertiesView.topAnchor constraintEqualToAnchor:_propertiesScrollView.contentView.topAnchor],
+        [_propertiesView.leadingAnchor constraintEqualToAnchor:_propertiesScrollView.contentView.leadingAnchor],
+        [_propertiesView.trailingAnchor constraintEqualToAnchor:_propertiesScrollView.contentView.trailingAnchor],
+    ]];
+
+    [_splitView addSubview:_propertiesScrollView];
+
+    // Set initial split positions
+    CGFloat totalWidth = view.bounds.size.width;
+    CGFloat previewWidth = totalWidth - kModelTreeDefaultWidth - kPropertiesDefaultWidth;
     [_splitView setPosition:kModelTreeDefaultWidth ofDividerAtIndex:0];
+    [_splitView setPosition:kModelTreeDefaultWidth + previewWidth ofDividerAtIndex:1];
 
     self.view = view;
 }
@@ -90,16 +122,29 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
 - (void)setEngineBridge:(XLEngineBridge *)engineBridge {
     _engineBridge = engineBridge;
     _modelTreeController.engineBridge = engineBridge;
+    _propertiesView.engineBridge = engineBridge;
 }
 
 #pragma mark - NSSplitViewDelegate
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMin ofSubviewAt:(NSInteger)dividerIndex {
-    return kModelTreeMinWidth;
+    if (dividerIndex == 0) {
+        // Left divider: minimum for model tree
+        return kModelTreeMinWidth;
+    } else {
+        // Right divider: minimum preview width (leave room for properties)
+        return kModelTreeMinWidth + 300; // model tree + min preview
+    }
 }
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposedMax ofSubviewAt:(NSInteger)dividerIndex {
-    return proposedMax - 400; // Min width for preview
+    if (dividerIndex == 0) {
+        // Left divider: leave room for preview and properties
+        return proposedMax - 300 - kPropertiesMinWidth;
+    } else {
+        // Right divider: leave room for properties
+        return proposedMax - kPropertiesMinWidth;
+    }
 }
 
 #pragma mark - XLMetalPreviewDelegate
@@ -117,6 +162,7 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
 
 - (void)modelTree:(XLModelTreeViewController *)controller didSelectModel:(NSString *)modelName {
     NSLog(@"XLLayoutViewController: Model selected from tree: %@", modelName);
+    [self selectModel:modelName];
 }
 
 - (void)modelTree:(XLModelTreeViewController *)controller didMoveModel:(NSString *)modelName toGroup:(NSString *)groupName atIndex:(NSInteger)index {
@@ -267,6 +313,9 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
                                         renderDepth:renderDepth
                                            isLocked:isLocked
                                    supportsZScaling:supportsZScaling];
+
+        // Update properties view with real model data
+        [_propertiesView showPropertiesForModel:modelName info:modelInfo];
     }
 
     [_modelTreeController selectModelWithName:modelName];
@@ -275,6 +324,7 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
 - (void)clearSelection {
     _previewView.selectedModelName = nil;
     [_previewView clearModelSelection];
+    [_propertiesView clearProperties];
 }
 
 - (void)setToolMode:(NSInteger)mode {
@@ -335,6 +385,44 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
     NSLog(@"XLLayoutViewController: End manipulating model '%@'", modelName);
     // Trigger a full refresh to ensure model state is synced
     [_modelTreeController reloadData];
+    // Re-select to refresh properties view
+    if (modelName) {
+        NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
+        if (modelInfo) {
+            [_propertiesView showPropertiesForModel:modelName info:modelInfo];
+        }
+    }
+}
+
+#pragma mark - XLModelPropertiesDelegate
+
+- (void)modelProperties:(XLModelPropertiesView *)view
+       didChangeProperty:(NSString *)key
+                   value:(id)value
+                forModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Property '%@' changed to '%@' for model '%@'", key, value, modelName);
+
+    // Update model via engine bridge
+    BOOL success = [_engineBridge updateModelProperty:modelName key:key value:value];
+    if (success) {
+        // Refresh the model tree if name changed
+        if ([key isEqualToString:@"name"]) {
+            [_modelTreeController reloadData];
+            [_modelTreeController selectModelWithName:value];
+        }
+
+        // Refresh preview view handles if position/scale/rotation changed
+        // Keys are now mapped to engine keys by XLModelPropertiesView
+        NSSet *transformKeys = [NSSet setWithArray:@[
+            @"WorldPosX", @"WorldPosY", @"WorldPosZ",
+            @"ScaleX", @"ScaleY", @"ScaleZ", @"Scale",
+            @"RotateX", @"RotateY", @"RotateZ",
+            @"Locked"
+        ]];
+        if ([transformKeys containsObject:key]) {
+            [self selectModel:modelName];
+        }
+    }
 }
 
 @end

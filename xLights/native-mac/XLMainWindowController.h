@@ -17,6 +17,7 @@
 @class XLSequencerViewController;
 @class XLInspectorViewController;
 @class XLEngineBridge;
+@class XLPlaybackController;
 
 /// Main window controller for the native macOS xLights UI.
 ///
@@ -45,6 +46,9 @@
 
 /// Inspector sidebar controller (right panel)
 @property (nonatomic, strong, readonly) XLInspectorViewController *inspectorViewController;
+
+/// Playback controller for synchronized preview rendering
+@property (nonatomic, strong, readonly) XLPlaybackController *playbackController;
 
 /// Show/hide inspector sidebar
 - (void)toggleInspector:(id)sender;

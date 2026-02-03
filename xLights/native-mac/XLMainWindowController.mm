@@ -14,6 +14,8 @@
 #import "XLSequencerViewController.h"
 #import "XLInspectorViewController.h"
 #import "XLEngineBridge.h"
+#import "XLPlaybackController.h"
+#import "layout/XLMetalPreviewView.h"
 
 static const CGFloat kDefaultWindowWidth = 1600.0;
 static const CGFloat kDefaultWindowHeight = 1000.0;
@@ -162,6 +164,10 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
 - (void)setupEngine {
     _engineBridge = [[XLEngineBridge alloc] init];
+
+    // Create playback controller for synchronized preview rendering
+    _playbackController = [[XLPlaybackController alloc] init];
+    _playbackController.engineBridge = _engineBridge;
 }
 
 - (void)setupViewControllers {
@@ -176,6 +182,17 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
     _inspectorViewController = [[XLInspectorViewController alloc] init];
     _inspectorViewController.engineBridge = _engineBridge;
+
+    // Connect playback controller to layout preview view and sequencer
+    // Note: previewView is created in loadView, so we defer this
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.layoutViewController.previewView) {
+            self.playbackController.previewView = self.layoutViewController.previewView;
+            self.layoutViewController.previewView.engineBridge = self.engineBridge;
+        }
+        // Connect playback controller to sequencer
+        self.sequencerViewController.playbackController = self.playbackController;
+    });
 }
 
 - (void)setupSplitView {
@@ -424,19 +441,23 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 #pragma mark - Playback Actions
 
 - (void)playSequence:(id)sender {
-    [_engineBridge play];
+    [_playbackController play];
 }
 
 - (void)pauseSequence:(id)sender {
-    [_engineBridge pause];
+    [_playbackController pause];
 }
 
 - (void)stopSequence:(id)sender {
-    [_engineBridge stop];
+    [_playbackController stop];
 }
 
 - (void)renderAll:(id)sender {
     [_engineBridge renderAll];
+}
+
+- (void)renderCurrentFrame:(id)sender {
+    [_playbackController renderCurrentFrame];
 }
 
 #pragma mark - Window State Persistence

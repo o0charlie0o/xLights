@@ -27,6 +27,7 @@
 
 class OutputManager;
 class Controller;
+class xLightsFrame;
 
 namespace xlEngine {
 
@@ -215,7 +216,9 @@ public:
 
     // Initialization - must be called before use
     // The OutputEngine wraps the existing OutputManager. It does not own it.
-    void initialize(OutputManager* outputManager);
+    // The xLightsFrame pointer is optional but required for proper output toggle
+    // (it ensures the UI checkbox state stays in sync with output state).
+    void initialize(OutputManager* outputManager, xLightsFrame* frame = nullptr);
 
     // Controller enumeration
     std::vector<ControllerConfig> getControllers() const;
@@ -302,6 +305,7 @@ private:
     OperationResult addControllerInternal(const ControllerConfig& config);
 
     OutputManager* _outputManager = nullptr;
+    xLightsFrame* _frame = nullptr;
     mutable std::recursive_mutex _mutex;
     ErrorCallback _errorCallback;
     std::atomic<bool> _initialized{false};

@@ -197,34 +197,47 @@ static NSString * const kColumnController = @"ControllerColumn";
     }
 
     NSMutableArray<XLModelTreeNode *> *nodes = [[NSMutableArray alloc] init];
+    NSMutableSet<NSString *> *modelsInGroups = [[NSMutableSet alloc] init];
 
-    NSArray<NSString *> *modelNames = [_engineBridge getModelNames];
+    // First pass: collect all groups and track which models are in groups
+    NSArray<NSDictionary *> *groups = [_engineBridge getModelGroups];
+    for (NSDictionary *groupInfo in groups) {
+        NSString *groupName = groupInfo[@"name"];
+        NSArray<NSString *> *memberNames = groupInfo[@"modelNames"];
+
+        XLModelTreeNode *groupNode = [XLModelTreeNode groupNodeWithName:groupName];
+
+        for (NSString *memberName in memberNames) {
+            [modelsInGroups addObject:memberName];
+
+            NSDictionary *memberInfo = [_engineBridge getModelInfo:memberName];
+            if (!memberInfo) continue;
+
+            NSString *modelType = memberInfo[@"type"] ?: @"Unknown";
+            XLModelTreeNode *childNode = [XLModelTreeNode nodeWithName:memberName type:modelType];
+            childNode.channelCount = [memberInfo[@"channelCount"] integerValue];
+            childNode.controllerName = memberInfo[@"controllerName"];
+            [self loadSubmodelsForNode:childNode modelName:memberName];
+            [groupNode addChild:childNode];
+        }
+
+        [nodes addObject:groupNode];
+    }
+
+    // Second pass: add models that are not in any group (excluding groups themselves)
+    NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
     for (NSString *modelName in modelNames) {
+        // Skip models that are already children of a group
+        if ([modelsInGroups containsObject:modelName]) continue;
+
         NSDictionary *info = [_engineBridge getModelInfo:modelName];
         if (!info) continue;
 
-        XLModelTreeNode *node;
-        BOOL isGroup = [info[@"IsGroup"] boolValue];
-
-        if (isGroup) {
-            node = [XLModelTreeNode groupNodeWithName:modelName];
-            NSArray *memberNames = info[@"Models"];
-            for (NSString *memberName in memberNames) {
-                NSDictionary *memberInfo = [_engineBridge getModelInfo:memberName];
-                XLModelTreeNode *childNode = [XLModelTreeNode nodeWithName:memberName
-                                                                     type:memberInfo[@"DisplayAs"] ?: @"Unknown"];
-                childNode.channelCount = [memberInfo[@"ChannelCount"] integerValue];
-                childNode.controllerName = memberInfo[@"Controller"];
-                [self loadSubmodelsForNode:childNode info:memberInfo];
-                [node addChild:childNode];
-            }
-        } else {
-            NSString *displayAs = info[@"DisplayAs"] ?: @"Unknown";
-            node = [XLModelTreeNode nodeWithName:modelName type:displayAs];
-            node.channelCount = [info[@"ChannelCount"] integerValue];
-            node.controllerName = info[@"Controller"];
-            [self loadSubmodelsForNode:node info:info];
-        }
+        NSString *modelType = info[@"type"] ?: @"Unknown";
+        XLModelTreeNode *node = [XLModelTreeNode nodeWithName:modelName type:modelType];
+        node.channelCount = [info[@"channelCount"] integerValue];
+        node.controllerName = info[@"controllerName"];
+        [self loadSubmodelsForNode:node modelName:modelName];
 
         [nodes addObject:node];
     }
@@ -232,11 +245,17 @@ static NSString * const kColumnController = @"ControllerColumn";
     _allNodes = [nodes copy];
 }
 
-- (void)loadSubmodelsForNode:(XLModelTreeNode *)node info:(NSDictionary *)info {
-    NSArray *submodels = info[@"Submodels"];
-    for (NSString *submodelName in submodels) {
+- (void)loadSubmodelsForNode:(XLModelTreeNode *)node modelName:(NSString *)modelName {
+    if (!_engineBridge) return;
+
+    NSArray<NSDictionary *> *submodels = [_engineBridge getSubmodels:modelName];
+    for (NSDictionary *submodelInfo in submodels) {
+        NSString *submodelName = submodelInfo[@"name"];
+        if (!submodelName) continue;
+
         XLModelTreeNode *subNode = [XLModelTreeNode submodelNodeWithName:submodelName
                                                              parentType:node.modelType];
+        subNode.channelCount = [submodelInfo[@"channelCount"] integerValue];
         [node addChild:subNode];
     }
 }

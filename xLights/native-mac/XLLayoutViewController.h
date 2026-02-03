@@ -13,17 +13,16 @@
 #import <Cocoa/Cocoa.h>
 #import "layout/XLMetalPreviewView.h"
 #import "layout/XLModelTreeViewController.h"
+#import "layout/XLModelPropertiesView.h"
 
 @class XLEngineBridge;
-
-@class XLModelPropertiesView;
 
 /// View controller for the Layout/Preview tab.
 ///
 /// Displays Metal-based 3D preview, model tree, and manipulation handles.
 /// Layout: Left sidebar (model tree) | Center (Metal preview) | Right sidebar (properties)
 /// The preview already uses Metal with integrated 2D/3D manipulation handles.
-@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate>
+@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLModelPropertiesDelegate>
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 
@@ -32,6 +31,9 @@
 
 /// The model tree view controller (left sidebar)
 @property (nonatomic, strong, readonly) XLModelTreeViewController *modelTreeController;
+
+/// The model properties view (right sidebar)
+@property (nonatomic, strong, readonly) XLModelPropertiesView *propertiesView;
 
 /// Show the model creation sheet for a given model type
 - (void)showModelCreationSheetForType:(NSString *)modelType;
