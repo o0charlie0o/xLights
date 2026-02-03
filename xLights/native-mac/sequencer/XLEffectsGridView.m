@@ -97,8 +97,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)commonInit {
-    self.wantsLayer = YES;
-
     _zoomLevel = kDefaultZoomLevel;
     _minZoomLevel = kDefaultMinZoom;
     _maxZoomLevel = kDefaultMaxZoom;
@@ -112,14 +110,20 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _timingMarks = @[];
     _needsRedraw = YES;
 
-    // Set up Metal layer
+    // Set up Metal layer - must set layer before wantsLayer for layer-hosting views
     _metalLayer = [CAMetalLayer layer];
+    _metalLayer.device = MTLCreateSystemDefaultDevice();
+    _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     _metalLayer.contentsScale = self.window.backingScaleFactor ?: 2.0;
     _metalLayer.framebufferOnly = YES;
     self.layer = _metalLayer;
+    self.wantsLayer = YES;
 
-    // Initialize renderer
+    // Initialize renderer (may return nil if Metal is unavailable)
     _renderer = [[XLEffectsGridRenderer alloc] initWithLayer:_metalLayer];
+    if (!_renderer) {
+        NSLog(@"XLEffectsGridView: Metal renderer unavailable, grid will not render");
+    }
 
     // Set up display link for 60fps+ rendering
     [self setupDisplayLink];
@@ -293,6 +297,25 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 #pragma mark - Mouse Events
 
 - (void)mouseDown:(NSEvent *)event {
+    // Handle double-click (AppKit delivers double-clicks as mouseDown with clickCount==2)
+    if (event.clickCount == 2) {
+        NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+        CGFloat timeMS;
+        NSInteger row;
+        [self convertPoint:loc toTimeMS:&timeMS row:&row];
+
+        NSInteger hitEffectIndex = -1;
+        XLEffectHitLocation hitLoc;
+        [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc];
+
+        if (hitEffectIndex >= 0) {
+            if ([_delegate respondsToSelector:@selector(effectsGrid:didDoubleClickEffectAtRow:effectIndex:)]) {
+                [_delegate effectsGrid:self didDoubleClickEffectAtRow:row effectIndex:hitEffectIndex];
+            }
+        }
+        return;
+    }
+
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
     _mouseDownPoint = loc;
     _lastMousePoint = loc;
@@ -463,23 +486,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _isResizing = NO;
     _isRubberBanding = NO;
     _needsRedraw = YES;
-}
-
-- (void)mouseDoubleClick:(NSEvent *)event {
-    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
-    CGFloat timeMS;
-    NSInteger row;
-    [self convertPoint:loc toTimeMS:&timeMS row:&row];
-
-    NSInteger hitEffectIndex = -1;
-    XLEffectHitLocation hitLoc;
-    [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc];
-
-    if (hitEffectIndex >= 0) {
-        if ([_delegate respondsToSelector:@selector(effectsGrid:didDoubleClickEffectAtRow:effectIndex:)]) {
-            [_delegate effectsGrid:self didDoubleClickEffectAtRow:row effectIndex:hitEffectIndex];
-        }
-    }
 }
 
 - (void)rightMouseDown:(NSEvent *)event {

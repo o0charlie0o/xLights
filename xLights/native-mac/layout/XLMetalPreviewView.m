@@ -470,8 +470,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         passDesc.colorAttachments[0].loadAction = MTLLoadActionClear;
         passDesc.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
 
-        CGFloat r, g, b, a;
-        [_backgroundColor getRed:&r green:&g blue:&b alpha:&a];
+        CGFloat r = 0.1, g = 0.1, b = 0.1, a = 1.0;
+        NSColor *bgRGB = [_backgroundColor colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+        if (bgRGB) {
+            [bgRGB getRed:&r green:&g blue:&b alpha:&a];
+        }
         passDesc.colorAttachments[0].clearColor = MTLClearColorMake(r, g, b, a);
 
         // Depth

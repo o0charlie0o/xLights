@@ -79,25 +79,125 @@ static const CGFloat kEffectBlockInset = 1.0;
 - (BOOL)buildPipelines {
     NSError *error = nil;
 
-    // Load shaders from the default library
-    id<MTLLibrary> library = [_device newDefaultLibrary];
+    // Compile shaders from inline source to avoid dependency on default.metallib
+    // which may not contain our functions if other Metal shaders exist in the project
+    NSString *shaderSource = @
+        "#include <metal_stdlib>\n"
+        "using namespace metal;\n"
+        "\n"
+        "struct EffectsGridUniforms {\n"
+        "    float2 viewportSize;\n"
+        "    float2 scrollOffset;\n"
+        "    float zoomLevel;\n"
+        "    float rowHeight;\n"
+        "    float padding0;\n"
+        "    float padding1;\n"
+        "};\n"
+        "\n"
+        "struct VertexIn {\n"
+        "    float2 position [[attribute(0)]];\n"
+        "    float4 color    [[attribute(1)]];\n"
+        "};\n"
+        "\n"
+        "struct VertexOut {\n"
+        "    float4 position [[position]];\n"
+        "    float4 color;\n"
+        "};\n"
+        "\n"
+        "struct RoundedRectVertexIn {\n"
+        "    float2 position  [[attribute(0)]];\n"
+        "    float4 color     [[attribute(1)]];\n"
+        "    float2 rectMin   [[attribute(2)]];\n"
+        "    float2 rectMax   [[attribute(3)]];\n"
+        "    float  cornerRadius [[attribute(4)]];\n"
+        "};\n"
+        "\n"
+        "struct RoundedRectVertexOut {\n"
+        "    float4 position [[position]];\n"
+        "    float4 color;\n"
+        "    float2 fragCoord;\n"
+        "    float2 rectMin;\n"
+        "    float2 rectMax;\n"
+        "    float  cornerRadius;\n"
+        "};\n"
+        "\n"
+        "vertex VertexOut effectsGridVertexShader(\n"
+        "    VertexIn in [[stage_in]],\n"
+        "    constant EffectsGridUniforms &uniforms [[buffer(1)]])\n"
+        "{\n"
+        "    VertexOut out;\n"
+        "    float2 pos = in.position;\n"
+        "    float2 ndc = (pos / uniforms.viewportSize) * 2.0 - 1.0;\n"
+        "    ndc.y = -ndc.y;\n"
+        "    out.position = float4(ndc, 0.0, 1.0);\n"
+        "    out.color = in.color;\n"
+        "    return out;\n"
+        "}\n"
+        "\n"
+        "fragment float4 effectsGridFragmentShader(VertexOut in [[stage_in]])\n"
+        "{\n"
+        "    return in.color;\n"
+        "}\n"
+        "\n"
+        "vertex RoundedRectVertexOut effectBlockVertexShader(\n"
+        "    RoundedRectVertexIn in [[stage_in]],\n"
+        "    constant EffectsGridUniforms &uniforms [[buffer(1)]])\n"
+        "{\n"
+        "    RoundedRectVertexOut out;\n"
+        "    float2 pos = in.position;\n"
+        "    float2 ndc = (pos / uniforms.viewportSize) * 2.0 - 1.0;\n"
+        "    ndc.y = -ndc.y;\n"
+        "    out.position = float4(ndc, 0.0, 1.0);\n"
+        "    out.color = in.color;\n"
+        "    out.fragCoord = in.position;\n"
+        "    out.rectMin = in.rectMin;\n"
+        "    out.rectMax = in.rectMax;\n"
+        "    out.cornerRadius = in.cornerRadius;\n"
+        "    return out;\n"
+        "}\n"
+        "\n"
+        "fragment float4 effectBlockFragmentShader(RoundedRectVertexOut in [[stage_in]])\n"
+        "{\n"
+        "    float2 p = in.fragCoord;\n"
+        "    float2 rMin = in.rectMin;\n"
+        "    float2 rMax = in.rectMax;\n"
+        "    float r = in.cornerRadius;\n"
+        "    float2 halfSize = (rMax - rMin) * 0.5;\n"
+        "    float2 center = (rMin + rMax) * 0.5;\n"
+        "    float2 q = abs(p - center) - halfSize + r;\n"
+        "    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n"
+        "    if (dist > 0.5) { discard_fragment(); }\n"
+        "    float4 color = in.color;\n"
+        "    float edgeFactor = smoothstep(0.0, 2.0, -dist);\n"
+        "    color.rgb *= mix(0.85, 1.0, edgeFactor);\n"
+        "    float alpha = 1.0 - smoothstep(-0.5, 0.5, dist);\n"
+        "    color.a *= alpha;\n"
+        "    return color;\n"
+        "}\n"
+        "\n"
+        "fragment float4 effectBlockOutlineFragmentShader(RoundedRectVertexOut in [[stage_in]])\n"
+        "{\n"
+        "    float2 p = in.fragCoord;\n"
+        "    float2 rMin = in.rectMin;\n"
+        "    float2 rMax = in.rectMax;\n"
+        "    float r = in.cornerRadius;\n"
+        "    float2 halfSize = (rMax - rMin) * 0.5;\n"
+        "    float2 center = (rMin + rMax) * 0.5;\n"
+        "    float2 q = abs(p - center) - halfSize + r;\n"
+        "    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n"
+        "    float outerEdge = smoothstep(0.5, -0.5, dist);\n"
+        "    float innerEdge = smoothstep(-1.5, -2.5, dist);\n"
+        "    float outline = outerEdge - innerEdge;\n"
+        "    if (outline < 0.01) { discard_fragment(); }\n"
+        "    float4 color = in.color;\n"
+        "    color.a *= outline;\n"
+        "    return color;\n"
+        "}\n";
+
+    id<MTLLibrary> library = [_device newLibraryWithSource:shaderSource options:nil error:&error];
     if (!library) {
-        // Try loading from a compiled metallib file or source
-        NSString *shaderPath = [[NSBundle mainBundle] pathForResource:@"XLEffectsGridShaders"
-                                                              ofType:@"metal"];
-        if (shaderPath) {
-            NSString *source = [NSString stringWithContentsOfFile:shaderPath
-                                                        encoding:NSUTF8StringEncoding
-                                                           error:&error];
-            if (source) {
-                MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
-                library = [_device newLibraryWithSource:source options:options error:&error];
-            }
-        }
-        if (!library) {
-            NSLog(@"XLEffectsGridRenderer: Could not load shader library: %@", error);
-            return NO;
-        }
+        NSLog(@"XLEffectsGridRenderer: Could not compile shader library: %@", error);
+        return NO;
     }
 
     // Simple line pipeline (grid lines, playback indicator)
