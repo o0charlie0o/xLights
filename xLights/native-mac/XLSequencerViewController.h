@@ -13,6 +13,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class XLEngineBridge;
+@class XLTimelineRulerView;
 
 /// View controller for the Sequencer tab.
 ///
@@ -24,5 +25,8 @@
 @interface XLSequencerViewController : NSViewController
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
+
+/// The timeline ruler at the top of the sequencer.
+@property (nonatomic, strong, readonly) XLTimelineRulerView *timelineRuler;
 
 @end
