@@ -22,7 +22,7 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 
 @interface XLDisclosureSection ()
 
-@property (nonatomic, copy) NSString *identifier;
+@property (nonatomic, copy) NSString *sectionIdentifier;
 @property (nonatomic, strong) NSButton *disclosureButton;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSView *headerView;
@@ -36,7 +36,7 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     self = [super initWithFrame:NSZeroRect];
     if (self) {
         _title = [title copy];
-        _identifier = [identifier copy];
+        _sectionIdentifier = [identifier copy];
         _expanded = YES;
 
         self.translatesAutoresizingMaskIntoConstraints = NO;
@@ -180,12 +180,12 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 }
 
 - (void)saveState {
-    NSString *key = [kDisclosureStatePrefix stringByAppendingString:_identifier];
+    NSString *key = [kDisclosureStatePrefix stringByAppendingString:_sectionIdentifier];
     [[NSUserDefaults standardUserDefaults] setBool:_expanded forKey:key];
 }
 
 - (void)restoreState {
-    NSString *key = [kDisclosureStatePrefix stringByAppendingString:_identifier];
+    NSString *key = [kDisclosureStatePrefix stringByAppendingString:_sectionIdentifier];
     if ([[NSUserDefaults standardUserDefaults] objectForKey:key]) {
         _expanded = [[NSUserDefaults standardUserDefaults] boolForKey:key];
         _disclosureButton.state = _expanded ? NSControlStateValueOn : NSControlStateValueOff;

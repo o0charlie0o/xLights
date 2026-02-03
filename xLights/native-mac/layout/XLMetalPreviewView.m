@@ -39,13 +39,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     return kCVReturnSuccess;
 }
 
-@interface XLMetalPreviewView ()
+@interface XLMetalPreviewView () {
+    CVDisplayLinkRef _displayLink;
+}
 
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> queue;
-@property (nonatomic, strong) CAMetalLayer *layer;
-
-@property (nonatomic, assign) CVDisplayLinkRef displayLink;
+@property (nonatomic, strong) CAMetalLayer *mlayer;
 @property (nonatomic, assign) BOOL renderLoopRunning;
 @property (nonatomic, assign) BOOL needsRenderFlag;
 @property (nonatomic, assign) BOOL contentDirty;
@@ -140,7 +140,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // ProMotion: allow the display link to drive at native refresh rate
     metalLayer.displaySyncEnabled = YES;
 
-    _layer = metalLayer;
+    _mlayer = metalLayer;
     return metalLayer;
 }
 
@@ -156,7 +156,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [super viewDidChangeBackingProperties];
 
     CGFloat scale = self.window.backingScaleFactor ?: 1.0;
-    _layer.contentsScale = scale;
+    _mlayer.contentsScale = scale;
     _contentDirty = YES;
 }
 
@@ -164,7 +164,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [super setFrameSize:newSize];
 
     CGFloat scale = self.window.backingScaleFactor ?: 1.0;
-    _layer.drawableSize = CGSizeMake(newSize.width * scale, newSize.height * scale);
+    _mlayer.drawableSize = CGSizeMake(newSize.width * scale, newSize.height * scale);
     _contentDirty = YES;
 }
 
@@ -427,10 +427,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     if (self.window) {
         CGFloat scale = self.window.backingScaleFactor;
-        _layer.contentsScale = scale;
+        _mlayer.contentsScale = scale;
 
         NSSize frameSize = self.frame.size;
-        _layer.drawableSize = CGSizeMake(frameSize.width * scale, frameSize.height * scale);
+        _mlayer.drawableSize = CGSizeMake(frameSize.width * scale, frameSize.height * scale);
 
         if (!_renderLoopRunning) {
             [self startRenderLoop];
@@ -450,10 +450,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)renderFrame {
     @autoreleasepool {
-        id<CAMetalDrawable> drawable = [_layer nextDrawable];
+        id<CAMetalDrawable> drawable = [_mlayer nextDrawable];
         if (!drawable) return;
 
-        CGSize drawableSize = _layer.drawableSize;
+        CGSize drawableSize = _mlayer.drawableSize;
         [self ensureTexturesForSize:drawableSize];
 
         if (!_msaaTexture || !_depthTexture) return;
@@ -531,7 +531,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (CAMetalLayer *)metalLayer {
-    return _layer;
+    return _mlayer;
 }
 
 - (simd_float3)cameraPosition {
@@ -578,7 +578,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // For now, frame a default scene volume
     simd_float3 bbMin = {-500.0f, 0.0f, -500.0f};
     simd_float3 bbMax = {500.0f, 500.0f, 500.0f};
-    float aspect = (float)_layer.drawableSize.width / (float)_layer.drawableSize.height;
+    float aspect = (float)_mlayer.drawableSize.width / (float)_mlayer.drawableSize.height;
     [_cameraController frameBoundingBoxMin:bbMin max:bbMax aspect:aspect];
     _contentDirty = YES;
 }
@@ -712,7 +712,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSPoint localPoint = [self convertPoint:event.locationInWindow fromView:nil];
 
     // Convert to normalized device coordinates
-    CGSize drawableSize = _layer.drawableSize;
+    CGSize drawableSize = _mlayer.drawableSize;
     CGFloat scale = self.window.backingScaleFactor ?: 1.0;
     float ndcX = (float)(localPoint.x * scale / drawableSize.width) * 2.0f - 1.0f;
     float ndcY = (float)(localPoint.y * scale / drawableSize.height) * 2.0f - 1.0f;

@@ -10,6 +10,7 @@
 
 #import "XLEffectsGridView.h"
 #import "XLEffectsGridRenderer.h"
+#import <CoreVideo/CVDisplayLink.h>
 
 static const CGFloat kDefaultZoomLevel = 0.1;     // pixels per ms
 static const CGFloat kDefaultMinZoom = 0.001;
@@ -19,11 +20,12 @@ static const CGFloat kEdgeHitTestWidth = 6.0;      // pixels from edge to trigge
 static const CGFloat kDragThreshold = 4.0;          // pixels before drag starts
 static const CGFloat kMinimumEffectWidthMS = 10.0;  // minimum effect width in ms
 
-@interface XLEffectsGridView ()
+@interface XLEffectsGridView () {
+    CVDisplayLinkRef _displayLink;
+}
 
 @property (nonatomic, strong) CAMetalLayer *metalLayer;
 @property (nonatomic, strong) XLEffectsGridRenderer *renderer;
-@property (nonatomic, strong) CVDisplayLinkRef displayLink;
 
 // Cached data from data source
 @property (nonatomic, assign) NSInteger totalRows;

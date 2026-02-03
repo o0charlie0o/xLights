@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLEffectsGridRenderer.h"
+#import <simd/simd.h>
 
 // Must match the struct in XLEffectsGridShaders.metal
 typedef struct {
