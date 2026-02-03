@@ -182,8 +182,21 @@ struct XLMainContentView: View {
 
     @ViewBuilder
     private var bottomPanel: some View {
-        // Effect properties panel - shows parameters for the selected effect
-        XLEffectPropertiesView(engineBridge: appState.engineBridge)
+        // TODO: Re-enable effect properties panel after fixing memory corruption issues
+        // XLEffectPropertiesView(engineBridge: appState.engineBridge)
+
+        // Placeholder while panel is disabled
+        VStack {
+            Spacer()
+            Text("Effect Properties Panel")
+                .foregroundColor(.secondary)
+            Text("(Temporarily disabled)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: NSColor(white: 0.15, alpha: 1.0)))
     }
 
     // MARK: - Inspector Panel
