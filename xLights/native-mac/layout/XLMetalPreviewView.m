@@ -981,6 +981,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         [_renderedPixelWidths removeObjectForKey:modelName];
         [_renderedPixelHeights removeObjectForKey:modelName];
     }
+    // Increment generation counter to signal pixel data has changed
+    _pixelDataGeneration++;
     [_pixelDataLock unlock];
 
     // Mark for rebuild if showing effect colors

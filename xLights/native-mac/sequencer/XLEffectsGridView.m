@@ -368,8 +368,21 @@ static const NSInteger kMenuTagEditSettings = 1005;
         return;
     }
 
-    _totalRows = [_dataSource numberOfRowsInEffectsGrid:self];
-    _sequenceLengthMS = [_dataSource sequenceLengthMSForEffectsGrid:self];
+    @try {
+        _totalRows = [_dataSource numberOfRowsInEffectsGrid:self];
+        _sequenceLengthMS = [_dataSource sequenceLengthMSForEffectsGrid:self];
+    } @catch (NSException *exception) {
+        NSLog(@"XLEffectsGridView: Exception getting basic data: %@ - %@",
+              exception.name, exception.reason);
+        _totalRows = 0;
+        _sequenceLengthMS = 0;
+        _needsRedraw = YES;
+        return;
+    }
+
+    // Validate data
+    if (_totalRows < 0) _totalRows = 0;
+    if (_sequenceLengthMS < 0) _sequenceLengthMS = 0;
 
     // Convert timing marks directly to a plain C array for the render path.
     // This avoids ALL ObjC message sends / ARC retain-release during drawing,
@@ -402,14 +415,23 @@ static const NSInteger kMenuTagEditSettings = 1005;
         if (_renderEffects) {
             NSUInteger idx = 0;
             for (NSInteger row = 0; row < _totalRows; row++) {
-                NSInteger effectCount = [_dataSource effectsGrid:self numberOfEffectsInRow:row];
-                for (NSInteger i = 0; i < effectCount; i++) {
-                    XLEffectRenderInfo info = [_dataSource effectsGrid:self effectInfoForRow:row atIndex:i];
-                    info.row = row;
-                    _renderEffects[idx++] = info;
+                @try {
+                    NSInteger effectCount = [_dataSource effectsGrid:self numberOfEffectsInRow:row];
+                    for (NSInteger i = 0; i < effectCount && idx < totalEffects; i++) {
+                        XLEffectRenderInfo info = [_dataSource effectsGrid:self effectInfoForRow:row atIndex:i];
+                        info.row = row;
+                        _renderEffects[idx++] = info;
+                    }
+                } @catch (NSException *exception) {
+                    NSLog(@"XLEffectsGridView: Exception getting effects for row %ld: %@ - %@",
+                          (long)row, exception.name, exception.reason);
+                    // Skip this row and continue with the next
                 }
             }
-            _renderEffectCount = totalEffects;
+            _renderEffectCount = idx;
+        } else {
+            NSLog(@"XLEffectsGridView: Failed to allocate memory for %lu effects",
+                  (unsigned long)totalEffects);
         }
     }
 

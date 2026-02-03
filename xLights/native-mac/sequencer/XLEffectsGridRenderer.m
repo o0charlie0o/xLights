@@ -81,27 +81,47 @@ typedef struct {
 - (instancetype)initWithLayer:(CAMetalLayer *)metalLayer {
     self = [super init];
     if (self) {
+        if (!metalLayer) {
+            NSLog(@"XLEffectsGridRenderer: Cannot initialize - metalLayer is nil");
+            return nil;
+        }
+
         _device = MTLCreateSystemDefaultDevice();
         if (!_device) {
-            NSLog(@"XLEffectsGridRenderer: Metal not available");
+            NSLog(@"XLEffectsGridRenderer: Metal not available on this system");
             return nil;
         }
 
-        metalLayer.device = _device;
-        metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-        metalLayer.framebufferOnly = YES;
+        @try {
+            metalLayer.device = _device;
+            metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+            metalLayer.framebufferOnly = YES;
 
-        _commandQueue = [_device newCommandQueue];
+            _commandQueue = [_device newCommandQueue];
+            if (!_commandQueue) {
+                NSLog(@"XLEffectsGridRenderer: Failed to create command queue");
+                return nil;
+            }
 
-        if (![self buildPipelines]) {
-            NSLog(@"XLEffectsGridRenderer: Failed to build render pipelines");
+            if (![self buildPipelines]) {
+                NSLog(@"XLEffectsGridRenderer: Failed to build render pipelines");
+                return nil;
+            }
+
+            // Pre-allocate reusable Metal buffers
+            [self allocateReusableBuffers];
+        } @catch (NSException *exception) {
+            NSLog(@"XLEffectsGridRenderer: Exception during initialization: %@ - %@",
+                  exception.name, exception.reason);
             return nil;
         }
-
-        // Pre-allocate reusable Metal buffers
-        [self allocateReusableBuffers];
     }
     return self;
+}
+
++ (BOOL)isMetalAvailable {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    return device != nil;
 }
 
 - (void)allocateReusableBuffers {

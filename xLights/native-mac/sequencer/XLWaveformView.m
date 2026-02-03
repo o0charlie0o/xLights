@@ -36,6 +36,13 @@ static const NSUInteger kMaxOverviewBuckets = 65536;
 @property (nonatomic, assign) BOOL needsRedraw;
 @property (nonatomic, assign) BOOL dragging;
 
+// Cached waveform path for efficient redraw
+@property (nonatomic, assign) CGMutablePathRef cachedWaveformPath;
+@property (nonatomic, assign) CGFloat cachedZoomLevel;
+@property (nonatomic, assign) CGFloat cachedScrollOffsetX;
+@property (nonatomic, assign) CGFloat cachedWidth;
+@property (nonatomic, assign) CGFloat cachedHeight;
+
 @end
 
 // CVDisplayLink callback — runs on a high-priority background thread.
@@ -88,6 +95,13 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _needsRedraw = YES;
     _dragging = NO;
 
+    // Waveform path cache
+    _cachedWaveformPath = NULL;
+    _cachedZoomLevel = 0;
+    _cachedScrollOffsetX = -1;
+    _cachedWidth = 0;
+    _cachedHeight = 0;
+
     self.wantsLayer = YES;
 
     [self setupDisplayLink];
@@ -98,6 +112,10 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
         CVDisplayLinkStop(_displayLink);
         CVDisplayLinkRelease(_displayLink);
         _displayLink = NULL;
+    }
+    if (_cachedWaveformPath) {
+        CGPathRelease(_cachedWaveformPath);
+        _cachedWaveformPath = NULL;
     }
 }
 
@@ -149,6 +167,11 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)setFrameSize:(NSSize)newSize {
     [super setFrameSize:newSize];
+    // Invalidate cached path when view size changes
+    if (_cachedWaveformPath) {
+        CGPathRelease(_cachedWaveformPath);
+        _cachedWaveformPath = NULL;
+    }
     _needsRedraw = YES;
 }
 
@@ -164,6 +187,12 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)loadAudioData:(XLAudioSampleData *)audioData {
     _audioData = audioData;
+
+    // Invalidate cached waveform path
+    if (_cachedWaveformPath) {
+        CGPathRelease(_cachedWaveformPath);
+        _cachedWaveformPath = NULL;
+    }
 
     if (!audioData || audioData.sampleCount == 0) {
         _overviewBuckets = nil;
@@ -197,12 +226,22 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)setZoomLevel:(CGFloat)zoomLevel {
     if (fabs(zoomLevel - _zoomLevel) < 0.00001) return;
     _zoomLevel = zoomLevel;
+    // Invalidate cached path when zoom changes
+    if (_cachedWaveformPath) {
+        CGPathRelease(_cachedWaveformPath);
+        _cachedWaveformPath = NULL;
+    }
     _needsRedraw = YES;
 }
 
 - (void)setScrollOffsetX:(CGFloat)scrollOffsetX {
     if (fabs(scrollOffsetX - _scrollOffsetX) < 0.01) return;
     _scrollOffsetX = scrollOffsetX;
+    // Invalidate cached path when scroll position changes
+    if (_cachedWaveformPath) {
+        CGPathRelease(_cachedWaveformPath);
+        _cachedWaveformPath = NULL;
+    }
     _needsRedraw = YES;
 }
 

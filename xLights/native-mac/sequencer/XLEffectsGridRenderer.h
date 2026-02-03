@@ -41,6 +41,9 @@ typedef struct {
 @property (nonatomic, readonly) id<MTLDevice> device;
 @property (nonatomic, readonly) id<MTLCommandQueue> commandQueue;
 
+/// Check if Metal is available on this system.
++ (BOOL)isMetalAvailable;
+
 - (instancetype)initWithLayer:(CAMetalLayer *)metalLayer;
 
 /// Full draw pass: grid lines, effect blocks, selection, playback indicator.

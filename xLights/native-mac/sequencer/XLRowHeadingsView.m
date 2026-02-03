@@ -185,11 +185,27 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     cell.row = row;
 
     if (_dataSource) {
-        cell.name = [_dataSource rowHeadings:self nameForRow:row];
-        cell.elementType = [_dataSource rowHeadings:self elementTypeForRow:row];
-        cell.expandable = [_dataSource rowHeadings:self isExpandableAtRow:row];
-        cell.expanded = [_dataSource rowHeadings:self isExpandedAtRow:row];
-        cell.indentLevel = [_dataSource rowHeadings:self indentLevelForRow:row];
+        @try {
+            cell.name = [_dataSource rowHeadings:self nameForRow:row] ?: @"";
+            cell.elementType = [_dataSource rowHeadings:self elementTypeForRow:row];
+            cell.expandable = [_dataSource rowHeadings:self isExpandableAtRow:row];
+            cell.expanded = [_dataSource rowHeadings:self isExpandedAtRow:row];
+            cell.indentLevel = [_dataSource rowHeadings:self indentLevelForRow:row];
+        } @catch (NSException *exception) {
+            NSLog(@"XLRowHeadingsView: Exception getting data for row %ld: %@ - %@",
+                  (long)row, exception.name, exception.reason);
+            cell.name = @"<Error>";
+            cell.elementType = XLElementTypeModel;
+            cell.expandable = NO;
+            cell.expanded = NO;
+            cell.indentLevel = 0;
+        }
+    } else {
+        cell.name = @"";
+        cell.elementType = XLElementTypeModel;
+        cell.expandable = NO;
+        cell.expanded = NO;
+        cell.indentLevel = 0;
     }
 
     cell.isSelected = (row == _selectedRow);
