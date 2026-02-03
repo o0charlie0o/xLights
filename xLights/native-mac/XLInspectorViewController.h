@@ -27,6 +27,12 @@
 /// Object can be a model name, effect ID, controller name, etc.
 - (void)inspectObject:(id)object;
 
+/// Show model properties in the inspector.
+- (void)inspectModel:(NSString *)modelName;
+
+/// Show properties for multiple models.
+- (void)inspectModels:(NSArray<NSString *> *)modelNames;
+
 /// Clear the inspector (no selection).
 - (void)clearInspector;
 

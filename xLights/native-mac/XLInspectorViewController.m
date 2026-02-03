@@ -9,11 +9,14 @@
  **************************************************************/
 
 #import "XLInspectorViewController.h"
+#import "XLEngineBridge.h"
+#import "layout/XLModelPropertiesView.h"
 
-@interface XLInspectorViewController ()
+@interface XLInspectorViewController () <XLModelPropertiesDelegate>
 
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong) NSStackView *stackView;
+@property (nonatomic, strong) XLModelPropertiesView *modelPropertiesView;
 
 @end
 
@@ -22,7 +25,7 @@
 - (void)loadView {
     NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 600)];
     view.wantsLayer = YES;
-    view.layer.backgroundColor = [[NSColor colorWithWhite:0.12 alpha:1.0] CGColor];
+    view.layer.backgroundColor = CGColorCreateGenericGray(0.12, 1.0);
 
     // Scroll view for inspector content
     _scrollView = [[NSScrollView alloc] initWithFrame:view.bounds];
@@ -87,24 +90,120 @@
     [super viewDidLoad];
 }
 
-- (void)inspectObject:(id)object {
-    // Clear existing content
-    for (NSView *subview in _stackView.arrangedSubviews) {
+#pragma mark - Model Properties View (lazy)
+
+- (XLModelPropertiesView *)ensureModelPropertiesView {
+    if (!_modelPropertiesView) {
+        _modelPropertiesView = [[XLModelPropertiesView alloc] initWithFrame:NSZeroRect];
+        _modelPropertiesView.delegate = self;
+        _modelPropertiesView.engineBridge = _engineBridge;
+    }
+    return _modelPropertiesView;
+}
+
+#pragma mark - Clear Stack
+
+- (void)clearStackView {
+    for (NSView *subview in [_stackView.arrangedSubviews copy]) {
         [_stackView removeArrangedSubview:subview];
         [subview removeFromSuperview];
     }
+}
 
-    // Build inspector UI based on object type
-    // TODO: Use InspectorView pattern from AppKitInspector spike
+#pragma mark - Inspect Methods
+
+- (void)inspectObject:(id)object {
+    if ([object isKindOfClass:[NSString class]]) {
+        [self inspectModel:(NSString *)object];
+        return;
+    }
+
+    if ([object isKindOfClass:[NSArray class]]) {
+        NSArray *arr = (NSArray *)object;
+        if (arr.count > 0 && [arr.firstObject isKindOfClass:[NSString class]]) {
+            [self inspectModels:arr];
+            return;
+        }
+    }
+
+    [self clearStackView];
+}
+
+- (void)inspectModel:(NSString *)modelName {
+    if (!modelName) {
+        [self clearInspector];
+        return;
+    }
+
+    NSDictionary *info = [_engineBridge getModelInfo:modelName];
+    if (!info) {
+        [self clearInspector];
+        return;
+    }
+
+    [self clearStackView];
+
+    XLModelPropertiesView *propsView = [self ensureModelPropertiesView];
+    propsView.engineBridge = _engineBridge;
+    [propsView showPropertiesForModel:modelName info:info];
+
+    [_stackView addArrangedSubview:propsView];
+    [NSLayoutConstraint activateConstraints:@[
+        [propsView.leadingAnchor constraintEqualToAnchor:_stackView.leadingAnchor],
+        [propsView.trailingAnchor constraintEqualToAnchor:_stackView.trailingAnchor],
+    ]];
+}
+
+- (void)inspectModels:(NSArray<NSString *> *)modelNames {
+    if (!modelNames || modelNames.count == 0) {
+        [self clearInspector];
+        return;
+    }
+
+    if (modelNames.count == 1) {
+        [self inspectModel:modelNames.firstObject];
+        return;
+    }
+
+    NSMutableArray<NSDictionary *> *infos = [[NSMutableArray alloc] initWithCapacity:modelNames.count];
+    for (NSString *name in modelNames) {
+        NSDictionary *info = [_engineBridge getModelInfo:name];
+        if (info) {
+            [infos addObject:info];
+        }
+    }
+
+    if (infos.count == 0) {
+        [self clearInspector];
+        return;
+    }
+
+    [self clearStackView];
+
+    XLModelPropertiesView *propsView = [self ensureModelPropertiesView];
+    propsView.engineBridge = _engineBridge;
+    [propsView showPropertiesForModels:modelNames infos:infos];
+
+    [_stackView addArrangedSubview:propsView];
+    [NSLayoutConstraint activateConstraints:@[
+        [propsView.leadingAnchor constraintEqualToAnchor:_stackView.leadingAnchor],
+        [propsView.trailingAnchor constraintEqualToAnchor:_stackView.trailingAnchor],
+    ]];
 }
 
 - (void)clearInspector {
-    for (NSView *subview in _stackView.arrangedSubviews) {
-        [_stackView removeArrangedSubview:subview];
-        [subview removeFromSuperview];
-    }
-
+    [self clearStackView];
+    [_modelPropertiesView clearProperties];
     [self addPlaceholderContent];
+}
+
+#pragma mark - XLModelPropertiesDelegate
+
+- (void)modelProperties:(XLModelPropertiesView *)view
+       didChangeProperty:(NSString *)key
+                   value:(id)value
+                forModel:(NSString *)modelName {
+    [_engineBridge updateModelProperty:modelName key:key value:value];
 }
 
 @end

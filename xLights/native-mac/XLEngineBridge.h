@@ -54,6 +54,7 @@
 - (NSArray<NSString *> *)getModelNames;
 - (NSDictionary *)getModelInfo:(NSString *)modelName;
 - (BOOL)hasModel:(NSString *)modelName;
+- (BOOL)updateModelProperty:(NSString *)modelName key:(NSString *)key value:(id)value;
 
 #pragma mark - Output Operations
 

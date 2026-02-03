@@ -159,12 +159,23 @@
     // xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
     // return [self dictFromModelInfo:info];
 
-    // Stub: return sample data
+    // Stub: return sample data with all property keys used by XLModelPropertiesView
     return @{
         @"name": modelName,
-        @"type": @"Custom",
+        @"type": @"Single Line",
+        @"description": @"",
+        @"displayAs": @"Default",
+        @"x": @(0.0), @"y": @(0.0), @"z": @(0.0),
+        @"width": @(100.0), @"height": @(100.0), @"depth": @(0.0),
+        @"rotationX": @(0.0), @"rotationY": @(0.0), @"rotationZ": @(0.0),
+        @"scale": @(1.0), @"locked": @(NO),
+        @"controllerName": @"No Controller",
+        @"port": @(1), @"protocol": @"ws2811",
+        @"startChannel": @(1), @"endChannel": @(100), @"channelCount": @(100),
+        @"colorOrder": @"RGB", @"brightness": @(100),
+        @"gamma": @(1.0), @"nullPixels": @(0),
+        @"reverse": @(NO), @"groupCount": @(1), @"zigZag": @(0),
         @"nodeCount": @100,
-        @"channelCount": @300,
     };
 }
 
@@ -176,6 +187,18 @@
     // TODO: Call into ModelEngine
     // return _modelEngine->hasModel(stdName);
 
+    return YES; // stub
+}
+
+- (BOOL)updateModelProperty:(NSString *)modelName key:(NSString *)key value:(id)value {
+    if (!modelName || !key) return NO;
+
+    // TODO: Call into ModelEngine to apply the property change
+    // std::string stdName = [modelName UTF8String];
+    // std::string stdKey = [key UTF8String];
+    // return _modelEngine->setProperty(stdName, stdKey, value);
+
+    NSLog(@"[Stub] updateModelProperty %@ key=%@ value=%@", modelName, key, value);
     return YES; // stub
 }
 
