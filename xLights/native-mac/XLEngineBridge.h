@@ -36,12 +36,38 @@
 - (BOOL)closeSequence;
 - (BOOL)isSequenceLoaded;
 
+/// Get information about the currently loaded sequence.
+/// Returns nil if no sequence is loaded.
+/// Dictionary keys: name, mediaFile, sequenceType, durationMS, frameTimeMS,
+///                  numChannels, numFrames, author, song, artist, album, comment
+- (NSDictionary *)getSequenceInfo;
+
 #pragma mark - Playback Control
 
 - (void)play;
 - (void)pause;
 - (void)stop;
 - (void)seek:(NSInteger)positionMS;
+- (void)seekToStart;
+- (void)seekToEnd;
+- (void)seekRelative:(NSInteger)deltaMS;
+
+#pragma mark - Playback State
+
+/// Get the current playback state: @"stopped", @"playing", or @"paused"
+- (NSString *)getPlaybackState;
+
+/// Get the current playback position in milliseconds
+- (NSInteger)getPosition;
+
+/// Get the sequence duration in milliseconds
+- (NSInteger)getDuration;
+
+/// Get the frame rate in frames per second
+- (NSInteger)getFrameRate;
+
+/// Get the frame time in milliseconds
+- (NSInteger)getFrameTimeMS;
 
 #pragma mark - Rendering
 
@@ -51,10 +77,29 @@
 
 #pragma mark - Model Operations
 
+/// Get all model names (including groups)
 - (NSArray<NSString *> *)getModelNames;
+
+/// Get model names excluding groups
+- (NSArray<NSString *> *)getModelNamesExcludingGroups;
+
+/// Get group names only
+- (NSArray<NSString *> *)getGroupNames;
+
+/// Get detailed model info
 - (NSDictionary *)getModelInfo:(NSString *)modelName;
+
+/// Check if a model exists
 - (BOOL)hasModel:(NSString *)modelName;
+
+/// Update a model property
 - (BOOL)updateModelProperty:(NSString *)modelName key:(NSString *)key value:(id)value;
+
+/// Get a single model property
+- (NSString *)getModelProperty:(NSString *)modelName key:(NSString *)key defaultValue:(NSString *)defaultValue;
+
+/// Get all model properties as a dictionary
+- (NSDictionary *)getModelProperties:(NSString *)modelName;
 
 /// Create a new model with the given type, name, and properties
 - (BOOL)createModel:(NSString *)modelType name:(NSString *)modelName properties:(NSDictionary *)properties;
@@ -67,6 +112,44 @@
 
 /// Duplicate a model
 - (BOOL)duplicateModel:(NSString *)modelName;
+
+#pragma mark - Model Groups
+
+/// Get all model groups with their member models
+/// Returns array of dictionaries with: name, modelNames (array)
+- (NSArray<NSDictionary *> *)getModelGroups;
+
+/// Get a specific model group
+/// Returns dictionary with: name, modelNames (array), defaultBufferStyle
+- (NSDictionary *)getModelGroup:(NSString *)groupName;
+
+/// Get groups containing a specific model
+- (NSArray<NSString *> *)getGroupsContainingModel:(NSString *)modelName;
+
+#pragma mark - Submodels
+
+/// Get submodels of a model
+/// Returns array of dictionaries with: name, fullName, nodeCount, channelCount
+- (NSArray<NSDictionary *> *)getSubmodels:(NSString *)modelName;
+
+/// Check if a model has a specific submodel
+- (BOOL)hasSubmodel:(NSString *)modelName submodelName:(NSString *)submodelName;
+
+#pragma mark - Model Geometry
+
+/// Get node coordinates for a model (for visualization)
+/// Returns array of dictionaries with: x, y, z, bufX, bufY, channel, channelCount, stringNum
+- (NSArray<NSDictionary *> *)getModelNodes:(NSString *)modelName;
+
+/// Get node count for a model
+- (NSUInteger)getModelNodeCount:(NSString *)modelName;
+
+/// Get channel count for a model
+- (NSUInteger)getModelChannelCount:(NSString *)modelName;
+
+/// Get bounding box for a model
+/// Returns dictionary with: minX, maxX, minY, maxY, minZ, maxZ
+- (NSDictionary *)getModelBounds:(NSString *)modelName;
 
 #pragma mark - Model Import Operations
 
@@ -123,15 +206,152 @@
 /// Get controller capabilities (max ports, protocols, etc.)
 - (NSDictionary *)getControllerCapabilities:(NSString *)controllerName;
 
+/// Get total channel count across all controllers
+- (NSInteger)getTotalChannels;
+
+/// Check if output configuration has unsaved changes
+- (BOOL)isOutputDirty;
+
+/// Save output configuration
+- (BOOL)saveOutputConfiguration;
+
+#pragma mark - Controller Discovery
+
+/// Discover controllers on the network asynchronously.
+/// @param completion Block called with array of discovered controller dictionaries when complete.
+///   Each dictionary contains: ip, hostname, vendor, model, variant, description, version,
+///   mode, platform, majorVersion, minorVersion, patchVersion, alreadyConfigured, existingName.
+- (void)discoverControllers:(void (^)(BOOL success, NSArray<NSDictionary *> *controllers))completion;
+
+/// Add a discovered controller to the configuration.
+/// @param discoveredInfo Dictionary from discovery results.
+/// @return YES if successful.
+- (BOOL)addDiscoveredController:(NSDictionary *)discoveredInfo;
+
+/// Test connectivity to a specific controller.
+/// @param controllerName Controller to test.
+/// @param completion Block called with ping state: @"OK", @"WebOK", @"Open", @"Opened",
+///   @"AllFailed", @"Unavailable", or @"Unknown".
+- (void)testController:(NSString *)controllerName completion:(void (^)(NSString *pingState))completion;
+
+/// Test connectivity to all controllers.
+/// @param completion Block called for each controller with name and ping state.
+- (void)testAllControllers:(void (^)(NSString *controllerName, NSString *pingState))completion;
+
+#pragma mark - Controller Upload
+
+/// Upload configuration to a controller.
+/// @param controllerName Controller to upload to.
+/// @param completion Block called with success status and message.
+- (void)uploadToController:(NSString *)controllerName
+                completion:(void (^)(BOOL success, NSString *message))completion;
+
+/// Upload input configuration only to a controller.
+/// @param controllerName Controller to upload to.
+/// @param completion Block called with success status and message.
+- (void)uploadInputToController:(NSString *)controllerName
+                     completion:(void (^)(BOOL success, NSString *message))completion;
+
+/// Upload output configuration only to a controller.
+/// @param controllerName Controller to upload to.
+/// @param completion Block called with success status and message.
+- (void)uploadOutputToController:(NSString *)controllerName
+                      completion:(void (^)(BOOL success, NSString *message))completion;
+
+#pragma mark - Sequence Elements (for Sequencer View)
+
+/// Get the number of elements (rows) in the sequence
+- (NSInteger)getSequenceElementCount;
+
+/// Get element info at a given index
+/// Returns dictionary with: name, type (timing/model/submodel/strand), effectLayerCount, visible, collapsed
+- (NSDictionary *)getSequenceElementAtIndex:(NSInteger)index;
+
+/// Get all elements in the sequence
+/// Returns array of element info dictionaries
+- (NSArray<NSDictionary *> *)getSequenceElements;
+
+/// Get effects for a sequence element at index and layer
+/// Returns array of effect info dictionaries
+- (NSArray<NSDictionary *> *)getEffectsForElementAtIndex:(NSInteger)index layer:(NSInteger)layer;
+
 #pragma mark - Effect Operations
 
+/// Get all available effect types
 - (NSArray<NSString *> *)getEffectTypes;
+
+/// Get detailed info about an effect type
+/// Returns dictionary with: id, name, tooltip, canBeRandom, etc.
+- (NSDictionary *)getEffectTypeInfo:(NSString *)effectType;
+
+/// Get parameter definitions for an effect type
+/// Returns array of parameter dictionaries with: key, displayLabel, type, minValue, maxValue, etc.
+- (NSArray<NSDictionary *> *)getEffectParameters:(NSString *)effectType;
+
+/// Create a new effect. Returns effect ID or -1 on failure.
 - (NSInteger)createEffect:(NSString *)modelName
                     layer:(NSInteger)layer
                effectType:(NSString *)effectType
-               startTimeMS:(NSInteger)startMS
-                 endTimeMS:(NSInteger)endMS;
+              startTimeMS:(NSInteger)startMS
+                endTimeMS:(NSInteger)endMS;
+
+/// Delete an effect by ID
 - (BOOL)deleteEffect:(NSInteger)effectId;
+
+/// Get effect info by ID
+/// Returns dictionary with: id, effectType, modelName, layerIndex, startTimeMS, endTimeMS, settings, palette, etc.
+- (NSDictionary *)getEffect:(NSInteger)effectId;
+
+/// Set a single effect parameter
+- (BOOL)setEffectParameter:(NSInteger)effectId key:(NSString *)key value:(NSString *)value;
+
+/// Get a single effect parameter value
+- (NSString *)getEffectParameter:(NSInteger)effectId key:(NSString *)key;
+
+/// Set all effect settings at once (serialized settings string)
+- (BOOL)setEffectSettings:(NSInteger)effectId settings:(NSString *)settings;
+
+/// Get all effect settings as a serialized string
+- (NSString *)getEffectSettings:(NSInteger)effectId;
+
+/// Set the effect palette (colors)
+- (BOOL)setEffectPalette:(NSInteger)effectId palette:(NSString *)palette;
+
+/// Get the effect palette as a serialized string
+- (NSString *)getEffectPalette:(NSInteger)effectId;
+
+/// Move an effect to a new time range
+- (BOOL)moveEffect:(NSInteger)effectId startTimeMS:(NSInteger)startMS endTimeMS:(NSInteger)endMS;
+
+/// Get all effects for a model
+- (NSArray<NSDictionary *> *)getEffectsForModel:(NSString *)modelName;
+
+/// Get effects active at a specific time on a model
+- (NSArray<NSDictionary *> *)getEffectsAtTime:(NSString *)modelName timeMS:(NSInteger)timeMS;
+
+/// Get effects on a specific layer of a model
+- (NSArray<NSDictionary *> *)getEffectsForLayer:(NSString *)modelName layer:(NSInteger)layer;
+
+/// Get the number of effect layers on a model
+- (NSInteger)getLayerCount:(NSString *)modelName;
+
+/// Add a new effect layer to a model
+- (NSInteger)addLayer:(NSString *)modelName;
+
+/// Remove an effect layer from a model
+- (BOOL)removeLayer:(NSString *)modelName layer:(NSInteger)layer;
+
+/// Select an effect
+- (BOOL)selectEffect:(NSInteger)effectId;
+
+/// Deselect all effects
+- (void)deselectAllEffects;
+
+/// Get IDs of all selected effects
+- (NSArray<NSNumber *> *)getSelectedEffectIds;
+
+/// Convert an effect to a different type
+- (BOOL)convertEffectType:(NSInteger)effectId newType:(NSString *)newType;
 
 #pragma mark - Utility
 

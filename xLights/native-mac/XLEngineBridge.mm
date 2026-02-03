@@ -18,20 +18,36 @@
 #include "../engine/RenderEngine.h"
 #include "../engine/EffectEngine.h"
 
+// Access to xLightsFrame singleton during transition period
+#include "../xLightsApp.h"
+#include "../xLightsMain.h"
+
+// Sequencer classes for element/effect access
+#include "../sequencer/SequenceElements.h"
+#include "../sequencer/Element.h"
+#include "../sequencer/Effect.h"
+#include "../sequencer/EffectLayer.h"
+
 #include <string>
 #include <vector>
 #include <map>
+#include <memory>
 
 @implementation XLEngineBridge {
-    // During the transition period, the engines are singletons accessed via
-    // xLightsFrame. Once Phase 0 is complete, we'll hold pointers here.
-    // For now, this is a placeholder that shows the pattern.
+    // The SequenceEngine instance - created lazily when xLightsFrame is available
+    std::unique_ptr<xlEngine::SequenceEngine> _sequenceEngine;
 
-    // std::unique_ptr<xlEngine::SequenceEngine> _sequenceEngine;
-    // std::unique_ptr<xlEngine::ModelEngine> _modelEngine;
-    // std::unique_ptr<xlEngine::OutputEngine> _outputEngine;
-    // std::unique_ptr<xlEngine::RenderEngine> _renderEngine;
-    // std::unique_ptr<xlEngine::EffectEngine> _effectEngine;
+    // The ModelEngine instance - wraps ModelManager
+    std::unique_ptr<xlEngine::ModelEngine> _modelEngine;
+
+    // The OutputEngine instance - wraps OutputManager
+    std::unique_ptr<xlEngine::OutputEngine> _outputEngine;
+
+    // The EffectEngine instance - wraps EffectManager/SequenceElements
+    std::unique_ptr<xlEngine::EffectEngine> _effectEngine;
+
+    // Track whether we've initialized the engine
+    BOOL _engineInitialized;
 }
 
 #pragma mark - Lifecycle
@@ -39,12 +55,33 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        // TODO: Initialize engine instances once Phase 0 is complete
-        // For now, this is a stub that demonstrates the pattern
+        _engineInitialized = NO;
 
-        NSLog(@"XLEngineBridge initialized (stub implementation)");
+        // Try to initialize the engine immediately if frame is available
+        [self ensureEngineInitialized];
+
+        if (_engineInitialized) {
+            NSLog(@"XLEngineBridge initialized with SequenceEngine");
+        } else {
+            NSLog(@"XLEngineBridge initialized (engine will be created when frame is available)");
+        }
     }
     return self;
+}
+
+- (void)ensureEngineInitialized {
+    if (_engineInitialized) return;
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (frame) {
+        _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(frame);
+        _modelEngine = std::make_unique<xlEngine::ModelEngine>(frame->AllModels);
+        _outputEngine = std::make_unique<xlEngine::OutputEngine>();
+        _outputEngine->initialize(frame->GetOutputManager());
+        _effectEngine = std::make_unique<xlEngine::EffectEngine>(frame);
+        _engineInitialized = YES;
+        NSLog(@"XLEngineBridge: All engines created successfully");
+    }
 }
 
 #pragma mark - Sequence Operations
@@ -52,68 +89,209 @@
 - (BOOL)loadSequence:(NSString *)path {
     if (!path || path.length == 0) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot load sequence - engine not available");
+        return NO;
+    }
+
     std::string stdPath = [path UTF8String];
-
-    // TODO: Call into SequenceEngine once Phase 0 is complete
-    // return _sequenceEngine->loadSequence(stdPath);
-
-    NSLog(@"[Stub] loadSequence: %@", path);
-    return YES; // stub
+    bool result = _sequenceEngine->loadSequence(stdPath);
+    NSLog(@"XLEngineBridge: loadSequence(%@) = %s", path, result ? "YES" : "NO");
+    return result ? YES : NO;
 }
 
 - (BOOL)saveSequence:(NSString *)path {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot save sequence - engine not available");
+        return NO;
+    }
+
     std::string stdPath = path ? [path UTF8String] : "";
-
-    // TODO: Call into SequenceEngine
-    // return _sequenceEngine->saveSequence(stdPath);
-
-    NSLog(@"[Stub] saveSequence: %@", path ?: @"<current>");
-    return YES; // stub
+    bool result = _sequenceEngine->saveSequence(stdPath);
+    NSLog(@"XLEngineBridge: saveSequence(%@) = %s", path ?: @"<current>", result ? "YES" : "NO");
+    return result ? YES : NO;
 }
 
 - (BOOL)closeSequence {
-    // TODO: Call into SequenceEngine
-    // return _sequenceEngine->closeSequence();
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot close sequence - engine not available");
+        return NO;
+    }
 
-    NSLog(@"[Stub] closeSequence");
-    return YES; // stub
+    bool result = _sequenceEngine->closeSequence();
+    NSLog(@"XLEngineBridge: closeSequence() = %s", result ? "YES" : "NO");
+    return result ? YES : NO;
 }
 
 - (BOOL)isSequenceLoaded {
-    // TODO: Call into SequenceEngine
-    // return _sequenceEngine->isSequenceLoaded();
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        return NO;
+    }
 
-    return NO; // stub
+    return _sequenceEngine->isSequenceLoaded() ? YES : NO;
+}
+
+- (NSDictionary *)getSequenceInfo {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return nil;
+    }
+
+    xlEngine::SequenceInfo info = _sequenceEngine->getSequenceInfo();
+
+    return @{
+        @"name": [NSString stringWithUTF8String:info.name.c_str()],
+        @"mediaFile": [NSString stringWithUTF8String:info.mediaFile.c_str()],
+        @"sequenceType": [NSString stringWithUTF8String:info.sequenceType.c_str()],
+        @"durationMS": @(info.durationMS),
+        @"frameTimeMS": @(info.frameTimeMS),
+        @"numChannels": @(info.numChannels),
+        @"numFrames": @(info.numFrames),
+        @"author": [NSString stringWithUTF8String:info.author.c_str()],
+        @"song": [NSString stringWithUTF8String:info.song.c_str()],
+        @"artist": [NSString stringWithUTF8String:info.artist.c_str()],
+        @"album": [NSString stringWithUTF8String:info.album.c_str()],
+        @"comment": [NSString stringWithUTF8String:info.comment.c_str()],
+    };
 }
 
 #pragma mark - Playback Control
 
 - (void)play {
-    // TODO: Call into SequenceEngine
-    // _sequenceEngine->play();
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot play - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] play");
+    _sequenceEngine->play();
+    NSLog(@"XLEngineBridge: play()");
 }
 
 - (void)pause {
-    // TODO: Call into SequenceEngine
-    // _sequenceEngine->pause();
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot pause - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] pause");
+    _sequenceEngine->pause();
+    NSLog(@"XLEngineBridge: pause()");
 }
 
 - (void)stop {
-    // TODO: Call into SequenceEngine
-    // _sequenceEngine->stop();
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot stop - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] stop");
+    _sequenceEngine->stop();
+    NSLog(@"XLEngineBridge: stop()");
 }
 
 - (void)seek:(NSInteger)positionMS {
-    // TODO: Call into SequenceEngine
-    // _sequenceEngine->seek((int)positionMS);
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot seek - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] seek: %ld ms", (long)positionMS);
+    _sequenceEngine->seek((int)positionMS);
+    NSLog(@"XLEngineBridge: seek(%ld ms)", (long)positionMS);
+}
+
+- (void)seekToStart {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot seekToStart - engine not available");
+        return;
+    }
+
+    _sequenceEngine->seekToStart();
+    NSLog(@"XLEngineBridge: seekToStart()");
+}
+
+- (void)seekToEnd {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot seekToEnd - engine not available");
+        return;
+    }
+
+    _sequenceEngine->seekToEnd();
+    NSLog(@"XLEngineBridge: seekToEnd()");
+}
+
+- (void)seekRelative:(NSInteger)deltaMS {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        NSLog(@"XLEngineBridge: Cannot seekRelative - engine not available");
+        return;
+    }
+
+    _sequenceEngine->seekRelative((int)deltaMS);
+    NSLog(@"XLEngineBridge: seekRelative(%ld ms)", (long)deltaMS);
+}
+
+#pragma mark - Playback State
+
+- (NSString *)getPlaybackState {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        return @"stopped";
+    }
+
+    xlEngine::PlaybackState state = _sequenceEngine->getPlaybackState();
+    switch (state) {
+        case xlEngine::PlaybackState::Playing:
+            return @"playing";
+        case xlEngine::PlaybackState::Paused:
+            return @"paused";
+        case xlEngine::PlaybackState::Stopped:
+        default:
+            return @"stopped";
+    }
+}
+
+- (NSInteger)getPosition {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        return 0;
+    }
+
+    return _sequenceEngine->getPosition();
+}
+
+- (NSInteger)getDuration {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        return 0;
+    }
+
+    return _sequenceEngine->getDuration();
+}
+
+- (NSInteger)getFrameRate {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        return 0;
+    }
+
+    return _sequenceEngine->getFrameRate();
+}
+
+- (NSInteger)getFrameTimeMS {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) {
+        return 0;
+    }
+
+    return _sequenceEngine->getFrameTimeMS();
 }
 
 #pragma mark - Rendering
@@ -142,68 +320,84 @@
 #pragma mark - Model Operations
 
 - (NSArray<NSString *> *)getModelNames {
-    // TODO: Call into ModelEngine
-    // std::vector<std::string> names = _modelEngine->getModelNames();
-    // return [self arrayFromVector:names];
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot get model names - engine not available");
+        return @[];
+    }
 
-    // Stub: return sample data
-    return @[@"Mega Tree 1", @"Arch Left", @"Arch Right", @"Matrix"];
+    std::vector<std::string> names = _modelEngine->getModelNames();
+    return [self arrayFromVector:names];
 }
 
 - (NSDictionary *)getModelInfo:(NSString *)modelName {
     if (!modelName) return nil;
 
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot get model info - engine not available");
+        return nil;
+    }
+
     std::string stdName = [modelName UTF8String];
+    if (!_modelEngine->hasModel(stdName)) {
+        return nil;
+    }
 
-    // TODO: Call into ModelEngine
-    // xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
-    // return [self dictFromModelInfo:info];
-
-    // Stub: return sample data with all property keys used by XLModelPropertiesView
-    return @{
-        @"name": modelName,
-        @"type": @"Single Line",
-        @"description": @"",
-        @"displayAs": @"Default",
-        @"x": @(0.0), @"y": @(0.0), @"z": @(0.0),
-        @"width": @(100.0), @"height": @(100.0), @"depth": @(0.0),
-        @"rotationX": @(0.0), @"rotationY": @(0.0), @"rotationZ": @(0.0),
-        @"scale": @(1.0), @"locked": @(NO),
-        @"controllerName": @"No Controller",
-        @"port": @(1), @"protocol": @"ws2811",
-        @"startChannel": @(1), @"endChannel": @(100), @"channelCount": @(100),
-        @"colorOrder": @"RGB", @"brightness": @(100),
-        @"gamma": @(1.0), @"nullPixels": @(0),
-        @"reverse": @(NO), @"groupCount": @(1), @"zigZag": @(0),
-        @"nodeCount": @100,
-    };
+    xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+    return [self dictFromModelInfo:info];
 }
 
 - (BOOL)hasModel:(NSString *)modelName {
     if (!modelName) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return NO;
+    }
+
     std::string stdName = [modelName UTF8String];
-
-    // TODO: Call into ModelEngine
-    // return _modelEngine->hasModel(stdName);
-
-    return YES; // stub
+    return _modelEngine->hasModel(stdName) ? YES : NO;
 }
 
 - (BOOL)updateModelProperty:(NSString *)modelName key:(NSString *)key value:(id)value {
     if (!modelName || !key) return NO;
 
-    // TODO: Call into ModelEngine to apply the property change
-    // std::string stdName = [modelName UTF8String];
-    // std::string stdKey = [key UTF8String];
-    // return _modelEngine->setProperty(stdName, stdKey, value);
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot update model property - engine not available");
+        return NO;
+    }
 
-    NSLog(@"[Stub] updateModelProperty %@ key=%@ value=%@", modelName, key, value);
-    return YES; // stub
+    std::string stdName = [modelName UTF8String];
+    std::string stdKey = [key UTF8String];
+
+    // Convert value to string
+    NSString *stringValue;
+    if ([value isKindOfClass:[NSString class]]) {
+        stringValue = value;
+    } else if ([value isKindOfClass:[NSNumber class]]) {
+        stringValue = [value stringValue];
+    } else {
+        stringValue = [value description];
+    }
+    std::string stdValue = [stringValue UTF8String];
+
+    xlEngine::OperationResult result = _modelEngine->updateModelProperty(stdName, stdKey, stdValue);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to update model property: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 - (BOOL)createModel:(NSString *)modelType name:(NSString *)modelName properties:(NSDictionary *)properties {
     if (!modelType || !modelName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot create model - engine not available");
+        return NO;
+    }
 
     std::string stdType = [modelType UTF8String];
     std::string stdName = [modelName UTF8String];
@@ -223,52 +417,299 @@
         stdProps[[key UTF8String]] = [stringValue UTF8String];
     }
 
-    // TODO: Call into ModelEngine
-    // xlEngine::OperationResult result = _modelEngine->createModel(stdType, stdName, stdProps);
-    // return result.success;
-
-    NSLog(@"[Stub] createModel type=%@ name=%@ properties=%@", modelType, modelName, properties);
-    return YES; // stub
+    xlEngine::OperationResult result = _modelEngine->createModel(stdType, stdName, stdProps);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to create model: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 - (BOOL)deleteModel:(NSString *)modelName {
     if (!modelName) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot delete model - engine not available");
+        return NO;
+    }
+
     std::string stdName = [modelName UTF8String];
-
-    // TODO: Call into ModelEngine
-    // xlEngine::OperationResult result = _modelEngine->deleteModel(stdName);
-    // return result.success;
-
-    NSLog(@"[Stub] deleteModel: %@", modelName);
-    return YES; // stub
+    xlEngine::OperationResult result = _modelEngine->deleteModel(stdName);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to delete model: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 - (BOOL)renameModel:(NSString *)oldName toName:(NSString *)newName {
     if (!oldName || !newName) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot rename model - engine not available");
+        return NO;
+    }
+
     std::string stdOldName = [oldName UTF8String];
     std::string stdNewName = [newName UTF8String];
-
-    // TODO: Call into ModelEngine
-    // xlEngine::OperationResult result = _modelEngine->renameModel(stdOldName, stdNewName);
-    // return result.success;
-
-    NSLog(@"[Stub] renameModel: %@ -> %@", oldName, newName);
-    return YES; // stub
+    xlEngine::OperationResult result = _modelEngine->renameModel(stdOldName, stdNewName);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to rename model: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 - (BOOL)duplicateModel:(NSString *)modelName {
     if (!modelName) return NO;
 
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot duplicate model - engine not available");
+        return NO;
+    }
+
+    // Note: ModelEngine doesn't currently have duplicateModel - this needs to be added
+    // For now, we could implement by getting model info and creating a new model
     std::string stdName = [modelName UTF8String];
+    if (!_modelEngine->hasModel(stdName)) {
+        return NO;
+    }
 
-    // TODO: Call into ModelEngine - duplicateModel would create a copy with unique name
-    // xlEngine::OperationResult result = _modelEngine->duplicateModel(stdName);
-    // return result.success;
+    // Generate unique name
+    xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+    std::string newName = info.name + " Copy";
+    int counter = 1;
+    while (_modelEngine->hasModel(newName)) {
+        newName = info.name + " Copy " + std::to_string(++counter);
+    }
 
-    NSLog(@"[Stub] duplicateModel: %@", modelName);
-    return YES; // stub
+    xlEngine::OperationResult result = _modelEngine->createModel(info.type, newName, info.properties);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to duplicate model: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (NSArray<NSString *> *)getModelNamesExcludingGroups {
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot get model names - engine not available");
+        return @[];
+    }
+
+    std::vector<std::string> names = _modelEngine->getModelNamesExcludingGroups();
+    return [self arrayFromVector:names];
+}
+
+- (NSArray<NSString *> *)getGroupNames {
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot get group names - engine not available");
+        return @[];
+    }
+
+    std::vector<std::string> names = _modelEngine->getGroupNames();
+    return [self arrayFromVector:names];
+}
+
+- (NSString *)getModelProperty:(NSString *)modelName key:(NSString *)key defaultValue:(NSString *)defaultValue {
+    if (!modelName || !key) return defaultValue;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return defaultValue;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    std::string stdKey = [key UTF8String];
+    std::string stdDefault = defaultValue ? [defaultValue UTF8String] : "";
+    std::string value = _modelEngine->getModelProperty(stdName, stdKey, stdDefault);
+    return [NSString stringWithUTF8String:value.c_str()];
+}
+
+- (NSDictionary *)getModelProperties:(NSString *)modelName {
+    if (!modelName) return @{};
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return @{};
+    }
+
+    std::string stdName = [modelName UTF8String];
+    std::map<std::string, std::string> props = _modelEngine->getModelProperties(stdName);
+    return [self dictFromMap:props];
+}
+
+#pragma mark - Model Groups
+
+- (NSArray<NSDictionary *> *)getModelGroups {
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot get model groups - engine not available");
+        return @[];
+    }
+
+    std::vector<xlEngine::ModelGroupInfo> groups = _modelEngine->getModelGroups();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:groups.size()];
+    for (const auto &group : groups) {
+        NSMutableArray *modelNames = [NSMutableArray arrayWithCapacity:group.modelNames.size()];
+        for (const auto &name : group.modelNames) {
+            [modelNames addObject:[NSString stringWithUTF8String:name.c_str()]];
+        }
+        [result addObject:@{
+            @"name": [NSString stringWithUTF8String:group.name.c_str()],
+            @"modelNames": modelNames,
+            @"defaultBufferStyle": [NSString stringWithUTF8String:group.defaultBufferStyle.c_str()],
+        }];
+    }
+    return result;
+}
+
+- (NSDictionary *)getModelGroup:(NSString *)groupName {
+    if (!groupName) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return nil;
+    }
+
+    std::string stdName = [groupName UTF8String];
+    xlEngine::ModelGroupInfo group = _modelEngine->getModelGroup(stdName);
+    if (group.name.empty()) {
+        return nil;
+    }
+
+    NSMutableArray *modelNames = [NSMutableArray arrayWithCapacity:group.modelNames.size()];
+    for (const auto &name : group.modelNames) {
+        [modelNames addObject:[NSString stringWithUTF8String:name.c_str()]];
+    }
+    return @{
+        @"name": [NSString stringWithUTF8String:group.name.c_str()],
+        @"modelNames": modelNames,
+        @"defaultBufferStyle": [NSString stringWithUTF8String:group.defaultBufferStyle.c_str()],
+    };
+}
+
+- (NSArray<NSString *> *)getGroupsContainingModel:(NSString *)modelName {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return @[];
+    }
+
+    std::string stdName = [modelName UTF8String];
+    std::vector<std::string> groups = _modelEngine->getGroupsContainingModel(stdName);
+    return [self arrayFromVector:groups];
+}
+
+#pragma mark - Submodels
+
+- (NSArray<NSDictionary *> *)getSubmodels:(NSString *)modelName {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return @[];
+    }
+
+    std::string stdName = [modelName UTF8String];
+    std::vector<xlEngine::SubmodelInfo> submodels = _modelEngine->getSubmodels(stdName);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:submodels.size()];
+    for (const auto &sm : submodels) {
+        [result addObject:@{
+            @"name": [NSString stringWithUTF8String:sm.name.c_str()],
+            @"fullName": [NSString stringWithUTF8String:sm.fullName.c_str()],
+            @"nodeCount": @(sm.nodeCount),
+            @"channelCount": @(sm.channelCount),
+        }];
+    }
+    return result;
+}
+
+- (BOOL)hasSubmodel:(NSString *)modelName submodelName:(NSString *)submodelName {
+    if (!modelName || !submodelName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return NO;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::string stdSubmodel = [submodelName UTF8String];
+    return _modelEngine->hasSubmodel(stdModel, stdSubmodel) ? YES : NO;
+}
+
+#pragma mark - Model Geometry
+
+- (NSArray<NSDictionary *> *)getModelNodes:(NSString *)modelName {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return @[];
+    }
+
+    std::string stdName = [modelName UTF8String];
+    std::vector<xlEngine::NodeCoord> nodes = _modelEngine->getModelNodes(stdName);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:nodes.size()];
+    for (const auto &node : nodes) {
+        [result addObject:@{
+            @"x": @(node.x),
+            @"y": @(node.y),
+            @"z": @(node.z),
+            @"bufX": @(node.bufX),
+            @"bufY": @(node.bufY),
+            @"channel": @(node.actChannel),
+            @"channelCount": @(node.channelCount),
+            @"stringNum": @(node.stringNum),
+        }];
+    }
+    return result;
+}
+
+- (NSUInteger)getModelNodeCount:(NSString *)modelName {
+    if (!modelName) return 0;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return 0;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    return _modelEngine->getModelNodeCount(stdName);
+}
+
+- (NSUInteger)getModelChannelCount:(NSString *)modelName {
+    if (!modelName) return 0;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return 0;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    return _modelEngine->getModelChannelCount(stdName);
+}
+
+- (NSDictionary *)getModelBounds:(NSString *)modelName {
+    if (!modelName) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return nil;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    xlEngine::ModelEngine::BoundingBox box = _modelEngine->getModelBounds(stdName);
+    return @{
+        @"minX": @(box.minX),
+        @"maxX": @(box.maxX),
+        @"minY": @(box.minY),
+        @"maxY": @(box.maxY),
+        @"minZ": @(box.minZ),
+        @"maxZ": @(box.maxZ),
+    };
 }
 
 #pragma mark - Model Import Operations
@@ -330,52 +771,64 @@
 #pragma mark - Output Operations
 
 - (NSArray<NSString *> *)getControllerNames {
-    // TODO: Call into OutputEngine
-    // std::vector<std::string> names = _outputEngine->getControllerNames();
-    // return [self arrayFromVector:names];
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot get controller names - engine not available");
+        return @[];
+    }
 
-    // Stub: return sample data
-    return @[@"FPP (192.168.1.10)", @"Falcon F48 (192.168.1.20)"];
+    std::vector<std::string> names = _outputEngine->getControllerNames();
+    return [self arrayFromVector:names];
 }
 
 - (NSDictionary *)getControllerInfo:(NSString *)controllerName {
     if (!controllerName) return nil;
 
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot get controller info - engine not available");
+        return nil;
+    }
+
     std::string stdName = [controllerName UTF8String];
+    if (!_outputEngine->controllerExists(stdName)) {
+        return nil;
+    }
 
-    // TODO: Call into OutputEngine
-    // xlEngine::ControllerConfig config = _outputEngine->getController(stdName);
-    // return [self dictFromControllerConfig:config];
-
-    // Stub: return sample data
-    return @{
-        @"name": controllerName,
-        @"type": @"Ethernet",
-        @"protocol": @"E131",
-        @"ip": @"192.168.1.10",
-    };
+    xlEngine::ControllerConfig config = _outputEngine->getController(stdName);
+    return [self dictFromControllerConfig:config];
 }
 
 - (BOOL)startOutput {
-    // TODO: Call into OutputEngine
-    // return _outputEngine->startOutput();
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot start output - engine not available");
+        return NO;
+    }
 
-    NSLog(@"[Stub] startOutput");
-    return YES; // stub
+    bool result = _outputEngine->startOutput();
+    NSLog(@"XLEngineBridge: startOutput() = %s", result ? "YES" : "NO");
+    return result ? YES : NO;
 }
 
 - (void)stopOutput {
-    // TODO: Call into OutputEngine
-    // _outputEngine->stopOutput();
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot stop output - engine not available");
+        return;
+    }
 
-    NSLog(@"[Stub] stopOutput");
+    _outputEngine->stopOutput();
+    NSLog(@"XLEngineBridge: stopOutput()");
 }
 
 - (BOOL)isOutputting {
-    // TODO: Call into OutputEngine
-    // return _outputEngine->isOutputting();
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        return NO;
+    }
 
-    return NO; // stub
+    return _outputEngine->isOutputting() ? YES : NO;
 }
 
 #pragma mark - Port Configuration
@@ -383,53 +836,15 @@
 - (NSArray<NSDictionary *> *)getPortsForController:(NSString *)controllerName {
     if (!controllerName) return @[];
 
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot get ports - engine not available");
+        return @[];
+    }
+
     std::string stdName = [controllerName UTF8String];
-
-    // TODO: Call into OutputEngine
-    // std::vector<xlEngine::PortConfig> ports = _outputEngine->getControllerPorts(stdName);
-    // return [self arrayFromPortConfigs:ports];
-
-    // Stub: return sample port data
-    NSMutableArray *ports = [NSMutableArray array];
-
-    // Generate 16 pixel ports
-    for (int i = 1; i <= 16; i++) {
-        [ports addObject:@{
-            @"port": @(i),
-            @"type": @"pixel",
-            @"protocol": @"ws2811",
-            @"startChannel": @(0),
-            @"channelCount": @(0),
-            @"pixelCount": @(0),
-            @"brightness": @(100),
-            @"gamma": @(1.0),
-            @"colorOrder": @"RGB",
-            @"nullPixelsStart": @(0),
-            @"nullPixelsEnd": @(0),
-            @"smartRemote": @(0),
-            @"modelName": @"",
-        }];
-    }
-
-    // Generate 4 serial ports
-    for (int i = 1; i <= 4; i++) {
-        [ports addObject:@{
-            @"port": @(i),
-            @"type": @"serial",
-            @"protocol": @"DMX",
-            @"startChannel": @(0),
-            @"channelCount": @(0),
-            @"brightness": @(100),
-            @"gamma": @(1.0),
-            @"colorOrder": @"",
-            @"nullPixelsStart": @(0),
-            @"nullPixelsEnd": @(0),
-            @"smartRemote": @(0),
-            @"modelName": @"",
-        }];
-    }
-
-    return ports;
+    std::vector<xlEngine::PortConfig> ports = _outputEngine->getControllerPorts(stdName);
+    return [self arrayFromPortConfigs:ports];
 }
 
 - (BOOL)updatePort:(NSString *)controllerName
@@ -478,44 +893,161 @@
 - (NSDictionary *)getControllerCapabilities:(NSString *)controllerName {
     if (!controllerName) return nil;
 
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot get controller capabilities - engine not available");
+        return nil;
+    }
+
     std::string stdName = [controllerName UTF8String];
+    xlEngine::ControllerCapabilities caps = _outputEngine->getControllerCapabilities(stdName);
+    return [self dictFromControllerCapabilities:caps];
+}
 
-    // TODO: Call into OutputEngine
-    // xlEngine::ControllerCapabilities caps = _outputEngine->getControllerCapabilities(stdName);
-    // return [self dictFromCapabilities:caps];
+#pragma mark - Sequence Elements (for Sequencer View)
 
-    // Stub: return typical Falcon controller capabilities
+- (NSInteger)getSequenceElementCount {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return 0;
+    }
+
+    // Access SequenceElements through xLightsFrame
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return 0;
+
+    SequenceElements& elements = frame->GetSequenceElements();
+    return (NSInteger)elements.GetElementCount();
+}
+
+- (NSDictionary *)getSequenceElementAtIndex:(NSInteger)index {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return nil;
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return nil;
+
+    SequenceElements& elements = frame->GetSequenceElements();
+    if (index < 0 || index >= (NSInteger)elements.GetElementCount()) {
+        return nil;
+    }
+
+    Element* elem = elements.GetElement((size_t)index);
+    if (!elem) return nil;
+
+    NSString *typeString;
+    ElementType type = elem->GetType();
+    switch (type) {
+        case ElementType::ELEMENT_TYPE_TIMING:
+            typeString = @"timing";
+            break;
+        case ElementType::ELEMENT_TYPE_MODEL:
+            typeString = @"model";
+            break;
+        case ElementType::ELEMENT_TYPE_SUBMODEL:
+            typeString = @"submodel";
+            break;
+        case ElementType::ELEMENT_TYPE_STRAND:
+            typeString = @"strand";
+            break;
+        default:
+            typeString = @"unknown";
+            break;
+    }
+
     return @{
-        @"maxPixelPorts": @(48),
-        @"maxSerialPorts": @(4),
-        @"maxPixelPortChannels": @(1024 * 3),
-        @"maxSerialPortChannels": @(512),
-        @"supportsSmartRemotes": @(YES),
-        @"smartRemoteCount": @(6),
-        @"supportsUpload": @(YES),
-        @"supportsAutoLayout": @(YES),
-        @"supportsAutoSize": @(YES),
-        @"supportsBrightness": @(YES),
-        @"supportsGamma": @(YES),
-        @"pixelProtocols": @[@"ws2811", @"ws2801", @"apa102", @"lpd8806", @"tm1809", @"tm1804", @"sm16716"],
-        @"serialProtocols": @[@"DMX", @"LOR", @"Renard"],
+        @"name": [NSString stringWithUTF8String:elem->GetName().c_str()],
+        @"type": typeString,
+        @"effectLayerCount": @(elem->GetEffectLayerCount()),
+        @"visible": @(elem->GetVisible()),
+        @"collapsed": @(elem->GetCollapsed()),
     };
+}
+
+- (NSArray<NSDictionary *> *)getSequenceElements {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return @[];
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @[];
+
+    SequenceElements& elements = frame->GetSequenceElements();
+    NSMutableArray *result = [NSMutableArray array];
+
+    for (size_t i = 0; i < elements.GetElementCount(); i++) {
+        NSDictionary *info = [self getSequenceElementAtIndex:(NSInteger)i];
+        if (info) {
+            NSMutableDictionary *infoWithIndex = [info mutableCopy];
+            infoWithIndex[@"index"] = @(i);
+            [result addObject:infoWithIndex];
+        }
+    }
+
+    return result;
+}
+
+- (NSArray<NSDictionary *> *)getEffectsForElementAtIndex:(NSInteger)index layer:(NSInteger)layer {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return @[];
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @[];
+
+    SequenceElements& elements = frame->GetSequenceElements();
+    if (index < 0 || index >= (NSInteger)elements.GetElementCount()) {
+        return @[];
+    }
+
+    Element* elem = elements.GetElement((size_t)index);
+    if (!elem) return @[];
+
+    if (layer < 0 || layer >= (NSInteger)elem->GetEffectLayerCount()) {
+        return @[];
+    }
+
+    EffectLayer* effectLayer = elem->GetEffectLayer((int)layer);
+    if (!effectLayer) return @[];
+
+    NSMutableArray *result = [NSMutableArray array];
+    for (int i = 0; i < effectLayer->GetEffectCount(); i++) {
+        Effect* eff = effectLayer->GetEffect(i);
+        if (!eff) continue;
+
+        [result addObject:@{
+            @"id": @(eff->GetID()),
+            @"effectType": [NSString stringWithUTF8String:eff->GetEffectName().c_str()],
+            @"effectIndex": @(eff->GetEffectIndex()),
+            @"startTimeMS": @(eff->GetStartTimeMS()),
+            @"endTimeMS": @(eff->GetEndTimeMS()),
+            @"selected": @(eff->GetSelected()),
+            @"protected": @(eff->IsLocked()),
+        }];
+    }
+
+    return result;
 }
 
 #pragma mark - Effect Operations
 
 - (NSArray<NSString *> *)getEffectTypes {
-    // TODO: Call into EffectEngine
-    // std::vector<xlEngine::EffectTypeInfo> types = _effectEngine->getEffectTypes();
-    // NSMutableArray *result = [NSMutableArray array];
-    // for (const auto &type : types) {
-    //     [result addObject:[NSString stringWithUTF8String:type.name.c_str()]];
-    // }
-    // return result;
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        NSLog(@"XLEngineBridge: Cannot get effect types - engine not available");
+        return @[];
+    }
 
-    // Stub: return sample data
-    return @[@"Bars", @"Butterfly", @"Candle", @"Circles", @"Colorwash", @"Curtain",
-             @"Fire", @"Fireworks", @"Faces", @"Fan", @"Galaxy", @"Garlands"];
+    std::vector<xlEngine::EffectTypeInfo> types = _effectEngine->getEffectTypes();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:types.size()];
+    for (const auto &type : types) {
+        [result addObject:[NSString stringWithUTF8String:type.name.c_str()]];
+    }
+    return result;
 }
 
 - (NSInteger)createEffect:(NSString *)modelName
@@ -525,24 +1057,34 @@
                  endTimeMS:(NSInteger)endMS {
     if (!modelName || !effectType) return -1;
 
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        NSLog(@"XLEngineBridge: Cannot create effect - engine not available");
+        return -1;
+    }
+
     std::string stdModel = [modelName UTF8String];
     std::string stdEffect = [effectType UTF8String];
 
-    // TODO: Call into EffectEngine
-    // return _effectEngine->createEffect(stdModel, (int)layer, stdEffect, (int)startMS, (int)endMS);
-
-    NSLog(@"[Stub] createEffect: %@ on %@, layer %ld, %ld-%ld ms",
-          effectType, modelName, (long)layer, (long)startMS, (long)endMS);
-
-    return 1; // stub effect ID
+    int effectId = _effectEngine->createEffect(stdModel, (int)layer, stdEffect, (int)startMS, (int)endMS);
+    if (effectId < 0) {
+        NSLog(@"XLEngineBridge: Failed to create effect %@ on %@", effectType, modelName);
+    }
+    return effectId;
 }
 
 - (BOOL)deleteEffect:(NSInteger)effectId {
-    // TODO: Call into EffectEngine
-    // return _effectEngine->deleteEffect((int)effectId);
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        NSLog(@"XLEngineBridge: Cannot delete effect - engine not available");
+        return NO;
+    }
 
-    NSLog(@"[Stub] deleteEffect: %ld", (long)effectId);
-    return YES; // stub
+    bool result = _effectEngine->deleteEffect((int)effectId);
+    if (!result) {
+        NSLog(@"XLEngineBridge: Failed to delete effect %ld", (long)effectId);
+    }
+    return result ? YES : NO;
 }
 
 #pragma mark - Utility Conversion Methods
@@ -578,6 +1120,161 @@
         result[key] = value;
     }
     return result;
+}
+
+- (NSDictionary *)dictFromModelInfo:(const xlEngine::ModelInfo &)info {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+
+    result[@"name"] = [NSString stringWithUTF8String:info.name.c_str()];
+    result[@"type"] = [NSString stringWithUTF8String:info.type.c_str()];
+    result[@"description"] = [NSString stringWithUTF8String:info.description.c_str()];
+    result[@"nodeCount"] = @(info.nodeCount);
+    result[@"channelCount"] = @(info.channelCount);
+    result[@"startChannel"] = [NSString stringWithUTF8String:info.startChannel.c_str()];
+    result[@"firstChannel"] = @(info.firstChannel);
+    result[@"endChannel"] = @(info.lastChannel);
+    result[@"defaultBufferWi"] = @(info.defaultBufferWi);
+    result[@"defaultBufferHt"] = @(info.defaultBufferHt);
+    result[@"layoutGroup"] = [NSString stringWithUTF8String:info.layoutGroup.c_str()];
+    result[@"controllerName"] = [NSString stringWithUTF8String:info.controllerName.c_str()];
+    result[@"protocol"] = [NSString stringWithUTF8String:info.controllerProtocol.c_str()];
+    result[@"port"] = @(info.controllerPort);
+    result[@"isActive"] = @(info.isActive);
+    result[@"isGroupModel"] = @(info.isGroupModel);
+
+    // Include all XML properties
+    for (const auto &pair : info.properties) {
+        NSString *key = [NSString stringWithUTF8String:pair.first.c_str()];
+        NSString *value = [NSString stringWithUTF8String:pair.second.c_str()];
+        if (result[key] == nil) {
+            result[key] = value;
+        }
+    }
+
+    return result;
+}
+
+- (NSDictionary *)dictFromControllerConfig:(const xlEngine::ControllerConfig &)config {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+
+    result[@"name"] = [NSString stringWithUTF8String:config.name.c_str()];
+    result[@"description"] = [NSString stringWithUTF8String:config.description.c_str()];
+    result[@"id"] = @(config.id);
+
+    // Controller type
+    NSString *typeStr = @"Unknown";
+    switch (config.type) {
+        case xlEngine::ControllerType::Ethernet: typeStr = @"Ethernet"; break;
+        case xlEngine::ControllerType::Serial: typeStr = @"Serial"; break;
+        case xlEngine::ControllerType::Null: typeStr = @"Null"; break;
+    }
+    result[@"type"] = typeStr;
+
+    result[@"ip"] = [NSString stringWithUTF8String:config.ip.c_str()];
+    result[@"commPort"] = [NSString stringWithUTF8String:config.commPort.c_str()];
+    result[@"baudRate"] = @(config.baudRate);
+    result[@"protocol"] = [NSString stringWithUTF8String:config.protocol.c_str()];
+    result[@"fppProxy"] = [NSString stringWithUTF8String:config.fppProxy.c_str()];
+    result[@"forceLocalIP"] = [NSString stringWithUTF8String:config.forceLocalIP.c_str()];
+
+    result[@"vendor"] = [NSString stringWithUTF8String:config.vendor.c_str()];
+    result[@"model"] = [NSString stringWithUTF8String:config.model.c_str()];
+    result[@"variant"] = [NSString stringWithUTF8String:config.variant.c_str()];
+
+    // Active state
+    NSString *activeStr = @"Active";
+    switch (config.active) {
+        case xlEngine::ActiveState::Active: activeStr = @"Active"; break;
+        case xlEngine::ActiveState::Inactive: activeStr = @"Inactive"; break;
+        case xlEngine::ActiveState::ActiveInXLightsOnly: activeStr = @"xLights Only"; break;
+    }
+    result[@"active"] = activeStr;
+
+    result[@"autoLayout"] = @(config.autoLayout);
+    result[@"autoSize"] = @(config.autoSize);
+    result[@"autoUpload"] = @(config.autoUpload);
+    result[@"fullxLightsControl"] = @(config.fullxLightsControl);
+    result[@"defaultBrightness"] = @(config.defaultBrightness);
+    result[@"defaultGamma"] = @(config.defaultGamma);
+    result[@"suppressDuplicateFrames"] = @(config.suppressDuplicateFrames);
+    result[@"monitor"] = @(config.monitor);
+    result[@"managed"] = @(config.managed);
+
+    result[@"startChannel"] = @(config.startChannel);
+    result[@"endChannel"] = @(config.endChannel);
+    result[@"channels"] = @(config.channels);
+    result[@"outputCount"] = @(config.outputCount);
+
+    return result;
+}
+
+- (NSArray<NSDictionary *> *)arrayFromPortConfigs:(const std::vector<xlEngine::PortConfig> &)ports {
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:ports.size()];
+    for (const auto &port : ports) {
+        [result addObject:@{
+            @"port": @(port.portNumber),
+            @"protocol": [NSString stringWithUTF8String:port.protocol.c_str()],
+            @"startChannel": @(port.startChannel),
+            @"channelCount": @(port.channels),
+            @"brightness": @(port.brightness),
+            @"gamma": @(port.gamma),
+            @"nullPixelsStart": @(port.nullPixels),
+            @"nullPixelsEnd": @(port.endNullPixels),
+            @"colorOrder": [NSString stringWithUTF8String:port.colorOrder.c_str()],
+            @"groupCount": @(port.groupCount),
+            @"reverse": @(port.reverse),
+            @"zigZag": @(port.zigZag),
+            @"smartRemoteType": [NSString stringWithUTF8String:port.smartRemoteType.c_str()],
+        }];
+    }
+    return result;
+}
+
+- (NSDictionary *)dictFromControllerCapabilities:(const xlEngine::ControllerCapabilities &)caps {
+    // Convert pixel protocols vector to NSArray
+    NSMutableArray *pixelProtocols = [NSMutableArray arrayWithCapacity:caps.pixelProtocols.size()];
+    for (const auto &proto : caps.pixelProtocols) {
+        [pixelProtocols addObject:[NSString stringWithUTF8String:proto.c_str()]];
+    }
+
+    // Convert serial protocols vector to NSArray
+    NSMutableArray *serialProtocols = [NSMutableArray arrayWithCapacity:caps.serialProtocols.size()];
+    for (const auto &proto : caps.serialProtocols) {
+        [serialProtocols addObject:[NSString stringWithUTF8String:proto.c_str()]];
+    }
+
+    // Convert input protocols vector to NSArray
+    NSMutableArray *inputProtocols = [NSMutableArray arrayWithCapacity:caps.inputProtocols.size()];
+    for (const auto &proto : caps.inputProtocols) {
+        [inputProtocols addObject:[NSString stringWithUTF8String:proto.c_str()]];
+    }
+
+    return @{
+        @"supportsUpload": @(caps.supportsUpload),
+        @"supportsInputOnlyUpload": @(caps.supportsInputOnlyUpload),
+        @"supportsAutoLayout": @(caps.supportsAutoLayout),
+        @"supportsAutoUpload": @(caps.supportsAutoUpload),
+        @"supportsAutoSize": @(caps.supportsAutoSize),
+        @"supportsFullxLightsControl": @(caps.supportsFullxLightsControl),
+        @"supportsPixelPortBrightness": @(caps.supportsPixelPortBrightness),
+        @"supportsPixelPortGamma": @(caps.supportsPixelPortGamma),
+        @"supportsDefaultBrightness": @(caps.supportsDefaultBrightness),
+        @"supportsDefaultGamma": @(caps.supportsDefaultGamma),
+        @"supportsSmartRemotes": @(caps.supportsSmartRemotes),
+        @"supportsVirtualStrings": @(caps.supportsVirtualStrings),
+        @"supportsUniversePerString": @(caps.supportsUniversePerString),
+        @"supportsLEDPanelMatrix": @(caps.supportsLEDPanelMatrix),
+        @"supportsVirtualMatrix": @(caps.supportsVirtualMatrix),
+        @"maxPixelPorts": @(caps.maxPixelPort),
+        @"maxSerialPorts": @(caps.maxSerialPort),
+        @"maxPixelPortChannels": @(caps.maxPixelPortChannels),
+        @"maxSerialPortChannels": @(caps.maxSerialPortChannels),
+        @"maxInputE131Universes": @(caps.maxInputE131Universes),
+        @"smartRemoteCount": @(caps.smartRemoteCount),
+        @"pixelProtocols": pixelProtocols,
+        @"serialProtocols": serialProtocols,
+        @"inputProtocols": inputProtocols,
+    };
 }
 
 @end
