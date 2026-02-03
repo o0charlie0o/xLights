@@ -431,38 +431,7 @@ static const CGFloat kHeaderHeight = 28.0;
     }
 }
 
-- (void)setFrame:(NSRect)frame {
-    [super setFrame:frame];
-
-    // Skip if we're in the middle of rebuilding
-    if (_isRebuildingItemViews) {
-        return;
-    }
-
-    // Update content view width and item widths
-    CGFloat width = frame.size.width;
-    if (width <= 0) {
-        return;
-    }
-
-    // Use a copy of the array to avoid issues with mutation during iteration
-    // and check that items are still valid
-    NSArray *itemViewsCopy = _itemViews ? [_itemViews copy] : nil;
-    if (itemViewsCopy) {
-        for (XLEffectPaletteItemView *itemView in itemViewsCopy) {
-            if (itemView && itemView.superview) {
-                NSRect itemFrame = itemView.frame;
-                itemFrame.size.width = width;
-                itemView.frame = itemFrame;
-            }
-        }
-    }
-
-    CGFloat contentHeight = _filteredEffectTypes.count * _itemHeight;
-    if (_contentView) {
-        _contentView.frame = NSMakeRect(0, 0, width, contentHeight);
-    }
-}
+// Note: setFrame: override removed - item views use autoresizingMask for automatic sizing
 
 - (BOOL)isFlipped {
     return YES;
