@@ -9,6 +9,17 @@
  **************************************************************/
 
 #import "XLLayoutViewController.h"
+#import "layout/XLCameraController.h"
+#import "layout/XLModelTreeNode.h"
+
+static const CGFloat kModelTreeMinWidth = 200.0;
+static const CGFloat kModelTreeDefaultWidth = 280.0;
+
+@interface XLLayoutViewController ()
+
+@property (nonatomic, strong) NSSplitView *splitView;
+
+@end
 
 @implementation XLLayoutViewController
 
@@ -17,33 +28,117 @@
     view.wantsLayer = YES;
     view.layer.backgroundColor = [[NSColor colorWithWhite:0.16 alpha:1.0] CGColor];
 
-    // Placeholder label
-    NSTextField *label = [NSTextField labelWithString:@"Layout/Preview Tab"];
-    label.font = [NSFont systemFontOfSize:24 weight:NSFontWeightLight];
-    label.textColor = [NSColor secondaryLabelColor];
-    label.alignment = NSTextAlignmentCenter;
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    [view addSubview:label];
-
-    NSTextField *sublabel = [NSTextField labelWithString:@"Metal 3D preview will go here"];
-    sublabel.font = [NSFont systemFontOfSize:14 weight:NSFontWeightRegular];
-    sublabel.textColor = [NSColor tertiaryLabelColor];
-    sublabel.alignment = NSTextAlignmentCenter;
-    sublabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [view addSubview:sublabel];
+    // Split view: model tree (left) | preview (right)
+    _splitView = [[NSSplitView alloc] initWithFrame:view.bounds];
+    _splitView.translatesAutoresizingMaskIntoConstraints = NO;
+    _splitView.vertical = YES;
+    _splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    _splitView.delegate = (id<NSSplitViewDelegate>)self;
+    [view addSubview:_splitView];
 
     [NSLayoutConstraint activateConstraints:@[
-        [label.centerXAnchor constraintEqualToAnchor:view.centerXAnchor],
-        [label.centerYAnchor constraintEqualToAnchor:view.centerYAnchor constant:-20],
-        [sublabel.centerXAnchor constraintEqualToAnchor:view.centerXAnchor],
-        [sublabel.topAnchor constraintEqualToAnchor:label.bottomAnchor constant:8],
+        [_splitView.topAnchor constraintEqualToAnchor:view.topAnchor],
+        [_splitView.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
+        [_splitView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_splitView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
     ]];
+
+    // Model tree (left)
+    _modelTreeController = [[XLModelTreeViewController alloc] init];
+    _modelTreeController.delegate = self;
+    _modelTreeController.engineBridge = self.engineBridge;
+
+    NSView *treeView = _modelTreeController.view;
+    treeView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_splitView addSubview:treeView];
+
+    // Preview (right)
+    _previewView = [[XLMetalPreviewView alloc] initWithFrame:NSZeroRect];
+    _previewView.translatesAutoresizingMaskIntoConstraints = NO;
+    _previewView.delegate = self;
+    _previewView.show3D = YES;
+    _previewView.showGrid = YES;
+    [_splitView addSubview:_previewView];
+
+    // Set initial split position
+    [_splitView setPosition:kModelTreeDefaultWidth ofDividerAtIndex:0];
 
     self.view = view;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [_modelTreeController reloadData];
+}
+
+- (void)viewDidAppear {
+    [super viewDidAppear];
+    [_previewView startRenderLoop];
+}
+
+- (void)viewDidDisappear {
+    [super viewDidDisappear];
+    [_previewView stopRenderLoop];
+}
+
+- (void)setEngineBridge:(XLEngineBridge *)engineBridge {
+    _engineBridge = engineBridge;
+    _modelTreeController.engineBridge = engineBridge;
+}
+
+#pragma mark - NSSplitViewDelegate
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMin ofSubviewAt:(NSInteger)dividerIndex {
+    return kModelTreeMinWidth;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposedMax ofSubviewAt:(NSInteger)dividerIndex {
+    return proposedMax - 400; // Min width for preview
+}
+
+#pragma mark - XLMetalPreviewDelegate
+
+- (void)previewView:(XLMetalPreviewView *)view didSelectModel:(NSString *)modelName {
+    if (modelName) {
+        [_modelTreeController selectModelWithName:modelName];
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didChangeCamera:(XLCameraController *)camera {
+}
+
+#pragma mark - XLModelTreeDelegate
+
+- (void)modelTree:(XLModelTreeViewController *)controller didSelectModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Model selected from tree: %@", modelName);
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didMoveModel:(NSString *)modelName toGroup:(NSString *)groupName atIndex:(NSInteger)index {
+    NSLog(@"XLLayoutViewController: Model '%@' moved to group '%@' at index %ld", modelName, groupName, (long)index);
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestAddModelOfType:(NSString *)modelType {
+    NSLog(@"XLLayoutViewController: Add model of type '%@' requested", modelType);
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestDeleteModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Delete model '%@' requested", modelName);
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestDuplicateModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Duplicate model '%@' requested", modelName);
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestGroupModels:(NSArray<NSString *> *)modelNames {
+    NSLog(@"XLLayoutViewController: Group models requested: %@", modelNames);
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestUngroupModel:(NSString *)groupName {
+    NSLog(@"XLLayoutViewController: Ungroup '%@' requested", groupName);
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestRenameModel:(NSString *)oldName toName:(NSString *)newName {
+    NSLog(@"XLLayoutViewController: Rename model '%@' -> '%@' requested", oldName, newName);
 }
 
 @end
