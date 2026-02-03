@@ -12,6 +12,14 @@
 #import "XLEffectsGridRenderer.h"
 #import <CoreVideo/CVDisplayLink.h>
 
+// Pasteboard type for effect drags from the palette
+NSPasteboardType const XLEffectTypePasteboardType = @"com.xlights.effectType";
+
+// Notification names for clipboard operations
+NSNotificationName const XLEffectsGridDidCopyNotification = @"XLEffectsGridDidCopyNotification";
+NSNotificationName const XLEffectsGridDidPasteNotification = @"XLEffectsGridDidPasteNotification";
+NSNotificationName const XLEffectsGridDidCutNotification = @"XLEffectsGridDidCutNotification";
+
 static const CGFloat kDefaultZoomLevel = 0.1;     // pixels per ms
 static const CGFloat kDefaultMinZoom = 0.001;
 static const CGFloat kDefaultMaxZoom = 5.0;
@@ -19,6 +27,16 @@ static const CGFloat kDefaultRowHeight = 22.0;
 static const CGFloat kEdgeHitTestWidth = 6.0;      // pixels from edge to trigger resize
 static const CGFloat kDragThreshold = 4.0;          // pixels before drag starts
 static const CGFloat kMinimumEffectWidthMS = 10.0;  // minimum effect width in ms
+static const CGFloat kSnapThresholdPixels = 5.0;    // pixel distance for snap-to-grid
+static const CGFloat kDefaultDropDurationMS = 1000.0; // default effect duration for palette drops
+static const CGFloat kGhostAlpha = 0.4;             // alpha for ghost/preview effect during drag
+
+// Context menu item tags
+static const NSInteger kMenuTagCut = 1001;
+static const NSInteger kMenuTagCopy = 1002;
+static const NSInteger kMenuTagPaste = 1003;
+static const NSInteger kMenuTagDelete = 1004;
+static const NSInteger kMenuTagEditSettings = 1005;
 
 @interface XLEffectsGridView () {
     CVDisplayLinkRef _displayLink;
@@ -48,9 +66,23 @@ static const CGFloat kMinimumEffectWidthMS = 10.0;  // minimum effect width in m
 @property (nonatomic, assign) CGFloat dragOriginalStartMS;
 @property (nonatomic, assign) CGFloat dragOriginalEndMS;
 
+// Cross-row drag state
+@property (nonatomic, assign) NSInteger dragCurrentRow;
+@property (nonatomic, assign) CGFloat dragCurrentStartMS;
+
 // Rubber band selection
 @property (nonatomic, assign) NSPoint rubberBandOrigin;
 @property (nonatomic, assign) NSPoint rubberBandCurrent;
+
+// Multi-selection
+@property (nonatomic, strong, readwrite) NSMutableIndexSet *selectedEffectIndices;
+
+// Palette drop state
+@property (nonatomic, assign) BOOL isReceivingDrop;
+@property (nonatomic, assign) NSInteger dropTargetRow;
+@property (nonatomic, assign) CGFloat dropTargetStartMS;
+@property (nonatomic, assign) CGFloat dropTargetEndMS;
+@property (nonatomic, copy) NSString *dropEffectType;
 
 // Display link
 @property (nonatomic, assign) BOOL needsRedraw;
@@ -109,6 +141,19 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _effectRenderInfos = [NSMutableArray array];
     _timingMarks = @[];
     _needsRedraw = YES;
+    _snapToTimingMarks = YES;
+    _selectedEffectIndices = [NSMutableIndexSet indexSet];
+
+    // Drop state
+    _isReceivingDrop = NO;
+    _dropTargetRow = -1;
+    _dropTargetStartMS = 0;
+    _dropTargetEndMS = 0;
+    _dropEffectType = nil;
+
+    // Cross-row drag state
+    _dragCurrentRow = -1;
+    _dragCurrentStartMS = 0;
 
     // Set up Metal layer - must set layer before wantsLayer for layer-hosting views
     _metalLayer = [CAMetalLayer layer];
@@ -138,6 +183,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                                                                  owner:self
                                                               userInfo:nil];
     [self addTrackingArea:trackingArea];
+
+    // Register for drag types (palette drops)
+    [self registerForDraggedTypes:@[XLEffectTypePasteboardType]];
 }
 
 - (void)setupDisplayLink {
@@ -294,6 +342,109 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     );
 }
 
+#pragma mark - Snap-to-Grid
+
+- (CGFloat)snapTimeMS:(CGFloat)timeMS {
+    if (!_snapToTimingMarks) return timeMS;
+
+    CGFloat snapThresholdMS = kSnapThresholdPixels / _zoomLevel;
+    CGFloat bestSnap = timeMS;
+    CGFloat bestDistance = snapThresholdMS + 1;
+
+    // Snap to timing marks
+    for (NSNumber *mark in _timingMarks) {
+        CGFloat markMS = mark.doubleValue;
+        CGFloat dist = fabs(timeMS - markMS);
+        if (dist < bestDistance) {
+            bestDistance = dist;
+            bestSnap = markMS;
+        }
+    }
+
+    // Also snap to sequence start and end
+    if (fabs(timeMS) < snapThresholdMS) {
+        if (fabs(timeMS) < bestDistance) {
+            bestSnap = 0;
+            bestDistance = fabs(timeMS);
+        }
+    }
+    if (fabs(timeMS - _sequenceLengthMS) < snapThresholdMS) {
+        if (fabs(timeMS - _sequenceLengthMS) < bestDistance) {
+            bestSnap = _sequenceLengthMS;
+        }
+    }
+
+    if (bestDistance <= snapThresholdMS) {
+        return bestSnap;
+    }
+    return timeMS;
+}
+
+- (CGFloat)timingGridSnapInterval {
+    if ([_dataSource respondsToSelector:@selector(timingGridSnapIntervalMSForEffectsGrid:)]) {
+        CGFloat interval = [_dataSource timingGridSnapIntervalMSForEffectsGrid:self];
+        if (interval > 0) return interval;
+    }
+    return 0;
+}
+
+#pragma mark - Selection Management
+
+- (void)updateSelectionState {
+    // Update the selected flags on all cached render infos based on selectedEffectIndices
+    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
+        XLEffectRenderInfo info;
+        [_effectRenderInfos[i] getValue:&info];
+        BOOL shouldBeSelected = [_selectedEffectIndices containsIndex:i];
+        if (info.selected != shouldBeSelected) {
+            info.selected = shouldBeSelected;
+            _effectRenderInfos[i] = [NSValue valueWithBytes:&info
+                                                    objCType:@encode(XLEffectRenderInfo)];
+        }
+    }
+}
+
+- (void)notifySelectionChanged {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didChangeSelection:)]) {
+        [_delegate effectsGrid:self didChangeSelection:[_selectedEffectIndices copy]];
+    }
+}
+
+- (void)clearSelection {
+    [_selectedEffectIndices removeAllIndexes];
+    _selectedEffectID = -1;
+    [self updateSelectionState];
+    [self notifySelectionChanged];
+    _needsRedraw = YES;
+}
+
+- (void)selectAllEffectsInRow:(NSInteger)row {
+    [_selectedEffectIndices removeAllIndexes];
+    _selectedEffectID = -1;
+
+    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
+        XLEffectRenderInfo info;
+        [_effectRenderInfos[i] getValue:&info];
+        if (info.row == row) {
+            [_selectedEffectIndices addIndex:i];
+            if (_selectedEffectID < 0) {
+                _selectedEffectID = i;
+            }
+        }
+    }
+
+    [self updateSelectionState];
+    [self notifySelectionChanged];
+    _needsRedraw = YES;
+}
+
+- (NSInteger)rowForEffectIndex:(NSInteger)effectIndex {
+    if (effectIndex < 0 || effectIndex >= (NSInteger)_effectRenderInfos.count) return -1;
+    XLEffectRenderInfo info;
+    [_effectRenderInfos[effectIndex] getValue:&info];
+    return info.row;
+}
+
 #pragma mark - Mouse Events
 
 - (void)mouseDown:(NSEvent *)event {
@@ -327,6 +478,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSInteger row;
     [self convertPoint:loc toTimeMS:&timeMS row:&row];
     _mouseDownRow = row;
+    _dragCurrentRow = row;
 
     // Find effect at click location
     NSInteger hitEffectIndex = -1;
@@ -336,9 +488,49 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _mouseDownEffectIndex = hitEffectIndex;
     _mouseDownHitLocation = hitLoc;
 
+    BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+
     if (hitEffectIndex >= 0) {
-        // Select the effect
-        _selectedEffectID = hitEffectIndex;
+        if (shiftDown) {
+            // Shift+click: extend selection from primary to this effect
+            if (_selectedEffectID >= 0) {
+                NSInteger startIdx = MIN(_selectedEffectID, hitEffectIndex);
+                NSInteger endIdx = MAX(_selectedEffectID, hitEffectIndex);
+                for (NSInteger i = startIdx; i <= endIdx; i++) {
+                    [_selectedEffectIndices addIndex:i];
+                }
+            } else {
+                [_selectedEffectIndices addIndex:hitEffectIndex];
+                _selectedEffectID = hitEffectIndex;
+            }
+        } else if (cmdDown) {
+            // Cmd+click: toggle individual selection
+            if ([_selectedEffectIndices containsIndex:hitEffectIndex]) {
+                [_selectedEffectIndices removeIndex:hitEffectIndex];
+                if (_selectedEffectID == hitEffectIndex) {
+                    _selectedEffectID = (_selectedEffectIndices.count > 0)
+                        ? (NSInteger)_selectedEffectIndices.firstIndex
+                        : -1;
+                }
+            } else {
+                [_selectedEffectIndices addIndex:hitEffectIndex];
+                _selectedEffectID = hitEffectIndex;
+            }
+        } else {
+            // Plain click: select only this effect (unless it's already part of multi-selection
+            // and user might be about to drag)
+            if (![_selectedEffectIndices containsIndex:hitEffectIndex]) {
+                [_selectedEffectIndices removeAllIndexes];
+                [_selectedEffectIndices addIndex:hitEffectIndex];
+                _selectedEffectID = hitEffectIndex;
+            }
+            // If already in selection, keep multi-selection intact for potential drag.
+            // On mouseUp without drag, narrow to single selection.
+        }
+
+        [self updateSelectionState];
+        [self notifySelectionChanged];
         _needsRedraw = YES;
 
         if ([_delegate respondsToSelector:@selector(effectsGrid:didSelectEffectAtRow:effectIndex:)]) {
@@ -352,9 +544,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         _dragOriginalEndMS = info.endTimeMS;
         _dragStartTimeMS = timeMS;
     } else {
-        // Deselect
-        _selectedEffectID = -1;
-        _needsRedraw = YES;
+        // Clicked on empty area
+        if (!shiftDown && !cmdDown) {
+            [self clearSelection];
+        }
 
         if ([_delegate respondsToSelector:@selector(effectsGrid:didClickAtTimeMS:row:)]) {
             [_delegate effectsGrid:self didClickAtTimeMS:timeMS row:row];
@@ -375,6 +568,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (distance < kDragThreshold && !_isDragging && !_isResizing && !_isRubberBanding) {
         return;
     }
+
+    BOOL optionDown = (event.modifierFlags & NSEventModifierFlagOption) != 0;
+    BOOL snapEnabled = _snapToTimingMarks && !optionDown;
 
     if (_mouseDownEffectIndex >= 0 && !_isDragging && !_isResizing) {
         if (_mouseDownHitLocation == XLEffectHitLocationLeftEdge ||
@@ -398,9 +594,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         if (_mouseDownHitLocation == XLEffectHitLocationLeftEdge) {
             newStart = _dragOriginalStartMS + deltaMS;
             newStart = MAX(0, MIN(newStart, newEnd - kMinimumEffectWidthMS));
+            if (snapEnabled) {
+                newStart = [self snapTimeMS:newStart];
+                newStart = MIN(newStart, newEnd - kMinimumEffectWidthMS);
+            }
         } else {
             newEnd = _dragOriginalEndMS + deltaMS;
             newEnd = MAX(newStart + kMinimumEffectWidthMS, MIN(newEnd, _sequenceLengthMS));
+            if (snapEnabled) {
+                newEnd = [self snapTimeMS:newEnd];
+                newEnd = MAX(newStart + kMinimumEffectWidthMS, newEnd);
+            }
         }
 
         // Update the cached info for visual feedback
@@ -414,22 +618,45 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         _needsRedraw = YES;
     } else if (_isDragging && _mouseDownEffectIndex >= 0) {
         CGFloat timeMS;
-        [self convertPoint:loc toTimeMS:&timeMS row:NULL];
+        NSInteger targetRow;
+        [self convertPoint:loc toTimeMS:&timeMS row:&targetRow];
+        targetRow = MAX(0, MIN(targetRow, _totalRows - 1));
+
         CGFloat deltaMS = timeMS - _dragStartTimeMS;
         CGFloat duration = _dragOriginalEndMS - _dragOriginalStartMS;
         CGFloat newStart = _dragOriginalStartMS + deltaMS;
         newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
 
+        if (snapEnabled) {
+            CGFloat snappedStart = [self snapTimeMS:newStart];
+            CGFloat snappedEnd = [self snapTimeMS:newStart + duration];
+            CGFloat snapDeltaStart = fabs(snappedStart - newStart);
+            CGFloat snapDeltaEnd = fabs(snappedEnd - (newStart + duration));
+
+            if (snapDeltaStart <= snapDeltaEnd && snapDeltaStart <= (kSnapThresholdPixels / _zoomLevel)) {
+                newStart = snappedStart;
+            } else if (snapDeltaEnd <= (kSnapThresholdPixels / _zoomLevel)) {
+                newStart = snappedEnd - duration;
+            }
+            newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
+        }
+
+        _dragCurrentRow = targetRow;
+        _dragCurrentStartMS = newStart;
+
+        // Update the cached info for visual feedback
         XLEffectRenderInfo info;
         [_effectRenderInfos[_mouseDownEffectIndex] getValue:&info];
         info.startTimeMS = newStart;
         info.endTimeMS = newStart + duration;
+        info.row = targetRow;
         NSValue *val = [NSValue valueWithBytes:&info objCType:@encode(XLEffectRenderInfo)];
         _effectRenderInfos[_mouseDownEffectIndex] = val;
 
         _needsRedraw = YES;
     } else if (_isRubberBanding) {
         _rubberBandCurrent = loc;
+        [self updateRubberBandSelection];
         _needsRedraw = YES;
     }
 
@@ -438,6 +665,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)mouseUp:(NSEvent *)event {
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+    BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
 
     if (_isResizing && _mouseDownEffectIndex >= 0) {
         XLEffectRenderInfo info;
@@ -454,11 +683,23 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         XLEffectRenderInfo info;
         [_effectRenderInfos[_mouseDownEffectIndex] getValue:&info];
 
-        if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toTimeMS:)]) {
-            [_delegate effectsGrid:self
-              didMoveEffectAtRow:_mouseDownRow
-                    effectIndex:_mouseDownEffectIndex
-                      toTimeMS:info.startTimeMS];
+        if (_dragCurrentRow != _mouseDownRow) {
+            // Cross-row move
+            if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toRow:toTimeMS:)]) {
+                [_delegate effectsGrid:self
+                  didMoveEffectAtRow:_mouseDownRow
+                        effectIndex:_mouseDownEffectIndex
+                              toRow:_dragCurrentRow
+                          toTimeMS:info.startTimeMS];
+            }
+        } else {
+            // Same-row move
+            if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toTimeMS:)]) {
+                [_delegate effectsGrid:self
+                  didMoveEffectAtRow:_mouseDownRow
+                        effectIndex:_mouseDownEffectIndex
+                          toTimeMS:info.startTimeMS];
+            }
         }
     } else if (_isRubberBanding) {
         CGFloat startTimeMS, endTimeMS;
@@ -480,11 +721,19 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                         fromTimeMS:startTimeMS
                           toTimeMS:endTimeMS];
         }
+    } else if (_mouseDownEffectIndex >= 0 && !shiftDown && !cmdDown) {
+        // Plain click without drag: narrow to single selection
+        [_selectedEffectIndices removeAllIndexes];
+        [_selectedEffectIndices addIndex:_mouseDownEffectIndex];
+        _selectedEffectID = _mouseDownEffectIndex;
+        [self updateSelectionState];
+        [self notifySelectionChanged];
     }
 
     _isDragging = NO;
     _isResizing = NO;
     _isRubberBanding = NO;
+    _dragCurrentRow = -1;
     _needsRedraw = YES;
 }
 
@@ -499,20 +748,178 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc];
 
     if (hitEffectIndex >= 0) {
-        _selectedEffectID = hitEffectIndex;
+        // Select the right-clicked effect if not already selected
+        if (![_selectedEffectIndices containsIndex:hitEffectIndex]) {
+            [_selectedEffectIndices removeAllIndexes];
+            [_selectedEffectIndices addIndex:hitEffectIndex];
+            _selectedEffectID = hitEffectIndex;
+            [self updateSelectionState];
+            [self notifySelectionChanged];
+        }
         _needsRedraw = YES;
     }
 
+    NSMenu *menu = nil;
+
     if ([_delegate respondsToSelector:@selector(effectsGrid:contextMenuForRow:effectIndex:atTimeMS:)]) {
-        NSMenu *menu = [_delegate effectsGrid:self
-                          contextMenuForRow:row
-                               effectIndex:hitEffectIndex
-                                  atTimeMS:timeMS];
-        if (menu) {
-            [NSMenu popUpContextMenu:menu withEvent:event forView:self];
+        menu = [_delegate effectsGrid:self
+                    contextMenuForRow:row
+                         effectIndex:hitEffectIndex
+                            atTimeMS:timeMS];
+    }
+
+    if (!menu) {
+        menu = [self buildDefaultContextMenuForRow:row effectIndex:hitEffectIndex atTimeMS:timeMS];
+    }
+
+    if (menu) {
+        [NSMenu popUpContextMenu:menu withEvent:event forView:self];
+    }
+}
+
+- (NSMenu *)buildDefaultContextMenuForRow:(NSInteger)row
+                             effectIndex:(NSInteger)effectIndex
+                                atTimeMS:(CGFloat)timeMS {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Effects"];
+
+    BOOL hasSelection = _selectedEffectIndices.count > 0;
+
+    NSMenuItem *cutItem = [[NSMenuItem alloc] initWithTitle:@"Cut"
+                                                    action:@selector(cut:)
+                                             keyEquivalent:@"x"];
+    cutItem.tag = kMenuTagCut;
+    cutItem.target = self;
+    cutItem.enabled = hasSelection;
+    [menu addItem:cutItem];
+
+    NSMenuItem *copyItem = [[NSMenuItem alloc] initWithTitle:@"Copy"
+                                                     action:@selector(copy:)
+                                              keyEquivalent:@"c"];
+    copyItem.tag = kMenuTagCopy;
+    copyItem.target = self;
+    copyItem.enabled = hasSelection;
+    [menu addItem:copyItem];
+
+    NSMenuItem *pasteItem = [[NSMenuItem alloc] initWithTitle:@"Paste"
+                                                      action:@selector(paste:)
+                                               keyEquivalent:@"v"];
+    pasteItem.tag = kMenuTagPaste;
+    pasteItem.target = self;
+    [menu addItem:pasteItem];
+
+    NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete"
+                                                       action:@selector(deleteSelectedEffects:)
+                                                keyEquivalent:@""];
+    deleteItem.tag = kMenuTagDelete;
+    deleteItem.target = self;
+    deleteItem.enabled = hasSelection;
+    [menu addItem:deleteItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit Effect Settings..."
+                                                     action:@selector(editEffectSettings:)
+                                              keyEquivalent:@""];
+    editItem.tag = kMenuTagEditSettings;
+    editItem.target = self;
+    editItem.enabled = (effectIndex >= 0);
+    [menu addItem:editItem];
+
+    return menu;
+}
+
+#pragma mark - Context Menu Actions
+
+- (void)cut:(id)sender {
+    [self performCopy];
+    [self performDelete];
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:XLEffectsGridDidCutNotification
+                      object:self
+                    userInfo:[self selectedEffectUserInfo]];
+}
+
+- (void)copy:(id)sender {
+    [self performCopy];
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:XLEffectsGridDidCopyNotification
+                      object:self
+                    userInfo:[self selectedEffectUserInfo]];
+}
+
+- (void)paste:(id)sender {
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:XLEffectsGridDidPasteNotification
+                      object:self
+                    userInfo:@{
+                        @"row": @(_mouseDownRow >= 0 ? _mouseDownRow : 0),
+                        @"timeMS": @(_dragStartTimeMS)
+                    }];
+}
+
+- (void)deleteSelectedEffects:(id)sender {
+    [self performDelete];
+}
+
+- (void)editEffectSettings:(id)sender {
+    if (_selectedEffectID >= 0) {
+        NSInteger row = [self rowForEffectIndex:_selectedEffectID];
+        if ([_delegate respondsToSelector:@selector(effectsGrid:didDoubleClickEffectAtRow:effectIndex:)]) {
+            [_delegate effectsGrid:self didDoubleClickEffectAtRow:row effectIndex:_selectedEffectID];
         }
     }
 }
+
+- (void)performCopy {
+    NSMutableArray *effectInfoArray = [NSMutableArray array];
+
+    [_selectedEffectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if (idx < (NSUInteger)self->_effectRenderInfos.count) {
+            XLEffectRenderInfo info;
+            [self->_effectRenderInfos[idx] getValue:&info];
+            NSDictionary *dict = @{
+                @"index": @(idx),
+                @"row": @(info.row),
+                @"startTimeMS": @(info.startTimeMS),
+                @"endTimeMS": @(info.endTimeMS),
+                @"effectName": info.effectName ?: @""
+            };
+            [effectInfoArray addObject:dict];
+        }
+    }];
+
+    if (effectInfoArray.count > 0) {
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        [pb clearContents];
+        NSData *data = [NSKeyedArchiver archivedDataWithRootObject:effectInfoArray
+                                             requiringSecureCoding:NO
+                                                             error:nil];
+        if (data) {
+            [pb setData:data forType:XLEffectTypePasteboardType];
+        }
+    }
+}
+
+- (void)performDelete {
+    if (_selectedEffectIndices.count == 0) return;
+
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestDeleteEffects:)]) {
+        [_delegate effectsGrid:self didRequestDeleteEffects:[_selectedEffectIndices copy]];
+    }
+
+    [self clearSelection];
+    _needsRedraw = YES;
+}
+
+- (NSDictionary *)selectedEffectUserInfo {
+    NSMutableArray *indices = [NSMutableArray array];
+    [_selectedEffectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        [indices addObject:@(idx)];
+    }];
+    return @{@"selectedIndices": indices};
+}
+
+#pragma mark - Middle Mouse (Pan)
 
 - (void)otherMouseDown:(NSEvent *)event {
     if (event.buttonNumber == 2) {
@@ -545,6 +952,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         [NSCursor pop];
     }
 }
+
+#pragma mark - Scroll Wheel & Magnify
 
 - (void)scrollWheel:(NSEvent *)event {
     if (event.modifierFlags & NSEventModifierFlagCommand) {
@@ -608,6 +1017,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
+#pragma mark - Mouse Move (Cursor Updates)
+
 - (void)mouseMoved:(NSEvent *)event {
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
 
@@ -633,29 +1044,241 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 #pragma mark - Keyboard Events
 
 - (void)keyDown:(NSEvent *)event {
+    BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+    BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
+
+    // Handle keyboard shortcuts with Cmd modifier
+    if (cmdDown) {
+        NSString *chars = event.charactersIgnoringModifiers;
+        if ([chars isEqualToString:@"c"]) {
+            [self copy:nil];
+            return;
+        } else if ([chars isEqualToString:@"v"]) {
+            [self paste:nil];
+            return;
+        } else if ([chars isEqualToString:@"x"]) {
+            [self cut:nil];
+            return;
+        } else if ([chars isEqualToString:@"a"]) {
+            // Cmd+A: select all effects in the row of the current selection
+            NSInteger row = -1;
+            if (_selectedEffectID >= 0) {
+                row = [self rowForEffectIndex:_selectedEffectID];
+            } else if (_mouseDownRow >= 0) {
+                row = _mouseDownRow;
+            }
+            if (row >= 0) {
+                [self selectAllEffectsInRow:row];
+            }
+            return;
+        }
+    }
+
+    // Delete or Forward Delete
     if (event.keyCode == 51 || event.keyCode == 117) {
-        // Delete or Forward Delete
-        // Will be handled by responder chain / menu actions
-        [super keyDown:event];
+        [self performDelete];
         return;
     }
 
-    // Arrow key navigation
+    // Arrow keys
+    CGFloat snapInterval = [self timingGridSnapInterval];
+    if (snapInterval <= 0) snapInterval = 50.0; // fallback: 50ms
+
     switch (event.keyCode) {
         case 123: // Left arrow
-            if (_selectedEffectID >= 0 && (event.modifierFlags & NSEventModifierFlagShift)) {
-                // Shift+Left: move effect left
+            if (_selectedEffectID >= 0) {
+                if (shiftDown) {
+                    [self nudgeSelectedEffectsByMS:-snapInterval];
+                } else {
+                    [self moveSelectionToAdjacentEffect:NO];
+                }
             }
-            break;
+            return;
         case 124: // Right arrow
-            if (_selectedEffectID >= 0 && (event.modifierFlags & NSEventModifierFlagShift)) {
-                // Shift+Right: move effect right
+            if (_selectedEffectID >= 0) {
+                if (shiftDown) {
+                    [self nudgeSelectedEffectsByMS:snapInterval];
+                } else {
+                    [self moveSelectionToAdjacentEffect:YES];
+                }
             }
-            break;
+            return;
+        case 125: // Down arrow
+            if (_selectedEffectID >= 0) {
+                [self moveSelectionToAdjacentRow:YES];
+            }
+            return;
+        case 126: // Up arrow
+            if (_selectedEffectID >= 0) {
+                [self moveSelectionToAdjacentRow:NO];
+            }
+            return;
         default:
             [super keyDown:event];
             break;
     }
+}
+
+- (void)nudgeSelectedEffectsByMS:(CGFloat)deltaMS {
+    if (_selectedEffectIndices.count == 0) return;
+
+    [_selectedEffectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if (idx < (NSUInteger)self->_effectRenderInfos.count) {
+            XLEffectRenderInfo info;
+            [self->_effectRenderInfos[idx] getValue:&info];
+            CGFloat duration = info.endTimeMS - info.startTimeMS;
+            CGFloat newStart = info.startTimeMS + deltaMS;
+            newStart = MAX(0, MIN(newStart, self->_sequenceLengthMS - duration));
+            info.startTimeMS = newStart;
+            info.endTimeMS = newStart + duration;
+            self->_effectRenderInfos[idx] = [NSValue valueWithBytes:&info
+                                                            objCType:@encode(XLEffectRenderInfo)];
+        }
+    }];
+
+    // Notify delegate about the move of the primary selection
+    if (_selectedEffectID >= 0 && _selectedEffectID < (NSInteger)_effectRenderInfos.count) {
+        XLEffectRenderInfo info;
+        [_effectRenderInfos[_selectedEffectID] getValue:&info];
+        NSInteger row = info.row;
+
+        if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toTimeMS:)]) {
+            [_delegate effectsGrid:self
+              didMoveEffectAtRow:row
+                    effectIndex:_selectedEffectID
+                      toTimeMS:info.startTimeMS];
+        }
+    }
+
+    _needsRedraw = YES;
+}
+
+- (void)moveSelectionToAdjacentEffect:(BOOL)forward {
+    if (_selectedEffectID < 0 || _selectedEffectID >= (NSInteger)_effectRenderInfos.count) return;
+
+    XLEffectRenderInfo currentInfo;
+    [_effectRenderInfos[_selectedEffectID] getValue:&currentInfo];
+    NSInteger currentRow = currentInfo.row;
+
+    NSInteger bestIndex = -1;
+    CGFloat bestDistance = CGFLOAT_MAX;
+
+    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
+        if (i == _selectedEffectID) continue;
+        XLEffectRenderInfo info;
+        [_effectRenderInfos[i] getValue:&info];
+        if (info.row != currentRow) continue;
+
+        if (forward && info.startTimeMS > currentInfo.startTimeMS) {
+            CGFloat dist = info.startTimeMS - currentInfo.startTimeMS;
+            if (dist < bestDistance) {
+                bestDistance = dist;
+                bestIndex = i;
+            }
+        } else if (!forward && info.startTimeMS < currentInfo.startTimeMS) {
+            CGFloat dist = currentInfo.startTimeMS - info.startTimeMS;
+            if (dist < bestDistance) {
+                bestDistance = dist;
+                bestIndex = i;
+            }
+        }
+    }
+
+    if (bestIndex >= 0) {
+        [_selectedEffectIndices removeAllIndexes];
+        [_selectedEffectIndices addIndex:bestIndex];
+        _selectedEffectID = bestIndex;
+        [self updateSelectionState];
+        [self notifySelectionChanged];
+        _needsRedraw = YES;
+
+        NSInteger row = [self rowForEffectIndex:bestIndex];
+        if ([_delegate respondsToSelector:@selector(effectsGrid:didSelectEffectAtRow:effectIndex:)]) {
+            [_delegate effectsGrid:self didSelectEffectAtRow:row effectIndex:bestIndex];
+        }
+    }
+}
+
+- (void)moveSelectionToAdjacentRow:(BOOL)downward {
+    if (_selectedEffectID < 0 || _selectedEffectID >= (NSInteger)_effectRenderInfos.count) return;
+
+    XLEffectRenderInfo currentInfo;
+    [_effectRenderInfos[_selectedEffectID] getValue:&currentInfo];
+    NSInteger currentRow = currentInfo.row;
+    CGFloat currentMidTime = (currentInfo.startTimeMS + currentInfo.endTimeMS) / 2.0;
+
+    NSInteger targetRow = downward ? currentRow + 1 : currentRow - 1;
+    if (targetRow < 0 || targetRow >= _totalRows) return;
+
+    NSInteger bestIndex = -1;
+    CGFloat bestDistance = CGFLOAT_MAX;
+
+    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
+        XLEffectRenderInfo info;
+        [_effectRenderInfos[i] getValue:&info];
+        if (info.row != targetRow) continue;
+
+        CGFloat midTime = (info.startTimeMS + info.endTimeMS) / 2.0;
+        CGFloat dist = fabs(midTime - currentMidTime);
+        if (dist < bestDistance) {
+            bestDistance = dist;
+            bestIndex = i;
+        }
+    }
+
+    if (bestIndex >= 0) {
+        [_selectedEffectIndices removeAllIndexes];
+        [_selectedEffectIndices addIndex:bestIndex];
+        _selectedEffectID = bestIndex;
+        [self updateSelectionState];
+        [self notifySelectionChanged];
+        _needsRedraw = YES;
+
+        if ([_delegate respondsToSelector:@selector(effectsGrid:didSelectEffectAtRow:effectIndex:)]) {
+            [_delegate effectsGrid:self didSelectEffectAtRow:targetRow effectIndex:bestIndex];
+        }
+    }
+}
+
+#pragma mark - Rubber Band Selection
+
+- (void)updateRubberBandSelection {
+    CGFloat startTimeMS, endTimeMS;
+    NSInteger startRow, endRow;
+    [self convertPoint:_rubberBandOrigin toTimeMS:&startTimeMS row:&startRow];
+    [self convertPoint:_rubberBandCurrent toTimeMS:&endTimeMS row:&endRow];
+
+    if (startTimeMS > endTimeMS) {
+        CGFloat tmp = startTimeMS; startTimeMS = endTimeMS; endTimeMS = tmp;
+    }
+    if (startRow > endRow) {
+        NSInteger tmp = startRow; startRow = endRow; endRow = tmp;
+    }
+
+    startRow = MAX(0, startRow);
+    endRow = MIN(endRow, _totalRows - 1);
+
+    [_selectedEffectIndices removeAllIndexes];
+    _selectedEffectID = -1;
+
+    for (NSInteger i = 0; i < (NSInteger)_effectRenderInfos.count; i++) {
+        XLEffectRenderInfo info;
+        [_effectRenderInfos[i] getValue:&info];
+
+        if (info.row < startRow || info.row > endRow) continue;
+
+        // Effect overlaps the selection rectangle if it starts before the end
+        // and ends after the start of the selection
+        if (info.startTimeMS < endTimeMS && info.endTimeMS > startTimeMS) {
+            [_selectedEffectIndices addIndex:i];
+            if (_selectedEffectID < 0) {
+                _selectedEffectID = i;
+            }
+        }
+    }
+
+    [self updateSelectionState];
+    [self notifySelectionChanged];
 }
 
 #pragma mark - Hit Testing
@@ -697,6 +1320,120 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
+#pragma mark - NSDraggingDestination (Palette Drop)
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    NSPasteboard *pb = sender.draggingPasteboard;
+    if ([pb.types containsObject:XLEffectTypePasteboardType]) {
+        _isReceivingDrop = YES;
+        [self updateDropIndicatorForDraggingInfo:sender];
+        _needsRedraw = YES;
+        return NSDragOperationCopy;
+    }
+    return NSDragOperationNone;
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+    NSPasteboard *pb = sender.draggingPasteboard;
+    if ([pb.types containsObject:XLEffectTypePasteboardType]) {
+        [self updateDropIndicatorForDraggingInfo:sender];
+        _needsRedraw = YES;
+        return NSDragOperationCopy;
+    }
+    return NSDragOperationNone;
+}
+
+- (void)draggingExited:(id<NSDraggingInfo>)sender {
+    _isReceivingDrop = NO;
+    _dropTargetRow = -1;
+    _dropEffectType = nil;
+    _needsRedraw = YES;
+}
+
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender {
+    return YES;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSPasteboard *pb = sender.draggingPasteboard;
+    NSString *effectType = [pb stringForType:XLEffectTypePasteboardType];
+
+    if (!effectType || _dropTargetRow < 0) {
+        _isReceivingDrop = NO;
+        _dropTargetRow = -1;
+        _dropEffectType = nil;
+        _needsRedraw = YES;
+        return NO;
+    }
+
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestCreateEffectOfType:atRow:startTimeMS:endTimeMS:)]) {
+        [_delegate effectsGrid:self
+            didRequestCreateEffectOfType:effectType
+                                   atRow:_dropTargetRow
+                             startTimeMS:_dropTargetStartMS
+                               endTimeMS:_dropTargetEndMS];
+    }
+
+    _isReceivingDrop = NO;
+    _dropTargetRow = -1;
+    _dropEffectType = nil;
+    _needsRedraw = YES;
+    return YES;
+}
+
+- (void)concludeDragOperation:(id<NSDraggingInfo>)sender {
+    _isReceivingDrop = NO;
+    _dropTargetRow = -1;
+    _dropEffectType = nil;
+    _needsRedraw = YES;
+}
+
+- (void)updateDropIndicatorForDraggingInfo:(id<NSDraggingInfo>)sender {
+    NSPoint dragPoint = [self convertPoint:sender.draggingLocation fromView:nil];
+    CGFloat timeMS;
+    NSInteger row;
+    [self convertPoint:dragPoint toTimeMS:&timeMS row:&row];
+
+    row = MAX(0, MIN(row, _totalRows - 1));
+
+    // Determine the drop time range. Try to snap to timing marks.
+    CGFloat startMS = timeMS - kDefaultDropDurationMS / 2.0;
+    CGFloat endMS = timeMS + kDefaultDropDurationMS / 2.0;
+    startMS = MAX(0, startMS);
+    endMS = MIN(endMS, _sequenceLengthMS);
+
+    // Snap to timing marks if within range
+    if (_snapToTimingMarks && _timingMarks.count > 0) {
+        CGFloat bestSnapStart = startMS;
+        CGFloat bestSnapEnd = endMS;
+        BOOL foundTimingSpan = NO;
+
+        // Find the timing mark pair that encompasses the drop point
+        for (NSUInteger i = 0; i + 1 < _timingMarks.count; i++) {
+            CGFloat markStart = _timingMarks[i].doubleValue;
+            CGFloat markEnd = _timingMarks[i + 1].doubleValue;
+            if (timeMS >= markStart && timeMS < markEnd) {
+                bestSnapStart = markStart;
+                bestSnapEnd = markEnd;
+                foundTimingSpan = YES;
+                break;
+            }
+        }
+
+        if (foundTimingSpan) {
+            startMS = bestSnapStart;
+            endMS = bestSnapEnd;
+        }
+    }
+
+    _dropTargetRow = row;
+    _dropTargetStartMS = startMS;
+    _dropTargetEndMS = endMS;
+
+    NSPasteboard *pb = sender.draggingPasteboard;
+    _dropEffectType = [pb stringForType:XLEffectTypePasteboardType];
+}
+
 #pragma mark - Properties
 
 - (void)setZoomLevel:(CGFloat)zoomLevel {
@@ -717,22 +1454,19 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)setSelectedEffectID:(NSInteger)selectedEffectID {
     if (_selectedEffectID != selectedEffectID) {
-        // Update selection state in cached render infos
-        if (_selectedEffectID >= 0 && _selectedEffectID < (NSInteger)_effectRenderInfos.count) {
-            XLEffectRenderInfo info;
-            [_effectRenderInfos[_selectedEffectID] getValue:&info];
-            info.selected = NO;
-            _effectRenderInfos[_selectedEffectID] = [NSValue valueWithBytes:&info
-                                                                    objCType:@encode(XLEffectRenderInfo)];
-        }
         _selectedEffectID = selectedEffectID;
-        if (_selectedEffectID >= 0 && _selectedEffectID < (NSInteger)_effectRenderInfos.count) {
-            XLEffectRenderInfo info;
-            [_effectRenderInfos[_selectedEffectID] getValue:&info];
-            info.selected = YES;
-            _effectRenderInfos[_selectedEffectID] = [NSValue valueWithBytes:&info
-                                                                    objCType:@encode(XLEffectRenderInfo)];
+
+        // Sync selectedEffectIndices with the primary selection if setting directly
+        if (selectedEffectID >= 0) {
+            if (![_selectedEffectIndices containsIndex:selectedEffectID]) {
+                [_selectedEffectIndices removeAllIndexes];
+                [_selectedEffectIndices addIndex:selectedEffectID];
+            }
+        } else {
+            [_selectedEffectIndices removeAllIndexes];
         }
+
+        [self updateSelectionState];
         _needsRedraw = YES;
     }
 }

@@ -15,6 +15,14 @@
 
 @class XLEffectsGridView;
 
+// Drag pasteboard type for effects dragged from the palette
+extern NSPasteboardType const XLEffectTypePasteboardType;
+
+// Notification names for clipboard operations
+extern NSNotificationName const XLEffectsGridDidCopyNotification;
+extern NSNotificationName const XLEffectsGridDidPasteNotification;
+extern NSNotificationName const XLEffectsGridDidCutNotification;
+
 /// Hit location within an effect block (mirrors existing EffectsGrid HitLocation enum).
 typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
     XLEffectHitLocationNone,
@@ -53,6 +61,10 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 /// Timing marks from the active timing track (array of NSNumber containing ms values).
 - (NSArray<NSNumber *> *)timingMarksForEffectsGrid:(XLEffectsGridView *)gridView;
 
+/// The timing grid snap interval in milliseconds (e.g. 50ms for 20fps).
+/// Used for arrow-key nudge and snap-to-grid. Returns 0 or not implemented means no snap.
+- (CGFloat)timingGridSnapIntervalMSForEffectsGrid:(XLEffectsGridView *)gridView;
+
 @end
 
 /// Receives interaction events from the effects grid.
@@ -86,10 +98,17 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didChangeScrollOffset:(CGPoint)scrollOffset;
 
-/// An effect was moved to a new time position.
+/// An effect was moved to a new time position (same row, horizontal only).
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didMoveEffectAtRow:(NSInteger)fromRow
           effectIndex:(NSInteger)effectIndex
+            toTimeMS:(CGFloat)newStartTimeMS;
+
+/// An effect was moved to a different row and/or time position.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didMoveEffectAtRow:(NSInteger)fromRow
+          effectIndex:(NSInteger)effectIndex
+                toRow:(NSInteger)toRow
             toTimeMS:(CGFloat)newStartTimeMS;
 
 /// An effect was resized (start or end time changed).
@@ -99,7 +118,7 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
          newStartTimeMS:(CGFloat)startTimeMS
            newEndTimeMS:(CGFloat)endTimeMS;
 
-/// Context menu requested at a position.
+/// Context menu requested at a position. Return nil to use default menu.
 - (NSMenu *)effectsGrid:(XLEffectsGridView *)gridView
     contextMenuForRow:(NSInteger)row
            effectIndex:(NSInteger)effectIndex
@@ -112,6 +131,21 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
               fromTimeMS:(CGFloat)startTimeMS
                 toTimeMS:(CGFloat)endTimeMS;
 
+/// Request to create a new effect from a palette drag-and-drop.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateEffectOfType:(NSString *)effectType
+                           atRow:(NSInteger)row
+                     startTimeMS:(CGFloat)startTimeMS
+                       endTimeMS:(CGFloat)endTimeMS;
+
+/// Request to delete effects at the given indices.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestDeleteEffects:(NSIndexSet *)effectIndices;
+
+/// Multi-selection changed. Called when selectedEffectIndices changes.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didChangeSelection:(NSIndexSet *)selectedIndices;
+
 @end
 
 /// Metal-backed NSView that renders the sequencer effects timeline.
@@ -122,7 +156,7 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 ///
 /// Designed for 60fps+ rendering with support for 100+ models and 1000+ effects
 /// via virtual scrolling and frustum culling.
-@interface XLEffectsGridView : NSView
+@interface XLEffectsGridView : NSView <NSDraggingDestination>
 
 /// Data source providing element and effect information.
 @property (nonatomic, weak) id<XLEffectsGridDataSource> dataSource;
@@ -148,8 +182,14 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 /// Height of each row in points. Default: 22.
 @property (nonatomic, assign) CGFloat rowHeight;
 
-/// Currently selected effect index, or -1 if none.
+/// Currently selected effect index, or -1 if none (primary selection).
 @property (nonatomic, assign) NSInteger selectedEffectID;
+
+/// Multi-selection: set of selected effect indices within the effectRenderInfos array.
+@property (nonatomic, strong, readonly) NSMutableIndexSet *selectedEffectIndices;
+
+/// Whether to snap effect edges to timing marks during drag/resize. Default: YES.
+@property (nonatomic, assign) BOOL snapToTimingMarks;
 
 /// Reload all data from the data source and redraw.
 - (void)reloadData;
@@ -168,5 +208,11 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 
 /// Force a redraw on the next display cycle.
 - (void)setNeedsDisplay;
+
+/// Select all effects in the given row.
+- (void)selectAllEffectsInRow:(NSInteger)row;
+
+/// Clear all selections.
+- (void)clearSelection;
 
 @end
