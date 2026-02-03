@@ -17,6 +17,7 @@
 @class XLRowHeadingsView;
 @class XLScrollCoordinator;
 @class XLUndoController;
+@class XLPlaybackController;
 
 /// View controller for the Sequencer tab.
 ///
@@ -40,5 +41,18 @@
 
 /// The undo controller for managing undo/redo operations on effects.
 @property (nonatomic, strong, readonly) XLUndoController *undoController;
+
+/// Playback controller for coordinated audio and preview playback.
+@property (nonatomic, strong) XLPlaybackController *playbackController;
+
+/// Reload sequence data from the engine bridge.
+/// Call this when a sequence is loaded or unloaded, or when elements/effects change.
+- (void)reloadSequenceData;
+
+/// Whether real sequence data is currently loaded (vs demo data).
+@property (nonatomic, readonly) BOOL isUsingRealData;
+
+/// Current sequence duration in milliseconds.
+@property (nonatomic, readonly) CGFloat sequenceDurationMS;
 
 @end

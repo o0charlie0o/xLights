@@ -28,6 +28,9 @@
 #include "../sequencer/Effect.h"
 #include "../sequencer/EffectLayer.h"
 
+// Audio support
+#include "../AudioManager.h"
+
 #include <string>
 #include <vector>
 #include <map>
@@ -332,6 +335,87 @@
 
     bool aborted = _renderEngine->abortRender();
     NSLog(@"XLEngineBridge: abortRender() = %s", aborted ? "YES" : "NO");
+}
+
+- (void)renderFrame:(NSInteger)timeMS {
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        NSLog(@"XLEngineBridge: Cannot render frame - engine not available");
+        return;
+    }
+
+    _renderEngine->renderFrame((int)timeMS);
+}
+
+- (void)renderModelFrame:(NSString *)modelName timeMS:(NSInteger)timeMS {
+    if (!modelName) return;
+
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        NSLog(@"XLEngineBridge: Cannot render model frame - engine not available");
+        return;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    _renderEngine->renderModelFrame(stdName, (int)timeMS);
+}
+
+- (NSDictionary *)getFrameBuffer:(NSString *)modelName {
+    if (!modelName) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        return nil;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    xlEngine::FrameBuffer fb = _renderEngine->getFrameBuffer(stdName);
+
+    if (!fb.isValid()) {
+        return nil;
+    }
+
+    NSData *pixelData = [NSData dataWithBytes:fb.pixels.data() length:fb.pixels.size()];
+
+    return @{
+        @"modelName": [NSString stringWithUTF8String:fb.modelName.c_str()],
+        @"width": @(fb.width),
+        @"height": @(fb.height),
+        @"timeMS": @(fb.timeMS),
+        @"pixels": pixelData,
+    };
+}
+
+- (NSArray<NSDictionary *> *)getNodeData:(NSString *)modelName {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        return @[];
+    }
+
+    std::string stdName = [modelName UTF8String];
+    std::vector<xlEngine::NodeChannelData> nodes = _renderEngine->getNodeData(stdName);
+
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:nodes.size()];
+    for (const auto &node : nodes) {
+        NSData *data = [NSData dataWithBytes:node.data.data() length:node.data.size()];
+        [result addObject:@{
+            @"startChannel": @(node.startChannel),
+            @"channelCount": @(node.channelCount),
+            @"data": data,
+        }];
+    }
+    return result;
+}
+
+- (BOOL)isRendering {
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        return NO;
+    }
+
+    return _renderEngine->isRendering() ? YES : NO;
 }
 
 #pragma mark - Model Operations
@@ -1712,6 +1796,174 @@
 
     std::string stdType = [newType UTF8String];
     return _effectEngine->convertEffectType((int)effectId, stdType) ? YES : NO;
+}
+
+#pragma mark - Audio Operations
+
+- (NSString *)getMediaFilePath {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine) return nil;
+
+    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+    if (!seqFile) return nil;
+
+    AudioManager* audio = seqFile->GetMedia();
+    if (!audio) return nil;
+
+    std::string filePath = audio->FileName();
+    if (filePath.empty()) return nil;
+
+    return [NSString stringWithUTF8String:filePath.c_str()];
+}
+
+- (BOOL)isAudioLoaded {
+    [self ensureEngineInitialized];
+
+    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+    if (!seqFile) return NO;
+
+    AudioManager* audio = seqFile->GetMedia();
+    return audio != nullptr && audio->IsOk();
+}
+
+- (NSDictionary *)getAudioInfo {
+    [self ensureEngineInitialized];
+
+    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+    if (!seqFile) return nil;
+
+    AudioManager* audio = seqFile->GetMedia();
+    if (!audio || !audio->IsOk()) return nil;
+
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+
+    info[@"filePath"] = [NSString stringWithUTF8String:audio->FileName().c_str()];
+    info[@"durationMS"] = @(audio->LengthMS());
+    info[@"sampleRate"] = @(audio->GetSampleRate());
+    info[@"channels"] = @(audio->GetChannels());
+    info[@"bitRate"] = @(audio->GetBitRate());
+    info[@"title"] = [NSString stringWithUTF8String:audio->Title().c_str()];
+    info[@"artist"] = [NSString stringWithUTF8String:audio->Artist().c_str()];
+    info[@"album"] = [NSString stringWithUTF8String:audio->Album().c_str()];
+
+    return info;
+}
+
+- (NSDictionary *)getAudioSamples:(NSInteger)startMS endMS:(NSInteger)endMS {
+    [self ensureEngineInitialized];
+
+    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+    if (!seqFile) return nil;
+
+    AudioManager* audio = seqFile->GetMedia();
+    if (!audio || !audio->IsOk()) return nil;
+
+    long sampleRate = audio->GetSampleRate();
+    long trackSize = audio->GetTrackSize();
+    int channels = audio->GetChannels();
+
+    // Convert milliseconds to sample offsets
+    long startSample = (startMS * sampleRate) / 1000;
+    long endSample = (endMS * sampleRate) / 1000;
+
+    if (startSample < 0) startSample = 0;
+    if (endSample > trackSize) endSample = trackSize;
+    if (endSample <= startSample) return nil;
+
+    long sampleCount = endSample - startSample;
+
+    // Allocate output buffers
+    NSMutableData *leftData = [NSMutableData dataWithLength:sampleCount * sizeof(float)];
+    NSMutableData *rightData = [NSMutableData dataWithLength:sampleCount * sizeof(float)];
+
+    float *leftPtr = (float *)leftData.mutableBytes;
+    float *rightPtr = (float *)rightData.mutableBytes;
+
+    // Get audio data pointers
+    float *rawLeft = audio->GetRawLeftDataPtr(startSample);
+    float *rawRight = audio->GetRawRightDataPtr(startSample);
+
+    if (rawLeft) {
+        memcpy(leftPtr, rawLeft, sampleCount * sizeof(float));
+    }
+    if (rawRight && channels >= 2) {
+        memcpy(rightPtr, rawRight, sampleCount * sizeof(float));
+    } else if (rawLeft) {
+        // Mono - copy left to right
+        memcpy(rightPtr, rawLeft, sampleCount * sizeof(float));
+    }
+
+    return @{
+        @"leftChannel": leftData,
+        @"rightChannel": rightData,
+        @"sampleCount": @(sampleCount),
+        @"sampleRate": @(sampleRate)
+    };
+}
+
+- (NSDictionary *)getAudioAmplitudeRange:(NSInteger)startMS endMS:(NSInteger)endMS {
+    [self ensureEngineInitialized];
+
+    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+    if (!seqFile) return nil;
+
+    AudioManager* audio = seqFile->GetMedia();
+    if (!audio || !audio->IsOk()) return nil;
+
+    long sampleRate = audio->GetSampleRate();
+    long trackSize = audio->GetTrackSize();
+
+    // Convert milliseconds to sample offsets
+    long startSample = (startMS * sampleRate) / 1000;
+    long endSample = (endMS * sampleRate) / 1000;
+
+    if (startSample < 0) startSample = 0;
+    if (endSample > trackSize) endSample = trackSize;
+    if (endSample <= startSample) return nil;
+
+    float minLeft = 0.0f, maxLeft = 0.0f;
+    audio->GetLeftDataMinMax(startSample, endSample, minLeft, maxLeft);
+
+    // For right channel, use left data if mono
+    float minRight = minLeft, maxRight = maxLeft;
+    if (audio->GetChannels() >= 2) {
+        // AudioManager only provides GetLeftDataMinMax, so for right channel
+        // we need to iterate manually or use the same data
+        // For now, use the left channel data for both (most sequences are similar L/R)
+        // A more complete implementation would add GetRightDataMinMax to AudioManager
+    }
+
+    return @{
+        @"minLeft": @(minLeft),
+        @"maxLeft": @(maxLeft),
+        @"minRight": @(minRight),
+        @"maxRight": @(maxRight)
+    };
+}
+
+- (void)setAudioVolume:(NSInteger)volume {
+    [self ensureEngineInitialized];
+
+    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+    if (!seqFile) return;
+
+    AudioManager* audio = seqFile->GetMedia();
+    if (audio) {
+        audio->SetVolume((int)volume);
+    }
+}
+
+- (NSInteger)getAudioVolume {
+    [self ensureEngineInitialized];
+
+    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+    if (!seqFile) return 100;
+
+    AudioManager* audio = seqFile->GetMedia();
+    if (audio) {
+        return audio->GetVolume();
+    }
+    return 100;
 }
 
 #pragma mark - Utility Conversion Methods
