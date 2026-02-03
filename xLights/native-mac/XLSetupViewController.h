@@ -11,6 +11,7 @@
  **************************************************************/
 
 #import <Cocoa/Cocoa.h>
+#import "setup/XLControllersViewController.h"
 
 @class XLEngineBridge;
 
@@ -18,8 +19,13 @@
 ///
 /// Displays controller list, port configuration, and network discovery.
 /// This is the simplest of the three main tabs — mostly table views and forms.
-@interface XLSetupViewController : NSViewController
+/// The controller list occupies the left region of a split view; the right
+/// region will hold the controller detail inspector (ticket 2B).
+@interface XLSetupViewController : NSViewController <XLControllersViewDelegate>
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
+
+/// Controller list view controller (left panel).
+@property (nonatomic, strong, readonly) XLControllersViewController *controllersViewController;
 
 @end
