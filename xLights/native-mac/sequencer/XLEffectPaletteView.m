@@ -213,6 +213,7 @@ static const CGFloat kHeaderHeight = 28.0;
 @property (nonatomic, strong) NSArray<NSString *> *filteredEffectTypes;
 @property (nonatomic, strong) NSMutableArray<XLEffectPaletteItemView *> *itemViews;
 @property (nonatomic, copy, readwrite) NSString *selectedEffectType;
+@property (nonatomic, assign) BOOL isRebuildingItemViews;
 
 @end
 
@@ -322,13 +323,24 @@ static const CGFloat kHeaderHeight = 28.0;
 }
 
 - (void)rebuildItemViews {
-    // Remove existing item views
-    for (XLEffectPaletteItemView *itemView in _itemViews) {
-        [itemView removeFromSuperview];
+    // Prevent re-entry and signal that we're rebuilding
+    if (_isRebuildingItemViews) {
+        return;
     }
+    _isRebuildingItemViews = YES;
+
+    // Remove existing item views - use a copy to avoid mutation during iteration
+    NSArray *oldItems = [_itemViews copy];
     [_itemViews removeAllObjects];
 
+    for (XLEffectPaletteItemView *itemView in oldItems) {
+        [itemView removeFromSuperview];
+    }
+
     CGFloat width = self.bounds.size.width;
+    if (width <= 0) {
+        width = 200; // Default width
+    }
     CGFloat yOffset = 0;
 
     for (NSString *effectType in _filteredEffectTypes) {
@@ -348,7 +360,11 @@ static const CGFloat kHeaderHeight = 28.0;
 
     // Update content view frame to fit all items
     CGFloat contentHeight = _filteredEffectTypes.count * _itemHeight;
-    _contentView.frame = NSMakeRect(0, 0, width, contentHeight);
+    if (_contentView) {
+        _contentView.frame = NSMakeRect(0, 0, width, contentHeight);
+    }
+
+    _isRebuildingItemViews = NO;
 }
 
 - (NSImage *)iconForEffectType:(NSString *)effectType {
@@ -387,12 +403,22 @@ static const CGFloat kHeaderHeight = 28.0;
 - (void)selectEffectType:(NSString *)effectType {
     _selectedEffectType = effectType;
 
-    // Update selection state of all item views
-    for (XLEffectPaletteItemView *itemView in _itemViews) {
-        BOOL shouldBeSelected = [itemView.effectTypeName isEqualToString:effectType];
-        if (itemView.isSelected != shouldBeSelected) {
-            itemView.isSelected = shouldBeSelected;
-            [itemView setNeedsDisplay:YES];
+    // Skip if rebuilding
+    if (_isRebuildingItemViews) {
+        return;
+    }
+
+    // Update selection state of all item views - use copy for safety
+    NSArray *itemViewsCopy = _itemViews ? [_itemViews copy] : nil;
+    if (itemViewsCopy) {
+        for (XLEffectPaletteItemView *itemView in itemViewsCopy) {
+            if (itemView && itemView.superview) {
+                BOOL shouldBeSelected = [itemView.effectTypeName isEqualToString:effectType];
+                if (itemView.isSelected != shouldBeSelected) {
+                    itemView.isSelected = shouldBeSelected;
+                    [itemView setNeedsDisplay:YES];
+                }
+            }
         }
     }
 }
@@ -408,16 +434,34 @@ static const CGFloat kHeaderHeight = 28.0;
 - (void)setFrame:(NSRect)frame {
     [super setFrame:frame];
 
+    // Skip if we're in the middle of rebuilding
+    if (_isRebuildingItemViews) {
+        return;
+    }
+
     // Update content view width and item widths
     CGFloat width = frame.size.width;
-    for (XLEffectPaletteItemView *itemView in _itemViews) {
-        NSRect itemFrame = itemView.frame;
-        itemFrame.size.width = width;
-        itemView.frame = itemFrame;
+    if (width <= 0) {
+        return;
+    }
+
+    // Use a copy of the array to avoid issues with mutation during iteration
+    // and check that items are still valid
+    NSArray *itemViewsCopy = _itemViews ? [_itemViews copy] : nil;
+    if (itemViewsCopy) {
+        for (XLEffectPaletteItemView *itemView in itemViewsCopy) {
+            if (itemView && itemView.superview) {
+                NSRect itemFrame = itemView.frame;
+                itemFrame.size.width = width;
+                itemView.frame = itemFrame;
+            }
+        }
     }
 
     CGFloat contentHeight = _filteredEffectTypes.count * _itemHeight;
-    _contentView.frame = NSMakeRect(0, 0, width, contentHeight);
+    if (_contentView) {
+        _contentView.frame = NSMakeRect(0, 0, width, contentHeight);
+    }
 }
 
 - (BOOL)isFlipped {
