@@ -39,6 +39,15 @@
 - (BOOL)closeSequence;
 - (BOOL)isSequenceLoaded;
 
+/// Create a new sequence with the specified parameters.
+/// @param durationMS Duration in milliseconds (0 to use media duration)
+/// @param frameMS Frame interval in milliseconds (default: 50 for 20fps)
+/// @param mediaFile Optional path to audio file (nil for animation sequence)
+/// @return YES if sequence was created successfully
+- (BOOL)createSequence:(NSInteger)durationMS
+               frameMS:(NSInteger)frameMS
+             mediaFile:(NSString * _Nullable)mediaFile;
+
 /// Get information about the currently loaded sequence.
 /// Returns nil if no sequence is loaded.
 /// Dictionary keys: name, mediaFile, sequenceType, durationMS, frameTimeMS,

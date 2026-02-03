@@ -144,9 +144,119 @@ static void DecodeTag(NSInteger tag, NSInteger *paramIndex, XLControlType *type)
 - (void)refreshFromEffect {
     if (_effectId == 0 || !_currentDef) return;
 
-    // TODO: Query engine bridge for current parameter values
-    // For now, set defaults from definitions
-    [self setDefaultValues];
+    // Query engine bridge for current parameter values
+    if (_engineBridge) {
+        [self loadValuesFromEngine];
+    } else {
+        // Fall back to defaults if no engine bridge
+        [self setDefaultValues];
+    }
+}
+
+- (void)loadValuesFromEngine {
+    if (!_engineBridge || _effectId == 0 || !_currentDef) return;
+
+    // Iterate through parameters and query their values
+    for (int p = 0; _currentDef->parameters[p].key != NULL; p++) {
+        const XLParameterDef *param = &_currentDef->parameters[p];
+        NSString *key = [NSString stringWithUTF8String:param->key];
+        NSControl *control = _controlMap[key];
+
+        if (!control) continue;
+
+        // Get current value from engine
+        NSString *value = [_engineBridge getEffectParameter:_effectId key:key];
+        if (!value || value.length == 0) {
+            // Use default if no value set
+            continue;
+        }
+
+        // Update control based on type
+        switch (param->type) {
+            case XLParameterTypeInt:
+            case XLParameterTypeFloat:
+                if ([control isKindOfClass:[NSSlider class]]) {
+                    NSSlider *slider = (NSSlider *)control;
+                    double numValue = [value doubleValue];
+                    if (param->type == XLParameterTypeFloat && param->divisor > 1) {
+                        slider.doubleValue = numValue * param->divisor;
+                    } else {
+                        slider.doubleValue = numValue;
+                    }
+
+                    // Update linked text field
+                    NSTextField *textField = (NSTextField *)_controlMap[[key stringByAppendingString:@"_text"]];
+                    if (textField) {
+                        if (param->type == XLParameterTypeFloat && param->divisor > 1) {
+                            textField.stringValue = [NSString stringWithFormat:@"%.1f", numValue];
+                        } else {
+                            textField.integerValue = (NSInteger)numValue;
+                        }
+                    }
+                }
+                break;
+
+            case XLParameterTypeBool:
+                if ([control isKindOfClass:[NSSwitch class]]) {
+                    ((NSSwitch *)control).state = [value boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+                }
+                break;
+
+            case XLParameterTypeChoice:
+                if ([control isKindOfClass:[NSPopUpButton class]]) {
+                    NSPopUpButton *popup = (NSPopUpButton *)control;
+                    // Try to select by title first
+                    if ([popup itemWithTitle:value]) {
+                        [popup selectItemWithTitle:value];
+                    } else {
+                        // Try as index
+                        NSInteger idx = [value integerValue];
+                        if (idx >= 0 && idx < popup.numberOfItems) {
+                            [popup selectItemAtIndex:idx];
+                        }
+                    }
+                }
+                break;
+
+            case XLParameterTypeColor:
+                if ([control isKindOfClass:[NSColorWell class]]) {
+                    // Parse hex color string
+                    NSColor *color = [self colorFromHexString:value];
+                    if (color) {
+                        ((NSColorWell *)control).color = color;
+                    }
+                }
+                break;
+
+            case XLParameterTypeString:
+            case XLParameterTypeFile:
+                if ([control isKindOfClass:[NSTextField class]]) {
+                    ((NSTextField *)control).stringValue = value;
+                }
+                break;
+
+            default:
+                break;
+        }
+    }
+}
+
+- (NSColor *)colorFromHexString:(NSString *)hexString {
+    if (!hexString || hexString.length < 6) return nil;
+
+    // Remove # prefix if present
+    if ([hexString hasPrefix:@"#"]) {
+        hexString = [hexString substringFromIndex:1];
+    }
+
+    if (hexString.length < 6) return nil;
+
+    unsigned int red, green, blue;
+    [[NSScanner scannerWithString:[hexString substringWithRange:NSMakeRange(0, 2)]] scanHexInt:&red];
+    [[NSScanner scannerWithString:[hexString substringWithRange:NSMakeRange(2, 2)]] scanHexInt:&green];
+    [[NSScanner scannerWithString:[hexString substringWithRange:NSMakeRange(4, 2)]] scanHexInt:&blue];
+
+    return [NSColor colorWithRed:red/255.0 green:green/255.0 blue:blue/255.0 alpha:1.0];
 }
 
 - (NSString *)currentEffectName {
@@ -644,14 +754,15 @@ static void DecodeTag(NSInteger tag, NSInteger *paramIndex, XLControlType *type)
 }
 
 - (void)notifyParameterChange:(NSString *)key value:(NSString *)value {
+    // Update engine bridge if available
+    if (_engineBridge && _effectId > 0) {
+        [_engineBridge setEffectParameter:_effectId key:key value:value];
+    }
+
+    // Notify delegate
     if ([_delegate respondsToSelector:@selector(effectPanel:didChangeParameter:value:)]) {
         [_delegate effectPanel:_currentEffectName didChangeParameter:key value:value];
     }
-
-    // TODO: Update engine bridge if available
-    // if (_engineBridge && _effectId > 0) {
-    //     [_engineBridge setEffectParameter:_effectId key:key value:value];
-    // }
 }
 
 - (void)setDefaultValues {

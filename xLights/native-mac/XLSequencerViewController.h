@@ -14,6 +14,7 @@
 
 @class XLEngineBridge;
 @class XLEffectsGridView;
+@class XLEffectPaletteView;
 @class XLRowHeadingsView;
 @class XLScrollCoordinator;
 @class XLUndoController;
@@ -35,6 +36,12 @@
 
 /// The row headings view (element names, expand/collapse, mute/solo).
 @property (nonatomic, strong, readonly) XLRowHeadingsView *rowHeadingsView;
+
+/// The effect palette view for selecting effect types to drag onto the timeline.
+@property (nonatomic, strong, readonly) XLEffectPaletteView *effectPaletteView;
+
+/// Show or hide the effect palette sidebar.
+@property (nonatomic, assign) BOOL effectPaletteVisible;
 
 /// The scroll coordinator that synchronizes scrolling and zooming across all views.
 @property (nonatomic, strong, readonly) XLScrollCoordinator *scrollCoordinator;

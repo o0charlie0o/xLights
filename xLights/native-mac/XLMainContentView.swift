@@ -103,15 +103,19 @@ struct XLMainContentView: View {
             // Sidebar: Tab selection (could add more sidebar items later)
             sidebarContent
         } detail: {
-            // Detail: Main content area with bottom panel
-            HSplitView {
-                // Main content + bottom panel (vertical split)
+            // Detail: Main content area with inspector
+            // Using HStack with explicit frame control instead of HSplitView
+            // to avoid SwiftUI split view bugs when toggling panels
+            HStack(spacing: 0) {
+                // Main content + bottom panel
                 mainContentWithBottomPanel
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Inspector (right side)
+                // Inspector (right side) - always in hierarchy but zero-width when hidden
                 if appState.inspectorVisible {
+                    Divider()
                     inspectorPanel
-                        .frame(minWidth: 220, idealWidth: appState.inspectorWidth, maxWidth: 500)
+                        .frame(width: appState.inspectorWidth)
                 }
             }
         }
@@ -145,15 +149,17 @@ struct XLMainContentView: View {
 
     @ViewBuilder
     private var mainContentWithBottomPanel: some View {
-        VSplitView {
-            // Tab content area
+        // Using VStack instead of VSplitView to avoid SwiftUI bugs when toggling panels
+        VStack(spacing: 0) {
+            // Tab content area - takes all available space
             tabContent
-                .frame(minHeight: 300)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // Bottom panel (properties/effects)
+            // Bottom panel (properties/effects) - fixed height when visible
             if appState.bottomPanelVisible {
+                Divider()
                 bottomPanel
-                    .frame(minHeight: 150, idealHeight: appState.bottomPanelHeight, maxHeight: 500)
+                    .frame(height: appState.bottomPanelHeight)
             }
         }
     }
@@ -176,17 +182,8 @@ struct XLMainContentView: View {
 
     @ViewBuilder
     private var bottomPanel: some View {
-        VStack(spacing: 0) {
-            // Divider at top
-            Divider()
-
-            // Placeholder for effect properties panel
-            ZStack {
-                Color(nsColor: NSColor(white: 0.15, alpha: 1.0))
-                Text("Effect Properties Panel")
-                    .foregroundStyle(.secondary)
-            }
-        }
+        // Effect properties panel - shows parameters for the selected effect
+        XLEffectPropertiesView(engineBridge: appState.engineBridge)
     }
 
     // MARK: - Inspector Panel
@@ -238,17 +235,13 @@ struct XLMainContentView: View {
 
         ToolbarItemGroup(placement: .automatic) {
             Button {
-                withAnimation {
-                    appState.inspectorVisible.toggle()
-                }
+                appState.inspectorVisible.toggle()
             } label: {
                 Label("Inspector", systemImage: "sidebar.right")
             }
 
             Button {
-                withAnimation {
-                    appState.bottomPanelVisible.toggle()
-                }
+                appState.bottomPanelVisible.toggle()
             } label: {
                 Label("Properties", systemImage: "rectangle.split.1x2")
             }

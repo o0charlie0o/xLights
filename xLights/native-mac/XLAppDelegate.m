@@ -2,6 +2,10 @@
 #import "XLDocumentController.h"
 #import "XLToolbarExtensions.h"
 #import "preferences/XLPreferencesWindowController.h"
+#import "dialogs/XLSequenceDialogs.h"
+#import "XLMainWindowController.h"
+#import "XLEngineBridge.h"
+#import "XLSequencerViewController.h"
 
 @interface XLAppDelegate ()
 
@@ -102,6 +106,84 @@
             // Save as last show folder
             NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
             [defaults setObject:url.path forKey:@"LastShowFolder"];
+        }
+    }];
+}
+
+#pragma mark - Sequence Actions
+
+- (IBAction)newSequence:(id)sender {
+    // Get the key window's main window controller
+    NSWindow *keyWindow = [NSApp keyWindow];
+    NSWindowController *windowController = keyWindow.windowController;
+
+    // Check if this is an XLMainWindowController
+    if (![windowController isKindOfClass:[XLMainWindowController class]]) {
+        NSLog(@"XLAppDelegate: newSequence - no main window controller available");
+        return;
+    }
+
+    XLMainWindowController *mainController = (XLMainWindowController *)windowController;
+    XLEngineBridge *engineBridge = mainController.engineBridge;
+
+    // Get show directory from user defaults
+    NSString *showDirectory = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+    if (!showDirectory) {
+        showDirectory = NSHomeDirectory();
+    }
+
+    // Create and configure the new sequence dialog
+    XLNewSequenceDialog *dialog = [[XLNewSequenceDialog alloc] init];
+    dialog.engineBridge = engineBridge;
+    dialog.showDirectory = showDirectory;
+    dialog.sequenceName = @"New Sequence";
+    dialog.durationSeconds = 60;
+    dialog.frameIntervalMs = 50;
+
+    // Show the dialog as a sheet
+    [dialog presentAsSheetForWindow:keyWindow completion:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            // Convert duration to milliseconds
+            NSInteger durationMS = dialog.durationSeconds * 1000;
+            NSInteger frameMS = dialog.frameIntervalMs;
+            NSString *audioFile = dialog.audioFilePath;
+
+            // Create the sequence via engine bridge
+            BOOL success = [engineBridge createSequence:durationMS
+                                                frameMS:frameMS
+                                              mediaFile:audioFile];
+
+            if (success) {
+                NSLog(@"XLAppDelegate: Created new sequence - duration: %ld sec, frame: %ld ms, audio: %@",
+                      (long)dialog.durationSeconds, (long)frameMS, audioFile ?: @"(none)");
+
+                // Reload the sequencer view
+                [mainController.sequencerViewController reloadSequenceData];
+
+                // Switch to the sequencer tab
+                [mainController switchToTab:2];
+            } else {
+                NSAlert *alert = [[NSAlert alloc] init];
+                alert.messageText = @"Failed to Create Sequence";
+                alert.informativeText = @"Unable to create a new sequence. Please check the log for details.";
+                alert.alertStyle = NSAlertStyleWarning;
+                [alert runModal];
+            }
+        }
+    }];
+}
+
+- (IBAction)openSequence:(id)sender {
+    // Use the document controller to present an open panel
+    [_documentController presentOpenPanelWithCompletionHandler:^(NSArray<NSURL *> *urls) {
+        if (urls.count > 0) {
+            [self->_documentController openDocumentWithContentsOfURL:urls.firstObject
+                                                             display:YES
+                                                   completionHandler:^(NSDocument *document, BOOL documentWasAlreadyOpen, NSError *error) {
+                if (error) {
+                    [NSApp presentError:error];
+                }
+            }];
         }
     }];
 }

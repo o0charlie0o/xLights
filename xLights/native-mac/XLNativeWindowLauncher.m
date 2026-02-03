@@ -27,9 +27,9 @@ static XLMainWindowController *sNativeWindowController = nil;
 
 int XLIsNativeUIEnabled(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    // Check if the key exists; if not, default is OFF (disabled)
+    // Check if the key exists; if not, default is ON (enabled) for this branch
     if ([defaults objectForKey:kXLNativeUIEnabledKey] == nil) {
-        return 0;
+        return 1;
     }
     return [defaults boolForKey:kXLNativeUIEnabledKey] ? 1 : 0;
 }

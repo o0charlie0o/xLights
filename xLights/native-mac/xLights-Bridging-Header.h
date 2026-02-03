@@ -16,6 +16,7 @@
 #import "XLLayoutViewController.h"
 #import "XLSequencerViewController.h"
 #import "XLInspectorViewController.h"
+#import "XLEffectPropertiesViewController.h"
 #import "XLEngineBridge.h"
 
 #endif /* xLights_Bridging_Header_h */

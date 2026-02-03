@@ -79,6 +79,24 @@ struct XLInspectorView: NSViewControllerRepresentable {
     }
 }
 
+// MARK: - Effect Properties Panel Wrapper
+
+/// Wraps XLEffectPropertiesViewController (AppKit) for use in SwiftUI.
+/// This displays effect parameter controls when an effect is selected in the sequencer.
+struct XLEffectPropertiesView: NSViewControllerRepresentable {
+    let engineBridge: XLEngineBridge
+
+    func makeNSViewController(context: Context) -> XLEffectPropertiesViewController {
+        let viewController = XLEffectPropertiesViewController()
+        viewController.engineBridge = engineBridge
+        return viewController
+    }
+
+    func updateNSViewController(_ nsViewController: XLEffectPropertiesViewController, context: Context) {
+        // The view controller handles updates via notifications
+    }
+}
+
 // MARK: - Generic NSView Wrapper
 
 /// Generic wrapper for any NSView to embed in SwiftUI.

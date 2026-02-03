@@ -27,34 +27,26 @@ static NSString * const kDragType = @"org.xlights.controller.row";
 static const CGFloat kFooterHeight = 32.0;
 static const CGFloat kStatusDotSize = 8.0;
 
-#pragma mark - Controller Entry (C struct for heap corruption immunity)
+#pragma mark - Controller Entry (ObjC object for true heap isolation)
 
-// Plain C struct for controller data - immune to wxWidgets heap corruption.
-// Strings are copied/owned by the struct and must be freed.
-typedef struct {
-    char *name;
-    char *protocol;
-    char *address;
-    char *channels;
-    char *vendor;
-    char *model;
-    char *active;
-    XLControllerStatus status;
-} XLControllerEntry;
+// Using Objective-C class instead of C struct to isolate from wxWidgets heap corruption.
+// ARC manages these objects separately from the C heap that wxWidgets uses.
+@interface XLControllerEntryObj : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *protocol;
+@property (nonatomic, copy) NSString *address;
+@property (nonatomic, copy) NSString *channels;
+@property (nonatomic, copy) NSString *vendor;
+@property (nonatomic, copy) NSString *model;
+@property (nonatomic, copy) NSString *active;
+@property (nonatomic, assign) XLControllerStatus status;
+@end
 
-static inline char *CopyNSString(NSString *str) {
-    if (!str || str.length == 0) return strdup("");
-    return strdup(str.UTF8String ?: "");
-}
+@implementation XLControllerEntryObj
+@end
 
-static inline void FreeControllerEntry(XLControllerEntry *entry) {
-    if (entry->name) { free(entry->name); entry->name = NULL; }
-    if (entry->protocol) { free(entry->protocol); entry->protocol = NULL; }
-    if (entry->address) { free(entry->address); entry->address = NULL; }
-    if (entry->channels) { free(entry->channels); entry->channels = NULL; }
-    if (entry->vendor) { free(entry->vendor); entry->vendor = NULL; }
-    if (entry->model) { free(entry->model); entry->model = NULL; }
-    if (entry->active) { free(entry->active); entry->active = NULL; }
+static inline NSString *SafeString(NSString *str) {
+    return str ?: @"";
 }
 
 #pragma mark - Status Dot Drawing
@@ -96,12 +88,14 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 
 #pragma mark - XLControllersViewController
 
-@interface XLControllersViewController () {
-    // C array of controller entries - immune to wxWidgets heap corruption
-    XLControllerEntry *_controllersData;
-    NSUInteger _controllersCount;
-    NSUInteger _controllersCapacity;
-}
+// Use associated objects to store data in a completely separate hash table,
+// immune to any memory corruption of the view controller object itself.
+#import <objc/runtime.h>
+static const void *kControllerEntriesKey = &kControllerEntriesKey;
+static const void *kDataLoadCompleteKey = &kDataLoadCompleteKey;
+static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
+
+@interface XLControllersViewController ()
 
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong, readwrite) NSTableView *tableView;
@@ -115,46 +109,88 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 @property (nonatomic, strong, readwrite) XLNetworkDiscoveryController *discoveryController;
 @property (nonatomic, strong) NSPopover *discoveryPopover;
 @property (nonatomic, strong) XLDiscoveryResultsViewController *discoveryResultsViewController;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *pingStatusCache;
 
 @end
 
 @implementation XLControllersViewController
 
+#pragma mark - Associated Object Accessors (immune to memory corruption)
+
+- (NSMutableArray<XLControllerEntryObj *> *)controllerEntries {
+    NSMutableArray *entries = objc_getAssociatedObject(self, kControllerEntriesKey);
+    if (!entries) {
+        entries = [NSMutableArray array];
+        objc_setAssociatedObject(self, kControllerEntriesKey, entries, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return entries;
+}
+
+- (void)setControllerEntries:(NSMutableArray<XLControllerEntryObj *> *)entries {
+    objc_setAssociatedObject(self, kControllerEntriesKey, entries, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+- (BOOL)dataLoadComplete {
+    NSNumber *value = objc_getAssociatedObject(self, kDataLoadCompleteKey);
+    return value ? value.boolValue : NO;
+}
+
+- (void)setDataLoadComplete:(BOOL)complete {
+    objc_setAssociatedObject(self, kDataLoadCompleteKey, @(complete), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+- (NSMutableDictionary<NSString *, NSNumber *> *)pingStatusCache {
+    NSMutableDictionary *cache = objc_getAssociatedObject(self, kPingStatusCacheKey);
+    if (!cache) {
+        cache = [NSMutableDictionary dictionary];
+        objc_setAssociatedObject(self, kPingStatusCacheKey, cache, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return cache;
+}
+
+- (void)setPingStatusCache:(NSMutableDictionary<NSString *, NSNumber *> *)cache {
+    objc_setAssociatedObject(self, kPingStatusCacheKey, cache, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 #pragma mark - Lifecycle
 
 - (instancetype)init {
-    self = [super initWithNibName:nil bundle:nil];
+    return [self initWithNibName:nil bundle:nil];
+}
+
+- (instancetype)initWithNibName:(NSNibName)nibNameOrNil bundle:(NSBundle *)nibBundleOrNil {
+    self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil];
     if (self) {
-        // Initialize C array for controllers
-        _controllersCapacity = 32;
-        _controllersCount = 0;
-        _controllersData = (XLControllerEntry *)calloc(_controllersCapacity, sizeof(XLControllerEntry));
-
-        _sortAscending = YES;
-        _sortColumnIdentifier = XLControllerColumnName;
-        _pingStatusCache = [NSMutableDictionary dictionary];
-
-        // Initialize discovery controller
-        _discoveryController = [[XLNetworkDiscoveryController alloc] init];
-        _discoveryController.delegate = self;
+        [self commonInit];
     }
     return self;
+}
+
+- (instancetype)initWithCoder:(NSCoder *)coder {
+    self = [super initWithCoder:coder];
+    if (self) {
+        [self commonInit];
+    }
+    return self;
+}
+
+- (void)commonInit {
+    // Initialize controller array (ARC-managed, isolated from C heap)
+    self.controllerEntries = [NSMutableArray array];
+
+    _sortAscending = YES;
+    _sortColumnIdentifier = XLControllerColumnName;
+    self.pingStatusCache = [NSMutableDictionary dictionary];
+
+    // Initialize discovery controller
+    _discoveryController = [[XLNetworkDiscoveryController alloc] init];
+    _discoveryController.delegate = self;
 }
 
 - (void)dealloc {
     _tableView.dataSource = nil;
     _tableView.delegate = nil;
     [_discoveryController stopBackgroundPing];
-
-    // Free controller entries
-    if (_controllersData) {
-        for (NSUInteger i = 0; i < _controllersCount; i++) {
-            FreeControllerEntry(&_controllersData[i]);
-        }
-        free(_controllersData);
-        _controllersData = NULL;
-    }
+    // ARC handles self.controllerEntries cleanup automatically
 }
 
 - (void)loadView {
@@ -188,10 +224,13 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     _discoveryController.engineBridge = _engineBridge;
-    [self reloadData];
 
-    // Start background ping monitoring
-    [_discoveryController startBackgroundPing];
+    // Defer data loading briefly to let the view fully set up
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self reloadData];
+        // Start background ping monitoring after data is loaded
+        [self->_discoveryController startBackgroundPing];
+    });
 }
 
 - (void)setEngineBridge:(XLEngineBridge *)engineBridge {
@@ -380,95 +419,97 @@ static NSImage *StatusDotImage(XLControllerStatus status) {
 #pragma mark - Data Loading
 
 - (void)reloadData {
-    // Free existing controller data
-    for (NSUInteger i = 0; i < _controllersCount; i++) {
-        FreeControllerEntry(&_controllersData[i]);
+    // Mark data as not ready during reload
+    self.dataLoadComplete = NO;
+
+    // Clear existing data - getter lazily creates array if needed
+    [self.controllerEntries removeAllObjects];
+
+    // Guard: don't load if engine bridge isn't available
+    if (!_engineBridge || ![_engineBridge isEngineAvailable]) {
+        NSLog(@"XLControllersViewController: Engine not available, skipping data load");
+        self.dataLoadComplete = YES;  // Empty but ready
+        [_tableView reloadData];
+        return;
     }
-    _controllersCount = 0;
 
+    // Get controller names - this calls into wxWidgets
     NSArray<NSString *> *controllerNames = [_engineBridge getControllerNames];
-    NSUInteger needed = controllerNames.count;
-
-    // Ensure capacity
-    if (needed > _controllersCapacity) {
-        NSUInteger newCapacity = needed + 16;
-        XLControllerEntry *newData = (XLControllerEntry *)calloc(newCapacity, sizeof(XLControllerEntry));
-        free(_controllersData);
-        _controllersData = newData;
-        _controllersCapacity = newCapacity;
+    if (!controllerNames) {
+        NSLog(@"XLControllersViewController: Failed to get controller names");
+        self.dataLoadComplete = YES;
+        [_tableView reloadData];
+        return;
     }
 
     for (NSString *name in controllerNames) {
         NSDictionary *info = [_engineBridge getControllerInfo:name];
         if (info) {
-            XLControllerEntry *entry = &_controllersData[_controllersCount];
-            memset(entry, 0, sizeof(XLControllerEntry));
+            XLControllerEntryObj *entry = [[XLControllerEntryObj alloc] init];
 
-            entry->name = CopyNSString(name);
-            entry->protocol = CopyNSString(info[XLControllerColumnProtocol]);
-            entry->address = CopyNSString(info[XLControllerColumnAddress]);
+            entry.name = SafeString(name);
+            entry.protocol = SafeString(info[XLControllerColumnProtocol]);
+            entry.address = SafeString(info[XLControllerColumnAddress]);
 
             id channelsVal = info[XLControllerColumnChannels];
             if ([channelsVal isKindOfClass:[NSNumber class]]) {
-                entry->channels = CopyNSString([(NSNumber *)channelsVal stringValue]);
+                entry.channels = [(NSNumber *)channelsVal stringValue];
             } else {
-                entry->channels = CopyNSString(channelsVal);
+                entry.channels = SafeString(channelsVal);
             }
 
-            entry->vendor = CopyNSString(info[XLControllerColumnVendor]);
-            entry->model = CopyNSString(info[XLControllerColumnModel]);
-            entry->active = CopyNSString(info[XLControllerColumnActive] ?: @"Active");
+            entry.vendor = SafeString(info[XLControllerColumnVendor]);
+            entry.model = SafeString(info[XLControllerColumnModel]);
+            entry.active = SafeString(info[XLControllerColumnActive] ?: @"Active");
 
             NSNumber *statusNum = info[XLControllerColumnStatus];
-            entry->status = statusNum ? (XLControllerStatus)statusNum.integerValue : XLControllerStatusUnknown;
+            entry.status = statusNum ? (XLControllerStatus)statusNum.integerValue : XLControllerStatusUnknown;
 
-            _controllersCount++;
+            [self.controllerEntries addObject:entry];
         }
     }
 
     [self sortControllersIfNeeded];
+
+    NSLog(@"XLControllersViewController: Loaded %lu controllers", (unsigned long)self.controllerEntries.count);
+
+    // Mark data as ready for display
+    self.dataLoadComplete = YES;
+
     [_tableView reloadData];
     [self updateRemoveButtonState];
 }
 
 // Helper to get string field from controller entry by column identifier
-static const char *GetControllerField(const XLControllerEntry *entry, NSString *columnId) {
-    if ([columnId isEqualToString:XLControllerColumnName]) return entry->name;
-    if ([columnId isEqualToString:XLControllerColumnProtocol]) return entry->protocol;
-    if ([columnId isEqualToString:XLControllerColumnAddress]) return entry->address;
-    if ([columnId isEqualToString:XLControllerColumnChannels]) return entry->channels;
-    if ([columnId isEqualToString:XLControllerColumnVendor]) return entry->vendor;
-    if ([columnId isEqualToString:XLControllerColumnModel]) return entry->model;
-    if ([columnId isEqualToString:XLControllerColumnActive]) return entry->active;
-    return "";
+static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *columnId) {
+    if ([columnId isEqualToString:XLControllerColumnName]) return entry.name;
+    if ([columnId isEqualToString:XLControllerColumnProtocol]) return entry.protocol;
+    if ([columnId isEqualToString:XLControllerColumnAddress]) return entry.address;
+    if ([columnId isEqualToString:XLControllerColumnChannels]) return entry.channels;
+    if ([columnId isEqualToString:XLControllerColumnVendor]) return entry.vendor;
+    if ([columnId isEqualToString:XLControllerColumnModel]) return entry.model;
+    if ([columnId isEqualToString:XLControllerColumnActive]) return entry.active;
+    return @"";
 }
 
 - (void)sortControllersIfNeeded {
-    if (!_sortColumnIdentifier || _controllersCount <= 1) return;
+    if (!_sortColumnIdentifier || self.controllerEntries.count <= 1) return;
 
-    // Simple bubble sort (adequate for small lists of controllers)
     NSString *sortCol = _sortColumnIdentifier;
     BOOL ascending = _sortAscending;
 
-    for (NSUInteger i = 0; i < _controllersCount - 1; i++) {
-        for (NSUInteger j = 0; j < _controllersCount - i - 1; j++) {
-            const char *a = GetControllerField(&_controllersData[j], sortCol);
-            const char *b = GetControllerField(&_controllersData[j + 1], sortCol);
-            int cmp = strcasecmp(a ?: "", b ?: "");
-            BOOL shouldSwap = ascending ? (cmp > 0) : (cmp < 0);
-            if (shouldSwap) {
-                XLControllerEntry temp = _controllersData[j];
-                _controllersData[j] = _controllersData[j + 1];
-                _controllersData[j + 1] = temp;
-            }
-        }
-    }
+    [self.controllerEntries sortUsingComparator:^NSComparisonResult(XLControllerEntryObj *a, XLControllerEntryObj *b) {
+        NSString *aVal = GetControllerField(a, sortCol);
+        NSString *bVal = GetControllerField(b, sortCol);
+        NSComparisonResult result = [aVal localizedCaseInsensitiveCompare:bVal];
+        return ascending ? result : -result;
+    }];
 }
 
 #pragma mark - Selection
 
 - (void)selectControllerAtIndex:(NSInteger)index {
-    if (index >= 0 && index < (NSInteger)_controllersCount) {
+    if (index >= 0 && index < (NSInteger)self.controllerEntries.count) {
         NSIndexSet *indexSet = [NSIndexSet indexSetWithIndex:index];
         [_tableView selectRowIndexes:indexSet byExtendingSelection:NO];
         [_tableView scrollRowToVisible:index];
@@ -483,9 +524,8 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
 
 - (NSString *)selectedControllerName {
     NSInteger index = _tableView.selectedRow;
-    if (index >= 0 && index < (NSInteger)_controllersCount && _controllersData) {
-        const char *name = _controllersData[index].name;
-        return name ? [NSString stringWithUTF8String:name] : nil;
+    if (index >= 0 && index < (NSInteger)self.controllerEntries.count) {
+        return self.controllerEntries[index].name;
     }
     return nil;
 }
@@ -497,23 +537,24 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
 #pragma mark - NSTableViewDataSource
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
-    return (NSInteger)_controllersCount;
+    // Return 0 if data isn't ready yet
+    if (!self.dataLoadComplete) return 0;
+    return (NSInteger)self.controllerEntries.count;
 }
 
 - (id)tableView:(NSTableView *)tableView
     objectValueForTableColumn:(NSTableColumn *)tableColumn
     row:(NSInteger)row {
-    if (!_controllersData || row < 0 || row >= (NSInteger)_controllersCount) return nil;
+    if (row < 0 || row >= (NSInteger)self.controllerEntries.count) return nil;
 
-    const XLControllerEntry *entry = &_controllersData[row];
+    XLControllerEntryObj *entry = self.controllerEntries[row];
     NSString *identifier = tableColumn.identifier;
-    const char *value = GetControllerField(entry, identifier);
 
     if ([identifier isEqualToString:XLControllerColumnStatus]) {
-        return @(entry->status);
+        return @(entry.status);
     }
 
-    return value ? [NSString stringWithUTF8String:value] : @"";
+    return GetControllerField(entry, identifier);
 }
 
 #pragma mark - NSTableViewDelegate
@@ -521,10 +562,16 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
 - (NSView *)tableView:(NSTableView *)tableView
     viewForTableColumn:(NSTableColumn *)tableColumn
                    row:(NSInteger)row {
-    if (!_controllersData || row < 0 || row >= (NSInteger)_controllersCount) return nil;
+    // Safety check: ensure data is ready and row is in bounds
+    if (!self.dataLoadComplete || self.controllerEntries.count == 0) {
+        return nil;
+    }
+    if (row < 0 || (NSUInteger)row >= self.controllerEntries.count) {
+        return nil;
+    }
 
     NSString *identifier = tableColumn.identifier;
-    const XLControllerEntry *entry = &_controllersData[row];
+    XLControllerEntryObj *entry = self.controllerEntries[row];
 
     if ([identifier isEqualToString:XLControllerColumnStatus]) {
         return [self statusCellForRow:row entry:entry reusingView:
@@ -536,11 +583,11 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
         cell = [self makeTextCellWithIdentifier:identifier];
     }
 
-    const char *value = GetControllerField(entry, identifier);
-    cell.textField.stringValue = value ? [NSString stringWithUTF8String:value] : @"";
+    NSString *value = GetControllerField(entry, identifier);
+    cell.textField.stringValue = value ?: @"";
 
     // Dim inactive controllers
-    if (entry->active && strcasecmp(entry->active, "Inactive") == 0) {
+    if ([entry.active caseInsensitiveCompare:@"Inactive"] == NSOrderedSame) {
         cell.textField.textColor = [NSColor tertiaryLabelColor];
     } else {
         cell.textField.textColor = [NSColor labelColor];
@@ -569,7 +616,7 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
 }
 
 - (NSView *)statusCellForRow:(NSInteger)row
-                       entry:(const XLControllerEntry *)entry
+                       entry:(XLControllerEntryObj *)entry
                  reusingView:(NSView *)existingView {
     NSTableCellView *cell = (NSTableCellView *)existingView;
     if (!cell) {
@@ -589,17 +636,9 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
         ]];
     }
 
-    // Check ping status cache first, then fall back to entry data
-    XLControllerStatus status = entry->status;
-
-    if (entry->name) {
-        NSString *name = [NSString stringWithUTF8String:entry->name];
-        if (name && _pingStatusCache[name]) {
-            status = (XLControllerStatus)_pingStatusCache[name].integerValue;
-        }
-    }
-
-    cell.imageView.image = StatusDotImage(status);
+    // Use entry status directly - skip ping cache to avoid memory corruption issues
+    // TODO: Move ping cache to associated objects if live status updates are needed
+    cell.imageView.image = StatusDotImage(entry.status);
 
     return cell;
 }
@@ -816,10 +855,9 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
 #pragma mark - Delete Confirmation
 
 - (void)confirmDeleteControllerAtIndex:(NSInteger)index {
-    if (!_controllersData || index < 0 || index >= (NSInteger)_controllersCount) return;
+    if (index < 0 || index >= (NSInteger)self.controllerEntries.count) return;
 
-    const char *nameC = _controllersData[index].name;
-    NSString *name = nameC ? [NSString stringWithUTF8String:nameC] : @"this controller";
+    NSString *name = self.controllerEntries[index].name ?: @"this controller";
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"Delete \"%@\"?", name];
@@ -889,17 +927,14 @@ static const char *GetControllerField(const XLControllerEntry *entry, NSString *
 - (void)updatePingStatus:(XLControllerStatus)status forControllerNamed:(NSString *)name {
     if (!name) return;
 
-    _pingStatusCache[name] = @(status);
+    self.pingStatusCache[name] = @(status);
 
     // Find the row for this controller and refresh it
     NSInteger rowIndex = -1;
-    for (NSUInteger i = 0; i < _controllersCount; i++) {
-        if (_controllersData[i].name) {
-            NSString *entryName = [NSString stringWithUTF8String:_controllersData[i].name];
-            if ([entryName isEqualToString:name]) {
-                rowIndex = (NSInteger)i;
-                break;
-            }
+    for (NSUInteger i = 0; i < self.controllerEntries.count; i++) {
+        if ([self.controllerEntries[i].name isEqualToString:name]) {
+            rowIndex = (NSInteger)i;
+            break;
         }
     }
 

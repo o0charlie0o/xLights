@@ -190,6 +190,37 @@
     return _sequenceEngine->isSequenceLoaded() ? YES : NO;
 }
 
+- (BOOL)createSequence:(NSInteger)durationMS
+               frameMS:(NSInteger)frameMS
+             mediaFile:(NSString * _Nullable)mediaFile {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        NSLog(@"XLEngineBridge: Cannot create sequence - xLightsFrame not available");
+        return NO;
+    }
+
+    @try {
+        // Convert parameters
+        std::string media = mediaFile ? [mediaFile UTF8String] : "";
+        uint32_t duration = (uint32_t)durationMS;
+        uint32_t frameInterval = (uint32_t)frameMS;
+
+        // Call NewSequence on the frame - this handles all the setup
+        frame->NewSequence(media, duration, frameInterval, "");
+
+        NSLog(@"XLEngineBridge: createSequence completed - duration: %ldms, frameMS: %ldms, media: %@",
+              (long)durationMS, (long)frameMS, mediaFile ?: @"(none)");
+
+        return [self isSequenceLoaded];
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception creating sequence: %@ - %@",
+              exception.name, exception.reason);
+        return NO;
+    }
+}
+
 - (NSDictionary *)getSequenceInfo {
     [self ensureEngineInitialized];
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {

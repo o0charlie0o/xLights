@@ -23,12 +23,12 @@
 ///
 /// Typical usage:
 /// @code
-///   XLEffectPanelView *panelView = [[XLEffectPanelView alloc] initWithFrame:frame];
+///   XLSequencerEffectPanelView *panelView = [[XLSequencerEffectPanelView alloc] initWithFrame:frame];
 ///   panelView.delegate = self;
 ///   [panelView loadEffectPanel:@"Bars" settings:currentSettings];
 ///   [containerView addSubview:panelView];
 /// @endcode
-@interface XLEffectPanelView : NSView
+@interface XLSequencerEffectPanelView : NSView
 
 /// The descriptor for the currently loaded effect, or nil if placeholder state.
 @property (nonatomic, strong, readonly) XLEffectPanelDescriptor *descriptor;

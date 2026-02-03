@@ -8,15 +8,15 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
-#import "XLEffectPanelView.h"
+#import "XLSequencerEffectPanelView.h"
 
 // Flipped NSView subclass so scroll view content starts at the top.
-@interface XLEffectPanelFlippedView : NSView
+@interface XLSequencerEffectPanelFlippedView : NSView
 @end
 
 static const CGFloat kPlaceholderFontSize = 13.0;
 
-@interface XLEffectPanelView ()
+@interface XLSequencerEffectPanelView ()
 
 /// The builder instance that constructs and manages the panel controls.
 @property (nonatomic, strong) XLEffectPanelBuilder *builder;
@@ -38,7 +38,7 @@ static const CGFloat kPlaceholderFontSize = 13.0;
 
 @end
 
-@implementation XLEffectPanelView
+@implementation XLSequencerEffectPanelView
 
 // ---------------------------------------------------------------------------
 // MARK: - Initialization
@@ -120,7 +120,7 @@ static const CGFloat kPlaceholderFontSize = 13.0;
     self.panelContentView = panelView;
 
     // Wrap in a flipped clip view so content starts at the top
-    NSView *documentView = [[XLEffectPanelFlippedView alloc] initWithFrame:NSZeroRect];
+    NSView *documentView = [[XLSequencerEffectPanelFlippedView alloc] initWithFrame:NSZeroRect];
     documentView.translatesAutoresizingMaskIntoConstraints = NO;
     [documentView addSubview:panelView];
 
@@ -220,7 +220,7 @@ static const CGFloat kPlaceholderFontSize = 13.0;
 // MARK: - Flipped document view (content starts at top)
 // ---------------------------------------------------------------------------
 
-@implementation XLEffectPanelFlippedView
+@implementation XLSequencerEffectPanelFlippedView
 
 - (BOOL)isFlipped
 {

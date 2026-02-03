@@ -11,6 +11,7 @@
 #import "XLSequencerViewController.h"
 #import "sequencer/XLTimelineRulerView.h"
 #import "sequencer/XLEffectsGridView.h"
+#import "sequencer/XLEffectPaletteView.h"
 #import "sequencer/XLRowHeadingsView.h"
 #import "sequencer/XLWaveformView.h"
 #import "sequencer/XLTransportBarView.h"
@@ -20,11 +21,13 @@
 #import "sequencer/XLAudioPlayer.h"
 #import "XLEngineBridge.h"
 #import "XLPlaybackController.h"
+#import "XLEffectPropertiesViewController.h"
 
 static const CGFloat kRowHeaderWidth = 180.0;
 static const CGFloat kTimelineRulerHeight = 28.0;
 static const CGFloat kWaveformHeight = 60.0;
 static const CGFloat kTransportBarHeight = 44.0;
+static const CGFloat kEffectPaletteWidth = 160.0;
 
 // Row data stored as plain C struct - immune to wxWidgets heap corruption.
 // No ObjC objects means no isa pointer dereference, no ARC, no message dispatch.
@@ -54,6 +57,7 @@ typedef struct {
 @interface XLSequencerViewController () <XLTimelineRulerDelegate,
                                           XLEffectsGridDataSource,
                                           XLEffectsGridDelegate,
+                                          XLEffectPaletteViewDelegate,
                                           XLTransportBarDelegate,
                                           XLWaveformViewDelegate,
                                           XLRowHeadingsDataSource,
@@ -84,6 +88,8 @@ typedef struct {
 @property (nonatomic, strong, readwrite) XLScrollCoordinator *scrollCoordinator;
 @property (nonatomic, strong, readwrite) XLUndoController *undoController;
 @property (nonatomic, strong) XLAudioSampleData *audioSampleData;
+@property (nonatomic, strong, readwrite) XLEffectPaletteView *effectPaletteView;
+@property (nonatomic, strong) NSLayoutConstraint *effectPaletteWidthConstraint;
 
 // Effect index offset per row for fast lookup
 @property (nonatomic, assign) NSUInteger *effectOffsetPerRow;
@@ -151,6 +157,14 @@ typedef struct {
     _transportBar.totalDurationMS = _sequenceDurationMS;
     [view addSubview:_transportBar];
 
+    // Effect palette view (right sidebar for dragging effects onto timeline)
+    _effectPaletteView = [[XLEffectPaletteView alloc] initWithFrame:NSZeroRect];
+    _effectPaletteView.translatesAutoresizingMaskIntoConstraints = NO;
+    _effectPaletteView.engineBridge = self.engineBridge;
+    _effectPaletteView.delegate = self;
+    _effectPaletteVisible = YES;
+    [view addSubview:_effectPaletteView];
+
     // Set up scroll coordinator for synchronized scrolling
     _scrollCoordinator = [[XLScrollCoordinator alloc] init];
     _scrollCoordinator.timelineRulerView = _timelineRuler;
@@ -171,13 +185,22 @@ typedef struct {
     _scrollCoordinator.maxHorizontalScrollOffset = _sequenceDurationMS * _scrollCoordinator.zoomLevel;
     _scrollCoordinator.maxVerticalScrollOffset = rowCount * rowHeight;
 
+    // Create effect palette width constraint (stored so we can animate show/hide)
+    _effectPaletteWidthConstraint = [_effectPaletteView.widthAnchor constraintEqualToConstant:kEffectPaletteWidth];
+
     // Layout constraints
     [NSLayoutConstraint activateConstraints:@[
-        // Timeline ruler: right of row header column, full remaining width at top
+        // Effect palette: right side, from top to above waveform
+        [_effectPaletteView.topAnchor constraintEqualToAnchor:view.topAnchor],
+        [_effectPaletteView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        _effectPaletteWidthConstraint,
+        [_effectPaletteView.bottomAnchor constraintEqualToAnchor:_waveformView.topAnchor],
+
+        // Timeline ruler: right of row header column, left of palette at top
         [_timelineRuler.topAnchor constraintEqualToAnchor:view.topAnchor],
         [_timelineRuler.leadingAnchor constraintEqualToAnchor:view.leadingAnchor
                                                      constant:kRowHeaderWidth],
-        [_timelineRuler.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_timelineRuler.trailingAnchor constraintEqualToAnchor:_effectPaletteView.leadingAnchor],
         [_timelineRuler.heightAnchor constraintEqualToConstant:kTimelineRulerHeight],
 
         // Row headings: left side, below ruler, above waveform
@@ -186,10 +209,10 @@ typedef struct {
         [_rowHeadingsView.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
         [_rowHeadingsView.bottomAnchor constraintEqualToAnchor:_waveformView.topAnchor],
 
-        // Effects grid: main area, right of row headings, below ruler, above waveform
+        // Effects grid: main area, right of row headings, below ruler, above waveform, left of palette
         [_effectsGridView.topAnchor constraintEqualToAnchor:_timelineRuler.bottomAnchor],
         [_effectsGridView.leadingAnchor constraintEqualToAnchor:_rowHeadingsView.trailingAnchor],
-        [_effectsGridView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_effectsGridView.trailingAnchor constraintEqualToAnchor:_effectPaletteView.leadingAnchor],
         [_effectsGridView.bottomAnchor constraintEqualToAnchor:_waveformView.topAnchor],
 
         // Waveform: full width, above transport bar
@@ -212,6 +235,7 @@ typedef struct {
     [super viewDidLoad];
     [_effectsGridView reloadData];
     [_rowHeadingsView reloadData];
+    [_effectPaletteView reloadEffectTypes];
 
     // Load audio if sequence has media file
     [self loadAudioForSequence];
@@ -720,6 +744,33 @@ typedef struct {
           effectIndex:(NSInteger)effectIndex
 {
     NSLog(@"Selected effect at row %ld, index %ld", (long)row, (long)effectIndex);
+
+    // Get the actual effect ID from our data
+    NSInteger effectId = 0;
+    NSString *effectType = nil;
+
+    if (row >= 0 && row < (NSInteger)_rowCount && _effectOffsetPerRow && _effectData) {
+        NSUInteger offset = _effectOffsetPerRow[row] + (NSUInteger)effectIndex;
+        if (offset < _effectCount) {
+            XLEffectEntry *eff = &_effectData[offset];
+            effectId = eff->effectIndex;
+
+            // Get effect type from engine if available
+            if (_engineBridge && effectId > 0) {
+                NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+                effectType = effectInfo[@"effectType"];
+            }
+        }
+    }
+
+    // Post notification for effect properties panel
+    NSDictionary *userInfo = @{
+        @"effectId": @(effectId),
+        @"effectType": effectType ?: [NSNull null]
+    };
+    [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
+                                                        object:self
+                                                      userInfo:userInfo];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -734,6 +785,15 @@ typedef struct {
                  row:(NSInteger)row
 {
     NSLog(@"Clicked at time %.0fms, row %ld", timeMS, (long)row);
+
+    // Clicking on empty area clears selection
+    NSDictionary *userInfo = @{
+        @"effectId": @(0),
+        @"effectType": [NSNull null]
+    };
+    [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
+                                                        object:self
+                                                      userInfo:userInfo];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -749,6 +809,44 @@ typedef struct {
     // Use scroll coordinator for synchronized scroll
     [_scrollCoordinator viewDidScrollHorizontally:scrollOffset.x fromView:gridView];
     [_scrollCoordinator viewDidScrollVertically:scrollOffset.y fromView:gridView];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateEffectOfType:(NSString *)effectType
+                           atRow:(NSInteger)row
+                     startTimeMS:(CGFloat)startTimeMS
+                       endTimeMS:(CGFloat)endTimeMS
+{
+    NSLog(@"XLSequencerViewController: Create effect '%@' at row %ld, time %.0f-%.0f ms",
+          effectType, (long)row, startTimeMS, endTimeMS);
+
+    if (!_engineBridge || !_usingRealData) {
+        NSLog(@"XLSequencerViewController: Cannot create effect - no real sequence loaded");
+        return;
+    }
+
+    // Get the model name for this row
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) {
+        NSLog(@"XLSequencerViewController: Invalid row %ld for effect creation", (long)row);
+        return;
+    }
+
+    NSString *modelName = [NSString stringWithUTF8String:_rowData[row].name];
+
+    // Create the effect via engine bridge
+    NSInteger effectId = [_engineBridge createEffect:modelName
+                                               layer:0
+                                          effectType:effectType
+                                         startTimeMS:(NSInteger)startTimeMS
+                                           endTimeMS:(NSInteger)endTimeMS];
+
+    if (effectId >= 0) {
+        NSLog(@"XLSequencerViewController: Created effect with ID %ld", (long)effectId);
+        // Reload data to show the new effect
+        [self reloadSequenceData];
+    } else {
+        NSLog(@"XLSequencerViewController: Failed to create effect");
+    }
 }
 
 #pragma mark - XLRowHeadingsDataSource
@@ -985,6 +1083,33 @@ typedef struct {
 - (void)playbackController:(XLPlaybackController *)controller didRenderFrameAtMS:(NSInteger)timeMS {
     // Frame rendered - nothing additional needed here
     // Preview view is updated by the playback controller directly
+}
+
+#pragma mark - XLEffectPaletteViewDelegate
+
+- (void)effectPaletteView:(XLEffectPaletteView *)paletteView didSelectEffectType:(NSString *)effectType {
+    NSLog(@"XLSequencerViewController: Selected effect type: %@", effectType);
+}
+
+- (void)effectPaletteView:(XLEffectPaletteView *)paletteView didDoubleClickEffectType:(NSString *)effectType {
+    NSLog(@"XLSequencerViewController: Double-clicked effect type: %@", effectType);
+    // TODO: Apply effect to currently selected range on timeline
+}
+
+#pragma mark - Effect Palette Visibility
+
+- (void)setEffectPaletteVisible:(BOOL)effectPaletteVisible {
+    if (_effectPaletteVisible == effectPaletteVisible) return;
+
+    _effectPaletteVisible = effectPaletteVisible;
+
+    CGFloat targetWidth = effectPaletteVisible ? kEffectPaletteWidth : 0;
+
+    [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+        context.duration = 0.25;
+        context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        _effectPaletteWidthConstraint.animator.constant = targetWidth;
+    } completionHandler:nil];
 }
 
 @end

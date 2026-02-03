@@ -19,4 +19,10 @@
 /// Open the recent show folder, if any.
 - (IBAction)openRecentShow:(id)sender;
 
+/// Create a new sequence.
+- (IBAction)newSequence:(id)sender;
+
+/// Open an existing sequence.
+- (IBAction)openSequence:(id)sender;
+
 @end
