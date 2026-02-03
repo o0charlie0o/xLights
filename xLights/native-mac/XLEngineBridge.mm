@@ -80,22 +80,42 @@
 
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (frame) {
-        _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(frame);
-        _modelEngine = std::make_unique<xlEngine::ModelEngine>(frame->AllModels);
-        _outputEngine = std::make_unique<xlEngine::OutputEngine>();
-        // Pass frame to OutputEngine so it can properly toggle output checkbox state
-        _outputEngine->initialize(frame->GetOutputManager(), frame);
-        _effectEngine = std::make_unique<xlEngine::EffectEngine>(frame);
-        _renderEngine = std::make_unique<xlEngine::RenderEngine>(frame);
-        _engineInitialized = YES;
-        NSLog(@"XLEngineBridge: All engines created successfully");
+        @try {
+            _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(frame);
+            _modelEngine = std::make_unique<xlEngine::ModelEngine>(frame->AllModels);
+            _outputEngine = std::make_unique<xlEngine::OutputEngine>();
+            // Pass frame to OutputEngine so it can properly toggle output checkbox state
+            _outputEngine->initialize(frame->GetOutputManager(), frame);
+            _effectEngine = std::make_unique<xlEngine::EffectEngine>(frame);
+            _renderEngine = std::make_unique<xlEngine::RenderEngine>(frame);
+            _engineInitialized = YES;
+            NSLog(@"XLEngineBridge: All engines created successfully");
+        } @catch (NSException *exception) {
+            NSLog(@"XLEngineBridge: Exception during engine initialization: %@ - %@",
+                  exception.name, exception.reason);
+            _engineInitialized = NO;
+        }
     }
+}
+
+- (BOOL)isEngineAvailable {
+    [self ensureEngineInitialized];
+    return _engineInitialized;
 }
 
 #pragma mark - Sequence Operations
 
 - (BOOL)loadSequence:(NSString *)path {
-    if (!path || path.length == 0) return NO;
+    if (!path || path.length == 0) {
+        NSLog(@"XLEngineBridge: Cannot load sequence - path is nil or empty");
+        return NO;
+    }
+
+    // Check if file exists
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        NSLog(@"XLEngineBridge: Cannot load sequence - file not found: %@", path);
+        return NO;
+    }
 
     [self ensureEngineInitialized];
     if (!_sequenceEngine) {
@@ -103,10 +123,16 @@
         return NO;
     }
 
-    std::string stdPath = [path UTF8String];
-    bool result = _sequenceEngine->loadSequence(stdPath);
-    NSLog(@"XLEngineBridge: loadSequence(%@) = %s", path, result ? "YES" : "NO");
-    return result ? YES : NO;
+    @try {
+        std::string stdPath = [path UTF8String];
+        bool result = _sequenceEngine->loadSequence(stdPath);
+        NSLog(@"XLEngineBridge: loadSequence(%@) = %s", path, result ? "YES" : "NO");
+        return result ? YES : NO;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception loading sequence '%@': %@ - %@",
+              path, exception.name, exception.reason);
+        return NO;
+    }
 }
 
 - (BOOL)saveSequence:(NSString *)path {
@@ -116,10 +142,31 @@
         return NO;
     }
 
-    std::string stdPath = path ? [path UTF8String] : "";
-    bool result = _sequenceEngine->saveSequence(stdPath);
-    NSLog(@"XLEngineBridge: saveSequence(%@) = %s", path ?: @"<current>", result ? "YES" : "NO");
-    return result ? YES : NO;
+    if (![self isSequenceLoaded]) {
+        NSLog(@"XLEngineBridge: Cannot save sequence - no sequence loaded");
+        return NO;
+    }
+
+    // If path is provided, check that the directory exists
+    if (path && path.length > 0) {
+        NSString *directory = [path stringByDeletingLastPathComponent];
+        BOOL isDir = NO;
+        if (![[NSFileManager defaultManager] fileExistsAtPath:directory isDirectory:&isDir] || !isDir) {
+            NSLog(@"XLEngineBridge: Cannot save sequence - directory does not exist: %@", directory);
+            return NO;
+        }
+    }
+
+    @try {
+        std::string stdPath = path ? [path UTF8String] : "";
+        bool result = _sequenceEngine->saveSequence(stdPath);
+        NSLog(@"XLEngineBridge: saveSequence(%@) = %s", path ?: @"<current>", result ? "YES" : "NO");
+        return result ? YES : NO;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception saving sequence '%@': %@ - %@",
+              path ?: @"<current>", exception.name, exception.reason);
+        return NO;
+    }
 }
 
 - (BOOL)closeSequence {
@@ -149,22 +196,38 @@
         return nil;
     }
 
-    xlEngine::SequenceInfo info = _sequenceEngine->getSequenceInfo();
+    @try {
+        xlEngine::SequenceInfo info = _sequenceEngine->getSequenceInfo();
 
-    return @{
-        @"name": [NSString stringWithUTF8String:info.name.c_str()],
-        @"mediaFile": [NSString stringWithUTF8String:info.mediaFile.c_str()],
-        @"sequenceType": [NSString stringWithUTF8String:info.sequenceType.c_str()],
-        @"durationMS": @(info.durationMS),
-        @"frameTimeMS": @(info.frameTimeMS),
-        @"numChannels": @(info.numChannels),
-        @"numFrames": @(info.numFrames),
-        @"author": [NSString stringWithUTF8String:info.author.c_str()],
-        @"song": [NSString stringWithUTF8String:info.song.c_str()],
-        @"artist": [NSString stringWithUTF8String:info.artist.c_str()],
-        @"album": [NSString stringWithUTF8String:info.album.c_str()],
-        @"comment": [NSString stringWithUTF8String:info.comment.c_str()],
-    };
+        // Safely convert strings, defaulting to empty string if null
+        NSString *name = info.name.empty() ? @"" : [NSString stringWithUTF8String:info.name.c_str()];
+        NSString *mediaFile = info.mediaFile.empty() ? @"" : [NSString stringWithUTF8String:info.mediaFile.c_str()];
+        NSString *sequenceType = info.sequenceType.empty() ? @"" : [NSString stringWithUTF8String:info.sequenceType.c_str()];
+        NSString *author = info.author.empty() ? @"" : [NSString stringWithUTF8String:info.author.c_str()];
+        NSString *song = info.song.empty() ? @"" : [NSString stringWithUTF8String:info.song.c_str()];
+        NSString *artist = info.artist.empty() ? @"" : [NSString stringWithUTF8String:info.artist.c_str()];
+        NSString *album = info.album.empty() ? @"" : [NSString stringWithUTF8String:info.album.c_str()];
+        NSString *comment = info.comment.empty() ? @"" : [NSString stringWithUTF8String:info.comment.c_str()];
+
+        return @{
+            @"name": name,
+            @"mediaFile": mediaFile,
+            @"sequenceType": sequenceType,
+            @"durationMS": @(info.durationMS),
+            @"frameTimeMS": @(info.frameTimeMS > 0 ? info.frameTimeMS : 50), // Default to 50ms (20fps)
+            @"numChannels": @(info.numChannels),
+            @"numFrames": @(info.numFrames),
+            @"author": author,
+            @"song": song,
+            @"artist": artist,
+            @"album": album,
+            @"comment": comment,
+        };
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting sequence info: %@ - %@",
+              exception.name, exception.reason);
+        return nil;
+    }
 }
 
 #pragma mark - Playback Control
@@ -1804,16 +1867,30 @@
     [self ensureEngineInitialized];
     if (!_sequenceEngine) return nil;
 
-    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
-    if (!seqFile) return nil;
+    @try {
+        xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+        if (!seqFile) return nil;
 
-    AudioManager* audio = seqFile->GetMedia();
-    if (!audio) return nil;
+        AudioManager* audio = seqFile->GetMedia();
+        if (!audio) return nil;
 
-    std::string filePath = audio->FileName();
-    if (filePath.empty()) return nil;
+        std::string filePath = audio->FileName();
+        if (filePath.empty()) return nil;
 
-    return [NSString stringWithUTF8String:filePath.c_str()];
+        NSString *path = [NSString stringWithUTF8String:filePath.c_str()];
+
+        // Verify the file exists
+        if (path && ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            NSLog(@"XLEngineBridge: Media file path exists but file not found: %@", path);
+            return nil;
+        }
+
+        return path;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting media file path: %@ - %@",
+              exception.name, exception.reason);
+        return nil;
+    }
 }
 
 - (BOOL)isAudioLoaded {
@@ -1852,53 +1929,96 @@
 - (NSDictionary *)getAudioSamples:(NSInteger)startMS endMS:(NSInteger)endMS {
     [self ensureEngineInitialized];
 
-    xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
-    if (!seqFile) return nil;
-
-    AudioManager* audio = seqFile->GetMedia();
-    if (!audio || !audio->IsOk()) return nil;
-
-    long sampleRate = audio->GetSampleRate();
-    long trackSize = audio->GetTrackSize();
-    int channels = audio->GetChannels();
-
-    // Convert milliseconds to sample offsets
-    long startSample = (startMS * sampleRate) / 1000;
-    long endSample = (endMS * sampleRate) / 1000;
-
-    if (startSample < 0) startSample = 0;
-    if (endSample > trackSize) endSample = trackSize;
-    if (endSample <= startSample) return nil;
-
-    long sampleCount = endSample - startSample;
-
-    // Allocate output buffers
-    NSMutableData *leftData = [NSMutableData dataWithLength:sampleCount * sizeof(float)];
-    NSMutableData *rightData = [NSMutableData dataWithLength:sampleCount * sizeof(float)];
-
-    float *leftPtr = (float *)leftData.mutableBytes;
-    float *rightPtr = (float *)rightData.mutableBytes;
-
-    // Get audio data pointers
-    float *rawLeft = audio->GetRawLeftDataPtr(startSample);
-    float *rawRight = audio->GetRawRightDataPtr(startSample);
-
-    if (rawLeft) {
-        memcpy(leftPtr, rawLeft, sampleCount * sizeof(float));
-    }
-    if (rawRight && channels >= 2) {
-        memcpy(rightPtr, rawRight, sampleCount * sizeof(float));
-    } else if (rawLeft) {
-        // Mono - copy left to right
-        memcpy(rightPtr, rawLeft, sampleCount * sizeof(float));
+    // Validate time range
+    if (startMS < 0) startMS = 0;
+    if (endMS <= startMS) {
+        NSLog(@"XLEngineBridge: Invalid audio sample range: %ld to %ld", (long)startMS, (long)endMS);
+        return nil;
     }
 
-    return @{
-        @"leftChannel": leftData,
-        @"rightChannel": rightData,
-        @"sampleCount": @(sampleCount),
-        @"sampleRate": @(sampleRate)
-    };
+    @try {
+        xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
+        if (!seqFile) {
+            NSLog(@"XLEngineBridge: No sequence file loaded for audio samples");
+            return nil;
+        }
+
+        AudioManager* audio = seqFile->GetMedia();
+        if (!audio || !audio->IsOk()) {
+            // This is normal for sequences without audio - don't log as error
+            return nil;
+        }
+
+        long sampleRate = audio->GetSampleRate();
+        long trackSize = audio->GetTrackSize();
+        int channels = audio->GetChannels();
+
+        if (sampleRate <= 0 || trackSize <= 0) {
+            NSLog(@"XLEngineBridge: Invalid audio format - sampleRate: %ld, trackSize: %ld",
+                  sampleRate, trackSize);
+            return nil;
+        }
+
+        // Convert milliseconds to sample offsets
+        long startSample = (startMS * sampleRate) / 1000;
+        long endSample = (endMS * sampleRate) / 1000;
+
+        if (startSample < 0) startSample = 0;
+        if (endSample > trackSize) endSample = trackSize;
+        if (endSample <= startSample) return nil;
+
+        long sampleCount = endSample - startSample;
+
+        // Sanity check sample count to avoid huge allocations
+        if (sampleCount > 10000000) {
+            NSLog(@"XLEngineBridge: Requested sample count too large: %ld", sampleCount);
+            return nil;
+        }
+
+        // Allocate output buffers
+        NSMutableData *leftData = [NSMutableData dataWithLength:sampleCount * sizeof(float)];
+        NSMutableData *rightData = [NSMutableData dataWithLength:sampleCount * sizeof(float)];
+
+        if (!leftData || !rightData) {
+            NSLog(@"XLEngineBridge: Failed to allocate audio sample buffers");
+            return nil;
+        }
+
+        float *leftPtr = (float *)leftData.mutableBytes;
+        float *rightPtr = (float *)rightData.mutableBytes;
+
+        // Get audio data pointers
+        float *rawLeft = audio->GetRawLeftDataPtr(startSample);
+        float *rawRight = audio->GetRawRightDataPtr(startSample);
+
+        if (rawLeft) {
+            memcpy(leftPtr, rawLeft, sampleCount * sizeof(float));
+        } else {
+            // No left channel data - zero fill
+            memset(leftPtr, 0, sampleCount * sizeof(float));
+        }
+
+        if (rawRight && channels >= 2) {
+            memcpy(rightPtr, rawRight, sampleCount * sizeof(float));
+        } else if (rawLeft) {
+            // Mono - copy left to right
+            memcpy(rightPtr, rawLeft, sampleCount * sizeof(float));
+        } else {
+            // No audio data - zero fill
+            memset(rightPtr, 0, sampleCount * sizeof(float));
+        }
+
+        return @{
+            @"leftChannel": leftData,
+            @"rightChannel": rightData,
+            @"sampleCount": @(sampleCount),
+            @"sampleRate": @(sampleRate)
+        };
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting audio samples: %@ - %@",
+              exception.name, exception.reason);
+        return nil;
+    }
 }
 
 - (NSDictionary *)getAudioAmplitudeRange:(NSInteger)startMS endMS:(NSInteger)endMS {

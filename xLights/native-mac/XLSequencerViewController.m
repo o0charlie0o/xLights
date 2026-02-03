@@ -221,6 +221,7 @@ typedef struct {
 
 - (void)loadAudioForSequence {
     if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        [self clearAudioDisplay];
         return;
     }
 
@@ -228,13 +229,15 @@ typedef struct {
     NSString *mediaFile = seqInfo[@"mediaFile"];
 
     if (!mediaFile || mediaFile.length == 0) {
-        NSLog(@"XLSequencerViewController: No media file in sequence");
+        NSLog(@"XLSequencerViewController: No media file in sequence - audio waveform will be empty");
+        [self clearAudioDisplay];
         return;
     }
 
     // Check if the file exists
     if (![[NSFileManager defaultManager] fileExistsAtPath:mediaFile]) {
-        NSLog(@"XLSequencerViewController: Media file not found: %@", mediaFile);
+        NSLog(@"XLSequencerViewController: Media file not found: %@ - audio waveform will be empty", mediaFile);
+        [self clearAudioDisplay];
         return;
     }
 
@@ -253,11 +256,21 @@ typedef struct {
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (strongSelf) {
-                strongSelf.audioSampleData = sampleData;
-                [strongSelf.waveformView loadAudioData:sampleData];
+                if (sampleData && sampleData.sampleCount > 0) {
+                    strongSelf.audioSampleData = sampleData;
+                    [strongSelf.waveformView loadAudioData:sampleData];
+                } else {
+                    NSLog(@"XLSequencerViewController: Failed to load audio samples, waveform will be empty");
+                    [strongSelf clearAudioDisplay];
+                }
             }
         });
     });
+}
+
+- (void)clearAudioDisplay {
+    self.audioSampleData = nil;
+    [_waveformView clearWaveform];
 }
 
 #pragma mark - Data Loading

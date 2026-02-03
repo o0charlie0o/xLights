@@ -1,6 +1,16 @@
 #import "XLDocumentController.h"
 #import "XLDocument.h"
 
+// Error domain for XLDocumentController errors
+NSString * const XLDocumentControllerErrorDomain = @"com.xlights.documentcontroller";
+
+typedef NS_ENUM(NSInteger, XLDocumentControllerErrorCode) {
+    XLDocumentControllerErrorFileNotFound = 1001,
+    XLDocumentControllerErrorInvalidShowFolder = 1002,
+    XLDocumentControllerErrorUnsupportedFileType = 1003,
+    XLDocumentControllerErrorPermissionDenied = 1004,
+};
+
 @implementation XLDocumentController
 
 #pragma mark - Initialization
@@ -17,6 +27,45 @@
 #pragma mark - Opening Documents
 
 - (void)openShowFolder:(NSURL *)url completionHandler:(void (^)(NSDocument *document, BOOL documentWasAlreadyOpen, NSError *error))completionHandler {
+    // Validate URL
+    if (!url) {
+        if (completionHandler) {
+            NSError *error = [NSError errorWithDomain:XLDocumentControllerErrorDomain
+                                                 code:XLDocumentControllerErrorFileNotFound
+                                             userInfo:@{NSLocalizedDescriptionKey: @"No URL provided"}];
+            completionHandler(nil, NO, error);
+        }
+        return;
+    }
+
+    // Check if path exists
+    BOOL isDirectory = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:url.path isDirectory:&isDirectory]) {
+        if (completionHandler) {
+            NSError *error = [NSError errorWithDomain:XLDocumentControllerErrorDomain
+                                                 code:XLDocumentControllerErrorFileNotFound
+                                             userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Path not found: %@", url.path],
+                                                        NSURLErrorKey: url}];
+            completionHandler(nil, NO, error);
+        }
+        return;
+    }
+
+    // Validate it's actually a show folder
+    if (isDirectory) {
+        NSURL *rgbEffectsURL = [url URLByAppendingPathComponent:@"xlights_rgbeffects.xml"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:rgbEffectsURL.path]) {
+            if (completionHandler) {
+                NSError *error = [NSError errorWithDomain:XLDocumentControllerErrorDomain
+                                                     code:XLDocumentControllerErrorInvalidShowFolder
+                                                 userInfo:@{NSLocalizedDescriptionKey: @"Selected folder is not a valid xLights show folder (missing xlights_rgbeffects.xml)",
+                                                            NSURLErrorKey: url}];
+                completionHandler(nil, NO, error);
+            }
+            return;
+        }
+    }
+
     // Check if this show folder is already open
     for (NSDocument *doc in self.documents) {
         if ([doc isKindOfClass:[XLDocument class]]) {

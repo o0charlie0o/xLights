@@ -222,9 +222,17 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
     [self updateSequenceInfo];
 
     if (_durationMS <= 0) {
-        NSLog(@"XLPlaybackController: Cannot play - no sequence loaded");
+        NSLog(@"XLPlaybackController: Cannot play - no sequence loaded or duration is zero");
+        // Notify delegate of failure
+        if ([_delegate respondsToSelector:@selector(playbackControllerDidStopPlayback:)]) {
+            [_delegate playbackControllerDidStopPlayback:self];
+        }
         return;
     }
+
+    // Clamp position to valid range
+    if (_positionMS < 0) _positionMS = 0;
+    if (_positionMS >= _durationMS) _positionMS = 0;
 
     _isPlaying = YES;
     _isPaused = NO;
@@ -242,22 +250,23 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
     // Start the playback loop (for frame timing and preview rendering)
     [self startDisplayLink];
 
-    // Start audio playback
+    // Start audio playback (if audio is available)
     if (_useNativeAudio && _audioPlayer.isLoaded) {
         // Use native AVFoundation audio
         [_audioPlayer playFromPosition:(CGFloat)_positionMS];
-    } else {
+    } else if (_engineBridge) {
         // Fall back to engine audio
         [_engineBridge play];
     }
+    // Note: Playback can continue without audio for sequences without media files
 
     // Notify delegate
     if ([_delegate respondsToSelector:@selector(playbackControllerDidStartPlayback:)]) {
         [_delegate playbackControllerDidStartPlayback:self];
     }
 
-    NSLog(@"XLPlaybackController: Playback started at %ldms, duration %ldms, frameTime %ldms, nativeAudio=%d",
-          (long)_positionMS, (long)_durationMS, (long)_frameTimeMS, _useNativeAudio);
+    NSLog(@"XLPlaybackController: Playback started at %ldms, duration %ldms, frameTime %ldms, nativeAudio=%d, hasAudio=%d",
+          (long)_positionMS, (long)_durationMS, (long)_frameTimeMS, _useNativeAudio, (_useNativeAudio && _audioPlayer.isLoaded));
 }
 
 - (void)pause {
@@ -392,31 +401,49 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)renderFrameAtTime:(NSInteger)timeMS {
-    if (!_engineBridge || !_previewView) return;
-
-    // Request the engine to render this frame
-    [_engineBridge renderFrame:timeMS];
-
-    // Get rendered pixel data for each model and update the preview
-    NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
-    for (NSString *modelName in modelNames) {
-        NSDictionary *frameBuffer = [_engineBridge getFrameBuffer:modelName];
-        if (frameBuffer) {
-            NSData *pixels = frameBuffer[@"pixels"];
-            NSUInteger width = [frameBuffer[@"width"] unsignedIntegerValue];
-            NSUInteger height = [frameBuffer[@"height"] unsignedIntegerValue];
-
-            if (pixels && width > 0 && height > 0) {
-                [_previewView setRenderedPixels:pixels
-                                       forModel:modelName
-                                          width:width
-                                         height:height];
-            }
-        }
+    if (!_engineBridge) {
+        NSLog(@"XLPlaybackController: Cannot render frame - engine bridge not available");
+        return;
     }
 
-    // Tell preview to update for this time
-    [_previewView updatePreviewForTime:timeMS];
+    // Clamp time to valid range
+    if (timeMS < 0) timeMS = 0;
+    if (_durationMS > 0 && timeMS > _durationMS) timeMS = _durationMS;
+
+    // Request the engine to render this frame
+    @try {
+        [_engineBridge renderFrame:timeMS];
+
+        // Get rendered pixel data for each model and update the preview (if preview view is available)
+        if (_previewView) {
+            NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
+            if (modelNames && modelNames.count > 0) {
+                for (NSString *modelName in modelNames) {
+                    if (!modelName || modelName.length == 0) continue;
+
+                    NSDictionary *frameBuffer = [_engineBridge getFrameBuffer:modelName];
+                    if (frameBuffer) {
+                        NSData *pixels = frameBuffer[@"pixels"];
+                        NSUInteger width = [frameBuffer[@"width"] unsignedIntegerValue];
+                        NSUInteger height = [frameBuffer[@"height"] unsignedIntegerValue];
+
+                        if (pixels && pixels.length > 0 && width > 0 && height > 0) {
+                            [_previewView setRenderedPixels:pixels
+                                                   forModel:modelName
+                                                      width:width
+                                                     height:height];
+                        }
+                    }
+                }
+            }
+
+            // Tell preview to update for this time
+            [_previewView updatePreviewForTime:timeMS];
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"XLPlaybackController: Exception rendering frame at %ldms: %@ - %@",
+              (long)timeMS, exception.name, exception.reason);
+    }
 
     // Notify delegate
     if ([_delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {

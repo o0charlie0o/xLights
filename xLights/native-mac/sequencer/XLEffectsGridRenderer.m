@@ -39,6 +39,11 @@ static const NSInteger kMaxEffectVertices = 32768;
 static const CGFloat kEffectBlockCornerRadius = 3.0;
 static const CGFloat kEffectBlockInset = 1.0;
 
+// Pre-allocated buffer sizes for reuse (avoids per-frame allocations)
+static const NSUInteger kGridLineBufferSize = kMaxGridLineVertices * sizeof(SimpleVertex);
+static const NSUInteger kEffectBlockBufferSize = kMaxEffectVertices * sizeof(RoundedRectVertex);
+static const NSUInteger kOutlineBufferSize = 4096 * sizeof(RoundedRectVertex);
+
 /// Per-frame scalar rendering parameters, passed by value to sub-draw methods.
 /// All data stays on the stack (no heap/ivar involvement) to avoid stale or
 /// corrupted pointer reads.
@@ -60,6 +65,12 @@ typedef struct {
 @property (nonatomic, strong) id<MTLRenderPipelineState> linePipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> effectBlockPipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> outlinePipeline;
+
+// Pre-allocated reusable Metal buffers to avoid per-frame allocations
+@property (nonatomic, strong) id<MTLBuffer> gridLineBuffer;
+@property (nonatomic, strong) id<MTLBuffer> effectBlockBuffer;
+@property (nonatomic, strong) id<MTLBuffer> outlineBuffer;
+@property (nonatomic, strong) id<MTLBuffer> playbackBuffer;
 
 @end
 
@@ -86,8 +97,33 @@ typedef struct {
             NSLog(@"XLEffectsGridRenderer: Failed to build render pipelines");
             return nil;
         }
+
+        // Pre-allocate reusable Metal buffers
+        [self allocateReusableBuffers];
     }
     return self;
+}
+
+- (void)allocateReusableBuffers {
+    // Grid line buffer - shared storage for CPU writes, GPU reads
+    _gridLineBuffer = [_device newBufferWithLength:kGridLineBufferSize
+                                           options:MTLResourceStorageModeShared];
+    [_gridLineBuffer setLabel:@"GridLineBuffer"];
+
+    // Effect block buffer
+    _effectBlockBuffer = [_device newBufferWithLength:kEffectBlockBufferSize
+                                              options:MTLResourceStorageModeShared];
+    [_effectBlockBuffer setLabel:@"EffectBlockBuffer"];
+
+    // Outline buffer for selected effects
+    _outlineBuffer = [_device newBufferWithLength:kOutlineBufferSize
+                                          options:MTLResourceStorageModeShared];
+    [_outlineBuffer setLabel:@"OutlineBuffer"];
+
+    // Playback indicator buffer (6 vertices for 2 triangles)
+    _playbackBuffer = [_device newBufferWithLength:6 * sizeof(SimpleVertex)
+                                           options:MTLResourceStorageModeShared];
+    [_playbackBuffer setLabel:@"PlaybackBuffer"];
 }
 
 - (BOOL)buildPipelines {
@@ -370,7 +406,10 @@ typedef struct {
     NSInteger totalRows = fp.totalRows;
     CGFloat sequenceLengthMS = fp.sequenceLengthMS;
 
-    NSMutableData *vertexData = [NSMutableData dataWithCapacity:kMaxGridLineVertices * sizeof(SimpleVertex)];
+    // Write directly into pre-allocated buffer (avoids NSMutableData allocations)
+    SimpleVertex *vertices = (SimpleVertex *)_gridLineBuffer.contents;
+    NSUInteger vertexCount = 0;
+    NSUInteger maxVertices = kGridLineBufferSize / sizeof(SimpleVertex);
 
     // Horizontal row separator lines
     simd_float4 rowLineColor = simd_make_float4(0.25, 0.25, 0.25, 1.0);
@@ -382,11 +421,10 @@ typedef struct {
     for (NSInteger row = startRow; row <= endRow; row++) {
         CGFloat y = row * rowHeight - scrollOffset.y;
         if (y < -1 || y > viewSize.height + 1) continue;
+        if (vertexCount + 2 > maxVertices) break;
 
-        SimpleVertex v0 = { simd_make_float2(0, y), rowLineColor };
-        SimpleVertex v1 = { simd_make_float2(viewSize.width, y), rowLineColor };
-        [vertexData appendBytes:&v0 length:sizeof(SimpleVertex)];
-        [vertexData appendBytes:&v1 length:sizeof(SimpleVertex)];
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(0, y), rowLineColor };
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(viewSize.width, y), rowLineColor };
     }
 
     // Vertical time division lines
@@ -416,14 +454,13 @@ typedef struct {
     for (CGFloat t = firstMark; t <= endTimeMS && t <= sequenceLengthMS; t += gridIntervalMS) {
         CGFloat x = t * zoomLevel - scrollOffset.x;
         if (x < -1 || x > viewSize.width + 1) continue;
+        if (vertexCount + 2 > maxVertices) break;
 
         BOOL isMajor = fmod(t, gridIntervalMS * 4) < 0.1;
         simd_float4 lineColor = isMajor ? majorLineColor : minorLineColor;
 
-        SimpleVertex v0 = { simd_make_float2(x, 0), lineColor };
-        SimpleVertex v1 = { simd_make_float2(x, viewSize.height), lineColor };
-        [vertexData appendBytes:&v0 length:sizeof(SimpleVertex)];
-        [vertexData appendBytes:&v1 length:sizeof(SimpleVertex)];
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, 0), lineColor };
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, viewSize.height), lineColor };
     }
 
     // Timing mark lines (from active timing track)
@@ -434,23 +471,19 @@ typedef struct {
             CGFloat t = timingMarkValues[mi];
             CGFloat x = t * zoomLevel - scrollOffset.x;
             if (x < -1 || x > viewSize.width + 1) continue;
+            if (vertexCount + 2 > maxVertices) break;
 
-            SimpleVertex v0 = { simd_make_float2(x, 0), timingColor };
-            SimpleVertex v1 = { simd_make_float2(x, viewSize.height), timingColor };
-            [vertexData appendBytes:&v0 length:sizeof(SimpleVertex)];
-            [vertexData appendBytes:&v1 length:sizeof(SimpleVertex)];
+            vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, 0), timingColor };
+            vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, viewSize.height), timingColor };
         }
     }
 
-    if (vertexData.length == 0) return;
+    if (vertexCount == 0) return;
 
-    id<MTLBuffer> buffer = [_device newBufferWithBytes:vertexData.bytes
-                                               length:vertexData.length
-                                              options:MTLResourceStorageModeShared];
+    // Use pre-allocated buffer - data is already written
     [encoder setRenderPipelineState:_linePipeline];
-    [encoder setVertexBuffer:buffer offset:0 atIndex:0];
+    [encoder setVertexBuffer:_gridLineBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
-    NSInteger vertexCount = vertexData.length / sizeof(SimpleVertex);
     [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexCount];
 }
 
@@ -469,8 +502,13 @@ typedef struct {
 
     if (!effects || effectCount == 0) return;
 
-    NSMutableData *blockVertexData = [NSMutableData data];
-    NSMutableData *outlineVertexData = [NSMutableData data];
+    // Write directly into pre-allocated buffers
+    RoundedRectVertex *blockVertices = (RoundedRectVertex *)_effectBlockBuffer.contents;
+    RoundedRectVertex *outlineVertices = (RoundedRectVertex *)_outlineBuffer.contents;
+    NSUInteger blockVertexCount = 0;
+    NSUInteger outlineVertexCount = 0;
+    NSUInteger maxBlockVertices = kEffectBlockBufferSize / sizeof(RoundedRectVertex);
+    NSUInteger maxOutlineVertices = kOutlineBufferSize / sizeof(RoundedRectVertex);
 
     CGFloat msPerPixel = 1.0 / zoomLevel;
     CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
@@ -494,6 +532,9 @@ typedef struct {
         // Skip if too narrow to draw
         if (x2 - x1 < 2.0) continue;
 
+        // Check buffer capacity
+        if (blockVertexCount + 6 > maxBlockVertices) break;
+
         simd_float4 color;
         if (info.colorARGB != 0) {
             float a = ((info.colorARGB >> 24) & 0xFF) / 255.0f;
@@ -516,71 +557,59 @@ typedef struct {
         float cornerRadius = (float)kEffectBlockCornerRadius;
 
         // Two triangles forming the bounding quad for the rounded rect
-        RoundedRectVertex vertices[6];
+        // Write directly to pre-allocated buffer
+        RoundedRectVertex *vptr = &blockVertices[blockVertexCount];
         for (int i = 0; i < 6; i++) {
-            vertices[i].color = color;
-            vertices[i].rectMin = rectMin;
-            vertices[i].rectMax = rectMax;
-            vertices[i].cornerRadius = cornerRadius;
+            vptr[i].color = color;
+            vptr[i].rectMin = rectMin;
+            vptr[i].rectMax = rectMax;
+            vptr[i].cornerRadius = cornerRadius;
         }
-        vertices[0].position = simd_make_float2(x1, y1);
-        vertices[1].position = simd_make_float2(x2, y1);
-        vertices[2].position = simd_make_float2(x1, y2);
-        vertices[3].position = simd_make_float2(x2, y1);
-        vertices[4].position = simd_make_float2(x2, y2);
-        vertices[5].position = simd_make_float2(x1, y2);
-
-        [blockVertexData appendBytes:vertices length:sizeof(vertices)];
+        vptr[0].position = simd_make_float2(x1, y1);
+        vptr[1].position = simd_make_float2(x2, y1);
+        vptr[2].position = simd_make_float2(x1, y2);
+        vptr[3].position = simd_make_float2(x2, y1);
+        vptr[4].position = simd_make_float2(x2, y2);
+        vptr[5].position = simd_make_float2(x1, y2);
+        blockVertexCount += 6;
 
         // Selection outline
-        if (info.selected) {
+        if (info.selected && outlineVertexCount + 6 <= maxOutlineVertices) {
             simd_float4 selColor = simd_make_float4(0.3, 0.6, 1.0, 1.0);
-            RoundedRectVertex outlineVerts[6];
-            for (int i = 0; i < 6; i++) {
-                outlineVerts[i].color = selColor;
-                outlineVerts[i].rectMin = rectMin;
-                outlineVerts[i].rectMax = rectMax;
-                outlineVerts[i].cornerRadius = cornerRadius;
-            }
-            outlineVerts[0].position = simd_make_float2(x1 - 1, y1 - 1);
-            outlineVerts[1].position = simd_make_float2(x2 + 1, y1 - 1);
-            outlineVerts[2].position = simd_make_float2(x1 - 1, y2 + 1);
-            outlineVerts[3].position = simd_make_float2(x2 + 1, y1 - 1);
-            outlineVerts[4].position = simd_make_float2(x2 + 1, y2 + 1);
-            outlineVerts[5].position = simd_make_float2(x1 - 1, y2 + 1);
+            simd_float2 outlineMin = simd_make_float2(x1 - 1, y1 - 1);
+            simd_float2 outlineMax = simd_make_float2(x2 + 1, y2 + 1);
 
-            // Adjust the outline's rect bounds too
+            RoundedRectVertex *optr = &outlineVertices[outlineVertexCount];
             for (int i = 0; i < 6; i++) {
-                outlineVerts[i].rectMin = simd_make_float2(x1 - 1, y1 - 1);
-                outlineVerts[i].rectMax = simd_make_float2(x2 + 1, y2 + 1);
+                optr[i].color = selColor;
+                optr[i].rectMin = outlineMin;
+                optr[i].rectMax = outlineMax;
+                optr[i].cornerRadius = cornerRadius;
             }
-
-            [outlineVertexData appendBytes:outlineVerts length:sizeof(outlineVerts)];
+            optr[0].position = simd_make_float2(x1 - 1, y1 - 1);
+            optr[1].position = simd_make_float2(x2 + 1, y1 - 1);
+            optr[2].position = simd_make_float2(x1 - 1, y2 + 1);
+            optr[3].position = simd_make_float2(x2 + 1, y1 - 1);
+            optr[4].position = simd_make_float2(x2 + 1, y2 + 1);
+            optr[5].position = simd_make_float2(x1 - 1, y2 + 1);
+            outlineVertexCount += 6;
         }
     }
 
-    // Draw filled effect blocks
-    if (blockVertexData.length > 0) {
-        id<MTLBuffer> buffer = [_device newBufferWithBytes:blockVertexData.bytes
-                                                   length:blockVertexData.length
-                                                  options:MTLResourceStorageModeShared];
+    // Draw filled effect blocks using pre-allocated buffer
+    if (blockVertexCount > 0) {
         [encoder setRenderPipelineState:_effectBlockPipeline];
-        [encoder setVertexBuffer:buffer offset:0 atIndex:0];
+        [encoder setVertexBuffer:_effectBlockBuffer offset:0 atIndex:0];
         [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
-        NSInteger vertexCount = blockVertexData.length / sizeof(RoundedRectVertex);
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertexCount];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:blockVertexCount];
     }
 
-    // Draw selection outlines on top
-    if (outlineVertexData.length > 0) {
-        id<MTLBuffer> buffer = [_device newBufferWithBytes:outlineVertexData.bytes
-                                                   length:outlineVertexData.length
-                                                  options:MTLResourceStorageModeShared];
+    // Draw selection outlines on top using pre-allocated buffer
+    if (outlineVertexCount > 0) {
         [encoder setRenderPipelineState:_outlinePipeline];
-        [encoder setVertexBuffer:buffer offset:0 atIndex:0];
+        [encoder setVertexBuffer:_outlineBuffer offset:0 atIndex:0];
         [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
-        NSInteger vertexCount = outlineVertexData.length / sizeof(RoundedRectVertex);
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertexCount];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:outlineVertexCount];
     }
 }
 
@@ -600,9 +629,9 @@ typedef struct {
     CGFloat x = playbackPositionMS * zoomLevel - scrollOffset.x;
     if (x < -2 || x > viewSize.width + 2) return;
 
-    // Red playback line (2px wide)
+    // Red playback line (2px wide) - write directly to pre-allocated buffer
     simd_float4 playColor = simd_make_float4(1.0, 0.15, 0.15, 0.9);
-    SimpleVertex vertices[6];
+    SimpleVertex *vertices = (SimpleVertex *)_playbackBuffer.contents;
     vertices[0] = (SimpleVertex){ simd_make_float2(x - 1, 0), playColor };
     vertices[1] = (SimpleVertex){ simd_make_float2(x + 1, 0), playColor };
     vertices[2] = (SimpleVertex){ simd_make_float2(x - 1, viewSize.height), playColor };
@@ -610,11 +639,8 @@ typedef struct {
     vertices[4] = (SimpleVertex){ simd_make_float2(x + 1, viewSize.height), playColor };
     vertices[5] = (SimpleVertex){ simd_make_float2(x - 1, viewSize.height), playColor };
 
-    id<MTLBuffer> buffer = [_device newBufferWithBytes:vertices
-                                               length:sizeof(vertices)
-                                              options:MTLResourceStorageModeShared];
     [encoder setRenderPipelineState:_linePipeline];
-    [encoder setVertexBuffer:buffer offset:0 atIndex:0];
+    [encoder setVertexBuffer:_playbackBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 }

@@ -17,11 +17,56 @@ extern int XLLaunchSwiftUIWindow(void);
 // Set to 1 to use legacy AppKit window, 0 for new SwiftUI window
 #define USE_LEGACY_APPKIT_WINDOW 0
 
+// User defaults key for native UI feature flag
+const char* XLNativeUIEnabledKey = "XLNativeUIEnabled";
+static NSString *const kXLNativeUIEnabledKey = @"XLNativeUIEnabled";
+
 #if USE_LEGACY_APPKIT_WINDOW
 static XLMainWindowController *sNativeWindowController = nil;
 #endif
 
+int XLIsNativeUIEnabled(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    // Check if the key exists; if not, default is OFF (disabled)
+    if ([defaults objectForKey:kXLNativeUIEnabledKey] == nil) {
+        return 0;
+    }
+    return [defaults boolForKey:kXLNativeUIEnabledKey] ? 1 : 0;
+}
+
+void XLSetNativeUIEnabled(int enabled) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:(enabled != 0) forKey:kXLNativeUIEnabledKey];
+    [defaults synchronize];
+    NSLog(@"NativeUI: Feature flag set to %@", enabled ? @"ENABLED" : @"DISABLED");
+}
+
+static BOOL XLShouldLaunchNativeUI(void) {
+    // Check command-line arguments for -nativeUI flag (overrides preference)
+    NSArray *args = [[NSProcessInfo processInfo] arguments];
+    for (NSString *arg in args) {
+        if ([arg isEqualToString:@"-nativeUI"]) {
+            NSLog(@"NativeUI: Enabled via -nativeUI command-line flag");
+            return YES;
+        }
+    }
+
+    // Check user defaults preference
+    if (XLIsNativeUIEnabled()) {
+        NSLog(@"NativeUI: Enabled via user preference");
+        return YES;
+    }
+
+    return NO;
+}
+
 int XLTryLaunchNativeWindow(void) {
+    // Check if native UI should be launched
+    if (!XLShouldLaunchNativeUI()) {
+        NSLog(@"NativeUI: Native UI is disabled (use Preferences > Other to enable, or pass -nativeUI flag)");
+        return 0;
+    }
+
 #if USE_LEGACY_APPKIT_WINDOW
     // Legacy AppKit-based window (has resize issues due to Auto Layout conflicts)
     dispatch_async(dispatch_get_main_queue(), ^{

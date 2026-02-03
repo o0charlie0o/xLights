@@ -29,6 +29,9 @@
 
 - (instancetype)init;
 
+/// Check if the engine is available and initialized
+- (BOOL)isEngineAvailable;
+
 #pragma mark - Sequence Operations
 
 - (BOOL)loadSequence:(NSString *)path;

@@ -83,6 +83,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 @property (nonatomic, assign) NSUInteger previewColorCount;
 @property (nonatomic, strong) NSLock *pixelDataLock;
 
+// Optimization: track when vertex rebuild is actually needed
+@property (nonatomic, assign) BOOL modelVerticesDirty;
+@property (nonatomic, assign) NSUInteger lastPixelDataGeneration;
+@property (nonatomic, assign) NSUInteger pixelDataGeneration;
+
 @property (nonatomic, assign) NSPoint lastDragPoint;
 @property (nonatomic, assign) BOOL isDragging;
 @property (nonatomic, assign) BOOL isRightDragging;
@@ -143,6 +148,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _renderedPixelWidths = [[NSMutableDictionary alloc] init];
     _renderedPixelHeights = [[NSMutableDictionary alloc] init];
     _pixelDataLock = [[NSLock alloc] init];
+    _modelVerticesDirty = YES;
+    _pixelDataGeneration = 0;
+    _lastPixelDataGeneration = 0;
 
     [self setupDepthStencilState];
     [self buildGridPipeline];
@@ -947,9 +955,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)updatePreviewForTime:(NSInteger)timeMS {
     _playbackPositionMS = timeMS;
 
-    // Rebuild model vertices with current pixel data
-    if (_showEffectColors) {
+    // Only rebuild model vertices if pixel data has actually changed
+    if (_showEffectColors && _lastPixelDataGeneration != _pixelDataGeneration) {
         [self buildModelVerticesWithEffectColors:YES];
+        _lastPixelDataGeneration = _pixelDataGeneration;
     }
 
     _contentDirty = YES;
