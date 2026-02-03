@@ -211,7 +211,6 @@ static const CGFloat kHeaderHeight = 28.0;
 @property (nonatomic, strong) NSView *contentView;
 @property (nonatomic, strong) NSArray<NSString *> *allEffectTypes;
 @property (nonatomic, strong) NSArray<NSString *> *filteredEffectTypes;
-@property (nonatomic, strong) NSMutableArray<XLEffectPaletteItemView *> *itemViews;
 @property (nonatomic, copy, readwrite) NSString *selectedEffectType;
 @property (nonatomic, assign) BOOL isRebuildingItemViews;
 
@@ -239,7 +238,6 @@ static const CGFloat kHeaderHeight = 28.0;
     _itemHeight = kDefaultItemHeight;
     _allEffectTypes = @[];
     _filteredEffectTypes = @[];
-    _itemViews = [NSMutableArray array];
 
     self.wantsLayer = YES;
     self.layer.backgroundColor = [[NSColor colorWithWhite:0.15 alpha:1.0] CGColor];
@@ -329,12 +327,13 @@ static const CGFloat kHeaderHeight = 28.0;
     }
     _isRebuildingItemViews = YES;
 
-    // Remove existing item views - use a copy to avoid mutation during iteration
-    NSArray *oldItems = [_itemViews copy];
-    [_itemViews removeAllObjects];
-
-    for (XLEffectPaletteItemView *itemView in oldItems) {
-        [itemView removeFromSuperview];
+    // Remove existing item views from content view directly
+    // Don't use _itemViews array as it may be corrupted
+    if (_contentView) {
+        NSArray *subviewsCopy = [_contentView.subviews copy];
+        for (NSView *subview in subviewsCopy) {
+            [subview removeFromSuperview];
+        }
     }
 
     CGFloat width = self.bounds.size.width;
@@ -353,7 +352,6 @@ static const CGFloat kHeaderHeight = 28.0;
         itemView.autoresizingMask = NSViewWidthSizable;
 
         [_contentView addSubview:itemView];
-        [_itemViews addObject:itemView];
 
         yOffset += _itemHeight;
     }
@@ -408,11 +406,12 @@ static const CGFloat kHeaderHeight = 28.0;
         return;
     }
 
-    // Update selection state of all item views - use copy for safety
-    NSArray *itemViewsCopy = _itemViews ? [_itemViews copy] : nil;
-    if (itemViewsCopy) {
-        for (XLEffectPaletteItemView *itemView in itemViewsCopy) {
-            if (itemView && itemView.superview) {
+    // Update selection state by iterating content view's subviews directly
+    // This avoids using _itemViews array which can become corrupted
+    if (_contentView) {
+        for (NSView *subview in _contentView.subviews) {
+            if ([subview isKindOfClass:[XLEffectPaletteItemView class]]) {
+                XLEffectPaletteItemView *itemView = (XLEffectPaletteItemView *)subview;
                 BOOL shouldBeSelected = [itemView.effectTypeName isEqualToString:effectType];
                 if (itemView.isSelected != shouldBeSelected) {
                     itemView.isSelected = shouldBeSelected;
