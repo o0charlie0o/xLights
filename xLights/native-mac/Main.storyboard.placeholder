@@ -1,0 +1,58 @@
+<!-- Main.storyboard placeholder
+
+This file describes the structure of the main storyboard for xLights.
+The actual .storyboard file should be created in Xcode's Interface Builder.
+
+When creating the storyboard in Xcode:
+
+1. Create new Storyboard file named "Main.storyboard"
+2. Add the following scenes:
+
+Scene 1: Main Window Controller
+- Identifier: "MainWindowController"
+- Class: NSWindowController (will be replaced with custom class in 1A)
+- Window size: 1200x800
+- Window style: Titled, Closable, Miniaturizable, Resizable
+- Content view controller: MainViewController
+
+Scene 2: Main View Controller
+- Identifier: "MainViewController"
+- Class: NSViewController (will be replaced with custom class in 1A)
+- View layout:
+  - Top: NSToolbar (play controls, tool mode selectors)
+  - Body: NSSplitView (three regions - will be implemented in 1A)
+    - Left: Setup/Layout/Sequencer tabs
+    - Center: Preview/Timeline
+    - Right: Inspector sidebar
+  - Bottom: Status bar (optional)
+
+Storyboard Structure:
+```
+MainWindowController
+  └─ MainViewController
+      └─ NSSplitView
+          ├─ LeftViewController (Setup tab)
+          ├─ CenterViewController (Preview/Timeline)
+          └─ RightViewController (Inspector)
+```
+
+Document Architecture Setup:
+- NSDocumentController: XLDocumentController
+- NSDocument: XLDocument
+- Initial Scene: MainWindowController
+
+Storyboard Segues:
+- None (document-based app, not navigation-based)
+
+Toolbar Items (to be added in Phase 1B):
+- Play/Pause/Stop buttons
+- Timeline position slider
+- View toggles (inspector, timeline, waveform)
+- Zoom controls
+
+This placeholder file should be replaced with an actual .storyboard file
+created in Xcode Interface Builder during Phase 1A integration.
+
+Alternative: Skip storyboard and create window/views programmatically
+in NSWindowController subclass (recommended for complex layouts).
+-->

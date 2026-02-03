@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- This snippet should be merged into the main Info.plist -->
+
+    <!-- Document Types -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <!-- xLights Sequence Files -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>xLights Sequence</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.xlights.sequence</string>
+            </array>
+            <key>NSDocumentClass</key>
+            <string>XLDocument</string>
+        </dict>
+
+        <!-- FSEQ Binary Sequence Files -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>FSEQ Sequence</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.xlights.fseq</string>
+            </array>
+            <key>NSDocumentClass</key>
+            <string>XLDocument</string>
+        </dict>
+
+        <!-- Show Folder (Directory-based document) -->
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Show Folder</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>org.xlights.showfolder</string>
+            </array>
+            <key>LSTypeIsPackage</key>
+            <false/>
+            <key>NSDocumentClass</key>
+            <string>XLDocument</string>
+        </dict>
+    </array>
+
+    <!-- Exported UTI Declarations -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <!-- xLights Sequence UTI -->
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.xlights.sequence</string>
+            <key>UTTypeDescription</key>
+            <string>xLights Sequence</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.xml</string>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>xlights</string>
+                    <string>xsq</string>
+                    <string>xml</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/x-xlights-sequence</string>
+                </array>
+            </dict>
+            <key>UTTypeIconFile</key>
+            <string>xlights_document</string>
+        </dict>
+
+        <!-- FSEQ Sequence UTI -->
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.xlights.fseq</string>
+            <key>UTTypeDescription</key>
+            <string>FSEQ Binary Sequence</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>fseq</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/x-fseq</string>
+                </array>
+            </dict>
+            <key>UTTypeIconFile</key>
+            <string>fseq_document</string>
+        </dict>
+
+        <!-- Show Folder UTI -->
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>org.xlights.showfolder</string>
+            <key>UTTypeDescription</key>
+            <string>xLights Show Folder</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.folder</string>
+            </array>
+            <key>UTTypeIconFile</key>
+            <string>showfolder</string>
+        </dict>
+    </array>
+
+    <!-- NSDocument-based application -->
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+
+    <!-- Use custom document controller -->
+    <key>NSDocumentController</key>
+    <string>XLDocumentController</string>
+
+    <!-- Support opening documents from Finder -->
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+
+    <!-- iCloud support (optional - can be enabled later) -->
+    <key>NSUbiquitousContainers</key>
+    <dict/>
+</dict>
+</plist>
