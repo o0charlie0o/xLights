@@ -30,7 +30,7 @@
 /// - Bottom: Collapsible properties/color picker panel
 ///
 /// All subsequent UI phases depend on this foundation.
-@interface XLMainWindowController : NSWindowController <NSSplitViewDelegate, NSToolbarDelegate>
+@interface XLMainWindowController : NSWindowController <NSToolbarDelegate>
 
 /// Current active tab (Setup=0, Layout=1, Sequencer=2)
 @property (nonatomic, assign) NSInteger currentTab;

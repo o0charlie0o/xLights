@@ -110,7 +110,6 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     _mainSplitController = [[NSSplitViewController alloc] init];
     _mainSplitController.splitView.vertical = YES;
     _mainSplitController.splitView.dividerStyle = NSSplitViewDividerStyleThin;
-    _mainSplitController.splitView.delegate = self;
 
     // Left side: vertical split for main content + bottom panel
     _verticalSplitController = [[NSSplitViewController alloc] init];
@@ -416,32 +415,6 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 
 - (void)windowWillClose:(NSNotification *)notification {
     [self saveWindowState];
-}
-
-#pragma mark - NSSplitViewDelegate
-
-- (CGFloat)splitView:(NSSplitView *)splitView
-    constrainMinCoordinate:(CGFloat)proposedMin
-         ofSubviewAt:(NSInteger)dividerIndex {
-    if (splitView == _mainSplitController.splitView) {
-        return proposedMin + 600; // Min width for content area
-    }
-    else if (splitView == _verticalSplitController.splitView) {
-        return proposedMin + 300; // Min height for content area
-    }
-    return proposedMin;
-}
-
-- (CGFloat)splitView:(NSSplitView *)splitView
-    constrainMaxCoordinate:(CGFloat)proposedMax
-         ofSubviewAt:(NSInteger)dividerIndex {
-    if (splitView == _mainSplitController.splitView) {
-        return proposedMax - kMinInspectorWidth;
-    }
-    else if (splitView == _verticalSplitController.splitView) {
-        return proposedMax - kMinBottomPanelHeight;
-    }
-    return proposedMax;
 }
 
 @end
