@@ -56,6 +56,16 @@
 #include "Sequence.h"
 #include "Effect.h"
 
+// Media interfaces
+#include "media/ImageLoader.h"
+#include "media/VideoDecoder.h"
+
+// Effects
+#include "effects/PicturesEffect.h"
+#include "effects/VideoEffect.h"
+#include "effects/GlediatorEffect.h"
+#include "effects/ShaderEffect.h"
+
 namespace xlCore {
 
 /**

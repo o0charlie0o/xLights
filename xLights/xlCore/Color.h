@@ -263,6 +263,29 @@ public:
     }
 
     /**
+     * @brief Return copy with specified alpha value.
+     */
+    Color withAlpha(uint8_t a) const {
+        return Color(red, green, blue, a);
+    }
+
+    /**
+     * @brief Return copy with specified HSV value (brightness).
+     */
+    Color withValue(double v) const {
+        HSV hsv = toHSV();
+        hsv.value = std::clamp(v, 0.0, 1.0);
+        return Color(hsv);
+    }
+
+    /**
+     * @brief Get HSV value (brightness) component.
+     */
+    double value() const {
+        return toHSV().value;
+    }
+
+    /**
      * @brief Alpha blend foreground onto this color (modifies in place).
      */
     void alphaBlendForegroundOnto(const Color& fg) {
@@ -302,6 +325,30 @@ public:
     // Static factory methods
     static constexpr Color nil() {
         return Color(0, 0, 0, 0);
+    }
+
+    /**
+     * @brief Create color from HSV values.
+     * @param h Hue (0.0-1.0)
+     * @param s Saturation (0.0-1.0)
+     * @param v Value/brightness (0.0-1.0)
+     */
+    static Color fromHSV(float h, float s, float v) {
+        Color c;
+        c.fromHSV(HSV(static_cast<double>(h), static_cast<double>(s), static_cast<double>(v)));
+        return c;
+    }
+
+    /**
+     * @brief Create color from HSL values.
+     * @param h Hue (0.0-1.0)
+     * @param s Saturation (0.0-1.0)
+     * @param l Lightness (0.0-1.0)
+     */
+    static Color fromHSL(float h, float s, float l) {
+        Color c;
+        c.fromHSL(HSL(static_cast<double>(h), static_cast<double>(s), static_cast<double>(l)));
+        return c;
     }
 
     // Predefined colors (named with Color suffix to avoid conflict with member variables)
