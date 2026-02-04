@@ -91,6 +91,7 @@
 #include "ai/aiType.h"
 #include "ai/ServiceManager.h"
 #include "engine/SequenceEngine.h"
+#include "engine/adapters/SequenceStateAdapter.h"
 
 class wxDebugReport;
 
@@ -1794,6 +1795,7 @@ private:
     wxXmlNode* mCurrentPerpective = nullptr;
     std::map<wxString, bool> savedPaneShown;
     SequenceElements _sequenceElements;
+    std::unique_ptr<xlEngine::SequenceStateAdapter> _sequenceStateAdapter;
     std::unique_ptr<xlEngine::SequenceEngine> _sequenceEngine;
     MainSequencer* mainSequencer = nullptr;
     ModelPreview * _modelPreviewPanel = nullptr;

@@ -11,13 +11,19 @@
  **************************************************************/
 
 // RenderEngine: Pure C++ API for frame rendering and buffer access.
-// Part of the xlEngine abstraction layer (Phase 0, Ticket 0D).
+// Part of the xlEngine abstraction layer (Phase 2: Update Engines).
 //
 // This API wraps the existing PixelBuffer/RenderBuffer rendering pipeline
 // to provide a wx-free interface suitable for use by both the existing
 // wxWidgets UI and a future native AppKit UI. All data exchange uses
 // std::string, std::vector, and plain structs -- no wxWidgets types
 // cross this boundary.
+//
+// Architecture:
+// - RenderEngine depends on IRenderProvider interface (not xLightsFrame directly)
+// - For legacy wxWidgets code, use RenderContextAdapter to wrap xLightsFrame
+// - For native macOS code, use NativeRenderProvider (future implementation)
+// See DECOUPLING_GUIDE.md for architectural context.
 //
 // Thread safety: All public methods are safe to call from any thread.
 // Rendering happens on background threads via the existing JobPool.
@@ -32,6 +38,8 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+
+#include "interfaces/IRenderProvider.h"
 
 class xLightsFrame;
 class PixelBufferClass;
@@ -157,12 +165,28 @@ public:
 using RenderCompleteCallback = std::function<void(bool wasCancelled)>;
 
 // RenderEngine wraps the existing PixelBuffer/RenderBuffer pipeline
-// behind a clean C++ interface. During the transition period it delegates
-// to xLightsFrame for the actual rendering work. Once fully decoupled,
-// it will own the render pipeline directly.
+// behind a clean C++ interface. It uses the IRenderProvider interface
+// for all render operations, allowing it to work with both legacy wxWidgets
+// infrastructure (via RenderContextAdapter) and native implementations.
+//
+// For backward compatibility during the transition period, a constructor
+// accepting xLightsFrame* is provided. It internally creates a
+// RenderContextAdapter to wrap the frame.
 class RenderEngine {
 public:
+    /// Construct with an IRenderProvider interface.
+    /// This is the preferred constructor for new code.
+    /// @param provider Pointer to the render provider. Must outlive this engine.
+    explicit RenderEngine(IRenderProvider* provider);
+
+#ifndef XLIGHTS_NATIVE
+    /// Legacy constructor for backward compatibility.
+    /// Creates a RenderContextAdapter internally to wrap the xLightsFrame.
+    /// @param frame Pointer to xLightsFrame. Must outlive this engine.
+    /// @deprecated Use RenderEngine(IRenderProvider*) instead.
     explicit RenderEngine(xLightsFrame* frame);
+#endif
+
     ~RenderEngine();
 
     RenderEngine(const RenderEngine&) = delete;
@@ -287,7 +311,16 @@ private:
     FrameBuffer extractFrameBuffer(const std::string& modelName,
                                    PixelBufferClass* pixelBuffer, int timeMS) const;
 
-    xLightsFrame* _frame; // owning frame during transition period
+    IRenderProvider* _provider; // render provider interface
+
+#ifndef XLIGHTS_NATIVE
+    // Owned adapter when constructed with xLightsFrame* (legacy mode)
+    std::unique_ptr<class RenderContextAdapter> _ownedAdapter;
+
+    // Legacy frame pointer for functionality not yet abstracted.
+    // Will be removed once fully decoupled.
+    xLightsFrame* _frame;
+#endif
 
     std::vector<RenderEngineListener*> _listeners;
     mutable std::mutex _listenerMutex;

@@ -10,6 +10,9 @@
 
 #include "ModelEngine.h"
 
+#ifndef XLIGHTS_NATIVE
+#include "adapters/ModelManagerAdapter.h"
+
 #include <algorithm>
 
 #include "../models/Model.h"
@@ -20,11 +23,181 @@
 #include "../models/BaseObject.h"
 
 #include <wx/xml/xml.h>
+#endif
+
+#include <algorithm>
 
 namespace xlEngine {
 
+#ifdef XLIGHTS_NATIVE
+// Native build: stub implementation
+// The native build uses NativeModelProvider instead of the legacy adapter
+
+ModelEngine::ModelEngine(IModelProvider* provider)
+    : _provider(provider)
+{
+}
+
+ModelEngine::~ModelEngine()
+{
+}
+
+std::vector<std::string> ModelEngine::getModelNames() const
+{
+    if (!_provider) return {};
+    return _provider->getModelNames();
+}
+
+std::vector<std::string> ModelEngine::getModelNamesExcludingGroups() const
+{
+    // Native stub - would need native provider implementation
+    return getModelNames();
+}
+
+std::vector<std::string> ModelEngine::getGroupNames() const
+{
+    if (!_provider) return {};
+    return _provider->getGroupNames();
+}
+
+bool ModelEngine::hasModel(const std::string& name) const
+{
+    if (!_provider) return false;
+    return _provider->hasModel(name);
+}
+
+ModelInfo ModelEngine::getModel(const std::string& name) const
+{
+    // Native stub - returns empty info
+    return ModelInfo();
+}
+
+std::map<std::string, std::string> ModelEngine::getModelProperties(const std::string& name) const
+{
+    return {};
+}
+
+std::string ModelEngine::getModelProperty(const std::string& name, const std::string& key, const std::string& defaultValue) const
+{
+    return defaultValue;
+}
+
+std::vector<NodeCoord> ModelEngine::getModelNodes(const std::string& name) const
+{
+    return {};
+}
+
+uint32_t ModelEngine::getModelNodeCount(const std::string& name) const
+{
+    return 0;
+}
+
+uint32_t ModelEngine::getModelChannelCount(const std::string& name) const
+{
+    return 0;
+}
+
+OperationResult ModelEngine::createModel(const std::string& type, const std::string& name,
+                                         const std::map<std::string, std::string>& properties)
+{
+    return {false, "Native build: model creation not yet implemented"};
+}
+
+OperationResult ModelEngine::deleteModel(const std::string& name)
+{
+    return {false, "Native build: model deletion not yet implemented"};
+}
+
+OperationResult ModelEngine::renameModel(const std::string& oldName, const std::string& newName)
+{
+    return {false, "Native build: model rename not yet implemented"};
+}
+
+OperationResult ModelEngine::updateModelProperty(const std::string& name, const std::string& key, const std::string& value)
+{
+    return {false, "Native build: property update not yet implemented"};
+}
+
+std::vector<SubmodelInfo> ModelEngine::getSubmodels(const std::string& modelName) const
+{
+    return {};
+}
+
+bool ModelEngine::hasSubmodel(const std::string& modelName, const std::string& submodelName) const
+{
+    return false;
+}
+
+std::vector<ModelGroupInfo> ModelEngine::getModelGroups() const
+{
+    return {};
+}
+
+ModelGroupInfo ModelEngine::getModelGroup(const std::string& groupName) const
+{
+    return ModelGroupInfo();
+}
+
+std::vector<std::string> ModelEngine::getGroupsContainingModel(const std::string& modelName) const
+{
+    return {};
+}
+
+ModelEngine::BoundingBox ModelEngine::getModelBounds(const std::string& name) const
+{
+    return BoundingBox();
+}
+
+void ModelEngine::addListener(ModelEngineListener* listener)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    _listeners.push_back(listener);
+}
+
+void ModelEngine::removeListener(ModelEngineListener* listener)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    _listeners.erase(
+        std::remove(_listeners.begin(), _listeners.end(), listener),
+        _listeners.end());
+}
+
+void ModelEngine::notifyModelChanged(const ModelChangeEvent& event)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    for (auto* listener : _listeners) {
+        switch (event.type) {
+            case ModelChangeType::Added:
+                listener->onModelAdded(event);
+                break;
+            case ModelChangeType::Removed:
+                listener->onModelRemoved(event);
+                break;
+            case ModelChangeType::Modified:
+                listener->onModelModified(event);
+                break;
+            case ModelChangeType::Renamed:
+                listener->onModelRenamed(event);
+                break;
+            case ModelChangeType::PropertyChanged:
+                listener->onModelPropertyChanged(event);
+                break;
+        }
+    }
+}
+
+#else
+// Legacy build: full implementation using wxWidgets and Model classes
+
+ModelEngine::ModelEngine(IModelProvider* provider)
+    : _provider(provider)
+    , _ownedAdapter(nullptr)
+{
+}
+
 ModelEngine::ModelEngine(ModelManager& modelManager)
-    : _modelManager(modelManager)
+    : _ownedAdapter(std::make_unique<ModelManagerAdapter>(modelManager))
+    , _provider(_ownedAdapter.get())
 {
 }
 
@@ -36,7 +209,18 @@ ModelEngine::~ModelEngine()
 
 Model* ModelEngine::findModel(const std::string& name) const
 {
-    return _modelManager.GetModel(name);
+    return _provider->getModel(name);
+}
+
+ModelManagerAdapter* ModelEngine::getAdapter() const
+{
+    // Try to get the adapter for write operations.
+    // If _ownedAdapter is set, we created it ourselves.
+    // Otherwise, try to dynamic_cast the provider.
+    if (_ownedAdapter) {
+        return _ownedAdapter.get();
+    }
+    return dynamic_cast<ModelManagerAdapter*>(_provider);
 }
 
 ModelInfo ModelEngine::buildModelInfo(const Model* model) const
@@ -77,19 +261,17 @@ ModelInfo ModelEngine::buildModelInfo(const Model* model) const
 
 std::vector<std::string> ModelEngine::getModelNames() const
 {
-    std::vector<std::string> names;
-    for (auto it = _modelManager.begin(); it != _modelManager.end(); ++it) {
-        names.push_back(it->first);
-    }
-    return names;
+    return _provider->getModelNames();
 }
 
 std::vector<std::string> ModelEngine::getModelNamesExcludingGroups() const
 {
     std::vector<std::string> names;
-    for (auto it = _modelManager.begin(); it != _modelManager.end(); ++it) {
-        if (it->second != nullptr && it->second->GetDisplayAs() != "ModelGroup") {
-            names.push_back(it->first);
+    auto allNames = _provider->getModelNames();
+    for (const auto& name : allNames) {
+        const Model* m = _provider->getModel(name);
+        if (m != nullptr && m->GetDisplayAs() != "ModelGroup") {
+            names.push_back(name);
         }
     }
     return names;
@@ -97,13 +279,7 @@ std::vector<std::string> ModelEngine::getModelNamesExcludingGroups() const
 
 std::vector<std::string> ModelEngine::getGroupNames() const
 {
-    std::vector<std::string> names;
-    for (auto it = _modelManager.begin(); it != _modelManager.end(); ++it) {
-        if (it->second != nullptr && it->second->GetDisplayAs() == "ModelGroup") {
-            names.push_back(it->first);
-        }
-    }
-    return names;
+    return _provider->getGroupNames();
 }
 
 // --- Model Metadata ---
@@ -218,8 +394,12 @@ uint32_t ModelEngine::getModelChannelCount(const std::string& name) const
 OperationResult ModelEngine::createModel(const std::string& type, const std::string& name,
                                          const std::map<std::string, std::string>& properties)
 {
-    if (findModel(name) != nullptr)
+    if (_provider->hasModel(name))
         return {false, "Model '" + name + "' already exists"};
+
+    ModelManagerAdapter* adapter = getAdapter();
+    if (adapter == nullptr)
+        return {false, "Write operations not supported by this provider"};
 
     std::string startChannel = "1";
     auto scIt = properties.find("StartChannel");
@@ -227,7 +407,7 @@ OperationResult ModelEngine::createModel(const std::string& type, const std::str
         startChannel = scIt->second;
     }
 
-    Model* model = _modelManager.CreateDefaultModel(type, startChannel);
+    Model* model = adapter->createDefaultModel(type, startChannel);
     if (model == nullptr)
         return {false, "Failed to create model of type '" + type + "'"};
 
@@ -250,7 +430,7 @@ OperationResult ModelEngine::createModel(const std::string& type, const std::str
     }
 
     model->SetFromXml(xml);
-    _modelManager.AddModel(model);
+    adapter->addModel(model);
 
     ModelChangeEvent event;
     event.type = ModelChangeType::Added;
@@ -262,10 +442,14 @@ OperationResult ModelEngine::createModel(const std::string& type, const std::str
 
 OperationResult ModelEngine::deleteModel(const std::string& name)
 {
-    if (findModel(name) == nullptr)
+    if (!_provider->hasModel(name))
         return {false, "Model '" + name + "' not found"};
 
-    bool result = _modelManager.Delete(name);
+    ModelManagerAdapter* adapter = getAdapter();
+    if (adapter == nullptr)
+        return {false, "Write operations not supported by this provider"};
+
+    bool result = adapter->deleteModel(name);
 
     if (result) {
         ModelChangeEvent event;
@@ -279,13 +463,17 @@ OperationResult ModelEngine::deleteModel(const std::string& name)
 
 OperationResult ModelEngine::renameModel(const std::string& oldName, const std::string& newName)
 {
-    if (findModel(oldName) == nullptr)
+    if (!_provider->hasModel(oldName))
         return {false, "Model '" + oldName + "' not found"};
 
-    if (findModel(newName) != nullptr)
+    if (_provider->hasModel(newName))
         return {false, "Model '" + newName + "' already exists"};
 
-    bool result = _modelManager.Rename(oldName, newName);
+    ModelManagerAdapter* adapter = getAdapter();
+    if (adapter == nullptr)
+        return {false, "Write operations not supported by this provider"};
+
+    bool result = adapter->renameModel(oldName, newName);
 
     if (result) {
         ModelChangeEvent event;
@@ -353,9 +541,11 @@ bool ModelEngine::hasSubmodel(const std::string& modelName, const std::string& s
 std::vector<ModelGroupInfo> ModelEngine::getModelGroups() const
 {
     std::vector<ModelGroupInfo> result;
-    for (auto it = _modelManager.begin(); it != _modelManager.end(); ++it) {
-        if (it->second != nullptr && it->second->GetDisplayAs() == "ModelGroup") {
-            ModelGroup* grp = dynamic_cast<ModelGroup*>(it->second);
+    auto groupNames = _provider->getGroupNames();
+    for (const auto& name : groupNames) {
+        Model* m = _provider->getModel(name);
+        if (m != nullptr) {
+            ModelGroup* grp = dynamic_cast<ModelGroup*>(m);
             if (grp != nullptr) {
                 ModelGroupInfo info;
                 info.name = grp->GetName();
@@ -370,7 +560,7 @@ std::vector<ModelGroupInfo> ModelEngine::getModelGroups() const
 ModelGroupInfo ModelEngine::getModelGroup(const std::string& groupName) const
 {
     ModelGroupInfo info;
-    Model* m = findModel(groupName);
+    Model* m = _provider->getModel(groupName);
     if (m == nullptr || m->GetDisplayAs() != "ModelGroup")
         return info;
 
@@ -386,13 +576,28 @@ ModelGroupInfo ModelEngine::getModelGroup(const std::string& groupName) const
 std::vector<std::string> ModelEngine::getGroupsContainingModel(const std::string& modelName) const
 {
     std::vector<std::string> result;
-    Model* model = findModel(modelName);
+    Model* model = _provider->getModel(modelName);
     if (model == nullptr)
         return result;
 
-    auto groups = _modelManager.GetGroupsContainingModel(model);
-    for (const auto& g : groups) {
-        result.push_back(g);
+    ModelManagerAdapter* adapter = getAdapter();
+    if (adapter != nullptr) {
+        return adapter->getGroupsContainingModel(model);
+    }
+
+    // Fallback: iterate through groups to find ones containing this model
+    auto groupNames = _provider->getGroupNames();
+    for (const auto& groupName : groupNames) {
+        Model* grpModel = _provider->getModel(groupName);
+        if (grpModel != nullptr) {
+            ModelGroup* grp = dynamic_cast<ModelGroup*>(grpModel);
+            if (grp != nullptr) {
+                auto modelNames = grp->ModelNames();
+                if (std::find(modelNames.begin(), modelNames.end(), modelName) != modelNames.end()) {
+                    result.push_back(groupName);
+                }
+            }
+        }
     }
     return result;
 }
@@ -457,5 +662,7 @@ void ModelEngine::notifyModelChanged(const ModelChangeEvent& event)
         }
     }
 }
+
+#endif // XLIGHTS_NATIVE
 
 } // namespace xlEngine

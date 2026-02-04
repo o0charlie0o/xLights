@@ -9,8 +9,9 @@
  **************************************************************/
 
 #include "EffectEngine.h"
-#include "adapters/SequenceElementsAdapter.h"
 
+#ifndef XLIGHTS_NATIVE
+#include "adapters/SequenceElementsAdapter.h"
 #include "../xLightsMain.h"
 #include "../effects/EffectManager.h"
 #include "../effects/RenderableEffect.h"
@@ -19,11 +20,66 @@
 #include "../sequencer/Element.h"
 #include "../sequencer/Effect.h"
 #include "../sequencer/EffectLayer.h"
-
 #include <wx/tokenzr.h>
+#endif
+
 #include <algorithm>
 
 namespace xlEngine {
+
+#ifdef XLIGHTS_NATIVE
+// Native build: stub implementation
+// The native build uses NativeEffectProvider instead of the legacy adapter
+
+EffectEngine::EffectEngine(IEffectProvider* provider)
+    : _provider(provider)
+{
+}
+
+EffectEngine::~EffectEngine()
+{
+}
+
+void EffectEngine::addListener(EffectEngineListener* listener)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    _listeners.push_back(listener);
+}
+
+void EffectEngine::removeListener(EffectEngineListener* listener)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    _listeners.erase(
+        std::remove(_listeners.begin(), _listeners.end(), listener),
+        _listeners.end());
+}
+
+std::vector<EffectTypeInfo> EffectEngine::getEffectTypes() const { return {}; }
+bool EffectEngine::getEffectTypeInfo(const std::string& effectType, EffectTypeInfo& outInfo) const { return false; }
+std::vector<ParameterDefinition> EffectEngine::getEffectParameters(const std::string& effectType) const { return {}; }
+int EffectEngine::createEffect(const std::string& modelName, int layer, const std::string& effectType, int startTimeMS, int endTimeMS) { return -1; }
+bool EffectEngine::deleteEffect(int effectId) { return false; }
+bool EffectEngine::getEffect(int effectId, EffectInfo& outInfo) const { return false; }
+bool EffectEngine::setEffectParameter(int effectId, const std::string& key, const std::string& value) { return false; }
+std::string EffectEngine::getEffectParameter(int effectId, const std::string& key) const { return ""; }
+bool EffectEngine::setEffectSettings(int effectId, const std::string& settings) { return false; }
+std::string EffectEngine::getEffectSettings(int effectId) const { return ""; }
+bool EffectEngine::setEffectPalette(int effectId, const std::string& palette) { return false; }
+std::string EffectEngine::getEffectPalette(int effectId) const { return ""; }
+bool EffectEngine::moveEffect(int effectId, int newStartTimeMS, int newEndTimeMS) { return false; }
+std::vector<EffectInfo> EffectEngine::getEffectsForModel(const std::string& modelName) const { return {}; }
+std::vector<EffectInfo> EffectEngine::getEffectsAtTime(const std::string& modelName, int timeMS) const { return {}; }
+std::vector<EffectInfo> EffectEngine::getEffectsForLayer(const std::string& modelName, int layer) const { return {}; }
+int EffectEngine::getLayerCount(const std::string& modelName) const { return 0; }
+int EffectEngine::addLayer(const std::string& modelName) { return -1; }
+bool EffectEngine::removeLayer(const std::string& modelName, int layer) { return false; }
+bool EffectEngine::selectEffect(int effectId) { return false; }
+void EffectEngine::deselectAllEffects() {}
+std::vector<int> EffectEngine::getSelectedEffectIds() const { return {}; }
+bool EffectEngine::convertEffectType(int effectId, const std::string& newEffectType) { return false; }
+
+#else
+// Legacy build: full implementation using EffectManager and SequenceElements
 
 // ---------------------------------------------------------------------------
 // Construction / Destruction
@@ -990,5 +1046,7 @@ void EffectEngine::notifyError(const std::string& message)
         listener->onError(message);
     }
 }
+
+#endif // XLIGHTS_NATIVE
 
 } // namespace xlEngine

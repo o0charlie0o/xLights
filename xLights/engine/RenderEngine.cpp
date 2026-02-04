@@ -10,6 +10,8 @@
 
 #include "RenderEngine.h"
 
+#ifndef XLIGHTS_NATIVE
+#include "adapters/RenderContextAdapter.h"
 #include "../xLightsMain.h"
 #include "../PixelBuffer.h"
 #include "../RenderBuffer.h"
@@ -19,16 +21,99 @@
 #include "../models/Model.h"
 #include "../sequencer/SequenceElements.h"
 #include "../SequenceData.h"
+#endif
 
 #include <algorithm>
 
 namespace xlEngine {
 
+#ifdef XLIGHTS_NATIVE
+// Native build: stub implementation
+// The native build uses NativeRenderProvider instead of the legacy adapter
+
+RenderEngine::RenderEngine(IRenderProvider* provider)
+    : _provider(provider)
+{
+}
+
+RenderEngine::~RenderEngine()
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    _listeners.clear();
+}
+
+void RenderEngine::addListener(RenderEngineListener* listener)
+{
+    if (!listener) return;
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    if (std::find(_listeners.begin(), _listeners.end(), listener) == _listeners.end()) {
+        _listeners.push_back(listener);
+    }
+}
+
+void RenderEngine::removeListener(RenderEngineListener* listener)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    _listeners.erase(
+        std::remove(_listeners.begin(), _listeners.end(), listener),
+        _listeners.end());
+}
+
+void RenderEngine::renderFrame(int timeMS) {}
+void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS) {}
+void RenderEngine::renderAll(RenderCompleteCallback callback) { if (callback) callback(false); }
+void RenderEngine::renderRange(int startMS, int endMS, bool clear, RenderCompleteCallback callback) { if (callback) callback(false); }
+void RenderEngine::renderModelRange(const std::string& modelName, int startMS, int endMS, bool clear) {}
+bool RenderEngine::abortRender(int timeoutMS) { return true; }
+FrameBuffer RenderEngine::getFrameBuffer(const std::string& modelName) const { return {}; }
+std::vector<NodeChannelData> RenderEngine::getNodeData(const std::string& modelName) const { return {}; }
+int RenderEngine::getLayerCount(const std::string& modelName) const { return 0; }
+void RenderEngine::setMixMode(const std::string& modelName, int layer, MixMode mode) {}
+MixMode RenderEngine::getMixMode(const std::string& modelName, int layer) const { return MixMode::Normal; }
+std::vector<std::string> RenderEngine::getMixModeNames() { return {}; }
+ModelRenderInfo RenderEngine::getModelRenderInfo(const std::string& modelName) const { return {}; }
+std::vector<ModelRenderInfo> RenderEngine::getAllModelRenderInfo() const { return {}; }
+void RenderEngine::invalidateCache(const std::string& modelName) {}
+void RenderEngine::invalidateAllCaches() {}
+bool RenderEngine::getGPUAvailable() const { return false; }
+bool RenderEngine::getGPUEnabled() const { return false; }
+void RenderEngine::setGPUEnabled(bool enabled) {}
+void RenderEngine::setRenderMode(RenderMode mode) { _renderMode.store(mode); }
+RenderMode RenderEngine::getRenderMode() const { return _renderMode.load(); }
+bool RenderEngine::isRendering() const { return false; }
+RenderStatus RenderEngine::getRenderStatus() const { return {}; }
+int RenderEngine::getFrameTimeMS() const { return 50; }
+int RenderEngine::getNumFrames() const { return 0; }
+
+void RenderEngine::notifyModelFrameRendered(const std::string& modelName, int timeMS) {}
+void RenderEngine::notifyFrameRendered(int timeMS) {}
+void RenderEngine::notifyRenderComplete(bool wasCancelled) {}
+void RenderEngine::notifyRenderProgress(const RenderStatus& status) {}
+void RenderEngine::notifyRenderError(const std::string& modelName, const std::string& message) {}
+
+#else
+// Legacy build: full implementation using xLightsFrame and render pipeline
+
 // --- Construction / destruction ---
 
-RenderEngine::RenderEngine(xLightsFrame* frame)
-    : _frame(frame)
+RenderEngine::RenderEngine(IRenderProvider* provider)
+    : _provider(provider)
+    , _frame(nullptr)
 {
+    // If the provider is a RenderContextAdapter, extract the frame pointer
+    // for legacy operations not yet abstracted.
+    if (auto* adapter = dynamic_cast<RenderContextAdapter*>(provider)) {
+        _frame = adapter->getFrame();
+    }
+}
+
+RenderEngine::RenderEngine(xLightsFrame* frame)
+    : _provider(nullptr)
+    , _frame(frame)
+{
+    // Create an owned adapter to wrap the frame
+    _ownedAdapter = std::make_unique<RenderContextAdapter>(frame);
+    _provider = _ownedAdapter.get();
 }
 
 RenderEngine::~RenderEngine()
@@ -102,6 +187,8 @@ void RenderEngine::notifyRenderError(const std::string& modelName, const std::st
 
 void RenderEngine::renderFrame(int timeMS)
 {
+    // Frame rendering requires xLightsFrame for now as IRenderProvider
+    // only provides frame-indexed render requests, not time-based.
     if (!_frame) return;
 
     SequenceData& seqData = _frame->_seqData;
@@ -176,6 +263,11 @@ void RenderEngine::renderModelRange(const std::string& modelName, int startMS, i
 
 bool RenderEngine::abortRender(int timeoutMS)
 {
+    if (_provider) {
+        _provider->cancelRender();
+        // Provider's cancelRender is non-blocking; return true as best effort
+        return true;
+    }
     if (!_frame) return true;
     return _frame->AbortRender(timeoutMS);
 }
@@ -402,11 +494,17 @@ void RenderEngine::invalidateAllCaches()
 
 bool RenderEngine::getGPUAvailable() const
 {
+    if (_provider) {
+        return _provider->isGPUAvailable();
+    }
     return GPURenderUtils::IsEnabled();
 }
 
 bool RenderEngine::getGPUEnabled() const
 {
+    if (_provider) {
+        return _provider->isGPUEnabled();
+    }
     if (!_frame) return false;
     return _frame->UseGPURendering();
 }
@@ -445,6 +543,9 @@ RenderMode RenderEngine::getRenderMode() const
 
 bool RenderEngine::isRendering() const
 {
+    if (_provider) {
+        return _provider->isRendering();
+    }
     if (!_frame) return false;
     return !_frame->renderProgressInfo.empty();
 }
@@ -452,6 +553,14 @@ bool RenderEngine::isRendering() const
 RenderStatus RenderEngine::getRenderStatus() const
 {
     RenderStatus status;
+
+    if (_provider) {
+        status.isRendering = _provider->isRendering();
+        status.framesTotal = _provider->getTotalFrames();
+        status.progressPercent = _provider->getRenderProgress() * 100.0f;
+        return status;
+    }
+
     if (!_frame) return status;
 
     status.isRendering = !_frame->renderProgressInfo.empty();
@@ -476,6 +585,9 @@ RenderStatus RenderEngine::getRenderStatus() const
 
 int RenderEngine::getFrameTimeMS() const
 {
+    if (_provider) {
+        return _provider->getFrameTimeMS();
+    }
     if (!_frame) return 50;
     if (!_frame->_seqData.IsValidData()) return 50;
     return _frame->_seqData.FrameTime();
@@ -483,9 +595,14 @@ int RenderEngine::getFrameTimeMS() const
 
 int RenderEngine::getNumFrames() const
 {
+    if (_provider) {
+        return _provider->getTotalFrames();
+    }
     if (!_frame) return 0;
     if (!_frame->_seqData.IsValidData()) return 0;
     return _frame->_seqData.NumFrames();
 }
+
+#endif // XLIGHTS_NATIVE
 
 } // namespace xlEngine

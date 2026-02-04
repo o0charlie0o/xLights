@@ -13,6 +13,10 @@
 // SequenceEngine: Pure C++ API for sequence operations.
 // No wxWidgets types cross this boundary. This allows both the existing
 // wxWidgets UI and a future AppKit UI to drive the same engine.
+//
+// This engine uses the ISequenceProvider interface to access sequence state,
+// enabling decoupling from the xLightsFrame. For legacy support, use the
+// SequenceStateAdapter to wrap an xLightsFrame instance.
 
 #include <string>
 #include <functional>
@@ -21,16 +25,14 @@
 #include <atomic>
 #include <memory>
 
-class xLightsFrame;
+#include "interfaces/ISequenceProvider.h"
+
 class SequenceData;
 
 namespace xlEngine {
 
-enum class PlaybackState {
-    Stopped,
-    Playing,
-    Paused
-};
+// PlaybackState is now defined in interfaces/ISequenceProvider.h
+// (included above) to avoid duplication.
 
 struct SequenceInfo {
     std::string name;
@@ -93,12 +95,13 @@ public:
 // invoked from any thread; callers must dispatch to their own UI
 // thread if needed.
 //
-// During the transition period, this class wraps the existing
-// xLightsFrame implementation. Once the engine is fully decoupled,
-// this class will own the sequence state directly.
+// The engine uses the ISequenceProvider interface to access sequence state,
+// allowing it to work with different provider implementations:
+// - SequenceStateAdapter: Wraps xLightsFrame for legacy wxWidgets UI
+// - NativeSequenceProvider: For future native macOS implementation
 class SequenceEngine {
 public:
-    explicit SequenceEngine(xLightsFrame* frame);
+    explicit SequenceEngine(ISequenceProvider* provider);
     ~SequenceEngine();
 
     SequenceEngine(const SequenceEngine&) = delete;
@@ -179,7 +182,7 @@ private:
     void notifySequenceSaved(const std::string& path);
     void notifyError(const std::string& message);
 
-    xLightsFrame* _frame; // owning frame during transition period
+    ISequenceProvider* _provider; // sequence state provider (interface)
     std::vector<SequenceEngineListener*> _listeners;
     mutable std::mutex _listenerMutex;
     std::atomic<PlaybackState> _cachedState{PlaybackState::Stopped};

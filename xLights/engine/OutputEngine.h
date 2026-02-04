@@ -13,6 +13,13 @@
 // OutputEngine: Pure C++ API for controller/output management.
 // No wxWidgets types cross this boundary.
 // Thread-safe for async operations (discovery, upload, ping).
+//
+// This engine uses the IOutputProvider interface to access controller
+// and output data, allowing it to work with different data sources:
+// - OutputManagerAdapter: Wraps the legacy OutputManager for wxWidgets UI
+// - NativeOutputProvider: Direct implementation for native macOS builds
+//
+// See DECOUPLING_GUIDE.md for the overall architecture.
 
 #include <string>
 #include <vector>
@@ -24,10 +31,10 @@
 #include <atomic>
 
 #include "EngineTypes.h"
+#include "interfaces/IOutputProvider.h"
 
 class OutputManager;
 class Controller;
-class xLightsFrame;
 
 namespace xlEngine {
 
@@ -211,14 +218,16 @@ using ErrorCallback = std::function<void(const std::string& message)>;
 
 class OutputEngine {
 public:
-    OutputEngine();
+    // Construct with an IOutputProvider for decoupled operation.
+    // The provider is not owned by the engine; caller must ensure
+    // it remains valid for the engine's lifetime.
+    explicit OutputEngine(IOutputProvider* provider = nullptr);
     ~OutputEngine();
 
-    // Initialization - must be called before use
-    // The OutputEngine wraps the existing OutputManager. It does not own it.
-    // The xLightsFrame pointer is optional but required for proper output toggle
-    // (it ensures the UI checkbox state stays in sync with output state).
-    void initialize(OutputManager* outputManager, xLightsFrame* frame = nullptr);
+    // Initialize or reinitialize with a provider.
+    // Can be called to change the provider after construction.
+    // Set provider to nullptr to uninitialize.
+    void initialize(IOutputProvider* provider);
 
     // Controller enumeration
     std::vector<ControllerConfig> getControllers() const;
@@ -304,11 +313,67 @@ private:
     // Internal versions of public methods that assume the lock is already held
     OperationResult addControllerInternal(const ControllerConfig& config);
 
-    OutputManager* _outputManager = nullptr;
-    xLightsFrame* _frame = nullptr;
+    IOutputProvider* _provider = nullptr;
     mutable std::recursive_mutex _mutex;
     ErrorCallback _errorCallback;
     std::atomic<bool> _initialized{false};
+};
+
+// ============================================================================
+// OutputManagerAdapter: Implements IOutputProvider by delegating to OutputManager
+// ============================================================================
+//
+// This adapter allows the existing wxWidgets-based code to continue working
+// by wrapping OutputManager with the IOutputProvider interface. It also
+// handles the optional xLightsFrame dependency for proper UI synchronization.
+//
+// Usage (in wxWidgets code):
+//   auto adapter = std::make_unique<OutputManagerAdapter>(outputManager, frame);
+//   outputEngine.initialize(adapter.get());
+//
+// The adapter does NOT own the OutputManager or xLightsFrame; caller must
+// ensure they remain valid for the adapter's lifetime.
+
+class OutputManagerAdapter : public IOutputProvider {
+public:
+    // Construct with required OutputManager and optional xLightsFrame.
+    // The xLightsFrame pointer is needed for proper output toggle
+    // (it ensures the UI checkbox state stays in sync with output state).
+    OutputManagerAdapter(OutputManager* manager, class xLightsFrame* frame = nullptr);
+    ~OutputManagerAdapter() override = default;
+
+    // ============================================================
+    // IOutputProvider interface implementation
+    // ============================================================
+
+    size_t getControllerCount() const override;
+    std::optional<ControllerInfo> getController(size_t index) const override;
+    std::optional<ControllerInfo> getControllerByName(const std::string& name) const override;
+    std::vector<std::string> getControllerNames() const override;
+    bool controllerExists(const std::string& name) const override;
+
+    bool isOutputting() const override;
+    bool startOutput() override;
+    void stopOutput() override;
+
+    int32_t getTotalChannels() const override;
+
+    OutputManager* getOutputManager() override;
+    const OutputManager* getOutputManager() const override;
+
+    // ============================================================
+    // Additional accessors for legacy code during transition
+    // ============================================================
+
+    // Get xLightsFrame pointer (may be nullptr)
+    class xLightsFrame* getFrame() const { return _frame; }
+
+private:
+    // Build ControllerInfo from a Controller pointer
+    ControllerInfo buildControllerInfo(Controller* controller) const;
+
+    OutputManager* _manager;
+    class xLightsFrame* _frame;
 };
 
 } // namespace xlEngine

@@ -11,23 +11,29 @@
  **************************************************************/
 
 // ModelEngine: Pure C++ API for model management, decoupled from wxWidgets.
-// Part of the xlEngine abstraction layer (Phase 0, Ticket 0B).
+// Part of the xlEngine abstraction layer (Phase 2: Update Engines).
 //
-// This API wraps ModelManager and Model to provide a wx-free interface
-// suitable for use by both the existing wxWidgets UI and a future
-// native AppKit UI. All data exchange uses std::string, std::vector,
-// std::map, and plain structs.
+// This API uses IModelProvider interface to access model data, allowing it
+// to work with both the legacy wxWidgets UI (via ModelManagerAdapter) and
+// future native AppKit UI (via NativeModelProvider).
+//
+// All data exchange uses std::string, std::vector, std::map, and plain structs.
+// No wxWidgets types are exposed in the public API.
+//
+// See DECOUPLING_GUIDE.md for architectural context.
 
 #include <string>
 #include <vector>
 #include <map>
 #include <mutex>
+#include <memory>
 #include <cstdint>
 
 #include "EngineTypes.h"
+#include "interfaces/IModelProvider.h"
 
-class ModelManager;
 class Model;
+class ModelManager;
 
 namespace xlEngine {
 
@@ -106,6 +112,9 @@ public:
     virtual void onError(const std::string& message) {}
 };
 
+// Forward declaration for extended operations adapter
+class ModelManagerAdapter;
+
 // ModelEngine provides a pure C++ API for model management.
 //
 // Thread safety: All public methods are safe to call from any thread.
@@ -113,11 +122,24 @@ public:
 // invoked from any thread; callers must dispatch to their own UI
 // thread if needed.
 //
-// During the transition period, this class wraps the existing
-// ModelManager implementation.
+// This class uses IModelProvider for model access, allowing it to work
+// with different backend implementations:
+// - ModelManagerAdapter: Wraps legacy ModelManager for wxWidgets UI
+// - NativeModelProvider: Native macOS implementation (future)
 class ModelEngine {
 public:
+    /// Constructs a ModelEngine using the given model provider.
+    /// @param provider Pointer to the model provider. The provider must
+    ///                 outlive this engine. The engine does NOT take ownership.
+    explicit ModelEngine(IModelProvider* provider);
+
+#ifndef XLIGHTS_NATIVE
+    /// Legacy constructor for backward compatibility during transition.
+    /// Creates an internal ModelManagerAdapter to wrap the ModelManager.
+    /// @deprecated Use the IModelProvider* constructor instead.
     explicit ModelEngine(ModelManager& modelManager);
+#endif
+
     ~ModelEngine();
 
     ModelEngine(const ModelEngine&) = delete;
@@ -188,7 +210,17 @@ private:
     Model* findModel(const std::string& name) const;
     ModelInfo buildModelInfo(const Model* model) const;
 
-    ModelManager& _modelManager;
+    // Returns the adapter for extended operations (write operations).
+    // Returns nullptr if provider is not a ModelManagerAdapter.
+    ModelManagerAdapter* getAdapter() const;
+
+    IModelProvider* _provider;
+
+#ifndef XLIGHTS_NATIVE
+    // Owned adapter when using the legacy ModelManager& constructor.
+    // null when using the IModelProvider* constructor directly.
+    std::unique_ptr<ModelManagerAdapter> _ownedAdapter;
+#endif
 
     mutable std::mutex _listenerMutex;
     std::vector<ModelEngineListener*> _listeners;

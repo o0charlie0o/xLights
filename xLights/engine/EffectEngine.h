@@ -181,10 +181,12 @@ public:
     ///                 outlive this engine. The engine does NOT take ownership.
     explicit EffectEngine(IEffectProvider* provider);
 
+#ifndef XLIGHTS_NATIVE
     /// Legacy constructor for backward compatibility during transition.
     /// Creates an internal SequenceElementsAdapter to wrap xLightsFrame.
     /// @deprecated Use the IEffectProvider* constructor instead.
     explicit EffectEngine(xLightsFrame* frame);
+#endif
 
     ~EffectEngine();
 
@@ -314,9 +316,11 @@ private:
 
     IEffectProvider* _provider;
 
+#ifndef XLIGHTS_NATIVE
     // Owned adapter when using the legacy xLightsFrame* constructor.
     // null when using the IEffectProvider* constructor directly.
     std::unique_ptr<SequenceElementsAdapter> _ownedAdapter;
+#endif
 
     std::vector<EffectEngineListener*> _listeners;
     mutable std::mutex _listenerMutex;

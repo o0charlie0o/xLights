@@ -618,7 +618,10 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
 
     xLightsApp::__frame = this;
 
-    _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(this);
+    // Create the sequence state adapter that wraps this frame for legacy support
+    _sequenceStateAdapter = std::make_unique<xlEngine::SequenceStateAdapter>(this);
+    // Create the sequence engine using the adapter (decoupled from direct frame access)
+    _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(_sequenceStateAdapter.get());
 
     ValueCurve::SetSequenceElements(&_sequenceElements);
 

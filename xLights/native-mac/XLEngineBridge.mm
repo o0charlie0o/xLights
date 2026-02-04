@@ -27,6 +27,7 @@
 #include "providers/NativeRenderProvider.h"
 
 // Access to xLightsFrame singleton during transition period (legacy mode only)
+#ifndef XLIGHTS_NATIVE
 #include "../xLightsApp.h"
 #include "../xLightsMain.h"
 
@@ -43,6 +44,25 @@
 
 // Audio support
 #include "../AudioManager.h"
+#else
+// Forward declarations for types used in method signatures (native mode)
+// These methods will return stub values in native mode
+class xLightsFrame;
+class xLightsApp { public: static xLightsFrame* GetFrame() { return nullptr; } };
+class SequenceElements;
+class SequenceViewManager;
+class SequenceView;
+class Element;
+class ModelElement;
+class TimingElement;
+class EffectLayer;
+class Effect;
+class Model;
+class ModelGroup;
+class AudioManager;
+class xLightsXmlFile;
+enum class ElementType { ELEMENT_TYPE_TIMING, ELEMENT_TYPE_MODEL, ELEMENT_TYPE_SUBMODEL, ELEMENT_TYPE_STRAND };
+#endif // XLIGHTS_NATIVE
 
 #include <string>
 #include <vector>
@@ -126,6 +146,7 @@ static XLEngineBridge *_sharedBridge = nil;
 - (void)ensureEngineInitialized {
     if (_engineInitialized) return;
 
+#ifndef XLIGHTS_NATIVE
     // If legacy support is enabled, try xLightsFrame first
     if (_legacySupportEnabled) {
         xLightsFrame* frame = xLightsApp::GetFrame();
@@ -154,6 +175,7 @@ static XLEngineBridge *_sharedBridge = nil;
             }
         }
     }
+#endif
 
     // If we have a show folder loaded, initialize in standalone mode
     if (!_showFolderPath.empty()) {
@@ -352,10 +374,13 @@ static XLEngineBridge *_sharedBridge = nil;
              mediaFile:(NSString * _Nullable)mediaFile {
     [self ensureEngineInitialized];
 
+    // In standalone/native mode, create sequence through native provider
+    // Note: NativeSequenceProvider doesn't support creating new sequences yet
+#ifdef XLIGHTS_NATIVE
+    NSLog(@"XLEngineBridge: createSequence not yet supported in native mode");
+    return NO;
+#else
     if (_standaloneMode) {
-        // In standalone mode, create sequence through native provider
-        // Note: NativeSequenceProvider doesn't support creating new sequences yet
-        // This will need to be implemented when full standalone sequence editing is needed
         NSLog(@"XLEngineBridge: createSequence not yet supported in standalone mode");
         return NO;
     }
@@ -385,6 +410,7 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return NO;
     }
+#endif
 }
 
 - (NSDictionary *)getSequenceInfo {
@@ -975,6 +1001,10 @@ static XLEngineBridge *_sharedBridge = nil;
     return [NSString stringWithUTF8String:value.c_str()];
 }
 
+- (NSString *)getModelProperty:(NSString *)modelName key:(NSString *)key {
+    return [self getModelProperty:modelName key:key defaultValue:@""];
+}
+
 - (NSDictionary *)getModelProperties:(NSString *)modelName {
     if (!modelName) return @{};
 
@@ -1277,6 +1307,24 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     return _outputEngine->isOutputting() ? YES : NO;
+}
+
+- (NSArray<NSString *> *)getOutputIPs {
+    // TODO: Implement when OutputEngine supports this
+    // For now, return empty array
+    return @[];
+}
+
+- (NSArray<NSNumber *> *)getAllUniverses {
+    // TODO: Implement when OutputEngine supports this
+    // For now, return empty array
+    return @[];
+}
+
+- (NSArray<NSNumber *> *)getUniversesForIP:(NSString *)ip {
+    // TODO: Implement when OutputEngine supports this
+    // For now, return empty array
+    return @[];
 }
 
 #pragma mark - Port Configuration
@@ -1688,6 +1736,10 @@ static XLEngineBridge *_sharedBridge = nil;
         return @[@"Master View"];
     }
 
+#ifdef XLIGHTS_NATIVE
+    // Native mode - return default for now
+    return @[@"Master View"];
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[@"Master View"];
 
@@ -1711,6 +1763,7 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     return [viewNames copy];
+#endif
 }
 
 - (NSString *)getCurrentViewName {
@@ -1718,7 +1771,9 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return @"Master View";
     }
-
+#ifdef XLIGHTS_NATIVE
+    return @"Master View";
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @"Master View";
 
@@ -1729,6 +1784,7 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!currentView) return @"Master View";
 
     return [NSString stringWithUTF8String:currentView->GetName().c_str()];
+#endif
 }
 
 - (NSInteger)getCurrentViewIndex {
@@ -1736,22 +1792,26 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return 0;
     }
-
+#ifdef XLIGHTS_NATIVE
+    return 0;
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return 0;
 
     SequenceElements& elements = frame->GetSequenceElements();
     return (NSInteger)elements.GetCurrentView();
+#endif
 }
 
 - (BOOL)setCurrentView:(NSString *)viewName {
     if (!viewName) return NO;
-
     [self ensureEngineInitialized];
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return NO;
     }
-
+#ifdef XLIGHTS_NATIVE
+    return NO;
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
 
@@ -1760,28 +1820,18 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!viewManager) return NO;
 
     std::string stdViewName = [viewName UTF8String];
-
-    // Find the view index by name
     int viewIndex = viewManager->GetViewIndex(stdViewName);
-    if (viewIndex < 0) {
-        return NO;
-    }
+    if (viewIndex < 0) return NO;
 
-    // Only populate view for non-Master views (index > 0)
-    // Master View (index 0) already contains all elements
     if (viewIndex > 0) {
         std::string modelsString = elements.GetViewModels(stdViewName);
         elements.AddMissingModelsToSequence(modelsString);
         elements.PopulateView(modelsString, viewIndex);
     }
-
-    // Set as current view
     elements.SetCurrentView(viewIndex);
-
-    // Set timing visibility for this view
     elements.SetTimingVisibility(stdViewName);
-
     return YES;
+#endif
 }
 
 - (BOOL)setCurrentViewIndex:(NSInteger)viewIndex {
@@ -1789,7 +1839,9 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return NO;
     }
-
+#ifdef XLIGHTS_NATIVE
+    return NO;
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
 
@@ -1797,32 +1849,21 @@ static XLEngineBridge *_sharedBridge = nil;
     SequenceViewManager* viewManager = frame->GetViewsManager();
     if (!viewManager) return NO;
 
-    // Validate index
-    if (viewIndex < 0 || viewIndex >= viewManager->GetViewCount()) {
-        return NO;
-    }
+    if (viewIndex < 0 || viewIndex >= viewManager->GetViewCount()) return NO;
 
-    // Get the view at this index
     SequenceView* view = viewManager->GetView((int)viewIndex);
     if (!view) return NO;
 
     std::string viewName = view->GetName();
-
-    // Only populate view for non-Master views (index > 0)
-    // Master View (index 0) already contains all elements
     if (viewIndex > 0) {
         std::string modelsString = elements.GetViewModels(viewName);
         elements.AddMissingModelsToSequence(modelsString);
         elements.PopulateView(modelsString, (int)viewIndex);
     }
-
-    // Set as current view
     elements.SetCurrentView((int)viewIndex);
-
-    // Set timing visibility for this view
     elements.SetTimingVisibility(viewName);
-
     return YES;
+#endif
 }
 
 #pragma mark - Sequence Elements (for Sequencer View)
@@ -1832,14 +1873,15 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return 0;
     }
-
-    // Access SequenceElements through xLightsFrame
+#ifdef XLIGHTS_NATIVE
+    return 0;  // Native mode stub
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return 0;
-
     SequenceElements& elements = frame->GetSequenceElements();
     int currentView = elements.GetCurrentView();
     return (NSInteger)elements.GetElementCount(currentView);
+#endif
 }
 
 - (NSDictionary *)getSequenceElementAtIndex:(NSInteger)index {
@@ -1847,7 +1889,9 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return nil;
     }
-
+#ifdef XLIGHTS_NATIVE
+    return nil;  // Native mode stub
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return nil;
 
@@ -1873,15 +1917,12 @@ static XLEngineBridge *_sharedBridge = nil;
             typeString = @"timing";
             break;
         case ElementType::ELEMENT_TYPE_MODEL: {
-            // Check if this is actually a model group
             ModelElement* modelElem = dynamic_cast<ModelElement*>(elem);
             if (modelElem) {
                 submodelCount = modelElem->GetSubModelCount();
                 strandCount = modelElem->GetStrandCount();
                 hasSubmodels = (submodelCount > 0);
                 hasStrands = (strandCount > 0);
-
-                // Check underlying model to see if it's a group
                 Model* model = frame->AllModels[elem->GetName()];
                 if (model && model->GetDisplayAs() == "ModelGroup") {
                     typeString = @"group";
@@ -1917,6 +1958,7 @@ static XLEngineBridge *_sharedBridge = nil;
         @"submodelCount": @(submodelCount),
         @"strandCount": @(strandCount),
     };
+#endif
 }
 
 - (NSArray<NSDictionary *> *)getSequenceElements {
@@ -1924,7 +1966,9 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return @[];
     }
-
+#ifdef XLIGHTS_NATIVE
+    return @[];  // Native mode stub
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
 
@@ -1942,6 +1986,7 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     return result;
+#endif
 }
 
 - (NSArray<NSDictionary *> *)getEffectsForElementAtIndex:(NSInteger)index layer:(NSInteger)layer {
@@ -1949,7 +1994,9 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
         return @[];
     }
-
+#ifdef XLIGHTS_NATIVE
+    return @[];  // Native mode stub
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
 
@@ -1986,6 +2033,7 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     return result;
+#endif
 }
 
 #pragma mark - Effect Operations
@@ -2365,6 +2413,10 @@ static XLEngineBridge *_sharedBridge = nil;
 - (NSArray<NSDictionary *> *)getTimingTracks {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native timing tracks
+    return @[];
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
 
@@ -2392,11 +2444,15 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return @[];
     }
+#endif
 }
 
 - (NSString *)getActiveTimingTrackName {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return nil;  // TODO: Implement native timing tracks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return nil;
 
@@ -2416,6 +2472,7 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return nil;
     }
+#endif
 }
 
 - (BOOL)setActiveTimingTrack:(NSString *)trackName {
@@ -2423,6 +2480,9 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return NO;  // TODO: Implement native timing tracks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
 
@@ -2447,11 +2507,15 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return NO;
     }
+#endif
 }
 
 - (void)deactivateAllTimingTracks {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native timing tracks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return;
 
@@ -2463,6 +2527,7 @@ static XLEngineBridge *_sharedBridge = nil;
         NSLog(@"XLEngineBridge: Exception deactivating timing tracks: %@ - %@",
               exception.name, exception.reason);
     }
+#endif
 }
 
 - (NSArray<NSDictionary *> *)getTimingMarks:(NSString *)trackName layer:(NSInteger)layer {
@@ -2470,6 +2535,9 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return @[];  // TODO: Implement native timing marks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
 
@@ -2512,11 +2580,15 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return @[];
     }
+#endif
 }
 
 - (NSArray<NSNumber *> *)getActiveTimingMarkTimes {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return @[];  // TODO: Implement native timing marks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
 
@@ -2558,6 +2630,7 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return @[];
     }
+#endif
 }
 
 - (NSInteger)createTimingMark:(NSString *)trackName
@@ -2569,6 +2642,9 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return -1;  // TODO: Implement native timing marks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return -1;
 
@@ -2609,6 +2685,7 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return -1;
     }
+#endif
 }
 
 - (BOOL)moveTimingMark:(NSInteger)markId startTimeMS:(NSInteger)startMS endTimeMS:(NSInteger)endMS {
@@ -2621,6 +2698,9 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return NO;  // TODO: Implement native timing marks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
 
@@ -2653,6 +2733,7 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return NO;
     }
+#endif
 }
 
 - (BOOL)deleteTimingMark:(NSInteger)markId {
@@ -2663,6 +2744,9 @@ static XLEngineBridge *_sharedBridge = nil;
 - (NSDictionary *)getTimingMark:(NSInteger)markId {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return nil;  // TODO: Implement native timing marks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return nil;
 
@@ -2698,6 +2782,7 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return nil;
     }
+#endif
 }
 
 - (BOOL)createTimingTrack:(NSString *)name {
@@ -2705,6 +2790,7 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifndef XLIGHTS_NATIVE
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
 
@@ -2721,6 +2807,22 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return NO;
     }
+#else
+    // TODO: Implement native timing track creation
+    NSLog(@"XLEngineBridge: createTimingTrack not yet implemented for native build");
+    return NO;
+#endif
+}
+
+- (BOOL)createTimingTrack:(NSString *)name timingType:(NSString *)timingType {
+    // For now, delegate to the basic method (type will be handled later)
+    return [self createTimingTrack:name];
+}
+
+- (BOOL)importTimingTrack:(NSString *)trackName fromSequence:(NSString *)sequenceFile asTrackName:(NSString *)newTrackName {
+    // TODO: Implement timing track import
+    NSLog(@"XLEngineBridge: importTimingTrack not yet implemented");
+    return NO;
 }
 
 - (BOOL)deleteTimingTrack:(NSString *)name {
@@ -2728,6 +2830,7 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifndef XLIGHTS_NATIVE
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
 
@@ -2741,6 +2844,11 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return NO;
     }
+#else
+    // TODO: Implement native timing track deletion
+    NSLog(@"XLEngineBridge: deleteTimingTrack not yet implemented for native build");
+    return NO;
+#endif
 }
 
 - (BOOL)renameTimingTrack:(NSString *)oldName toName:(NSString *)newName {
@@ -2748,6 +2856,9 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return NO;  // TODO: Implement native timing tracks
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
 
@@ -2762,6 +2873,7 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return NO;
     }
+#endif
 }
 
 #pragma mark - Audio Operations
@@ -2770,6 +2882,16 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
     if (!_sequenceEngine) return nil;
 
+#ifdef XLIGHTS_NATIVE
+    // For native build, get media path from SequenceEngine
+    if (_sequenceEngine && _sequenceEngine->isSequenceLoaded()) {
+        xlEngine::SequenceInfo info = _sequenceEngine->getSequenceInfo();
+        if (!info.mediaFile.empty()) {
+            return [NSString stringWithUTF8String:info.mediaFile.c_str()];
+        }
+    }
+    return nil;
+#else
     @try {
         xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
         if (!seqFile) return nil;
@@ -2794,21 +2916,38 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return nil;
     }
+#endif
 }
 
 - (BOOL)isAudioLoaded {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // For native build, check if we have a media file
+    NSString *mediaPath = [self getMediaFilePath];
+    return mediaPath != nil && [[NSFileManager defaultManager] fileExistsAtPath:mediaPath];
+#else
     xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
     if (!seqFile) return NO;
 
     AudioManager* audio = seqFile->GetMedia();
     return audio != nullptr && audio->IsOk();
+#endif
 }
 
 - (NSDictionary *)getAudioInfo {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // For native build, return basic info from SequenceEngine
+    NSString *mediaPath = [self getMediaFilePath];
+    if (!mediaPath) return nil;
+
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+    info[@"filePath"] = mediaPath;
+    // Other fields would need native audio analysis
+    return info;
+#else
     xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
     if (!seqFile) return nil;
 
@@ -2827,6 +2966,7 @@ static XLEngineBridge *_sharedBridge = nil;
     info[@"album"] = [NSString stringWithUTF8String:audio->Album().c_str()];
 
     return info;
+#endif
 }
 
 - (NSDictionary *)getAudioSamples:(NSInteger)startMS endMS:(NSInteger)endMS {
@@ -2839,6 +2979,10 @@ static XLEngineBridge *_sharedBridge = nil;
         return nil;
     }
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native audio sample access
+    return nil;
+#else
     @try {
         xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
         if (!seqFile) {
@@ -2922,11 +3066,16 @@ static XLEngineBridge *_sharedBridge = nil;
               exception.name, exception.reason);
         return nil;
     }
+#endif
 }
 
 - (NSDictionary *)getAudioAmplitudeRange:(NSInteger)startMS endMS:(NSInteger)endMS {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native audio amplitude analysis
+    return nil;
+#else
     xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
     if (!seqFile) return nil;
 
@@ -2962,11 +3111,15 @@ static XLEngineBridge *_sharedBridge = nil;
         @"minRight": @(minRight),
         @"maxRight": @(maxRight)
     };
+#endif
 }
 
 - (void)setAudioVolume:(NSInteger)volume {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native audio volume control
+#else
     xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
     if (!seqFile) return;
 
@@ -2974,11 +3127,15 @@ static XLEngineBridge *_sharedBridge = nil;
     if (audio) {
         audio->SetVolume((int)volume);
     }
+#endif
 }
 
 - (NSInteger)getAudioVolume {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    return 100;  // TODO: Implement native audio volume
+#else
     xLightsXmlFile* seqFile = xLightsFrame::CurrentSeqXmlFile;
     if (!seqFile) return 100;
 
@@ -2987,6 +3144,7 @@ static XLEngineBridge *_sharedBridge = nil;
         return audio->GetVolume();
     }
     return 100;
+#endif
 }
 
 #pragma mark - Utility Conversion Methods
@@ -3242,6 +3400,12 @@ static XLEngineBridge *_sharedBridge = nil;
 - (void)setTestChannel:(NSInteger)channel value:(NSUInteger)value {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native pixel test via OutputEngine
+    if (_outputEngine) {
+        // _outputEngine->setChannel(channel - 1, value);
+    }
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         NSLog(@"XLEngineBridge: Cannot set test channel - xLightsFrame not available");
@@ -3253,6 +3417,7 @@ static XLEngineBridge *_sharedBridge = nil;
         // Channel is 1-indexed from the API, OutputManager expects 0-indexed
         outputManager->SetOneChannel((int32_t)(channel - 1), (unsigned char)value);
     }
+#endif
 }
 
 - (void)setTestChannels:(NSInteger)startChannel data:(NSData *)data {
@@ -3260,6 +3425,9 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native pixel test via OutputEngine
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         NSLog(@"XLEngineBridge: Cannot set test channels - xLightsFrame not available");
@@ -3273,11 +3441,15 @@ static XLEngineBridge *_sharedBridge = nil;
                                        (unsigned char*)data.bytes,
                                        data.length);
     }
+#endif
 }
 
 - (void)allTestChannelsOff {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native pixel test via OutputEngine
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         NSLog(@"XLEngineBridge: Cannot turn off test channels - xLightsFrame not available");
@@ -3288,11 +3460,15 @@ static XLEngineBridge *_sharedBridge = nil;
     if (outputManager) {
         outputManager->AllOff();
     }
+#endif
 }
 
 - (void)startTestFrame {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native pixel test via OutputEngine
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         return;
@@ -3302,11 +3478,15 @@ static XLEngineBridge *_sharedBridge = nil;
     if (outputManager) {
         outputManager->StartFrame(0);
     }
+#endif
 }
 
 - (void)endTestFrame {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native pixel test via OutputEngine
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         return;
@@ -3316,11 +3496,16 @@ static XLEngineBridge *_sharedBridge = nil;
     if (outputManager) {
         outputManager->EndFrame();
     }
+#endif
 }
 
 - (NSInteger)getTotalTestChannels {
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native total channels
+    return 0;
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         return 0;
@@ -3331,6 +3516,7 @@ static XLEngineBridge *_sharedBridge = nil;
         return outputManager->GetTotalChannels();
     }
     return 0;
+#endif
 }
 
 - (NSDictionary *)getModelChannelInfo:(NSString *)modelName {
@@ -3338,6 +3524,21 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // Get model info from ModelEngine
+    if (_modelEngine) {
+        std::string stdName = [modelName UTF8String];
+        xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+        if (!info.name.empty()) {
+            return @{
+                @"startChannel": @(info.firstChannel + 1),
+                @"channelCount": @(info.channelCount),
+                @"nodeCount": @(info.nodeCount)
+            };
+        }
+    }
+    return nil;
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         return nil;
@@ -3354,6 +3555,7 @@ static XLEngineBridge *_sharedBridge = nil;
         @"channelCount": @(model->GetChanCount()),
         @"nodeCount": @(model->GetNodeCount())
     };
+#endif
 }
 
 - (NSArray<NSDictionary *> *)getModelChannelRanges:(NSString *)modelName {
@@ -3361,6 +3563,10 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
 
+#ifdef XLIGHTS_NATIVE
+    // TODO: Implement native model channel ranges
+    return @[];
+#else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         return @[];
@@ -3389,6 +3595,7 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     return ranges;
+#endif
 }
 
 @end

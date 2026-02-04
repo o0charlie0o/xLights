@@ -168,6 +168,9 @@
 /// Get a single model property
 - (NSString *)getModelProperty:(NSString *)modelName key:(NSString *)key defaultValue:(NSString *)defaultValue;
 
+/// Get a single model property (convenience, uses empty default)
+- (NSString *)getModelProperty:(NSString *)modelName key:(NSString *)key;
+
 /// Get all model properties as a dictionary
 - (NSDictionary *)getModelProperties:(NSString *)modelName;
 
@@ -274,6 +277,15 @@
 - (BOOL)startOutput;
 - (void)stopOutput;
 - (BOOL)isOutputting;
+
+/// Get all unique IP addresses used by outputs
+- (NSArray<NSString *> *)getOutputIPs;
+
+/// Get all universes configured across all outputs
+- (NSArray<NSNumber *> *)getAllUniverses;
+
+/// Get universes for a specific IP address
+- (NSArray<NSNumber *> *)getUniversesForIP:(NSString *)ip;
 
 #pragma mark - Port Configuration
 
@@ -527,6 +539,19 @@
 /// Create a new timing track with the given name
 /// @return YES if successful
 - (BOOL)createTimingTrack:(NSString *)name;
+
+/// Create a new timing track with the given name and type
+/// @param name The name for the new timing track
+/// @param timingType The type of timing (e.g., "Empty", "Fixed Interval", "Metronome")
+/// @return YES if successful
+- (BOOL)createTimingTrack:(NSString *)name timingType:(NSString *)timingType;
+
+/// Import a timing track from another sequence file
+/// @param trackName Name of track in source file to import
+/// @param sequenceFile Path to source sequence file
+/// @param newTrackName Name for the imported track in current sequence
+/// @return YES if successful
+- (BOOL)importTimingTrack:(NSString *)trackName fromSequence:(NSString *)sequenceFile asTrackName:(NSString *)newTrackName;
 
 /// Delete a timing track by name
 - (BOOL)deleteTimingTrack:(NSString *)name;

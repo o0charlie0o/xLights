@@ -10,6 +10,7 @@
 
 #include "OutputEngine.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../outputs/OutputManager.h"
 #include "../outputs/Controller.h"
 #include "../outputs/ControllerEthernet.h"
@@ -19,11 +20,73 @@
 #include "../outputs/IPOutput.h"
 #include "../controllers/ControllerCaps.h"
 #include "../xLightsMain.h"
+#endif
 
 #include <algorithm>
 #include <thread>
 
 namespace xlEngine {
+
+#ifdef XLIGHTS_NATIVE
+// Native build: stub implementation
+// The native build uses NativeOutputProvider instead of the legacy adapter
+
+OutputEngine::OutputEngine(IOutputProvider* provider) : _provider(provider) {
+    _initialized = (provider != nullptr);
+}
+
+OutputEngine::~OutputEngine() = default;
+
+void OutputEngine::initialize(IOutputProvider* provider) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    _provider = provider;
+    _initialized = (provider != nullptr);
+}
+
+std::vector<ControllerConfig> OutputEngine::getControllers() const { return {}; }
+ControllerConfig OutputEngine::getController(const std::string& name) const { return {}; }
+bool OutputEngine::controllerExists(const std::string& name) const { return false; }
+int OutputEngine::getControllerCount() const { return 0; }
+std::vector<std::string> OutputEngine::getControllerNames() const { return {}; }
+OperationResult OutputEngine::addController(const ControllerConfig& config) { return {false, "Native build: not implemented"}; }
+OperationResult OutputEngine::removeController(const std::string& name) { return {false, "Native build: not implemented"}; }
+OperationResult OutputEngine::updateController(const std::string& name, const ControllerConfig& config) { return {false, "Native build: not implemented"}; }
+std::vector<PortConfig> OutputEngine::getControllerPorts(const std::string& name) const { return {}; }
+OperationResult OutputEngine::setPortConfig(const std::string& name, int port, const PortConfig& config) { return {false, "Native build: not implemented"}; }
+ControllerCapabilities OutputEngine::getControllerCapabilities(const std::string& name) const { return {}; }
+std::vector<ProtocolInfo> OutputEngine::getOutputProtocols() const { return {}; }
+std::vector<std::string> OutputEngine::getVendors(const std::string& controllerType) const { return {}; }
+std::vector<std::string> OutputEngine::getModels(const std::string& controllerType, const std::string& vendor) const { return {}; }
+std::vector<std::string> OutputEngine::getVariants(const std::string& controllerType, const std::string& vendor, const std::string& model) const { return {}; }
+void OutputEngine::testController(const std::string& name, PingCallback callback) { if (callback) callback(name, PingState::Unknown); }
+void OutputEngine::testAllControllers(PingCallback callback) {}
+PingState OutputEngine::getLastPingState(const std::string& name) const { return PingState::Unknown; }
+void OutputEngine::discoverControllers(DiscoveryCallback callback) { if (callback) callback(false, {}); }
+OperationResult OutputEngine::addDiscoveredController(const DiscoveredController& discovered) { return {false, "Native build: not implemented"}; }
+void OutputEngine::uploadInputToController(const std::string& name, UploadCallback callback) { if (callback) callback(false, "Native build: not implemented"); }
+void OutputEngine::uploadOutputToController(const std::string& name, UploadCallback callback) { if (callback) callback(false, "Native build: not implemented"); }
+void OutputEngine::uploadToController(const std::string& name, UploadCallback callback) { if (callback) callback(false, "Native build: not implemented"); }
+bool OutputEngine::startOutput() { return false; }
+void OutputEngine::stopOutput() {}
+bool OutputEngine::isOutputting() const { return false; }
+void OutputEngine::sortControllersByName() {}
+void OutputEngine::sortControllersByID() {}
+void OutputEngine::sortControllersByIP() {}
+bool OutputEngine::isDirty() const { return false; }
+OperationResult OutputEngine::save() { return {false, "Native build: not implemented"}; }
+std::string OutputEngine::getGlobalFPPProxy() const { return ""; }
+void OutputEngine::setGlobalFPPProxy(const std::string& proxy) {}
+std::string OutputEngine::getGlobalForceLocalIP() const { return ""; }
+void OutputEngine::setGlobalForceLocalIP(const std::string& ip) {}
+int OutputEngine::getSuppressFrames() const { return 0; }
+void OutputEngine::setSuppressFrames(int frames) {}
+bool OutputEngine::isParallelTransmission() const { return false; }
+void OutputEngine::setParallelTransmission(bool parallel) {}
+int32_t OutputEngine::getTotalChannels() const { return 0; }
+void OutputEngine::setErrorCallback(ErrorCallback callback) { _errorCallback = std::move(callback); }
+
+#else
+// Legacy build: full implementation using OutputManager and Controller classes
 
 OutputEngine::OutputEngine(IOutputProvider* provider) : _provider(provider) {
     _initialized = (provider != nullptr);
@@ -732,11 +795,13 @@ bool OutputManagerAdapter::isOutputting() const {
 bool OutputManagerAdapter::startOutput() {
     if (!_manager) return false;
 
+#ifndef XLIGHTS_NATIVE
     // If we have access to xLightsFrame, use its EnableOutputs method
     // which properly sets the UI checkbox state and handles auto-upload
     if (_frame) {
         return _frame->EnableOutputs(true);
     }
+#endif
 
     // Fallback to direct OutputManager call (checkbox state won't be updated)
     return _manager->StartOutput();
@@ -745,12 +810,14 @@ bool OutputManagerAdapter::startOutput() {
 void OutputManagerAdapter::stopOutput() {
     if (!_manager) return;
 
+#ifndef XLIGHTS_NATIVE
     // If we have access to xLightsFrame, use its DisableOutputs method
     // which properly clears the UI checkbox state
     if (_frame) {
         _frame->DisableOutputs();
         return;
     }
+#endif
 
     // Fallback to direct OutputManager call
     _manager->StopOutput();
@@ -810,5 +877,7 @@ ControllerInfo OutputManagerAdapter::buildControllerInfo(Controller* c) const {
 
     return info;
 }
+
+#endif // XLIGHTS_NATIVE
 
 } // namespace xlEngine
