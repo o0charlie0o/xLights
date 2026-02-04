@@ -27,7 +27,7 @@
  */
 
 #include "../Effect.h"
-#include "../Math.h"
+#include "../XLMath.h"
 #include <list>
 #include <vector>
 #include <random>

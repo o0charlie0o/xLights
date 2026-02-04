@@ -33,7 +33,7 @@
 #include <cassert>
 
 #include "Color.h"
-#include "Math.h"
+#include "XLMath.h"
 
 namespace xlCore {
 

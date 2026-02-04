@@ -24,7 +24,7 @@
  */
 
 #include "../Effect.h"
-#include "../Math.h"
+#include "../XLMath.h"
 #include <vector>
 #include <list>
 #include <unordered_map>

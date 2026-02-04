@@ -11,7 +11,7 @@
 #include "TreeEffect.h"
 #include "../RenderContext.h"
 #include "../Sequence.h"
-#include "../Math.h"
+#include "../XLMath.h"
 
 #include <cmath>
 #include <algorithm>

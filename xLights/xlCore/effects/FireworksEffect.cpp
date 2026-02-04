@@ -8,7 +8,7 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
-// System headers first (before Math.h to avoid macOS cmath collision)
+// System headers first
 #include <cmath>
 #include <algorithm>
 

@@ -25,6 +25,7 @@
  */
 
 #include "AudioReactiveEffect.h"
+#include "../XLMath.h"
 
 #include <vector>
 #include <list>

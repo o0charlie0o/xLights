@@ -46,7 +46,7 @@
 
 #include "Types.h"
 #include "Color.h"
-#include "Math.h"
+#include "XLMath.h"
 #include "ImageBuffer.h"
 #include "RenderContext.h"
 #include "StringUtils.h"

@@ -10,7 +10,7 @@
 
 #include "KaleidoscopeEffect.h"
 #include "../RenderContext.h"
-#include "../Math.h"
+#include "../XLMath.h"
 
 #include <cmath>
 #include <algorithm>

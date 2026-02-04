@@ -34,7 +34,7 @@
 #include <cstdint>
 
 #include "Types.h"
-#include "Math.h"
+#include "XLMath.h"
 #include "Color.h"
 
 namespace xlCore {
