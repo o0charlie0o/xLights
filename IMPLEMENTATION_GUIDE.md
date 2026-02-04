@@ -857,3 +857,365 @@ The Layer Blending panel provides comprehensive controls for layer mixing, color
 - `ColorWellView` - NSViewRepresentable wrapper for NSColorWell
 
 **TODO**: Wire Layer Blending panel state to engine bridge to affect actual rendering. Currently the controls are functional but not connected to the C++ effect rendering pipeline.
+
+---
+
+## Phase 7: Engine Modernization (Long-Term)
+
+> **Goal**: Completely remove wxWidgets dependencies from the rendering engine, creating a pure modern C++ core that can be used by any frontend.
+
+### Why This Is Necessary
+
+During the native macOS rebuild, we've encountered repeated issues caused by the tight coupling between the C++ engine and wxWidgets:
+
+1. **Threading conflicts**: wxWidgets requires main thread for UI calls, but the engine is called from various threads. This caused crashes when calling `RenderTimeSlice` from background threads (creates `RenderProgressDialog`), and `EnableSequenceControls` being called during render.
+
+2. **Audio system conflicts**: Both the native audio (AVFoundation) and wxWidgets audio (SDL) can play simultaneously because they're not aware of each other.
+
+3. **Type pollution**: `wxString`, `wxColour`, `wxPoint`, etc. are sprinkled throughout the engine, requiring conversions at every boundary.
+
+4. **UI calls embedded in engine code**: Dialogs, progress bars, and control state changes happen deep in render code where they don't belong.
+
+5. **Event system entanglement**: `wxCommandEvent` and `wxPostEvent` are used for playback control, tightly coupling the engine to the wx event loop.
+
+### Target Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Native UI Layer                          │
+│              (SwiftUI / AppKit / Qt / Web)                  │
+└───────────────────────────┬─────────────────────────────────┘
+                            │ Clean C++ API (std:: types only)
+┌───────────────────────────▼─────────────────────────────────┐
+│                    xlEngine (Pure C++17/20)                 │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Effects System                                        │ │
+│  │  - RenderContext (replaces RenderBuffer)               │ │
+│  │  - EffectBase class (no wx dependencies)               │ │
+│  │  - 60+ effects ported to pure C++                      │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Model System                                          │ │
+│  │  - Pure geometry calculations                          │ │
+│  │  - Node coordinate management                          │ │
+│  │  - No wx serialization dependencies                    │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Sequence System                                       │ │
+│  │  - Timeline and layer management                       │ │
+│  │  - Pre-rendered frame data (SequenceData)              │ │
+│  │  - Modern XML/JSON serialization                       │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Audio System                                          │ │
+│  │  - Platform-abstracted audio interface                 │ │
+│  │  - AVFoundation backend (macOS)                        │ │
+│  │  - miniaudio backend (cross-platform fallback)         │ │
+│  │  - Waveform analysis (FFT, beat detection)             │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Output System                                         │ │
+│  │  - Protocol implementations (E1.31, ArtNet, DMX, etc.) │ │
+│  │  - Standard socket/serial operations                   │ │
+│  │  - No wx networking dependencies                       │ │
+│  └────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Implementation Phases
+
+#### Phase 7A: Core Type Abstractions (2-3 weeks)
+
+Create `xlCore` library with fundamental types that replace wx equivalents:
+
+| wx Type | xlCore Replacement | Notes |
+|---------|-------------------|-------|
+| `wxString` | `std::string` | UTF-8 throughout |
+| `wxColour` | `xlCore::Color` | RGBA, HSV, HSL conversions |
+| `wxPoint` | `xlCore::Point2D` | Integer 2D point |
+| `wxRealPoint` | `xlCore::Vec2` | Float 2D vector |
+| `wxPoint3D` | `xlCore::Vec3` | 3D vector with math ops |
+| `wxRect` | `xlCore::Rect` | 2D rectangle |
+| `wxImage` | `xlCore::ImageBuffer` | Raw pixel buffer |
+| `wxArrayString` | `std::vector<std::string>` | String arrays |
+
+**Deliverables**:
+- `xlCore/Types.h` - Core type definitions
+- `xlCore/Color.h/cpp` - Color class with conversions
+- `xlCore/Math.h/cpp` - Vector and matrix math
+- `xlCore/ImageBuffer.h/cpp` - Pixel buffer management
+
+#### Phase 7B: RenderContext (2-3 weeks)
+
+Replace `RenderBuffer` with a pure C++ `RenderContext`:
+
+```cpp
+namespace xlCore {
+    class RenderContext {
+    public:
+        // Pixel access
+        void setPixel(int x, int y, const Color& color);
+        Color getPixel(int x, int y) const;
+
+        // Drawing primitives
+        void drawLine(Vec2 start, Vec2 end, const Color& color);
+        void drawRect(Rect rect, const Color& color, bool filled);
+        void drawCircle(Vec2 center, float radius, const Color& color, bool filled);
+
+        // Buffer properties
+        int width() const;
+        int height() const;
+
+        // Raw access for GPU transfer
+        const uint8_t* pixelData() const;
+        size_t pixelDataSize() const;
+
+    private:
+        std::vector<uint8_t> _pixels;  // RGBA format
+        int _width, _height;
+    };
+}
+```
+
+**Key changes from RenderBuffer**:
+- No `wxImage` dependency
+- No wx color types
+- Clean pixel data access for Metal/OpenGL
+- Thread-safe design
+
+#### Phase 7C: Effect System Port (6-10 weeks)
+
+Port all 60+ effects to use `xlCore` types. This is the largest effort but highly parallelizable.
+
+**Effect categories and counts**:
+| Category | Count | Complexity | Examples |
+|----------|-------|------------|----------|
+| Simple patterns | ~15 | Low | Bars, Butterfly, Curtain, Strobe |
+| Particle/physics | ~8 | High | Fire, Fireworks, Snowflakes, Liquid |
+| Image/video | ~6 | Medium | Pictures, Video, Shader |
+| Text/faces | ~4 | Medium | Text, Faces, Marquee |
+| Music reactive | ~5 | Medium | VU Meter, Waveform, On |
+| 3D effects | ~8 | High | Cube, Sphere, Pinwheel |
+| Utility | ~10 | Low | DMX, State, Fan |
+| Complex | ~4 | Very High | Galaxy, Kaleidoscope, Plasma |
+
+**Approach**:
+1. Create `xlCore::Effect` base class with pure virtual `render(RenderContext&, const Settings&)`
+2. Port effects one at a time, starting with simplest
+3. Each effect can be tested independently
+4. Maintain compatibility shim so old effects work during transition
+
+**Per-effect porting checklist**:
+- [ ] Replace `wxString` with `std::string`
+- [ ] Replace `wxColour` with `xlCore::Color`
+- [ ] Replace `RenderBuffer&` with `RenderContext&`
+- [ ] Remove any UI calls (progress, dialogs)
+- [ ] Add unit test with known output
+- [ ] Verify visual output matches original
+
+#### Phase 7D: Model System Extraction (2-3 weeks)
+
+Extract model geometry into pure C++ library:
+
+```cpp
+namespace xlCore {
+    class Model {
+    public:
+        virtual ~Model() = default;
+
+        // Geometry
+        virtual void initializeGeometry() = 0;
+        virtual size_t nodeCount() const = 0;
+        virtual Vec3 nodePosition(size_t index) const = 0;
+
+        // Properties
+        const std::string& name() const;
+        void setProperty(const std::string& key, const std::string& value);
+        std::string property(const std::string& key) const;
+
+        // Channel mapping
+        size_t startChannel() const;
+        size_t channelCount() const;
+
+    protected:
+        std::vector<Vec3> _nodePositions;
+        std::map<std::string, std::string> _properties;
+    };
+
+    // Concrete model types
+    class SingleLineModel : public Model { ... };
+    class MatrixModel : public Model { ... };
+    class ArchesModel : public Model { ... };
+    class CustomModel : public Model { ... };
+    // ... etc for all model types
+}
+```
+
+**Model types to port** (~25 types):
+SingleLine, Matrix, Arches, Candy Canes, Circle, Custom, Cube, DMX, Icicles, Image, Poly Line, Spinner, Sphere, Star, Tree, Window Frame, Wreath, and more.
+
+#### Phase 7E: Audio System Abstraction (2-3 weeks)
+
+Create platform-abstracted audio interface:
+
+```cpp
+namespace xlCore {
+    class AudioPlayer {
+    public:
+        virtual ~AudioPlayer() = default;
+
+        virtual bool load(const std::string& path) = 0;
+        virtual void play() = 0;
+        virtual void pause() = 0;
+        virtual void stop() = 0;
+        virtual void seek(double positionSeconds) = 0;
+
+        virtual double position() const = 0;
+        virtual double duration() const = 0;
+        virtual bool isPlaying() const = 0;
+
+        // Callback for position updates
+        using PositionCallback = std::function<void(double)>;
+        virtual void setPositionCallback(PositionCallback cb) = 0;
+    };
+
+    class AudioAnalyzer {
+    public:
+        virtual bool loadForAnalysis(const std::string& path) = 0;
+        virtual std::vector<float> getWaveformData(size_t buckets) = 0;
+        virtual std::vector<float> getSpectrum(double timeSeconds) = 0;
+        virtual float getLevel(double timeSeconds) = 0;
+    };
+
+    // Platform implementations
+    std::unique_ptr<AudioPlayer> createAudioPlayer();  // Returns AVFoundation on macOS
+    std::unique_ptr<AudioAnalyzer> createAudioAnalyzer();
+}
+```
+
+**Platform backends**:
+- macOS: AVFoundation (already partially implemented in `XLAudioPlayer`)
+- Cross-platform fallback: miniaudio (lightweight, single-header)
+- Analysis: Accelerate framework on macOS, FFTW fallback
+
+#### Phase 7F: Sequence Serialization (2-3 weeks)
+
+Replace wxXml with modern serialization:
+
+```cpp
+namespace xlCore {
+    class SequenceSerializer {
+    public:
+        // Load/save .xLights format
+        bool loadSequence(const std::string& path, Sequence& seq);
+        bool saveSequence(const std::string& path, const Sequence& seq);
+
+        // Import from other formats
+        bool importFSEQ(const std::string& path, Sequence& seq);
+        bool importVixen(const std::string& path, Sequence& seq);
+
+    private:
+        // Use pugixml or rapidxml (header-only, no dependencies)
+    };
+}
+```
+
+**Considerations**:
+- Must maintain backward compatibility with existing .xLights files
+- Can add modern JSON format as alternative
+- FSEQ binary format is already fairly clean
+
+#### Phase 7G: Output Protocol Extraction (2-3 weeks)
+
+Extract output protocols to standalone library:
+
+```cpp
+namespace xlCore {
+    class OutputProtocol {
+    public:
+        virtual ~OutputProtocol() = default;
+
+        virtual bool connect() = 0;
+        virtual void disconnect() = 0;
+        virtual bool isConnected() const = 0;
+
+        virtual bool sendFrame(const uint8_t* data, size_t channels) = 0;
+    };
+
+    class E131Output : public OutputProtocol { ... };
+    class ArtNetOutput : public OutputProtocol { ... };
+    class DMXOutput : public OutputProtocol { ... };
+    class DDPOutput : public OutputProtocol { ... };
+    // ... etc
+}
+```
+
+Uses standard BSD sockets, no wx networking.
+
+#### Phase 7H: Integration & Testing (4-6 weeks)
+
+- Wire new engine to native macOS UI
+- Regression testing with real sequences
+- Performance benchmarking vs old engine
+- Memory profiling
+- Remove wx dependency entirely from engine build
+
+### Effort Summary
+
+| Phase | Description | Effort | Parallelizable |
+|-------|-------------|--------|----------------|
+| 7A | Core type abstractions | 2-3 weeks | No (foundation) |
+| 7B | RenderContext | 2-3 weeks | After 7A |
+| 7C | Effect system port | 6-10 weeks | Highly (60+ effects) |
+| 7D | Model system | 2-3 weeks | After 7A |
+| 7E | Audio system | 2-3 weeks | After 7A |
+| 7F | Sequence serialization | 2-3 weeks | After 7A |
+| 7G | Output protocols | 2-3 weeks | After 7A |
+| 7H | Integration & testing | 4-6 weeks | After all |
+
+**Total: 4-8 months** for focused effort, with significant parallelization possible in Phase 7C.
+
+### Benefits of Modern Engine
+
+1. **No threading restrictions** - Call from any thread, render in background
+2. **Clean API boundaries** - Standard C++ types only
+3. **Platform flexibility** - Same engine on macOS, Windows, Linux, or even web (WASM)
+4. **Testability** - Unit test effects without UI
+5. **Headless operation** - Server-side rendering possible
+6. **Easier maintenance** - No wx version compatibility concerns
+7. **Better performance** - Remove wx overhead, optimize data structures
+8. **Modern tooling** - Use sanitizers, modern debuggers without wx interference
+
+### Migration Strategy
+
+**Recommended approach: Gradual extraction**
+
+1. Start with Phase 7A (types) and 7B (RenderContext) - these are foundational
+2. Port effects incrementally (Phase 7C) - can happen in parallel with other work
+3. Run old and new engines side-by-side during transition
+4. Native macOS UI uses new engine components as they become available
+5. wxWidgets UI continues to work with old engine
+6. Eventually remove wx dependency entirely
+
+This allows continuous progress without a "big bang" rewrite that leaves you with nothing working for months.
+
+### Dependencies with UI Phases
+
+```
+Phase 0 (Engine Abstraction)  ─────────────────────────────────┐
+    │                                                          │
+    ▼                                                          │
+Phases 1-6 (UI)  ─────────────────────────────────────────────┤
+    │                                                          │
+    │  (Can proceed with abstracted engine)                   │
+    │                                                          │
+    ▼                                                          ▼
+Phase 7 (Engine Modernization) ◄───────────────────────────────┘
+    │
+    │  (Replaces abstraction layer with clean engine)
+    │
+    ▼
+Fully Native macOS xLights
+```
+
+Phase 7 can begin after Phase 0 and run in parallel with Phases 1-6. As new engine components are completed, the native UI can switch from the wx-abstraction layer to the modern engine.
