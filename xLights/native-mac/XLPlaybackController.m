@@ -267,9 +267,15 @@
 
     // Start audio playback (if audio is available)
     if (_useNativeAudio && _audioPlayer.isLoaded) {
+        // Stop engine audio first to prevent double playback
+        if (_engineBridge) {
+            [_engineBridge stop];
+        }
         // Use native AVFoundation audio
         [_audioPlayer playFromPosition:(CGFloat)_positionMS];
     } else if (_engineBridge) {
+        // Stop native audio first
+        [_audioPlayer stop];
         // Fall back to engine audio
         [_engineBridge play];
     }
@@ -290,10 +296,9 @@
     _isPaused = YES;
     [self stopPlaybackTimer];
 
-    // Pause audio
-    if (_useNativeAudio && _audioPlayer.isLoaded) {
-        [_audioPlayer pause];
-    } else {
+    // Pause both audio systems to ensure both are paused
+    [_audioPlayer pause];
+    if (_engineBridge) {
         [_engineBridge pause];
     }
 
@@ -321,10 +326,9 @@
         _previewView.playbackPositionMS = 0;
     }
 
-    // Stop audio
-    if (_useNativeAudio && _audioPlayer.isLoaded) {
-        [_audioPlayer stop];
-    } else {
+    // Stop both audio systems to ensure no double playback
+    [_audioPlayer stop];
+    if (_engineBridge) {
         [_engineBridge stop];
     }
 
