@@ -19,6 +19,12 @@ static const CGFloat kDefaultZoomLevel = 0.1; // pixels per ms
 static const CGFloat kMinZoomLevel = 0.001;
 static const CGFloat kMaxZoomLevel = 10.0;
 
+// Timing mark constants
+static const CGFloat kTimingMarkTriangleSize = 5.0;
+static const CGFloat kTimingMarkHitTestWidth = 8.0;
+static const CGFloat kTimingMarkR = 0.3, kTimingMarkG = 0.7, kTimingMarkB = 1.0;
+static const CGFloat kTimingMarkSelectedR = 1.0, kTimingMarkSelectedG = 0.5, kTimingMarkSelectedB = 0.0;
+
 // Color constants as raw RGBA values to avoid NSColor object lifetime issues
 // with static variables in CALayerDelegate callbacks
 static const CGFloat kBgR = 0.118, kBgG = 0.118, kBgB = 0.118;
@@ -29,12 +35,18 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 
 @property (nonatomic, assign) BOOL dragging;
 @property (nonatomic, strong) CALayer *playheadLayer;
+@property (nonatomic, strong) CALayer *timingMarksLayer;
 @property (nonatomic, strong) NSTimer *playheadTimer;
 @property (nonatomic, assign) CFTimeInterval lastDisplayLinkTimestamp;
 
 // For smooth playhead interpolation during playback
 @property (nonatomic, assign) NSTimeInterval lastSyncedPosition;
 @property (nonatomic, assign) CFAbsoluteTime lastSyncTime;
+
+// Timing mark dragging state
+@property (nonatomic, assign) BOOL draggingTimingMark;
+@property (nonatomic, assign) NSInteger draggingTimingMarkId;
+@property (nonatomic, assign) CGFloat dragStartTimeMS;
 
 @end
 
@@ -71,7 +83,15 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     _lastSyncedPosition = 0.0;
     _lastSyncTime = 0;
 
+    // Timing marks
+    _timingMarks = @[];
+    _timingMarksEditable = YES;
+    _selectedTimingMarkId = -1;
+    _draggingTimingMark = NO;
+    _draggingTimingMarkId = -1;
+
     [self setupPlayheadLayer];
+    [self setupTimingMarksLayer];
 }
 
 - (void)dealloc {
@@ -100,7 +120,9 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     CGFloat scale = self.window.backingScaleFactor ?: 1.0;
     self.layer.contentsScale = scale;
     _playheadLayer.contentsScale = scale;
+    _timingMarksLayer.contentsScale = scale;
     [self.layer setNeedsDisplay];
+    [_timingMarksLayer setNeedsDisplay];
 }
 
 #pragma mark - Playhead Layer
@@ -110,6 +132,24 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     _playheadLayer.zPosition = 100;
     [self.layer addSublayer:_playheadLayer];
     [self updatePlayheadPosition];
+}
+
+- (void)setupTimingMarksLayer {
+    _timingMarksLayer = [CALayer layer];
+    _timingMarksLayer.zPosition = 50;  // Below playhead, above ticks
+    _timingMarksLayer.delegate = self;
+    _timingMarksLayer.needsDisplayOnBoundsChange = YES;
+    [self.layer addSublayer:_timingMarksLayer];
+}
+
+- (void)updateTimingMarksLayer {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _timingMarksLayer.frame = self.bounds;
+    CGFloat scale = self.window.backingScaleFactor ?: 1.0;
+    _timingMarksLayer.contentsScale = scale;
+    [_timingMarksLayer setNeedsDisplay];
+    [CATransaction commit];
 }
 
 - (void)updatePlayheadPosition {
@@ -151,11 +191,91 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     CGContextStrokePath(ctx);
 }
 
+- (void)drawTimingMarksInContext:(CGContextRef)ctx bounds:(CGRect)bounds {
+    if (_timingMarks.count == 0) return;
+
+    CGFloat width = CGRectGetWidth(bounds);
+    CGFloat height = CGRectGetHeight(bounds);
+
+    // Text attributes for labels
+    NSDictionary *labelAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:8.0 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: [NSColor whiteColor],
+    };
+
+    for (NSDictionary *mark in _timingMarks) {
+        NSNumber *markIdNum = mark[@"id"];
+        NSNumber *startTimeMSNum = mark[@"startTimeMS"];
+        NSString *label = mark[@"label"];
+
+        if (!markIdNum || !startTimeMSNum) continue;
+
+        NSInteger markId = markIdNum.integerValue;
+        NSTimeInterval time = startTimeMSNum.doubleValue / 1000.0;
+        CGFloat x = [self pointForTime:time];
+
+        // Skip if off-screen
+        if (x < -kTimingMarkHitTestWidth || x > width + kTimingMarkHitTestWidth) continue;
+
+        BOOL isSelected = (markId == _selectedTimingMarkId);
+
+        // Set color based on selection
+        if (isSelected) {
+            CGContextSetRGBFillColor(ctx, kTimingMarkSelectedR, kTimingMarkSelectedG, kTimingMarkSelectedB, 1.0);
+            CGContextSetRGBStrokeColor(ctx, kTimingMarkSelectedR, kTimingMarkSelectedG, kTimingMarkSelectedB, 1.0);
+        } else {
+            CGContextSetRGBFillColor(ctx, kTimingMarkR, kTimingMarkG, kTimingMarkB, 1.0);
+            CGContextSetRGBStrokeColor(ctx, kTimingMarkR, kTimingMarkG, kTimingMarkB, 1.0);
+        }
+
+        // Draw inverted triangle at bottom (pointing up)
+        CGFloat triSize = kTimingMarkTriangleSize;
+        CGFloat triTop = height - triSize;
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, x - triSize, height);
+        CGContextAddLineToPoint(ctx, x + triSize, height);
+        CGContextAddLineToPoint(ctx, x, triTop);
+        CGContextClosePath(ctx);
+        CGContextFillPath(ctx);
+
+        // Draw vertical line extending up
+        CGContextSetLineWidth(ctx, 1.0);
+        CGContextBeginPath(ctx);
+        CGContextMoveToPoint(ctx, x, triTop);
+        CGContextAddLineToPoint(ctx, x, 0);
+        CGContextStrokePath(ctx);
+
+        // Draw label if present
+        if (label.length > 0) {
+            NSSize labelSize = [label sizeWithAttributes:labelAttrs];
+            CGFloat labelX = x + 3.0;
+            CGFloat labelY = height - triSize - labelSize.height - 2.0;
+
+            // Clamp to view bounds
+            if (labelX + labelSize.width > width - 2.0) {
+                labelX = x - labelSize.width - 3.0;
+            }
+            if (labelY < 2.0) labelY = 2.0;
+
+            NSGraphicsContext *nsCtx = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
+            [NSGraphicsContext saveGraphicsState];
+            [NSGraphicsContext setCurrentContext:nsCtx];
+            [label drawAtPoint:NSMakePoint(labelX, labelY) withAttributes:labelAttrs];
+            [NSGraphicsContext restoreGraphicsState];
+        }
+    }
+}
+
 #pragma mark - CALayerDelegate
 
 - (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)ctx {
     if (layer == _playheadLayer) {
         [self drawPlayheadInContext:ctx bounds:layer.bounds];
+        return;
+    }
+
+    if (layer == _timingMarksLayer) {
+        [self drawTimingMarksInContext:ctx bounds:layer.bounds];
         return;
     }
 
@@ -364,6 +484,7 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     _zoomLevel = clamped;
     [self.layer setNeedsDisplay];
     [self updatePlayheadPosition];
+    [_timingMarksLayer setNeedsDisplay];
 }
 
 - (void)setScrollOffset:(CGFloat)scrollOffset {
@@ -371,6 +492,7 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     _scrollOffset = scrollOffset;
     [self.layer setNeedsDisplay];
     [self updatePlayheadPosition];
+    [_timingMarksLayer setNeedsDisplay];
 }
 
 - (void)setSequenceDuration:(NSTimeInterval)sequenceDuration {
@@ -393,6 +515,22 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     }
 }
 
+- (void)setTimingMarks:(NSArray<NSDictionary *> *)timingMarks {
+    _timingMarks = [timingMarks copy];
+    [_timingMarksLayer setNeedsDisplay];
+}
+
+- (void)setSelectedTimingMarkId:(NSInteger)selectedTimingMarkId {
+    if (_selectedTimingMarkId != selectedTimingMarkId) {
+        _selectedTimingMarkId = selectedTimingMarkId;
+        [_timingMarksLayer setNeedsDisplay];
+    }
+}
+
+- (void)reloadTimingMarks {
+    [_timingMarksLayer setNeedsDisplay];
+}
+
 #pragma mark - Scrolling
 
 - (void)scrollToTime:(NSTimeInterval)time {
@@ -407,9 +545,38 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     }
 }
 
+#pragma mark - Timing Mark Hit Testing
+
+- (NSInteger)timingMarkIdAtPoint:(NSPoint)point {
+    CGFloat height = NSHeight(self.bounds);
+
+    for (NSDictionary *mark in _timingMarks) {
+        NSNumber *markIdNum = mark[@"id"];
+        NSNumber *startTimeMSNum = mark[@"startTimeMS"];
+
+        if (!markIdNum || !startTimeMSNum) continue;
+
+        NSTimeInterval time = startTimeMSNum.doubleValue / 1000.0;
+        CGFloat markX = [self pointForTime:time];
+
+        // Check if click is within hit test area (horizontal)
+        if (fabs(point.x - markX) <= kTimingMarkHitTestWidth) {
+            // Check if in the lower portion of the view (near the triangle)
+            if (point.y >= height - kTimingMarkTriangleSize * 3) {
+                return markIdNum.integerValue;
+            }
+        }
+    }
+    return -1;
+}
+
 #pragma mark - Mouse Handling
 
 - (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    return YES;
+}
+
+- (BOOL)acceptsFirstResponder {
     return YES;
 }
 
@@ -419,6 +586,27 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     time = [self snapTimeToFrame:time];
     time = fmax(0, fmin(time, _sequenceDuration));
 
+    // Check for Option+click to create timing mark
+    if ((event.modifierFlags & NSEventModifierFlagOption) && _timingMarksEditable) {
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didRequestTimingMarkAtSeconds:)]) {
+            [_delegate timelineRuler:self didRequestTimingMarkAtSeconds:time];
+        }
+        return;
+    }
+
+    // Check if clicking on a timing mark
+    NSInteger hitMarkId = [self timingMarkIdAtPoint:loc];
+    if (hitMarkId >= 0 && _timingMarksEditable) {
+        // Start dragging the timing mark
+        _draggingTimingMark = YES;
+        _draggingTimingMarkId = hitMarkId;
+        _selectedTimingMarkId = hitMarkId;
+        _dragStartTimeMS = time * 1000.0;
+        [_timingMarksLayer setNeedsDisplay];
+        return;
+    }
+
+    // Regular click - scrub to position
     _dragging = YES;
     _playbackPosition = time;
     [self updatePlayheadPosition];
@@ -432,12 +620,32 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 }
 
 - (void)mouseDragged:(NSEvent *)event {
-    if (!_dragging) return;
-
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
     NSTimeInterval time = [self timeForPoint:loc.x];
     time = [self snapTimeToFrame:time];
     time = fmax(0, fmin(time, _sequenceDuration));
+
+    // Handle timing mark dragging
+    if (_draggingTimingMark && _draggingTimingMarkId >= 0) {
+        // Update the timing mark position in the local array for visual feedback
+        NSMutableArray *updatedMarks = [_timingMarks mutableCopy];
+        for (NSUInteger i = 0; i < updatedMarks.count; i++) {
+            NSDictionary *mark = updatedMarks[i];
+            NSNumber *markIdNum = mark[@"id"];
+            if (markIdNum && markIdNum.integerValue == _draggingTimingMarkId) {
+                NSMutableDictionary *mutableMark = [mark mutableCopy];
+                mutableMark[@"startTimeMS"] = @((NSInteger)(time * 1000.0));
+                updatedMarks[i] = mutableMark;
+                break;
+            }
+        }
+        _timingMarks = updatedMarks;
+        [_timingMarksLayer setNeedsDisplay];
+        return;
+    }
+
+    // Handle normal playhead scrubbing
+    if (!_dragging) return;
 
     _playbackPosition = time;
     [self updatePlayheadPosition];
@@ -448,12 +656,23 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 }
 
 - (void)mouseUp:(NSEvent *)event {
-    if (!_dragging) return;
-
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
     NSTimeInterval time = [self timeForPoint:loc.x];
     time = [self snapTimeToFrame:time];
     time = fmax(0, fmin(time, _sequenceDuration));
+
+    // Finalize timing mark drag
+    if (_draggingTimingMark && _draggingTimingMarkId >= 0) {
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didMoveTimingMarkId:toSeconds:)]) {
+            [_delegate timelineRuler:self didMoveTimingMarkId:_draggingTimingMarkId toSeconds:time];
+        }
+        _draggingTimingMark = NO;
+        _draggingTimingMarkId = -1;
+        return;
+    }
+
+    // Finalize normal playhead scrubbing
+    if (!_dragging) return;
 
     _dragging = NO;
     _playbackPosition = time;
@@ -462,6 +681,68 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     if ([_delegate respondsToSelector:@selector(timelineRuler:didEndScrubbing:)]) {
         [_delegate timelineRuler:self didEndScrubbing:time];
     }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    if (!_timingMarksEditable) {
+        [super rightMouseDown:event];
+        return;
+    }
+
+    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger hitMarkId = [self timingMarkIdAtPoint:loc];
+
+    if (hitMarkId >= 0) {
+        _selectedTimingMarkId = hitMarkId;
+        [_timingMarksLayer setNeedsDisplay];
+
+        // Show context menu
+        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Timing Mark"];
+        NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete Timing Mark"
+                                                            action:@selector(deleteSelectedTimingMark:)
+                                                     keyEquivalent:@""];
+        deleteItem.target = self;
+        [menu addItem:deleteItem];
+
+        [NSMenu popUpContextMenu:menu withEvent:event forView:self];
+    } else {
+        [super rightMouseDown:event];
+    }
+}
+
+- (void)deleteSelectedTimingMark:(id)sender {
+    if (_selectedTimingMarkId >= 0 && _timingMarksEditable) {
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didRequestDeleteTimingMarkId:)]) {
+            [_delegate timelineRuler:self didRequestDeleteTimingMarkId:_selectedTimingMarkId];
+        }
+        _selectedTimingMarkId = -1;
+        [_timingMarksLayer setNeedsDisplay];
+    }
+}
+
+- (void)keyDown:(NSEvent *)event {
+    // Handle Delete/Backspace to delete selected timing mark
+    if (_selectedTimingMarkId >= 0 && _timingMarksEditable) {
+        unichar keyChar = 0;
+        if (event.characters.length > 0) {
+            keyChar = [event.characters characterAtIndex:0];
+        }
+
+        if (keyChar == NSDeleteCharacter || keyChar == NSBackspaceCharacter ||
+            event.keyCode == 51 || event.keyCode == 117) {  // 51 = Backspace, 117 = Delete
+            [self deleteSelectedTimingMark:nil];
+            return;
+        }
+    }
+
+    // Escape to deselect
+    if (event.keyCode == 53) {  // Escape
+        _selectedTimingMarkId = -1;
+        [_timingMarksLayer setNeedsDisplay];
+        return;
+    }
+
+    [super keyDown:event];
 }
 
 #pragma mark - Scroll Wheel (Zoom)
@@ -604,7 +885,9 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
         CGFloat scale = self.window.backingScaleFactor;
         self.layer.contentsScale = scale;
         _playheadLayer.contentsScale = scale;
+        _timingMarksLayer.contentsScale = scale;
         [self.layer setNeedsDisplay];
+        [self updateTimingMarksLayer];
     } else {
         [self stopDisplayLink];
     }
@@ -614,6 +897,7 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     [super setFrameSize:newSize];
     [self.layer setNeedsDisplay];
     [self updatePlayheadPosition];
+    [self updateTimingMarksLayer];
 }
 
 #pragma mark - Flipped Coordinates

@@ -485,6 +485,32 @@
     };
 }
 
+- (NSDictionary *)getPrerenderedFrameBuffer:(NSString *)modelName timeMS:(NSInteger)timeMS {
+    if (!modelName) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        return nil;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    xlEngine::FrameBuffer fb = _renderEngine->getPrerenderedFrameBuffer(stdName, static_cast<int>(timeMS));
+
+    if (!fb.isValid()) {
+        return nil;
+    }
+
+    NSData *pixelData = [NSData dataWithBytes:fb.pixels.data() length:fb.pixels.size()];
+
+    return @{
+        @"modelName": [NSString stringWithUTF8String:fb.modelName.c_str()],
+        @"width": @(fb.width),
+        @"height": @(fb.height),
+        @"timeMS": @(fb.timeMS),
+        @"pixels": pixelData,
+    };
+}
+
 - (NSArray<NSDictionary *> *)getNodeData:(NSString *)modelName {
     if (!modelName) return @[];
 
@@ -2110,6 +2136,410 @@
 
     std::string stdType = [newType UTF8String];
     return _effectEngine->convertEffectType((int)effectId, stdType) ? YES : NO;
+}
+
+#pragma mark - Timing Track Operations
+
+- (NSArray<NSDictionary *> *)getTimingTracks {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @[];
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+        int timingCount = elements.GetNumberOfTimingElements();
+
+        NSMutableArray *result = [NSMutableArray arrayWithCapacity:timingCount];
+        for (int i = 0; i < timingCount; i++) {
+            TimingElement* te = elements.GetTimingElement(i);
+            if (!te) continue;
+
+            NSMutableDictionary *info = [NSMutableDictionary dictionary];
+            info[@"name"] = [NSString stringWithUTF8String:te->GetName().c_str()];
+            info[@"layerCount"] = @(te->GetEffectLayerCount());
+            info[@"isActive"] = @(te->GetActive());
+            info[@"isFixed"] = @(te->IsFixedTiming());
+            info[@"fixedInterval"] = @(te->GetFixedTiming());
+            info[@"subType"] = [NSString stringWithUTF8String:te->GetSubType().c_str()];
+            [result addObject:info];
+        }
+        return result;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting timing tracks: %@ - %@",
+              exception.name, exception.reason);
+        return @[];
+    }
+}
+
+- (NSString *)getActiveTimingTrackName {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return nil;
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+        int timingCount = elements.GetNumberOfTimingElements();
+
+        for (int i = 0; i < timingCount; i++) {
+            TimingElement* te = elements.GetTimingElement(i);
+            if (te && te->GetActive()) {
+                return [NSString stringWithUTF8String:te->GetName().c_str()];
+            }
+        }
+        return nil;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting active timing track: %@ - %@",
+              exception.name, exception.reason);
+        return nil;
+    }
+}
+
+- (BOOL)setActiveTimingTrack:(NSString *)trackName {
+    if (!trackName) return NO;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return NO;
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+        std::string stdName = [trackName UTF8String];
+
+        // Deactivate all first
+        elements.DeactivateAllTimingElements();
+
+        // Find and activate the requested track
+        TimingElement* te = elements.GetTimingElement(stdName);
+        if (te) {
+            te->SetActive(true);
+            NSLog(@"XLEngineBridge: Activated timing track: %@", trackName);
+            return YES;
+        }
+        NSLog(@"XLEngineBridge: Timing track not found: %@", trackName);
+        return NO;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception setting active timing track: %@ - %@",
+              exception.name, exception.reason);
+        return NO;
+    }
+}
+
+- (void)deactivateAllTimingTracks {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return;
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+        elements.DeactivateAllTimingElements();
+        NSLog(@"XLEngineBridge: Deactivated all timing tracks");
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception deactivating timing tracks: %@ - %@",
+              exception.name, exception.reason);
+    }
+}
+
+- (NSArray<NSDictionary *> *)getTimingMarks:(NSString *)trackName layer:(NSInteger)layer {
+    if (!trackName) return @[];
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @[];
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+        std::string stdName = [trackName UTF8String];
+
+        TimingElement* te = elements.GetTimingElement(stdName);
+        if (!te) {
+            NSLog(@"XLEngineBridge: Timing track not found: %@", trackName);
+            return @[];
+        }
+
+        if (layer < 0 || layer >= te->GetEffectLayerCount()) {
+            NSLog(@"XLEngineBridge: Invalid layer %ld for timing track %@", (long)layer, trackName);
+            return @[];
+        }
+
+        EffectLayer* el = te->GetEffectLayer((int)layer);
+        if (!el) return @[];
+
+        const std::vector<Effect*>& effects = el->GetEffects();
+        NSMutableArray *result = [NSMutableArray arrayWithCapacity:effects.size()];
+
+        for (Effect* eff : effects) {
+            NSMutableDictionary *info = [NSMutableDictionary dictionary];
+            info[@"id"] = @(eff->GetID());
+            info[@"startTimeMS"] = @(eff->GetStartTimeMS());
+            info[@"endTimeMS"] = @(eff->GetEndTimeMS());
+
+            // For timing marks, the "effect name" is the label
+            std::string label = eff->GetEffectName();
+            info[@"label"] = [NSString stringWithUTF8String:label.c_str()];
+
+            [result addObject:info];
+        }
+        return result;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting timing marks: %@ - %@",
+              exception.name, exception.reason);
+        return @[];
+    }
+}
+
+- (NSArray<NSNumber *> *)getActiveTimingMarkTimes {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @[];
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+        int timingCount = elements.GetNumberOfTimingElements();
+
+        // Find the active timing track
+        TimingElement* activeTe = nil;
+        for (int i = 0; i < timingCount; i++) {
+            TimingElement* te = elements.GetTimingElement(i);
+            if (te && te->GetActive()) {
+                activeTe = te;
+                break;
+            }
+        }
+
+        if (!activeTe) return @[];
+
+        // Collect all timing mark start times from layer 0 (the main timing layer)
+        EffectLayer* el = activeTe->GetEffectLayer(0);
+        if (!el) return @[];
+
+        const std::vector<Effect*>& effects = el->GetEffects();
+        NSMutableArray *result = [NSMutableArray arrayWithCapacity:effects.size() * 2];
+
+        for (Effect* eff : effects) {
+            // Add both start and end times for snap-to-grid
+            [result addObject:@(eff->GetStartTimeMS())];
+            // Only add end time if different from start
+            if (eff->GetEndTimeMS() != eff->GetStartTimeMS()) {
+                [result addObject:@(eff->GetEndTimeMS())];
+            }
+        }
+
+        return result;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting active timing mark times: %@ - %@",
+              exception.name, exception.reason);
+        return @[];
+    }
+}
+
+- (NSInteger)createTimingMark:(NSString *)trackName
+                        layer:(NSInteger)layer
+                  startTimeMS:(NSInteger)startTimeMS
+                    endTimeMS:(NSInteger)endTimeMS
+                        label:(NSString * _Nullable)label {
+    if (!trackName) return -1;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return -1;
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+        std::string stdName = [trackName UTF8String];
+
+        TimingElement* te = elements.GetTimingElement(stdName);
+        if (!te) {
+            NSLog(@"XLEngineBridge: Timing track not found: %@", trackName);
+            return -1;
+        }
+
+        if (layer < 0 || layer >= te->GetEffectLayerCount()) {
+            NSLog(@"XLEngineBridge: Invalid layer %ld for timing track %@", (long)layer, trackName);
+            return -1;
+        }
+
+        EffectLayer* el = te->GetEffectLayer((int)layer);
+        if (!el) return -1;
+
+        // For timing marks, the label is stored as the effect name
+        std::string labelStr = label ? [label UTF8String] : "";
+
+        // Create the timing mark (effect with empty settings and palette)
+        Effect* eff = el->AddEffect(0, labelStr, "", "",
+                                     (int)startTimeMS, (int)endTimeMS,
+                                     EFFECT_NOT_SELECTED, false);
+
+        if (eff) {
+            NSLog(@"XLEngineBridge: Created timing mark '%s' at %ld-%ld ms",
+                  labelStr.c_str(), (long)startTimeMS, (long)endTimeMS);
+            return eff->GetID();
+        }
+        return -1;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception creating timing mark: %@ - %@",
+              exception.name, exception.reason);
+        return -1;
+    }
+}
+
+- (BOOL)moveTimingMark:(NSInteger)markId startTimeMS:(NSInteger)startMS endTimeMS:(NSInteger)endMS {
+    // Use the existing moveEffect method since timing marks are effects
+    return [self moveEffect:markId startTimeMS:startMS endTimeMS:endMS];
+}
+
+- (BOOL)setTimingMarkLabel:(NSInteger)markId label:(NSString *)label {
+    if (!label) return NO;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return NO;
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+
+        // Find the effect across all timing elements
+        int timingCount = elements.GetNumberOfTimingElements();
+        for (int i = 0; i < timingCount; i++) {
+            TimingElement* te = elements.GetTimingElement(i);
+            if (!te) continue;
+
+            for (int layerIdx = 0; layerIdx < te->GetEffectLayerCount(); layerIdx++) {
+                EffectLayer* el = te->GetEffectLayer(layerIdx);
+                if (!el) continue;
+
+                Effect* eff = el->GetEffectFromID((int)markId);
+                if (eff) {
+                    std::string stdLabel = [label UTF8String];
+                    eff->SetEffectName(stdLabel);
+                    NSLog(@"XLEngineBridge: Set timing mark %ld label to '%@'", (long)markId, label);
+                    return YES;
+                }
+            }
+        }
+        NSLog(@"XLEngineBridge: Timing mark not found: %ld", (long)markId);
+        return NO;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception setting timing mark label: %@ - %@",
+              exception.name, exception.reason);
+        return NO;
+    }
+}
+
+- (BOOL)deleteTimingMark:(NSInteger)markId {
+    // Use the existing deleteEffect method since timing marks are effects
+    return [self deleteEffect:markId];
+}
+
+- (NSDictionary *)getTimingMark:(NSInteger)markId {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return nil;
+
+    @try {
+        SequenceElements& elements = frame->GetSequenceElements();
+
+        // Find the effect across all timing elements
+        int timingCount = elements.GetNumberOfTimingElements();
+        for (int i = 0; i < timingCount; i++) {
+            TimingElement* te = elements.GetTimingElement(i);
+            if (!te) continue;
+
+            for (int layerIdx = 0; layerIdx < te->GetEffectLayerCount(); layerIdx++) {
+                EffectLayer* el = te->GetEffectLayer(layerIdx);
+                if (!el) continue;
+
+                Effect* eff = el->GetEffectFromID((int)markId);
+                if (eff) {
+                    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+                    info[@"id"] = @(eff->GetID());
+                    info[@"trackName"] = [NSString stringWithUTF8String:te->GetName().c_str()];
+                    info[@"layer"] = @(layerIdx);
+                    info[@"startTimeMS"] = @(eff->GetStartTimeMS());
+                    info[@"endTimeMS"] = @(eff->GetEndTimeMS());
+                    info[@"label"] = [NSString stringWithUTF8String:eff->GetEffectName().c_str()];
+                    return info;
+                }
+            }
+        }
+        return nil;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting timing mark: %@ - %@",
+              exception.name, exception.reason);
+        return nil;
+    }
+}
+
+- (BOOL)createTimingTrack:(NSString *)name {
+    if (!name) return NO;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return NO;
+
+    @try {
+        std::string stdName = [name UTF8String];
+        TimingElement* te = frame->AddTimingElement(stdName, "");
+        if (te) {
+            NSLog(@"XLEngineBridge: Created timing track: %@", name);
+            return YES;
+        }
+        return NO;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception creating timing track: %@ - %@",
+              exception.name, exception.reason);
+        return NO;
+    }
+}
+
+- (BOOL)deleteTimingTrack:(NSString *)name {
+    if (!name) return NO;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return NO;
+
+    @try {
+        std::string stdName = [name UTF8String];
+        frame->DeleteTimingElement(stdName);
+        NSLog(@"XLEngineBridge: Deleted timing track: %@", name);
+        return YES;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception deleting timing track: %@ - %@",
+              exception.name, exception.reason);
+        return NO;
+    }
+}
+
+- (BOOL)renameTimingTrack:(NSString *)oldName toName:(NSString *)newName {
+    if (!oldName || !newName) return NO;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return NO;
+
+    @try {
+        std::string stdOld = [oldName UTF8String];
+        std::string stdNew = [newName UTF8String];
+        frame->RenameTimingElement(stdOld, stdNew);
+        NSLog(@"XLEngineBridge: Renamed timing track '%@' to '%@'", oldName, newName);
+        return YES;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception renaming timing track: %@ - %@",
+              exception.name, exception.reason);
+        return NO;
+    }
 }
 
 #pragma mark - Audio Operations

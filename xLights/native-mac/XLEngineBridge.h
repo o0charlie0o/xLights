@@ -97,6 +97,12 @@
 /// Returns dictionary with: modelName, width, height, timeMS, pixels (NSData RGBA)
 - (NSDictionary *)getFrameBuffer:(NSString *)modelName;
 
+/// Get pre-rendered pixel data for a model at a specific time.
+/// This reads from the pre-rendered SequenceData (after renderAll) and does NOT trigger
+/// a new render. Suitable for use during playback. Returns nil if data is not available.
+/// Returns dictionary with: modelName, width, height, timeMS, pixels (NSData RGBA)
+- (NSDictionary *)getPrerenderedFrameBuffer:(NSString *)modelName timeMS:(NSInteger)timeMS;
+
 /// Get rendered node data for a model (output to hardware)
 /// Returns array of dictionaries with: startChannel, channelCount, data (NSData)
 - (NSArray<NSDictionary *> *)getNodeData:(NSString *)modelName;
@@ -398,6 +404,65 @@
 
 /// Convert an effect to a different type
 - (BOOL)convertEffectType:(NSInteger)effectId newType:(NSString *)newType;
+
+#pragma mark - Timing Track Operations
+
+/// Get list of timing tracks in the sequence
+/// Returns array of dictionaries with: name, layerCount, isActive, isFixed, fixedInterval
+- (NSArray<NSDictionary *> *)getTimingTracks;
+
+/// Get the currently active timing track name (nil if none active)
+- (NSString *)getActiveTimingTrackName;
+
+/// Set the active timing track by name
+- (BOOL)setActiveTimingTrack:(NSString *)trackName;
+
+/// Deactivate all timing tracks
+- (void)deactivateAllTimingTracks;
+
+/// Get timing marks for a track and layer
+/// Returns array of dictionaries with: id, startTimeMS, endTimeMS, label
+- (NSArray<NSDictionary *> *)getTimingMarks:(NSString *)trackName layer:(NSInteger)layer;
+
+/// Get all timing mark times from the active timing track (for snap-to-grid)
+/// Returns array of NSNumber containing millisecond values
+- (NSArray<NSNumber *> *)getActiveTimingMarkTimes;
+
+/// Create a new timing mark on the specified track and layer
+/// @param trackName The timing track name
+/// @param layer The layer index (0-based)
+/// @param startTimeMS Start time in milliseconds
+/// @param endTimeMS End time in milliseconds
+/// @param label Optional label for the timing mark (nil for no label)
+/// @return Effect ID of the new timing mark, or -1 on failure
+- (NSInteger)createTimingMark:(NSString *)trackName
+                        layer:(NSInteger)layer
+                  startTimeMS:(NSInteger)startTimeMS
+                    endTimeMS:(NSInteger)endTimeMS
+                        label:(NSString * _Nullable)label;
+
+/// Move a timing mark to a new time range
+- (BOOL)moveTimingMark:(NSInteger)markId startTimeMS:(NSInteger)startMS endTimeMS:(NSInteger)endMS;
+
+/// Update a timing mark's label
+- (BOOL)setTimingMarkLabel:(NSInteger)markId label:(NSString *)label;
+
+/// Delete a timing mark
+- (BOOL)deleteTimingMark:(NSInteger)markId;
+
+/// Get timing mark info by ID
+/// Returns dictionary with: id, trackName, layer, startTimeMS, endTimeMS, label
+- (NSDictionary *)getTimingMark:(NSInteger)markId;
+
+/// Create a new timing track with the given name
+/// @return YES if successful
+- (BOOL)createTimingTrack:(NSString *)name;
+
+/// Delete a timing track by name
+- (BOOL)deleteTimingTrack:(NSString *)name;
+
+/// Rename a timing track
+- (BOOL)renameTimingTrack:(NSString *)oldName toName:(NSString *)newName;
 
 #pragma mark - Audio Operations
 

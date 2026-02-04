@@ -38,6 +38,15 @@
 /// Called when the user ends scrubbing (mouse up after drag).
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didEndScrubbing:(NSTimeInterval)positionSeconds;
 
+/// Called when the user Option+clicks to create a timing mark.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestTimingMarkAtSeconds:(NSTimeInterval)positionSeconds;
+
+/// Called when a timing mark is dragged to a new position.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didMoveTimingMarkId:(NSInteger)markId toSeconds:(NSTimeInterval)positionSeconds;
+
+/// Called when a timing mark is deleted (via context menu or key).
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestDeleteTimingMarkId:(NSInteger)markId;
+
 @end
 
 /// CALayer-backed timeline ruler view for the native macOS sequencer.
@@ -94,5 +103,20 @@
 
 /// Convert a time in seconds to an x coordinate (in view space).
 - (CGFloat)pointForTime:(NSTimeInterval)time;
+
+#pragma mark - Timing Marks
+
+/// Array of timing marks to display. Each dictionary should have:
+/// id (NSNumber), startTimeMS (NSNumber), label (NSString optional)
+@property (nonatomic, copy) NSArray<NSDictionary *> *timingMarks;
+
+/// Whether timing marks are editable (can be created/moved/deleted). Default: YES.
+@property (nonatomic, assign) BOOL timingMarksEditable;
+
+/// The ID of the currently selected timing mark, or -1 if none.
+@property (nonatomic, assign) NSInteger selectedTimingMarkId;
+
+/// Reload timing marks from the data source and redraw.
+- (void)reloadTimingMarks;
 
 @end

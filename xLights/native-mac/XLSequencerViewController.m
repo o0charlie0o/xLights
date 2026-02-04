@@ -648,6 +648,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     if (_timelineRuler) {
         _timelineRuler.sequenceDuration = _sequenceDurationMS / 1000.0;
         _timelineRuler.frameRate = _frameRate;
+        [self reloadTimingMarksForRuler];
     }
 
     // Update waveform view
@@ -1090,6 +1091,102 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didEndScrubbing:(NSTimeInterval)positionSeconds {
 }
 
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestTimingMarkAtSeconds:(NSTimeInterval)positionSeconds {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) {
+        NSLog(@"XLSequencerViewController: Cannot create timing mark - no sequence loaded");
+        return;
+    }
+
+    // Get the active timing track name
+    NSString *activeTrack = [_engineBridge getActiveTimingTrackName];
+    if (!activeTrack || activeTrack.length == 0) {
+        NSLog(@"XLSequencerViewController: No active timing track - cannot create timing mark");
+        // TODO: Show alert or auto-select first timing track
+        return;
+    }
+
+    NSInteger timeMS = (NSInteger)(positionSeconds * 1000.0);
+
+    // Create timing mark on layer 0 with auto-generated end time (one frame)
+    NSInteger frameTimeMS = (_frameRate > 0) ? (1000 / _frameRate) : 50;
+    NSInteger endTimeMS = timeMS + frameTimeMS;
+
+    NSInteger markId = [_engineBridge createTimingMark:activeTrack
+                                                 layer:0
+                                           startTimeMS:timeMS
+                                             endTimeMS:endTimeMS
+                                                 label:nil];
+
+    if (markId >= 0) {
+        NSLog(@"XLSequencerViewController: Created timing mark %ld at %.3f seconds", (long)markId, positionSeconds);
+        [self reloadTimingMarksForRuler];
+        [_effectsGridView reloadData];  // Refresh snap points
+    } else {
+        NSLog(@"XLSequencerViewController: Failed to create timing mark");
+    }
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didMoveTimingMarkId:(NSInteger)markId toSeconds:(NSTimeInterval)positionSeconds {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) {
+        return;
+    }
+
+    NSInteger startMS = (NSInteger)(positionSeconds * 1000.0);
+
+    // Get the current mark info to preserve the duration
+    NSDictionary *markInfo = [_engineBridge getTimingMark:markId];
+    if (!markInfo) {
+        NSLog(@"XLSequencerViewController: Timing mark %ld not found", (long)markId);
+        return;
+    }
+
+    NSInteger oldStartMS = [markInfo[@"startTimeMS"] integerValue];
+    NSInteger oldEndMS = [markInfo[@"endTimeMS"] integerValue];
+    NSInteger duration = oldEndMS - oldStartMS;
+    NSInteger endMS = startMS + duration;
+
+    BOOL success = [_engineBridge moveTimingMark:markId startTimeMS:startMS endTimeMS:endMS];
+    if (success) {
+        NSLog(@"XLSequencerViewController: Moved timing mark %ld to %.3f seconds", (long)markId, positionSeconds);
+        [self reloadTimingMarksForRuler];
+        [_effectsGridView reloadData];  // Refresh snap points
+    }
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestDeleteTimingMarkId:(NSInteger)markId {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) {
+        return;
+    }
+
+    BOOL success = [_engineBridge deleteTimingMark:markId];
+    if (success) {
+        NSLog(@"XLSequencerViewController: Deleted timing mark %ld", (long)markId);
+        [self reloadTimingMarksForRuler];
+        [_effectsGridView reloadData];  // Refresh snap points
+    }
+}
+
+- (void)reloadTimingMarksForRuler {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) {
+        _timelineRuler.timingMarks = @[];
+        return;
+    }
+
+    // Get timing marks from the active timing track
+    NSArray<NSNumber *> *markTimes = [_engineBridge getActiveTimingMarkTimes];
+    if (!markTimes || markTimes.count == 0) {
+        _timelineRuler.timingMarks = @[];
+        return;
+    }
+
+    // Convert to the format expected by the ruler view
+    // The ruler expects array of dictionaries with id, startTimeMS, label
+    NSString *activeTrack = [_engineBridge getActiveTimingTrackName];
+    NSArray<NSDictionary *> *fullMarks = [_engineBridge getTimingMarks:activeTrack layer:0];
+
+    _timelineRuler.timingMarks = fullMarks ?: @[];
+}
+
 #pragma mark - XLEffectsGridDataSource
 
 - (NSInteger)numberOfRowsInEffectsGrid:(XLEffectsGridView *)gridView {
@@ -1197,11 +1294,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 }
 
 - (NSArray<NSNumber *> *)timingMarksForEffectsGrid:(XLEffectsGridView *)gridView {
-    NSMutableArray *marks = [NSMutableArray array];
-    for (CGFloat t = 0; t <= 60000; t += 2000) {
-        [marks addObject:@(t)];
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) {
+        return @[];
     }
-    return marks;
+
+    // Get timing mark times from the active timing track for snap-to functionality
+    NSArray<NSNumber *> *markTimes = [_engineBridge getActiveTimingMarkTimes];
+    return markTimes ?: @[];
 }
 
 #pragma mark - XLEffectsGridDelegate
