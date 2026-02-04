@@ -15,10 +15,12 @@
 #import "xLights-Swift.h"
 #endif
 
+// SwiftUI window launcher (defined in XLSwiftWindowLauncher.swift)
+extern int XLLaunchSwiftUIWindow(void);
+
 @interface XLAppDelegate ()
 
 @property (nonatomic, strong) XLDocumentController *documentController;
-@property (nonatomic, strong) XLMainWindowController *mainWindowController;
 
 @end
 
@@ -37,28 +39,14 @@
     // Build the full menu bar
     [XLMenuBuilder buildMenuBarForApplication:[NSApplication sharedApplication] target:self];
 
-    // Create and show the main window
-    _mainWindowController = [[XLMainWindowController alloc] init];
-    [_mainWindowController.window setTitle:@"xLights"];
-
-    // Set the frame explicitly before showing to avoid Auto Layout fighting
-    NSRect defaultFrame = NSMakeRect(100, 100, 1600, 1000);
-    [_mainWindowController.window setFrame:defaultFrame display:NO];
-
-    [_mainWindowController showWindow:self];
-    [_mainWindowController.window makeKeyAndOrderFront:self];
+    // Launch the SwiftUI-based main window
+    // This window handles Auto Layout correctly and supports resize
+    XLLaunchSwiftUIWindow();
 
     // Activate the app to bring it to the foreground
     [NSApp activateIgnoringOtherApps:YES];
 
-    // Force the frame again after layout to override Auto Layout sizing
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self->_mainWindowController.window setFrame:defaultFrame display:YES animate:NO];
-        [self->_mainWindowController.window center];
-        NSLog(@"XLAppDelegate: Forced window frame to %@", NSStringFromRect(defaultFrame));
-    });
-
-    NSLog(@"XLAppDelegate: Main window created and shown");
+    NSLog(@"XLAppDelegate: SwiftUI window launched");
 
     // Check for last open show folder in user defaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -172,11 +160,16 @@
         }
     }
 
-    // Fall back to the main window controller if no key window found
-    if (!engineBridge && _mainWindowController) {
-        engineBridge = _mainWindowController.engineBridge;
-        keyWindow = _mainWindowController.window;
-        NSLog(@"XLAppDelegate: newSequence - using main window controller fallback");
+    // Fall back to SwiftUI window helper if no key window found
+    if (!engineBridge) {
+        XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+        engineBridge = swiftHelper.engineBridge;
+        if (engineBridge) {
+            // Get the key window again - it should be the SwiftUI window
+            keyWindow = [NSApp keyWindow];
+            isSwiftUIWindow = YES;
+            NSLog(@"XLAppDelegate: newSequence - using SwiftUI window helper fallback");
+        }
     }
 
     if (!engineBridge) {
