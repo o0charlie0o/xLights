@@ -55,6 +55,11 @@
  * - PicturesEffect: Image display and animation
  * - ShapeEffect: Geometric shapes
  * - TextEffect: Scrolling text
+ *
+ * 3D Effects:
+ * - CubeEffect: 3D rotating cube
+ * - SphereEffect: 3D rotating sphere
+ * - TreeEffect: Christmas tree pattern
  */
 
 // Utility effects
@@ -96,3 +101,8 @@
 #include "PicturesEffect.h"
 #include "ShapeEffect.h"
 #include "TextEffect.h"
+
+// 3D effects
+#include "CubeEffect.h"
+#include "SphereEffect.h"
+#include "TreeEffect.h"
