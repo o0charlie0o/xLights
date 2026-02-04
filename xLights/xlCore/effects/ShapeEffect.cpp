@@ -11,7 +11,7 @@
 #include "ShapeEffect.h"
 #include "../RenderContext.h"
 #include "../Sequence.h"
-#include "../Math.h"
+#include "../XLMath.h"
 
 #include <cmath>
 #include <random>
