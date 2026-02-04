@@ -13,12 +13,20 @@
 // Include C++ engine headers
 // During transition period, these will delegate to the existing xLightsFrame
 #include "../engine/SequenceEngine.h"
+#include "../engine/adapters/SequenceStateAdapter.h"
 #include "../engine/ModelEngine.h"
 #include "../engine/OutputEngine.h"
 #include "../engine/RenderEngine.h"
 #include "../engine/EffectEngine.h"
 
-// Access to xLightsFrame singleton during transition period
+// Native providers for standalone operation (Phase 4: Decoupling)
+#include "providers/NativeModelProvider.h"
+#include "providers/NativeSequenceProvider.h"
+#include "providers/NativeOutputProvider.h"
+#include "providers/NativeEffectProvider.h"
+#include "providers/NativeRenderProvider.h"
+
+// Access to xLightsFrame singleton during transition period (legacy mode only)
 #include "../xLightsApp.h"
 #include "../xLightsMain.h"
 
@@ -41,40 +49,75 @@
 #include <map>
 #include <memory>
 
+// Static singleton instance for standalone mode
+static XLEngineBridge *_sharedBridge = nil;
+
 @implementation XLEngineBridge {
-    // The SequenceEngine instance - created lazily when xLightsFrame is available
+    // --- Native Providers (owned by bridge in standalone mode) ---
+    // These are used when running without wxWidgets
+    std::unique_ptr<xlEngine::NativeModelProvider> _nativeModelProvider;
+    std::unique_ptr<xlEngine::NativeSequenceProvider> _nativeSequenceProvider;
+    std::unique_ptr<xlEngine::NativeOutputProvider> _nativeOutputProvider;
+    std::unique_ptr<xlEngine::NativeEffectProvider> _nativeEffectProvider;
+    std::unique_ptr<xlEngine::NativeRenderProvider> _nativeRenderProvider;
+
+    // --- Legacy Adapters (used when wrapping xLightsFrame) ---
+    // These are used during transition period for hybrid operation
+    std::unique_ptr<xlEngine::SequenceStateAdapter> _sequenceStateAdapter;
+    std::unique_ptr<xlEngine::OutputManagerAdapter> _outputManagerAdapter;
+
+    // --- Engine Instances ---
+    // These are the actual engines that perform operations
     std::unique_ptr<xlEngine::SequenceEngine> _sequenceEngine;
-
-    // The ModelEngine instance - wraps ModelManager
     std::unique_ptr<xlEngine::ModelEngine> _modelEngine;
-
-    // The OutputEngine instance - wraps OutputManager
     std::unique_ptr<xlEngine::OutputEngine> _outputEngine;
-
-    // The EffectEngine instance - wraps EffectManager/SequenceElements
     std::unique_ptr<xlEngine::EffectEngine> _effectEngine;
-
-    // The RenderEngine instance - wraps rendering pipeline
     std::unique_ptr<xlEngine::RenderEngine> _renderEngine;
 
-    // Track whether we've initialized the engine
+    // --- State Tracking ---
     BOOL _engineInitialized;
+    BOOL _standaloneMode;       // YES = using native providers, NO = using xLightsFrame
+    BOOL _legacySupportEnabled; // YES = will fall back to xLightsFrame if available
+    std::string _showFolderPath;
 }
 
 #pragma mark - Lifecycle
 
++ (XLEngineBridge *)sharedBridge {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        _sharedBridge = [[XLEngineBridge alloc] init];
+    });
+    return _sharedBridge;
+}
+
 - (instancetype)init {
+    // Default init creates standalone mode (native providers only)
+    return [self initWithLegacySupport:NO];
+}
+
+- (instancetype)initWithLegacySupport:(BOOL)legacySupport {
     self = [super init];
     if (self) {
         _engineInitialized = NO;
+        _standaloneMode = YES;  // Start in standalone mode
+        _legacySupportEnabled = legacySupport;
+        _showFolderPath = "";
 
-        // Try to initialize the engine immediately if frame is available
-        [self ensureEngineInitialized];
+        if (_legacySupportEnabled) {
+            // In legacy mode, try to initialize with xLightsFrame if available
+            [self ensureEngineInitialized];
+        }
+        // In pure standalone mode, wait for loadShowFolder: to be called
 
         if (_engineInitialized) {
-            NSLog(@"XLEngineBridge initialized with SequenceEngine");
+            if (_standaloneMode) {
+                NSLog(@"XLEngineBridge initialized in standalone mode with native providers");
+            } else {
+                NSLog(@"XLEngineBridge initialized in legacy mode with xLightsFrame");
+            }
         } else {
-            NSLog(@"XLEngineBridge initialized (engine will be created when frame is available)");
+            NSLog(@"XLEngineBridge initialized (waiting for show folder or xLightsFrame)");
         }
     }
     return self;
@@ -83,29 +126,138 @@
 - (void)ensureEngineInitialized {
     if (_engineInitialized) return;
 
-    xLightsFrame* frame = xLightsApp::GetFrame();
-    if (frame) {
-        @try {
-            _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(frame);
-            _modelEngine = std::make_unique<xlEngine::ModelEngine>(frame->AllModels);
-            _outputEngine = std::make_unique<xlEngine::OutputEngine>();
-            // Pass frame to OutputEngine so it can properly toggle output checkbox state
-            _outputEngine->initialize(frame->GetOutputManager(), frame);
-            _effectEngine = std::make_unique<xlEngine::EffectEngine>(frame);
-            _renderEngine = std::make_unique<xlEngine::RenderEngine>(frame);
-            _engineInitialized = YES;
-            NSLog(@"XLEngineBridge: All engines created successfully");
-        } @catch (NSException *exception) {
-            NSLog(@"XLEngineBridge: Exception during engine initialization: %@ - %@",
-                  exception.name, exception.reason);
-            _engineInitialized = NO;
+    // If legacy support is enabled, try xLightsFrame first
+    if (_legacySupportEnabled) {
+        xLightsFrame* frame = xLightsApp::GetFrame();
+        if (frame) {
+            @try {
+                // Create legacy adapters that wrap xLightsFrame
+                _sequenceStateAdapter = std::make_unique<xlEngine::SequenceStateAdapter>(frame);
+                _outputManagerAdapter = std::make_unique<xlEngine::OutputManagerAdapter>(
+                    frame->GetOutputManager(), frame);
+
+                // Create engines using legacy adapters
+                _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(_sequenceStateAdapter.get());
+                _modelEngine = std::make_unique<xlEngine::ModelEngine>(frame->AllModels);
+                _outputEngine = std::make_unique<xlEngine::OutputEngine>(_outputManagerAdapter.get());
+                _effectEngine = std::make_unique<xlEngine::EffectEngine>(frame);
+                _renderEngine = std::make_unique<xlEngine::RenderEngine>(frame);
+
+                _standaloneMode = NO;  // Using legacy mode
+                _engineInitialized = YES;
+                NSLog(@"XLEngineBridge: Engines created with xLightsFrame (legacy mode)");
+                return;
+            } @catch (NSException *exception) {
+                NSLog(@"XLEngineBridge: Exception during legacy initialization: %@ - %@",
+                      exception.name, exception.reason);
+                // Fall through to try standalone initialization
+            }
         }
+    }
+
+    // If we have a show folder loaded, initialize in standalone mode
+    if (!_showFolderPath.empty()) {
+        [self initializeStandaloneProviders];
+    }
+}
+
+- (void)initializeStandaloneProviders {
+    if (_engineInitialized) return;
+
+    @try {
+        // Create native providers (no wxWidgets dependencies)
+        _nativeModelProvider = std::make_unique<xlEngine::NativeModelProvider>();
+        _nativeSequenceProvider = std::make_unique<xlEngine::NativeSequenceProvider>();
+        _nativeOutputProvider = std::make_unique<xlEngine::NativeOutputProvider>();
+        _nativeEffectProvider = std::make_unique<xlEngine::NativeEffectProvider>();
+        _nativeRenderProvider = std::make_unique<xlEngine::NativeRenderProvider>();
+
+        // Load data from show folder
+        if (!_showFolderPath.empty()) {
+            _nativeModelProvider->loadModelsFromShowFolder(_showFolderPath);
+
+            // Load output configuration from xlights_networks.xml
+            std::string networksPath = _showFolderPath + "/xlights_networks.xml";
+            _nativeOutputProvider->loadFromXML(networksPath);
+        }
+
+        // Create engines with native providers
+        _sequenceEngine = std::make_unique<xlEngine::SequenceEngine>(_nativeSequenceProvider.get());
+        _modelEngine = std::make_unique<xlEngine::ModelEngine>(_nativeModelProvider.get());
+        _outputEngine = std::make_unique<xlEngine::OutputEngine>(_nativeOutputProvider.get());
+        _effectEngine = std::make_unique<xlEngine::EffectEngine>(_nativeEffectProvider.get());
+        _renderEngine = std::make_unique<xlEngine::RenderEngine>(_nativeRenderProvider.get());
+
+        _standaloneMode = YES;
+        _engineInitialized = YES;
+        NSLog(@"XLEngineBridge: Engines created with native providers (standalone mode)");
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception during standalone initialization: %@ - %@",
+              exception.name, exception.reason);
+        _engineInitialized = NO;
     }
 }
 
 - (BOOL)isEngineAvailable {
     [self ensureEngineInitialized];
     return _engineInitialized;
+}
+
+- (BOOL)isStandaloneMode {
+    return _standaloneMode;
+}
+
+- (BOOL)loadShowFolder:(NSString *)showFolderPath {
+    if (!showFolderPath || showFolderPath.length == 0) {
+        NSLog(@"XLEngineBridge: Cannot load show folder - path is nil or empty");
+        return NO;
+    }
+
+    // Check if directory exists
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:showFolderPath isDirectory:&isDir] || !isDir) {
+        NSLog(@"XLEngineBridge: Cannot load show folder - directory not found: %@", showFolderPath);
+        return NO;
+    }
+
+    // Store the path
+    _showFolderPath = [showFolderPath UTF8String];
+
+    // If already initialized in legacy mode, we can't switch
+    if (_engineInitialized && !_standaloneMode) {
+        NSLog(@"XLEngineBridge: Already initialized in legacy mode - cannot switch to standalone");
+        return NO;
+    }
+
+    // If already initialized in standalone mode, reload the data
+    if (_engineInitialized && _standaloneMode) {
+        @try {
+            if (_nativeModelProvider) {
+                _nativeModelProvider->loadModelsFromShowFolder(_showFolderPath);
+            }
+            if (_nativeOutputProvider) {
+                std::string networksPath = _showFolderPath + "/xlights_networks.xml";
+                _nativeOutputProvider->loadFromXML(networksPath);
+            }
+            NSLog(@"XLEngineBridge: Reloaded show folder: %@", showFolderPath);
+            return YES;
+        } @catch (NSException *exception) {
+            NSLog(@"XLEngineBridge: Exception reloading show folder: %@ - %@",
+                  exception.name, exception.reason);
+            return NO;
+        }
+    }
+
+    // Initialize standalone providers
+    [self initializeStandaloneProviders];
+    return _engineInitialized;
+}
+
+- (NSString *)getShowFolderPath {
+    if (_showFolderPath.empty()) {
+        return nil;
+    }
+    return [NSString stringWithUTF8String:_showFolderPath.c_str()];
 }
 
 #pragma mark - Sequence Operations
@@ -200,6 +352,15 @@
              mediaFile:(NSString * _Nullable)mediaFile {
     [self ensureEngineInitialized];
 
+    if (_standaloneMode) {
+        // In standalone mode, create sequence through native provider
+        // Note: NativeSequenceProvider doesn't support creating new sequences yet
+        // This will need to be implemented when full standalone sequence editing is needed
+        NSLog(@"XLEngineBridge: createSequence not yet supported in standalone mode");
+        return NO;
+    }
+
+    // Legacy mode: use xLightsFrame
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
         NSLog(@"XLEngineBridge: Cannot create sequence - xLightsFrame not available");

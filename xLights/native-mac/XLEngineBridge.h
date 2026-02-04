@@ -23,14 +23,49 @@
 /// All methods are safe to call from any thread. The underlying C++ engines
 /// handle thread safety internally. Callbacks are delivered via NSNotification
 /// or delegate patterns (not implemented yet — Phase 1 focus is structure only).
+///
+/// Standalone Operation (Phase 4: Decoupling):
+/// XLEngineBridge can now operate without wxWidgets. In standalone mode, it uses
+/// native providers (NativeModelProvider, NativeSequenceProvider, etc.) instead
+/// of wrapping xLightsFrame. This enables the native macOS UI to function
+/// independently of the wxWidgets application.
+///
+/// Usage:
+/// - For standalone native app: [XLEngineBridge sharedBridge] uses native providers
+/// - For hybrid operation during transition: initWithLegacySupport: wraps xLightsFrame
 @interface XLEngineBridge : NSObject
 
 #pragma mark - Lifecycle
 
+/// Default initializer for standalone native operation.
+/// Creates native providers (no wxWidgets dependencies).
 - (instancetype)init;
+
+/// Initializer for legacy/hybrid operation.
+/// When enabled, wraps xLightsFrame for full compatibility during transition.
+/// @param legacySupport If YES, uses xLightsFrame adapters when available.
+///                      If NO, uses native providers only.
+- (instancetype)initWithLegacySupport:(BOOL)legacySupport;
+
+/// Shared singleton instance for standalone native operation.
+/// Uses native providers only - no wxWidgets dependencies.
+@property (class, readonly, strong) XLEngineBridge *sharedBridge;
 
 /// Check if the engine is available and initialized
 - (BOOL)isEngineAvailable;
+
+/// Check if running in standalone mode (native providers only)
+- (BOOL)isStandaloneMode;
+
+/// Load show folder to initialize models and outputs.
+/// Required for standalone mode before loading sequences.
+/// @param showFolderPath Path to xLights show folder containing rgbeffects.xml
+/// @return YES if show folder was loaded successfully
+- (BOOL)loadShowFolder:(NSString *)showFolderPath;
+
+/// Get the currently loaded show folder path.
+/// Returns nil if no show folder is loaded.
+- (NSString *)getShowFolderPath;
 
 #pragma mark - Sequence Operations
 

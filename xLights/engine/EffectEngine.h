@@ -10,9 +10,17 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
-// EffectEngine: Pure C++ API for effect management.
-// No wxWidgets types cross this boundary. This allows both the existing
-// wxWidgets UI and a future AppKit UI to drive the same engine.
+// EffectEngine: Pure C++ API for effect management, decoupled from wxWidgets.
+// Part of the xlEngine abstraction layer (Phase 2: Update Engines).
+//
+// This API uses IEffectProvider interface to access effect data, allowing it
+// to work with both the legacy wxWidgets UI (via SequenceElementsAdapter) and
+// future native AppKit UI (via NativeEffectProvider).
+//
+// All data exchange uses std::string, std::vector, std::map, and plain structs.
+// No wxWidgets types are exposed in the public API.
+//
+// See DECOUPLING_GUIDE.md for architectural context.
 
 #include <string>
 #include <vector>
@@ -21,9 +29,12 @@
 #include <mutex>
 #include <memory>
 
+#include "interfaces/IEffectProvider.h"
+
 class xLightsFrame;
 class EffectManager;
 class SequenceElements;
+class Effect;
 
 namespace xlEngine {
 
@@ -149,6 +160,9 @@ public:
     virtual void onError(const std::string& message) {}
 };
 
+// Forward declaration for extended operations adapter
+class SequenceElementsAdapter;
+
 // EffectEngine provides a pure C++ API for effect management.
 //
 // Thread safety: All public methods are safe to call from any thread.
@@ -156,11 +170,22 @@ public:
 // invoked from any thread; callers must dispatch to their own UI
 // thread if needed.
 //
-// During the transition period, this class wraps the existing
-// xLightsFrame/EffectManager/SequenceElements implementation.
+// This class uses IEffectProvider for effect access, allowing it to work
+// with different backend implementations:
+// - SequenceElementsAdapter: Wraps legacy xLightsFrame for wxWidgets UI
+// - NativeEffectProvider: Native macOS implementation (future)
 class EffectEngine {
 public:
+    /// Constructs an EffectEngine using the given effect provider.
+    /// @param provider Pointer to the effect provider. The provider must
+    ///                 outlive this engine. The engine does NOT take ownership.
+    explicit EffectEngine(IEffectProvider* provider);
+
+    /// Legacy constructor for backward compatibility during transition.
+    /// Creates an internal SequenceElementsAdapter to wrap xLightsFrame.
+    /// @deprecated Use the IEffectProvider* constructor instead.
     explicit EffectEngine(xLightsFrame* frame);
+
     ~EffectEngine();
 
     EffectEngine(const EffectEngine&) = delete;
@@ -268,12 +293,16 @@ private:
     EffectManager* getEffectManager() const;
     SequenceElements* getSequenceElements() const;
 
-    EffectInfo buildEffectInfo(class Effect* effect, const std::string& modelName, int layerIndex) const;
+    EffectInfo buildEffectInfo(::Effect* effect, const std::string& modelName, int layerIndex) const;
     std::vector<ParameterDefinition> buildDefaultParameters(const std::string& effectType) const;
 
     // Find an effect by ID across all elements/layers.
     // Returns the Effect pointer and populates modelName/layerIndex if found.
-    class Effect* findEffectById(int effectId, std::string& modelName, int& layerIndex) const;
+    ::Effect* findEffectById(int effectId, std::string& modelName, int& layerIndex) const;
+
+    // Returns the adapter for extended operations (internal access).
+    // Returns nullptr if provider is not a SequenceElementsAdapter.
+    SequenceElementsAdapter* getAdapter() const;
 
     // Notification helpers
     void notifyEffectCreated(int effectId, const std::string& modelName, int layerIndex);
@@ -283,7 +312,12 @@ private:
     void notifyEffectPaletteChanged(int effectId, const std::string& modelName, int layerIndex);
     void notifyError(const std::string& message);
 
-    xLightsFrame* _frame;
+    IEffectProvider* _provider;
+
+    // Owned adapter when using the legacy xLightsFrame* constructor.
+    // null when using the IEffectProvider* constructor directly.
+    std::unique_ptr<SequenceElementsAdapter> _ownedAdapter;
+
     std::vector<EffectEngineListener*> _listeners;
     mutable std::mutex _listenerMutex;
     mutable std::mutex _engineMutex;

@@ -25,14 +25,16 @@
 
 namespace xlEngine {
 
-OutputEngine::OutputEngine() = default;
+OutputEngine::OutputEngine(IOutputProvider* provider) : _provider(provider) {
+    _initialized = (provider != nullptr);
+}
+
 OutputEngine::~OutputEngine() = default;
 
-void OutputEngine::initialize(OutputManager* outputManager, xLightsFrame* frame) {
+void OutputEngine::initialize(IOutputProvider* provider) {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    _outputManager = outputManager;
-    _frame = frame;
-    _initialized = true;
+    _provider = provider;
+    _initialized = (provider != nullptr);
 }
 
 // Convert from Output::PINGSTATE to our PingState enum
@@ -69,8 +71,10 @@ std::string OutputEngine::activeStateToString(ActiveState state) {
 }
 
 Controller* OutputEngine::findController(const std::string& name) const {
-    if (!_outputManager) return nullptr;
-    return _outputManager->GetController(name);
+    if (!_provider) return nullptr;
+    auto* om = _provider->getOutputManager();
+    if (!om) return nullptr;
+    return om->GetController(name);
 }
 
 ControllerConfig OutputEngine::controllerToConfig(Controller* c) const {
@@ -215,10 +219,12 @@ void OutputEngine::applyConfigToController(Controller* c, const ControllerConfig
 
 std::vector<ControllerConfig> OutputEngine::getControllers() const {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return {};
+    if (!_provider) return {};
+    auto* om = _provider->getOutputManager();
+    if (!om) return {};
 
     std::vector<ControllerConfig> result;
-    for (auto* c : _outputManager->GetControllers()) {
+    for (auto* c : om->GetControllers()) {
         result.push_back(controllerToConfig(c));
     }
     return result;
@@ -238,20 +244,20 @@ bool OutputEngine::controllerExists(const std::string& name) const {
 
 int OutputEngine::getControllerCount() const {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return 0;
-    return _outputManager->GetControllerCount();
+    if (!_provider) return 0;
+    return static_cast<int>(_provider->getControllerCount());
 }
 
 std::vector<std::string> OutputEngine::getControllerNames() const {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return {};
-
-    auto names = _outputManager->GetControllerNames();
-    return std::vector<std::string>(names.begin(), names.end());
+    if (!_provider) return {};
+    return _provider->getControllerNames();
 }
 
 OperationResult OutputEngine::addControllerInternal(const ControllerConfig& config) {
-    if (!_outputManager) return {false, "OutputEngine not initialized"};
+    if (!_provider) return {false, "OutputEngine not initialized"};
+    auto* om = _provider->getOutputManager();
+    if (!om) return {false, "OutputManager not available"};
 
     if (findController(config.name) != nullptr) {
         return {false, "Controller with name '" + config.name + "' already exists"};
@@ -260,13 +266,13 @@ OperationResult OutputEngine::addControllerInternal(const ControllerConfig& conf
     Controller* c = nullptr;
     switch (config.type) {
     case ControllerType::Ethernet:
-        c = new ControllerEthernet(_outputManager);
+        c = new ControllerEthernet(om);
         break;
     case ControllerType::Serial:
-        c = new ControllerSerial(_outputManager);
+        c = new ControllerSerial(om);
         break;
     case ControllerType::Null:
-        c = new ControllerNull(_outputManager);
+        c = new ControllerNull(om);
         break;
     }
 
@@ -275,7 +281,7 @@ OperationResult OutputEngine::addControllerInternal(const ControllerConfig& conf
     }
 
     applyConfigToController(c, config);
-    _outputManager->AddController(c);
+    om->AddController(c);
 
     return {true, "Controller '" + config.name + "' added"};
 }
@@ -287,20 +293,22 @@ OperationResult OutputEngine::addController(const ControllerConfig& config) {
 
 OperationResult OutputEngine::removeController(const std::string& name) {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return {false, "OutputEngine not initialized"};
+    if (!_provider) return {false, "OutputEngine not initialized"};
+    auto* om = _provider->getOutputManager();
+    if (!om) return {false, "OutputManager not available"};
 
     auto* c = findController(name);
     if (!c) {
         return {false, "Controller '" + name + "' not found"};
     }
 
-    _outputManager->DeleteController(name);
+    om->DeleteController(name);
     return {true, "Controller '" + name + "' removed"};
 }
 
 OperationResult OutputEngine::updateController(const std::string& name, const ControllerConfig& config) {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return {false, "OutputEngine not initialized"};
+    if (!_provider) return {false, "OutputEngine not initialized"};
 
     auto* c = findController(name);
     if (!c) {
@@ -433,7 +441,7 @@ std::vector<std::string> OutputEngine::getVariants(const std::string& controller
 }
 
 void OutputEngine::testController(const std::string& name, PingCallback callback) {
-    if (!_outputManager) {
+    if (!_provider) {
         if (callback) callback(name, PingState::Unknown);
         return;
     }
@@ -459,13 +467,12 @@ void OutputEngine::testController(const std::string& name, PingCallback callback
 }
 
 void OutputEngine::testAllControllers(PingCallback callback) {
-    if (!_outputManager) return;
+    if (!_provider) return;
 
     std::vector<std::string> names;
     {
         std::lock_guard<std::recursive_mutex> lock(_mutex);
-        auto namesList = _outputManager->GetControllerNames();
-        names.assign(namesList.begin(), namesList.end());
+        names = _provider->getControllerNames();
     }
 
     for (const auto& name : names) {
@@ -549,7 +556,181 @@ void OutputEngine::uploadToController(const std::string& name, UploadCallback ca
 
 bool OutputEngine::startOutput() {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return false;
+    if (!_provider) return false;
+    return _provider->startOutput();
+}
+
+void OutputEngine::stopOutput() {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    _provider->stopOutput();
+}
+
+bool OutputEngine::isOutputting() const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return false;
+    return _provider->isOutputting();
+}
+
+void OutputEngine::sortControllersByName() {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    auto* om = _provider->getOutputManager();
+    if (om) om->SortControllersbyName();
+}
+
+void OutputEngine::sortControllersByID() {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    auto* om = _provider->getOutputManager();
+    if (om) om->SortControllersbyID();
+}
+
+void OutputEngine::sortControllersByIP() {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    auto* om = _provider->getOutputManager();
+    if (om) om->SortControllersbyIP();
+}
+
+bool OutputEngine::isDirty() const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return false;
+    auto* om = _provider->getOutputManager();
+    if (!om) return false;
+    return om->IsDirty();
+}
+
+OperationResult OutputEngine::save() {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return {false, "OutputEngine not initialized"};
+    auto* om = _provider->getOutputManager();
+    if (!om) return {false, "OutputManager not available"};
+
+    if (om->Save()) {
+        return {true, "Configuration saved"};
+    }
+    return {false, "Failed to save configuration"};
+}
+
+std::string OutputEngine::getGlobalFPPProxy() const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return "";
+    auto* om = _provider->getOutputManager();
+    if (!om) return "";
+    return om->GetGlobalFPPProxy();
+}
+
+void OutputEngine::setGlobalFPPProxy(const std::string& proxy) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    auto* om = _provider->getOutputManager();
+    if (om) om->SetGlobalFPPProxy(proxy);
+}
+
+std::string OutputEngine::getGlobalForceLocalIP() const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return "";
+    auto* om = _provider->getOutputManager();
+    if (!om) return "";
+    return om->GetGlobalForceLocalIP();
+}
+
+void OutputEngine::setGlobalForceLocalIP(const std::string& ip) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    auto* om = _provider->getOutputManager();
+    if (om) om->SetGlobalForceLocalIP(ip);
+}
+
+int OutputEngine::getSuppressFrames() const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return 0;
+    auto* om = _provider->getOutputManager();
+    if (!om) return 0;
+    return om->GetSuppressFrames();
+}
+
+void OutputEngine::setSuppressFrames(int frames) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    auto* om = _provider->getOutputManager();
+    if (om) om->SetSuppressFrames(frames);
+}
+
+bool OutputEngine::isParallelTransmission() const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return false;
+    auto* om = _provider->getOutputManager();
+    if (!om) return false;
+    return om->GetParallelTransmission();
+}
+
+void OutputEngine::setParallelTransmission(bool parallel) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return;
+    auto* om = _provider->getOutputManager();
+    if (om) om->SetParallelTransmission(parallel);
+}
+
+int32_t OutputEngine::getTotalChannels() const {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_provider) return 0;
+    return _provider->getTotalChannels();
+}
+
+void OutputEngine::setErrorCallback(ErrorCallback callback) {
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    _errorCallback = std::move(callback);
+}
+
+// ============================================================================
+// OutputManagerAdapter implementation
+// ============================================================================
+
+OutputManagerAdapter::OutputManagerAdapter(OutputManager* manager, xLightsFrame* frame)
+    : _manager(manager), _frame(frame) {
+}
+
+size_t OutputManagerAdapter::getControllerCount() const {
+    if (!_manager) return 0;
+    return static_cast<size_t>(_manager->GetControllerCount());
+}
+
+std::optional<ControllerInfo> OutputManagerAdapter::getController(size_t index) const {
+    if (!_manager) return std::nullopt;
+    auto controllers = _manager->GetControllers();
+    if (index >= controllers.size()) return std::nullopt;
+    auto it = controllers.begin();
+    std::advance(it, index);
+    return buildControllerInfo(*it);
+}
+
+std::optional<ControllerInfo> OutputManagerAdapter::getControllerByName(const std::string& name) const {
+    if (!_manager) return std::nullopt;
+    auto* controller = _manager->GetController(name);
+    if (!controller) return std::nullopt;
+    return buildControllerInfo(controller);
+}
+
+std::vector<std::string> OutputManagerAdapter::getControllerNames() const {
+    if (!_manager) return {};
+    auto names = _manager->GetControllerNames();
+    return std::vector<std::string>(names.begin(), names.end());
+}
+
+bool OutputManagerAdapter::controllerExists(const std::string& name) const {
+    if (!_manager) return false;
+    return _manager->GetController(name) != nullptr;
+}
+
+bool OutputManagerAdapter::isOutputting() const {
+    if (!_manager) return false;
+    return _manager->IsOutputting();
+}
+
+bool OutputManagerAdapter::startOutput() {
+    if (!_manager) return false;
 
     // If we have access to xLightsFrame, use its EnableOutputs method
     // which properly sets the UI checkbox state and handles auto-upload
@@ -558,12 +739,11 @@ bool OutputEngine::startOutput() {
     }
 
     // Fallback to direct OutputManager call (checkbox state won't be updated)
-    return _outputManager->StartOutput();
+    return _manager->StartOutput();
 }
 
-void OutputEngine::stopOutput() {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
+void OutputManagerAdapter::stopOutput() {
+    if (!_manager) return;
 
     // If we have access to xLightsFrame, use its DisableOutputs method
     // which properly clears the UI checkbox state
@@ -573,106 +753,62 @@ void OutputEngine::stopOutput() {
     }
 
     // Fallback to direct OutputManager call
-    _outputManager->StopOutput();
+    _manager->StopOutput();
 }
 
-bool OutputEngine::isOutputting() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return false;
-    return _outputManager->IsOutputting();
+int32_t OutputManagerAdapter::getTotalChannels() const {
+    if (!_manager) return 0;
+    return _manager->GetTotalChannels();
 }
 
-void OutputEngine::sortControllersByName() {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
-    _outputManager->SortControllersbyName();
+OutputManager* OutputManagerAdapter::getOutputManager() {
+    return _manager;
 }
 
-void OutputEngine::sortControllersByID() {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
-    _outputManager->SortControllersbyID();
+const OutputManager* OutputManagerAdapter::getOutputManager() const {
+    return _manager;
 }
 
-void OutputEngine::sortControllersByIP() {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
-    _outputManager->SortControllersbyIP();
-}
+ControllerInfo OutputManagerAdapter::buildControllerInfo(Controller* c) const {
+    if (!c) return {};
 
-bool OutputEngine::isDirty() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return false;
-    return _outputManager->IsDirty();
-}
+    ControllerInfo info;
+    info.name = c->GetName();
+    info.description = c->GetDescription();
+    info.id = c->GetId();
 
-OperationResult OutputEngine::save() {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return {false, "OutputEngine not initialized"};
-
-    if (_outputManager->Save()) {
-        return {true, "Configuration saved"};
+    auto typeStr = c->GetType();
+    if (typeStr == CONTROLLER_ETHERNET) {
+        info.type = OutputControllerType::Ethernet;
+    } else if (typeStr == CONTROLLER_SERIAL) {
+        info.type = OutputControllerType::Serial;
+    } else {
+        info.type = OutputControllerType::Null;
     }
-    return {false, "Failed to save configuration"};
-}
 
-std::string OutputEngine::getGlobalFPPProxy() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return "";
-    return _outputManager->GetGlobalFPPProxy();
-}
+    info.ip = c->GetIP();
+    info.protocol = c->GetProtocol();
+    info.vendor = c->GetVendor();
+    info.model = c->GetModel();
+    info.variant = c->GetVariant();
 
-void OutputEngine::setGlobalFPPProxy(const std::string& proxy) {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
-    _outputManager->SetGlobalFPPProxy(proxy);
-}
+    info.startChannel = c->GetStartChannel();
+    info.endChannel = c->GetEndChannel();
+    info.channels = c->GetChannels();
+    info.outputCount = c->GetOutputCount();
 
-std::string OutputEngine::getGlobalForceLocalIP() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return "";
-    return _outputManager->GetGlobalForceLocalIP();
-}
+    info.active = (c->GetActive() == Controller::ACTIVESTATE::ACTIVE);
+    info.autoLayout = c->IsAutoLayout();
+    info.autoSize = c->IsAutoSize();
+    info.managed = c->IsManaged();
 
-void OutputEngine::setGlobalForceLocalIP(const std::string& ip) {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
-    _outputManager->SetGlobalForceLocalIP(ip);
-}
+    // Serial-specific
+    auto* ser = dynamic_cast<ControllerSerial*>(c);
+    if (ser) {
+        info.commPort = ser->GetPort();
+    }
 
-int OutputEngine::getSuppressFrames() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return 0;
-    return _outputManager->GetSuppressFrames();
-}
-
-void OutputEngine::setSuppressFrames(int frames) {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
-    _outputManager->SetSuppressFrames(frames);
-}
-
-bool OutputEngine::isParallelTransmission() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return false;
-    return _outputManager->GetParallelTransmission();
-}
-
-void OutputEngine::setParallelTransmission(bool parallel) {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return;
-    _outputManager->SetParallelTransmission(parallel);
-}
-
-int32_t OutputEngine::getTotalChannels() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    if (!_outputManager) return 0;
-    return _outputManager->GetTotalChannels();
-}
-
-void OutputEngine::setErrorCallback(ErrorCallback callback) {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    _errorCallback = std::move(callback);
+    return info;
 }
 
 } // namespace xlEngine

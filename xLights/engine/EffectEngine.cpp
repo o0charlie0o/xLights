@@ -9,6 +9,7 @@
  **************************************************************/
 
 #include "EffectEngine.h"
+#include "adapters/SequenceElementsAdapter.h"
 
 #include "../xLightsMain.h"
 #include "../effects/EffectManager.h"
@@ -28,8 +29,15 @@ namespace xlEngine {
 // Construction / Destruction
 // ---------------------------------------------------------------------------
 
+EffectEngine::EffectEngine(IEffectProvider* provider)
+    : _provider(provider)
+    , _ownedAdapter(nullptr)
+{
+}
+
 EffectEngine::EffectEngine(xLightsFrame* frame)
-    : _frame(frame)
+    : _ownedAdapter(std::make_unique<SequenceElementsAdapter>(frame))
+    , _provider(_ownedAdapter.get())
 {
 }
 
@@ -59,16 +67,33 @@ void EffectEngine::removeListener(EffectEngineListener* listener)
 // Internal accessors
 // ---------------------------------------------------------------------------
 
+SequenceElementsAdapter* EffectEngine::getAdapter() const
+{
+    // Try to get the adapter for extended operations.
+    // If _ownedAdapter is set, we created it ourselves.
+    // Otherwise, try to dynamic_cast the provider.
+    if (_ownedAdapter) {
+        return _ownedAdapter.get();
+    }
+    return dynamic_cast<SequenceElementsAdapter*>(_provider);
+}
+
 EffectManager* EffectEngine::getEffectManager() const
 {
-    if (!_frame) return nullptr;
-    return &_frame->GetEffectManager();
+    SequenceElementsAdapter* adapter = getAdapter();
+    if (adapter) {
+        return adapter->getEffectManager();
+    }
+    return nullptr;
 }
 
 SequenceElements* EffectEngine::getSequenceElements() const
 {
-    if (!_frame) return nullptr;
-    return &_frame->GetSequenceElements();
+    SequenceElementsAdapter* adapter = getAdapter();
+    if (adapter) {
+        return adapter->getSequenceElements();
+    }
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,13 +197,13 @@ std::vector<ParameterDefinition> EffectEngine::buildDefaultParameters(const std:
 
     if (se) {
         for (size_t i = 0; i < se->GetElementCount(); ++i) {
-            Element* elem = se->GetElement(i);
+            ::Element* elem = se->GetElement(i);
             if (!elem) continue;
             for (size_t layer = 0; layer < elem->GetEffectLayerCount(); ++layer) {
-                EffectLayer* el = elem->GetEffectLayer(layer);
+                ::EffectLayer* el = elem->GetEffectLayer(layer);
                 if (!el) continue;
                 for (int e = 0; e < el->GetEffectCount(); ++e) {
-                    Effect* eff = el->GetEffect(e);
+                    ::Effect* eff = el->GetEffect(e);
                     if (eff && eff->GetEffectName() == effectType) {
                         const SettingsMap& sm = eff->GetSettings();
                         for (auto it = sm.begin(); it != sm.end(); ++it) {
@@ -198,8 +223,10 @@ std::vector<ParameterDefinition> EffectEngine::buildDefaultParameters(const std:
     }
 
     // If no sample settings found from existing effects, get defaults from the effect panel
-    if (sampleSettings.empty() && _frame) {
-        xlEffectPanel* panel = re->GetPanel(_frame);
+    SequenceElementsAdapter* adapter = getAdapter();
+    xLightsFrame* frame = adapter ? adapter->getFrame() : nullptr;
+    if (sampleSettings.empty() && frame) {
+        xlEffectPanel* panel = re->GetPanel(frame);
         if (panel) {
             // Set controls to defaults
             re->SetDefaultParameters();
@@ -391,18 +418,18 @@ int EffectEngine::createEffect(const std::string& modelName, int layer,
     SequenceElements* se = getSequenceElements();
     if (!se) return -1;
 
-    Element* elem = se->GetElement(modelName);
+    ::Element* elem = se->GetElement(modelName);
     if (!elem) return -1;
 
     if (layer < 0 || layer >= (int)elem->GetEffectLayerCount()) return -1;
 
-    EffectLayer* el = elem->GetEffectLayer(layer);
+    ::EffectLayer* el = elem->GetEffectLayer(layer);
     if (!el) return -1;
 
     // Check that the time range is clear
     if (!el->GetRangeIsClearMS(startTimeMS, endTimeMS)) return -1;
 
-    Effect* eff = el->AddEffect(0, effectType, "", "", startTimeMS, endTimeMS, EFFECT_NOT_SELECTED, false);
+    ::Effect* eff = el->AddEffect(0, effectType, "", "", startTimeMS, endTimeMS, EFFECT_NOT_SELECTED, false);
     if (!eff) return -1;
 
     int id = eff->GetID();
@@ -416,10 +443,10 @@ bool EffectEngine::deleteEffect(int effectId)
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
-    EffectLayer* el = eff->GetParentEffectLayer();
+    ::EffectLayer* el = eff->GetParentEffectLayer();
     if (!el) return false;
 
     // Find the index of this effect in the layer
@@ -440,7 +467,7 @@ bool EffectEngine::getEffect(int effectId, EffectInfo& outInfo) const
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
     outInfo = buildEffectInfo(eff, modelName, layerIndex);
@@ -457,7 +484,7 @@ bool EffectEngine::setEffectParameter(int effectId, const std::string& key, cons
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
     bool changed = eff->SetSetting(key, value);
@@ -474,7 +501,7 @@ std::string EffectEngine::getEffectParameter(int effectId, const std::string& ke
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return "";
 
     return eff->GetSetting(key);
@@ -486,7 +513,7 @@ bool EffectEngine::setEffectSettings(int effectId, const std::string& settings)
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
     eff->SetSettings(settings, false);
@@ -501,7 +528,7 @@ std::string EffectEngine::getEffectSettings(int effectId) const
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return "";
 
     return eff->GetSettingsAsString();
@@ -517,7 +544,7 @@ bool EffectEngine::setEffectPalette(int effectId, const std::string& palette)
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
     eff->SetPalette(palette);
@@ -532,7 +559,7 @@ std::string EffectEngine::getEffectPalette(int effectId) const
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return "";
 
     return eff->GetPaletteAsString();
@@ -550,7 +577,7 @@ bool EffectEngine::moveEffect(int effectId, int newStartTimeMS, int newEndTimeMS
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
     eff->SetStartTimeMS(newStartTimeMS);
@@ -572,15 +599,15 @@ std::vector<EffectInfo> EffectEngine::getEffectsForModel(const std::string& mode
     SequenceElements* se = getSequenceElements();
     if (!se) return result;
 
-    Element* elem = se->GetElement(modelName);
+    ::Element* elem = se->GetElement(modelName);
     if (!elem) return result;
 
     for (size_t layer = 0; layer < elem->GetEffectLayerCount(); ++layer) {
-        EffectLayer* el = elem->GetEffectLayer(layer);
+        ::EffectLayer* el = elem->GetEffectLayer(layer);
         if (!el) continue;
 
         for (int e = 0; e < el->GetEffectCount(); ++e) {
-            Effect* eff = el->GetEffect(e);
+            ::Effect* eff = el->GetEffect(e);
             if (eff) {
                 result.push_back(buildEffectInfo(eff, modelName, (int)layer));
             }
@@ -598,14 +625,14 @@ std::vector<EffectInfo> EffectEngine::getEffectsAtTime(const std::string& modelN
     SequenceElements* se = getSequenceElements();
     if (!se) return result;
 
-    Element* elem = se->GetElement(modelName);
+    ::Element* elem = se->GetElement(modelName);
     if (!elem) return result;
 
     for (size_t layer = 0; layer < elem->GetEffectLayerCount(); ++layer) {
-        EffectLayer* el = elem->GetEffectLayer(layer);
+        ::EffectLayer* el = elem->GetEffectLayer(layer);
         if (!el) continue;
 
-        Effect* eff = el->GetEffectAtTime(timeMS);
+        ::Effect* eff = el->GetEffectAtTime(timeMS);
         if (eff) {
             result.push_back(buildEffectInfo(eff, modelName, (int)layer));
         }
@@ -622,16 +649,16 @@ std::vector<EffectInfo> EffectEngine::getEffectsForLayer(const std::string& mode
     SequenceElements* se = getSequenceElements();
     if (!se) return result;
 
-    Element* elem = se->GetElement(modelName);
+    ::Element* elem = se->GetElement(modelName);
     if (!elem) return result;
 
     if (layer < 0 || layer >= (int)elem->GetEffectLayerCount()) return result;
 
-    EffectLayer* el = elem->GetEffectLayer(layer);
+    ::EffectLayer* el = elem->GetEffectLayer(layer);
     if (!el) return result;
 
     for (int e = 0; e < el->GetEffectCount(); ++e) {
-        Effect* eff = el->GetEffect(e);
+        ::Effect* eff = el->GetEffect(e);
         if (eff) {
             result.push_back(buildEffectInfo(eff, modelName, layer));
         }
@@ -647,7 +674,7 @@ int EffectEngine::getLayerCount(const std::string& modelName) const
     SequenceElements* se = getSequenceElements();
     if (!se) return 0;
 
-    Element* elem = se->GetElement(modelName);
+    ::Element* elem = se->GetElement(modelName);
     if (!elem) return 0;
 
     return (int)elem->GetEffectLayerCount();
@@ -664,10 +691,10 @@ int EffectEngine::addLayer(const std::string& modelName)
     SequenceElements* se = getSequenceElements();
     if (!se) return -1;
 
-    Element* elem = se->GetElement(modelName);
+    ::Element* elem = se->GetElement(modelName);
     if (!elem) return -1;
 
-    EffectLayer* newLayer = elem->AddEffectLayer();
+    ::EffectLayer* newLayer = elem->AddEffectLayer();
     if (!newLayer) return -1;
 
     return (int)elem->GetEffectLayerCount() - 1;
@@ -680,7 +707,7 @@ bool EffectEngine::removeLayer(const std::string& modelName, int layer)
     SequenceElements* se = getSequenceElements();
     if (!se) return false;
 
-    Element* elem = se->GetElement(modelName);
+    ::Element* elem = se->GetElement(modelName);
     if (!elem) return false;
 
     if (layer < 0 || layer >= (int)elem->GetEffectLayerCount()) return false;
@@ -699,7 +726,7 @@ bool EffectEngine::selectEffect(int effectId)
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
     eff->SetSelected(EFFECT_SELECTED);
@@ -725,13 +752,13 @@ std::vector<int> EffectEngine::getSelectedEffectIds() const
     if (!se) return result;
 
     for (size_t i = 0; i < se->GetElementCount(); ++i) {
-        Element* elem = se->GetElement(i);
+        ::Element* elem = se->GetElement(i);
         if (!elem) continue;
         for (size_t layer = 0; layer < elem->GetEffectLayerCount(); ++layer) {
-            EffectLayer* el = elem->GetEffectLayer(layer);
+            ::EffectLayer* el = elem->GetEffectLayer(layer);
             if (!el) continue;
             for (int e = 0; e < el->GetEffectCount(); ++e) {
-                Effect* eff = el->GetEffect(e);
+                ::Effect* eff = el->GetEffect(e);
                 if (eff && eff->GetSelected() != EFFECT_NOT_SELECTED) {
                     result.push_back(eff->GetID());
                 }
@@ -758,7 +785,7 @@ bool EffectEngine::convertEffectType(int effectId, const std::string& newEffectT
 
     std::string modelName;
     int layerIndex = -1;
-    Effect* eff = findEffectById(effectId, modelName, layerIndex);
+    ::Effect* eff = findEffectById(effectId, modelName, layerIndex);
     if (!eff) return false;
 
     eff->ConvertTo(newIndex);
@@ -784,21 +811,21 @@ bool EffectEngine::convertEffectType(int effectId, const std::string& newEffectT
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-Effect* EffectEngine::findEffectById(int effectId, std::string& modelName, int& layerIndex) const
+::Effect* EffectEngine::findEffectById(int effectId, std::string& modelName, int& layerIndex) const
 {
     SequenceElements* se = getSequenceElements();
     if (!se) return nullptr;
 
     for (size_t i = 0; i < se->GetElementCount(); ++i) {
-        Element* elem = se->GetElement(i);
+        ::Element* elem = se->GetElement(i);
         if (!elem) continue;
 
         for (size_t layer = 0; layer < elem->GetEffectLayerCount(); ++layer) {
-            EffectLayer* el = elem->GetEffectLayer(layer);
+            ::EffectLayer* el = elem->GetEffectLayer(layer);
             if (!el) continue;
 
             for (int e = 0; e < el->GetEffectCount(); ++e) {
-                Effect* eff = el->GetEffect(e);
+                ::Effect* eff = el->GetEffect(e);
                 if (eff && eff->GetID() == effectId) {
                     modelName = elem->GetName();
                     layerIndex = (int)layer;
@@ -809,16 +836,16 @@ Effect* EffectEngine::findEffectById(int effectId, std::string& modelName, int& 
 
         // Also search submodels and strands for ModelElements
         if (elem->GetType() == ElementType::ELEMENT_TYPE_MODEL) {
-            ModelElement* me = dynamic_cast<ModelElement*>(elem);
+            ::ModelElement* me = dynamic_cast<::ModelElement*>(elem);
             if (me) {
                 for (int s = 0; s < me->GetSubModelCount(); ++s) {
-                    SubModelElement* sme = me->GetSubModel(s);
+                    ::SubModelElement* sme = me->GetSubModel(s);
                     if (!sme) continue;
                     for (size_t layer = 0; layer < sme->GetEffectLayerCount(); ++layer) {
-                        EffectLayer* el = sme->GetEffectLayer(layer);
+                        ::EffectLayer* el = sme->GetEffectLayer(layer);
                         if (!el) continue;
                         for (int e = 0; e < el->GetEffectCount(); ++e) {
-                            Effect* eff = el->GetEffect(e);
+                            ::Effect* eff = el->GetEffect(e);
                             if (eff && eff->GetID() == effectId) {
                                 modelName = sme->GetFullName();
                                 layerIndex = (int)layer;
@@ -828,13 +855,13 @@ Effect* EffectEngine::findEffectById(int effectId, std::string& modelName, int& 
                     }
                 }
                 for (int s = 0; s < me->GetStrandCount(); ++s) {
-                    StrandElement* strand = me->GetStrand(s);
+                    ::StrandElement* strand = me->GetStrand(s);
                     if (!strand) continue;
                     for (size_t layer = 0; layer < strand->GetEffectLayerCount(); ++layer) {
-                        EffectLayer* el = strand->GetEffectLayer(layer);
+                        ::EffectLayer* el = strand->GetEffectLayer(layer);
                         if (!el) continue;
                         for (int e = 0; e < el->GetEffectCount(); ++e) {
-                            Effect* eff = el->GetEffect(e);
+                            ::Effect* eff = el->GetEffect(e);
                             if (eff && eff->GetID() == effectId) {
                                 modelName = strand->GetFullName();
                                 layerIndex = (int)layer;
@@ -850,7 +877,7 @@ Effect* EffectEngine::findEffectById(int effectId, std::string& modelName, int& 
     return nullptr;
 }
 
-EffectInfo EffectEngine::buildEffectInfo(Effect* effect, const std::string& modelName, int layerIndex) const
+EffectInfo EffectEngine::buildEffectInfo(::Effect* effect, const std::string& modelName, int layerIndex) const
 {
     EffectInfo info;
     if (!effect) return info;
