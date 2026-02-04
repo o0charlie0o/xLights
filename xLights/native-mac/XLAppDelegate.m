@@ -40,11 +40,23 @@
     // Create and show the main window
     _mainWindowController = [[XLMainWindowController alloc] init];
     [_mainWindowController.window setTitle:@"xLights"];
+
+    // Set the frame explicitly before showing to avoid Auto Layout fighting
+    NSRect defaultFrame = NSMakeRect(100, 100, 1600, 1000);
+    [_mainWindowController.window setFrame:defaultFrame display:NO];
+
     [_mainWindowController showWindow:self];
     [_mainWindowController.window makeKeyAndOrderFront:self];
 
     // Activate the app to bring it to the foreground
     [NSApp activateIgnoringOtherApps:YES];
+
+    // Force the frame again after layout to override Auto Layout sizing
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_mainWindowController.window setFrame:defaultFrame display:YES animate:NO];
+        [self->_mainWindowController.window center];
+        NSLog(@"XLAppDelegate: Forced window frame to %@", NSStringFromRect(defaultFrame));
+    });
 
     NSLog(@"XLAppDelegate: Main window created and shown");
 

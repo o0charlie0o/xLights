@@ -242,19 +242,25 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     inspectorItem.maximumThickness = 500.0;
     [_mainSplitController addSplitViewItem:inspectorItem];
 
-    // Use contentViewController but disable automatic window sizing from content.
-    // This lets NSSplitViewController manage the view hierarchy properly while
-    // preventing Auto Layout from fighting window resizing.
-    NSLog(@"NativeUI [setupSplitView]: setting contentViewController");
-    self.window.contentViewController = _mainSplitController;
+    // Set the split view as the content view directly instead of using contentViewController.
+    // Using contentViewController causes Auto Layout to drive window sizing, which fights
+    // with our explicit window frame. Setting contentView directly gives us control.
+    NSLog(@"NativeUI [setupSplitView]: setting contentView (not contentViewController)");
 
-    // Disable automatic content size updates - this is the key to preventing
-    // Auto Layout from snapping the window back to content-derived sizes.
-    if (@available(macOS 10.10, *)) {
-        // The split view should not drive window size
-        _mainSplitController.splitView.translatesAutoresizingMaskIntoConstraints = YES;
-    }
-    NSLog(@"NativeUI [setupSplitView]: after contentViewController, frame=%@", NSStringFromRect(self.window.frame));
+    // Store the current frame before setting content
+    NSRect currentFrame = self.window.frame;
+
+    // Set the split view as content view directly
+    NSView *splitView = _mainSplitController.view;
+    splitView.translatesAutoresizingMaskIntoConstraints = YES;
+    splitView.frame = self.window.contentView.bounds;
+    splitView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [self.window.contentView addSubview:splitView];
+
+    // Restore the frame that Auto Layout may have changed
+    [self.window setFrame:currentFrame display:NO];
+
+    NSLog(@"NativeUI [setupSplitView]: after setting contentView, frame=%@", NSStringFromRect(self.window.frame));
 
     // Add tab views to content container
     [self setupTabViews];
