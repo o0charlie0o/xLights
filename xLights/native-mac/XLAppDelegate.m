@@ -8,13 +8,17 @@
 #import "XLSequencerViewController.h"
 
 // Import Swift generated header for XLSwiftUIWindowHelper
-#if __has_include("xLights-Swift.h")
+// The header name depends on the target product name
+#if __has_include("xLights_Native-Swift.h")
+#import "xLights_Native-Swift.h"
+#elif __has_include("xLights-Swift.h")
 #import "xLights-Swift.h"
 #endif
 
 @interface XLAppDelegate ()
 
 @property (nonatomic, strong) XLDocumentController *documentController;
+@property (nonatomic, strong) XLMainWindowController *mainWindowController;
 
 @end
 
@@ -32,6 +36,17 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     // Build the full menu bar
     [XLMenuBuilder buildMenuBarForApplication:[NSApplication sharedApplication] target:self];
+
+    // Create and show the main window
+    _mainWindowController = [[XLMainWindowController alloc] init];
+    [_mainWindowController.window setTitle:@"xLights"];
+    [_mainWindowController showWindow:self];
+    [_mainWindowController.window makeKeyAndOrderFront:self];
+
+    // Activate the app to bring it to the foreground
+    [NSApp activateIgnoringOtherApps:YES];
+
+    NSLog(@"XLAppDelegate: Main window created and shown");
 
     // Check for last open show folder in user defaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
@@ -143,6 +158,13 @@
             engineBridge = mainController.engineBridge;
             NSLog(@"XLAppDelegate: newSequence - using ObjC window");
         }
+    }
+
+    // Fall back to the main window controller if no key window found
+    if (!engineBridge && _mainWindowController) {
+        engineBridge = _mainWindowController.engineBridge;
+        keyWindow = _mainWindowController.window;
+        NSLog(@"XLAppDelegate: newSequence - using main window controller fallback");
     }
 
     if (!engineBridge) {
