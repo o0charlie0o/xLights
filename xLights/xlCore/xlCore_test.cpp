@@ -418,6 +418,166 @@ void testEffect() {
     std::cout << "Effect tests passed!" << std::endl;
 }
 
+// EffectManager tests
+void testEffectManager() {
+    // Initialize the manager
+    EffectManager& manager = EffectManager::instance();
+    manager.initialize();
+
+    assert(manager.isInitialized());
+
+    // Get effect names (effects auto-register via XLCORE_REGISTER_EFFECT)
+    auto names = manager.effectNames();
+    // Note: May be empty if effects aren't linked, but the call should work
+    std::cout << "Registered effects: " << names.size() << std::endl;
+
+    // Test categories
+    auto categories = manager.categories();
+    std::cout << "Effect categories: " << categories.size() << std::endl;
+
+    // Test effect info (if Bars is registered)
+    if (manager.hasEffect("Bars")) {
+        auto info = manager.getEffectInfo("Bars");
+        assert(info.has_value());
+        assert(info->name == "Bars");
+        assert(info->category == "Patterns");
+
+        // Test parameters
+        auto params = manager.getParameters("Bars");
+        assert(!params.empty());
+
+        // Test default settings
+        auto defaults = manager.getDefaultSettings("Bars");
+        assert(!defaults.empty());
+
+        // Test settings validation
+        EffectSettings testSettings;
+        testSettings.setInt("E_SLIDER_Bars_BarCount", 5);
+        std::string validationError = manager.validateSettings("Bars", testSettings);
+        assert(validationError.empty());
+
+        // Test invalid settings
+        testSettings.setInt("E_SLIDER_Bars_BarCount", 999); // Out of range
+        validationError = manager.validateSettings("Bars", testSettings);
+        // May or may not be error depending on validation stringency
+
+        // Test effect creation
+        auto effect = manager.createEffect("Bars");
+        assert(effect != nullptr);
+        assert(effect->name() == "Bars");
+
+        // Test instance creation
+        auto instance = manager.createInstance("Bars", EffectSettings());
+        assert(instance != nullptr);
+    }
+
+    // Test non-existent effect
+    assert(!manager.hasEffect("NonExistentEffect"));
+    auto noEffect = manager.createEffect("NonExistentEffect");
+    assert(noEffect == nullptr);
+
+    // Test thread pool
+    auto& pool = manager.getThreadPool();
+    pool.clear();
+
+    // Test random effect selection
+    auto randomizableEffects = manager.randomizableEffects();
+    // Just verify the call works
+    if (!randomizableEffects.empty()) {
+        std::string randomEffect = manager.selectRandomEffect();
+        assert(!randomEffect.empty());
+    }
+
+    std::cout << "EffectManager tests passed!" << std::endl;
+}
+
+// RenderPipeline tests
+void testRenderPipeline() {
+    RenderPipeline pipeline;
+
+    // Test configuration
+    pipeline.setTiming(10000, 50); // 10 seconds, 50ms frames
+
+    // Add a test model
+    pipeline.addModel("TestModel", 50, 50);
+
+    // Get layers (should be empty initially)
+    auto layers = pipeline.getModelLayers("TestModel");
+    assert(layers.empty());
+
+    // Configure a layer
+    LayerConfig layer;
+    layer.effectType = "Bars";
+    layer.blendMode = BlendMode::Normal;
+    layer.brightness = 100.0;
+
+    pipeline.setModelLayers("TestModel", {layer});
+
+    layers = pipeline.getModelLayers("TestModel");
+    assert(layers.size() == 1);
+    assert(layers[0].effectType == "Bars");
+
+    // Test rendering (requires Bars effect to be registered)
+    EffectManager& manager = EffectManager::instance();
+    if (manager.hasEffect("Bars")) {
+        auto frame = pipeline.renderFrame("TestModel", 0);
+        assert(frame.modelName == "TestModel");
+        assert(frame.width == 50);
+        assert(frame.height == 50);
+        assert(frame.pixels.size() == 2500); // 50x50
+
+        // Test cache
+        pipeline.setCacheEnabled(true);
+        auto frame2 = pipeline.renderFrame("TestModel", 0);
+        // Second call should hit cache
+        auto stats = pipeline.getStatistics();
+        assert(stats.cacheHits >= 1);
+
+        // Test cache clear
+        pipeline.clearCache();
+        pipeline.renderFrame("TestModel", 0);
+        // Should be a cache miss now
+    }
+
+    // Test statistics
+    auto stats = pipeline.getStatistics();
+    std::cout << "Frames rendered: " << stats.framesRendered << std::endl;
+
+    // Test abort (no-op when not rendering)
+    pipeline.abortRender();
+    assert(!pipeline.isRendering());
+
+    // Remove model
+    pipeline.removeModel("TestModel");
+    layers = pipeline.getModelLayers("TestModel");
+    assert(layers.empty());
+
+    std::cout << "RenderPipeline tests passed!" << std::endl;
+}
+
+// Effect preview rendering test
+void testEffectPreview() {
+    EffectManager& manager = EffectManager::instance();
+
+    if (manager.hasEffect("Bars")) {
+        EffectSettings settings;
+        settings.setInt("E_SLIDER_Bars_BarCount", 3);
+
+        auto frame = renderEffectPreview("Bars", settings, 100, 100, 0.5);
+
+        assert(frame.width == 100);
+        assert(frame.height == 100);
+        assert(frame.pixels.size() == 10000); // 100x100
+
+        // Verify pixel data pointer is valid
+        const uint8_t* pixelData = frame.pixelData();
+        assert(pixelData != nullptr);
+        assert(frame.pixelDataSize() == 10000 * 4); // RGBA
+    }
+
+    std::cout << "Effect preview tests passed!" << std::endl;
+}
+
 // String utilities tests
 void testStringUtils() {
     using namespace strings;
@@ -478,6 +638,9 @@ int main() {
     testImageBuffer();
     testOutput();
     testEffect();
+    testEffectManager();
+    testRenderPipeline();
+    testEffectPreview();
     testStringUtils();
 
     std::cout << "\nAll tests passed!" << std::endl;

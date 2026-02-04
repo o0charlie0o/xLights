@@ -36,6 +36,8 @@
  * - Effect: Abstract base class for all effects
  * - EffectSettings: Thread-safe key-value store for effect parameters
  * - EffectRegistry: Factory/registry for effect types
+ * - EffectManager: High-level effect factory and management
+ * - RenderPipeline: Effect rendering orchestration
  *
  * Design principles:
  * - Zero wxWidgets dependencies
@@ -55,16 +57,15 @@
 #include "Output.h"
 #include "Sequence.h"
 #include "Effect.h"
+#include "EffectManager.h"
+#include "RenderPipeline.h"
 
 // Media interfaces
 #include "media/ImageLoader.h"
 #include "media/VideoDecoder.h"
 
-// Effects
-#include "effects/PicturesEffect.h"
-#include "effects/VideoEffect.h"
-#include "effects/GlediatorEffect.h"
-#include "effects/ShaderEffect.h"
+// Note: Individual effects are included via effects/Effects.h
+// They auto-register via XLCORE_REGISTER_EFFECT macro when their .cpp files are linked.
 
 namespace xlCore {
 
