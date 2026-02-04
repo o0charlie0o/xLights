@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLSequencerViewController.h"
+#import "input/XLKeyboardHandler.h"
 #import "sequencer/XLTimelineRulerView.h"
 #import "sequencer/XLEffectsGridView.h"
 #import "sequencer/XLEffectPaletteView.h"
@@ -600,6 +601,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Load audio if sequence has media file
     [self loadAudioForSequence];
+
+    // Initialize keyboard handler for processing key bindings
+    self.keyboardHandler = [[XLKeyboardHandler alloc] init];
+    self.keyboardHandler.delegate = self;
 }
 
 #pragma mark - Audio Loading
@@ -1866,13 +1871,16 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         return;
     }
 
-    // Get all timing track names from the engine bridge
-    NSArray<NSString *> *timingTracks = [self.engineBridge getTimingTracks];
+    // Get all timing tracks from the engine bridge (returns dictionaries with "name" key)
+    NSArray<NSDictionary *> *timingTracks = [self.engineBridge getTimingTracks];
     if (timingTracks.count == 0) {
         [_timingTrackPopup addItemWithTitle:@"(none)"];
     } else {
-        for (NSString *trackName in timingTracks) {
-            [_timingTrackPopup addItemWithTitle:trackName];
+        for (NSDictionary *track in timingTracks) {
+            NSString *trackName = track[@"name"];
+            if (trackName) {
+                [_timingTrackPopup addItemWithTitle:trackName];
+            }
         }
     }
 
@@ -1930,11 +1938,18 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     }
 
     // Get existing track names to prevent duplicates
-    NSArray<NSString *> *existingTracks = [self.engineBridge getTimingTracks];
+    NSArray<NSDictionary *> *timingTracks = [self.engineBridge getTimingTracks];
+    NSMutableArray<NSString *> *existingTrackNames = [NSMutableArray arrayWithCapacity:timingTracks.count];
+    for (NSDictionary *track in timingTracks) {
+        NSString *name = track[@"name"];
+        if (name) {
+            [existingTrackNames addObject:name];
+        }
+    }
 
     // Create and configure the dialog
     XLNewTimingDialog *dialog = [[XLNewTimingDialog alloc] init];
-    dialog.existingTrackNames = existingTracks;
+    dialog.existingTrackNames = existingTrackNames;
 
     // Show the dialog
     [dialog showSheetOnWindow:self.view.window completionHandler:^(NSModalResponse response) {
@@ -2298,6 +2313,147 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         context.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
         _effectPaletteWidthConstraint.animator.constant = targetWidth;
     } completionHandler:nil];
+}
+
+#pragma mark - First Responder & Keyboard Handling
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)keyDown:(NSEvent *)event {
+    if (![_keyboardHandler handleKeyEvent:event inScope:XLKeyScopeSequence]) {
+        [super keyDown:event];
+    }
+}
+
+#pragma mark - XLKeyboardActionDelegate
+
+- (BOOL)performKeyAction:(NSString *)actionType
+              effectName:(NSString *)effectName
+          effectSettings:(NSString *)effectSettings
+                 inScope:(XLKeyScope)scope {
+
+    // Space bar - play/pause
+    if ([actionType isEqualToString:@"TOGGLE_PLAY"]) {
+        [_playbackController togglePlayPause];
+        return YES;
+    }
+
+    // Toggle effect settings inspector (Cmd+I)
+    if ([actionType isEqualToString:@"EFFECT_SETTINGS_TOGGLE"]) {
+        self.effectPaletteVisible = !self.effectPaletteVisible;
+        return YES;
+    }
+
+    // Zoom controls
+    if ([actionType isEqualToString:@"ZOOM_IN"]) {
+        [self zoomIn:nil];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"ZOOM_OUT"]) {
+        [self zoomOut:nil];
+        return YES;
+    }
+
+    // Navigation
+    if ([actionType isEqualToString:@"START_OF_SONG"]) {
+        [self seekToStart:nil];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"END_OF_SONG"]) {
+        [self seekToEnd:nil];
+        return YES;
+    }
+
+    // Playback controls
+    if ([actionType isEqualToString:@"PLAY"]) {
+        [_playbackController play];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"PAUSE"]) {
+        [_playbackController pause];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"STOP"]) {
+        [_playbackController stop];
+        return YES;
+    }
+
+    // Frame step controls
+    if ([actionType isEqualToString:@"STEP_FORWARD"]) {
+        [_playbackController stepForward];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"STEP_BACKWARD"]) {
+        [_playbackController stepBackward];
+        return YES;
+    }
+
+    // Undo/Redo
+    if ([actionType isEqualToString:@"UNDO"]) {
+        [_undoController undo];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"REDO"]) {
+        [_undoController redo];
+        return YES;
+    }
+
+    NSLog(@"XLSequencerViewController: Unhandled key action: %@", actionType);
+    return NO;
+}
+
+#pragma mark - Zoom and Navigation Actions
+
+static const CGFloat kZoomFactor = 1.5;
+
+- (void)zoomIn:(id)sender {
+    CGFloat currentZoom = _scrollCoordinator.zoomLevel;
+    CGFloat newZoom = currentZoom * kZoomFactor;
+
+    // Center zoom on playhead if playing, otherwise on view center
+    CGFloat playheadMS = _transportBar.currentPositionMS;
+    CGFloat playheadPixelX = playheadMS * currentZoom - _scrollCoordinator.horizontalScrollOffset;
+    CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
+
+    if (playheadPixelX < 0 || playheadPixelX > viewWidth || playheadMS <= 0) {
+        playheadPixelX = viewWidth / 2.0;
+    }
+
+    [_scrollCoordinator setZoomLevel:newZoom centeredOnPointX:playheadPixelX];
+    [self saveZoomLevelForCurrentSequence];
+}
+
+- (void)zoomOut:(id)sender {
+    CGFloat currentZoom = _scrollCoordinator.zoomLevel;
+    CGFloat newZoom = currentZoom / kZoomFactor;
+
+    // Center zoom on playhead if playing, otherwise on view center
+    CGFloat playheadMS = _transportBar.currentPositionMS;
+    CGFloat playheadPixelX = playheadMS * currentZoom - _scrollCoordinator.horizontalScrollOffset;
+    CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
+
+    if (playheadPixelX < 0 || playheadPixelX > viewWidth || playheadMS <= 0) {
+        playheadPixelX = viewWidth / 2.0;
+    }
+
+    [_scrollCoordinator setZoomLevel:newZoom centeredOnPointX:playheadPixelX];
+    [self saveZoomLevelForCurrentSequence];
+}
+
+- (void)zoomToFit:(id)sender {
+    CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
+    [_scrollCoordinator zoomToFitSequenceLength:_sequenceDurationMS viewWidth:viewWidth];
+    [self saveZoomLevelForCurrentSequence];
+}
+
+- (void)seekToStart:(id)sender {
+    [_playbackController seekToPositionMS:0];
+}
+
+- (void)seekToEnd:(id)sender {
+    [_playbackController seekToPositionMS:(NSInteger)_sequenceDurationMS];
 }
 
 @end

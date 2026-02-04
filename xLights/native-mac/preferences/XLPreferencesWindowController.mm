@@ -16,6 +16,7 @@
 #import "XLOtherPreferencesViewController.h"
 #import "XLRandomEffectsPreferencesViewController.h"
 #import "XLServicesPreferencesViewController.h"
+#import "XLKeyboardPreferencesViewController.h"
 
 static XLPreferencesWindowController *sharedInstance = nil;
 
@@ -89,6 +90,7 @@ static XLPreferencesWindowController *sharedInstance = nil;
     self.viewControllers[@"backup"] = [[XLBackupPreferencesViewController alloc] init];
     self.viewControllers[@"randomEffects"] = [[XLRandomEffectsPreferencesViewController alloc] init];
     self.viewControllers[@"other"] = [[XLOtherPreferencesViewController alloc] init];
+    self.viewControllers[@"keyboard"] = [[XLKeyboardPreferencesViewController alloc] init];
 
 #ifdef ENABLE_SERVICES
     self.viewControllers[@"services"] = [[XLServicesPreferencesViewController alloc] init];
@@ -148,6 +150,7 @@ static XLPreferencesWindowController *sharedInstance = nil;
                             @"checkSequence",
                             @"randomEffects",
                             @"colorManager",
+                            @"keyboard",
                             @"other",
                             nil];
 
@@ -199,6 +202,10 @@ static XLPreferencesWindowController *sharedInstance = nil;
     else if ([itemIdentifier isEqualToString:@"colorManager"]) {
         item.label = @"Colors";
         item.image = [NSImage imageWithSystemSymbolName:@"paintpalette" accessibilityDescription:@"Colors"];
+    }
+    else if ([itemIdentifier isEqualToString:@"keyboard"]) {
+        item.label = @"Shortcuts";
+        item.image = [NSImage imageWithSystemSymbolName:@"keyboard" accessibilityDescription:@"Keyboard Shortcuts"];
     }
     else if ([itemIdentifier isEqualToString:@"other"]) {
         item.label = @"Other";

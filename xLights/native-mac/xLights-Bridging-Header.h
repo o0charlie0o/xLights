@@ -20,4 +20,7 @@
 #import "XLColorPaletteViewController.h"
 #import "XLEngineBridge.h"
 
+// Input handling
+#import "input/XLKeyboardHandler.h"
+
 #endif /* xLights_Bridging_Header_h */

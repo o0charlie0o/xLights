@@ -11,6 +11,7 @@
  **************************************************************/
 
 #import <Cocoa/Cocoa.h>
+#import "input/XLKeyboardHandler.h"
 
 @class XLEngineBridge;
 @class XLEffectsGridView;
@@ -19,6 +20,7 @@
 @class XLScrollCoordinator;
 @class XLUndoController;
 @class XLPlaybackController;
+@class XLKeyboardHandler;
 
 /// View controller for the Sequencer tab.
 ///
@@ -27,7 +29,7 @@
 /// Metal/CoreAnimation-backed views.
 ///
 /// Reference: MetalTimeline spike for the Metal NSView pattern.
-@interface XLSequencerViewController : NSViewController
+@interface XLSequencerViewController : NSViewController <XLKeyboardActionDelegate>
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 
@@ -52,6 +54,9 @@
 /// Playback controller for coordinated audio and preview playback.
 @property (nonatomic, strong) XLPlaybackController *playbackController;
 
+/// Keyboard handler for processing key bindings.
+@property (nonatomic, strong) XLKeyboardHandler *keyboardHandler;
+
 /// Reload sequence data from the engine bridge.
 /// Call this when a sequence is loaded or unloaded, or when elements/effects change.
 - (void)reloadSequenceData;
@@ -67,6 +72,22 @@
 - (void)addTimingTrack:(id)sender;
 - (void)importTiming:(id)sender;
 - (void)generateTiming:(id)sender;
+
+#pragma mark - Zoom and Navigation Actions
+/// Zoom in on the timeline (increase zoom level).
+- (void)zoomIn:(id)sender;
+
+/// Zoom out on the timeline (decrease zoom level).
+- (void)zoomOut:(id)sender;
+
+/// Zoom to fit the entire sequence in the view.
+- (void)zoomToFit:(id)sender;
+
+/// Seek to the start of the sequence.
+- (void)seekToStart:(id)sender;
+
+/// Seek to the end of the sequence.
+- (void)seekToEnd:(id)sender;
 
 /// Whether real sequence data is currently loaded (vs demo data).
 @property (nonatomic, readonly) BOOL isUsingRealData;

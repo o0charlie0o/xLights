@@ -38,6 +38,7 @@
  * - EffectRegistry: Factory/registry for effect types
  * - EffectManager: High-level effect factory and management
  * - RenderPipeline: Effect rendering orchestration
+ * - KeyBindingMap: Keyboard shortcut configuration (load/save key_bindings.xml)
  *
  * Design principles:
  * - Zero wxWidgets dependencies
@@ -59,6 +60,7 @@
 #include "Effect.h"
 #include "EffectManager.h"
 #include "RenderPipeline.h"
+#include "KeyBindings.h"
 
 // Media interfaces
 #include "media/ImageLoader.h"
