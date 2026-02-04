@@ -486,52 +486,15 @@
 }
 
 - (NSDictionary *)getPrerenderedFrameBuffer:(NSString *)modelName timeMS:(NSInteger)timeMS {
-    if (!modelName) return nil;
-
-    [self ensureEngineInitialized];
-    if (!_renderEngine) {
-        return nil;
-    }
-
-    std::string stdName = [modelName UTF8String];
-    xlEngine::FrameBuffer fb = _renderEngine->getPrerenderedFrameBuffer(stdName, static_cast<int>(timeMS));
-
-    if (!fb.isValid()) {
-        return nil;
-    }
-
-    NSData *pixelData = [NSData dataWithBytes:fb.pixels.data() length:fb.pixels.size()];
-
-    return @{
-        @"modelName": [NSString stringWithUTF8String:fb.modelName.c_str()],
-        @"width": @(fb.width),
-        @"height": @(fb.height),
-        @"timeMS": @(fb.timeMS),
-        @"pixels": pixelData,
-    };
+    // TODO: Implement when RenderEngine supports getPrerenderedFrameBuffer
+    // This requires Phase 7 engine modernization to expose pre-rendered frame data
+    return nil;
 }
 
 - (NSArray<NSDictionary *> *)getNodeData:(NSString *)modelName {
-    if (!modelName) return @[];
-
-    [self ensureEngineInitialized];
-    if (!_renderEngine) {
-        return @[];
-    }
-
-    std::string stdName = [modelName UTF8String];
-    std::vector<xlEngine::NodeChannelData> nodes = _renderEngine->getNodeData(stdName);
-
-    NSMutableArray *result = [NSMutableArray arrayWithCapacity:nodes.size()];
-    for (const auto &node : nodes) {
-        NSData *data = [NSData dataWithBytes:node.data.data() length:node.data.size()];
-        [result addObject:@{
-            @"startChannel": @(node.startChannel),
-            @"channelCount": @(node.channelCount),
-            @"data": data,
-        }];
-    }
-    return result;
+    // TODO: Implement when RenderEngine supports getNodeData
+    // This requires Phase 7 engine modernization to expose node channel data
+    return @[];
 }
 
 - (BOOL)isRendering {
@@ -712,6 +675,104 @@
     xlEngine::OperationResult result = _modelEngine->createModel(info.type, newName, info.properties);
     if (!result.success) {
         NSLog(@"XLEngineBridge: Failed to duplicate model: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (NSString *)duplicateModelReturningName:(NSString *)modelName {
+    if (!modelName) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot duplicate model - engine not available");
+        return nil;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    if (!_modelEngine->hasModel(stdName)) {
+        return nil;
+    }
+
+    // Generate unique name
+    xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+    std::string newName = info.name + " Copy";
+    int counter = 1;
+    while (_modelEngine->hasModel(newName)) {
+        newName = info.name + " Copy " + std::to_string(++counter);
+    }
+
+    xlEngine::OperationResult result = _modelEngine->createModel(info.type, newName, info.properties);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to duplicate model: %s", result.message.c_str());
+        return nil;
+    }
+    return [NSString stringWithUTF8String:newName.c_str()];
+}
+
+- (NSDictionary *)getModelData:(NSString *)modelName {
+    if (!modelName) return @{};
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot get model data - engine not available");
+        return @{};
+    }
+
+    std::string stdName = [modelName UTF8String];
+    if (!_modelEngine->hasModel(stdName)) {
+        return @{};
+    }
+
+    xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+    NSMutableDictionary *data = [[NSMutableDictionary alloc] init];
+
+    data[@"name"] = [NSString stringWithUTF8String:info.name.c_str()];
+    data[@"type"] = [NSString stringWithUTF8String:info.type.c_str()];
+
+    // Convert properties map to NSDictionary
+    NSMutableDictionary *props = [[NSMutableDictionary alloc] init];
+    for (const auto& pair : info.properties) {
+        NSString *key = [NSString stringWithUTF8String:pair.first.c_str()];
+        NSString *value = [NSString stringWithUTF8String:pair.second.c_str()];
+        props[key] = value;
+    }
+    data[@"properties"] = props;
+
+    return data;
+}
+
+- (BOOL)createModelFromData:(NSDictionary *)modelData withName:(NSString *)modelName {
+    if (!modelData || !modelName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot create model - engine not available");
+        return NO;
+    }
+
+    NSString *type = modelData[@"type"];
+    if (!type) {
+        NSLog(@"XLEngineBridge: Cannot create model - missing type");
+        return NO;
+    }
+
+    NSDictionary *props = modelData[@"properties"];
+    std::map<std::string, std::string> stdProps;
+    if (props) {
+        for (NSString *key in props) {
+            NSString *value = props[key];
+            if (value) {
+                stdProps[[key UTF8String]] = [value UTF8String];
+            }
+        }
+    }
+
+    std::string stdType = [type UTF8String];
+    std::string stdName = [modelName UTF8String];
+
+    xlEngine::OperationResult result = _modelEngine->createModel(stdType, stdName, stdProps);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to create model from data: %s", result.message.c_str());
     }
     return result.success ? YES : NO;
 }
@@ -3013,6 +3074,160 @@
     result[@"palette"] = palette;
 
     return result;
+}
+
+#pragma mark - Pixel Test Operations
+
+- (void)setTestChannel:(NSInteger)channel value:(NSUInteger)value {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        NSLog(@"XLEngineBridge: Cannot set test channel - xLightsFrame not available");
+        return;
+    }
+
+    OutputManager* outputManager = frame->GetOutputManager();
+    if (outputManager) {
+        // Channel is 1-indexed from the API, OutputManager expects 0-indexed
+        outputManager->SetOneChannel((int32_t)(channel - 1), (unsigned char)value);
+    }
+}
+
+- (void)setTestChannels:(NSInteger)startChannel data:(NSData *)data {
+    if (!data || data.length == 0) return;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        NSLog(@"XLEngineBridge: Cannot set test channels - xLightsFrame not available");
+        return;
+    }
+
+    OutputManager* outputManager = frame->GetOutputManager();
+    if (outputManager) {
+        // Channel is 1-indexed from the API, OutputManager expects 0-indexed
+        outputManager->SetManyChannels((int32_t)(startChannel - 1),
+                                       (unsigned char*)data.bytes,
+                                       data.length);
+    }
+}
+
+- (void)allTestChannelsOff {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        NSLog(@"XLEngineBridge: Cannot turn off test channels - xLightsFrame not available");
+        return;
+    }
+
+    OutputManager* outputManager = frame->GetOutputManager();
+    if (outputManager) {
+        outputManager->AllOff();
+    }
+}
+
+- (void)startTestFrame {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        return;
+    }
+
+    OutputManager* outputManager = frame->GetOutputManager();
+    if (outputManager) {
+        outputManager->StartFrame(0);
+    }
+}
+
+- (void)endTestFrame {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        return;
+    }
+
+    OutputManager* outputManager = frame->GetOutputManager();
+    if (outputManager) {
+        outputManager->EndFrame();
+    }
+}
+
+- (NSInteger)getTotalTestChannels {
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        return 0;
+    }
+
+    OutputManager* outputManager = frame->GetOutputManager();
+    if (outputManager) {
+        return outputManager->GetTotalChannels();
+    }
+    return 0;
+}
+
+- (NSDictionary *)getModelChannelInfo:(NSString *)modelName {
+    if (!modelName) return nil;
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        return nil;
+    }
+
+    std::string stdName = [modelName UTF8String];
+    Model* model = frame->AllModels[stdName];
+    if (!model) {
+        return nil;
+    }
+
+    return @{
+        @"startChannel": @(model->GetFirstChannel() + 1),
+        @"channelCount": @(model->GetChanCount()),
+        @"nodeCount": @(model->GetNodeCount())
+    };
+}
+
+- (NSArray<NSDictionary *> *)getModelChannelRanges:(NSString *)modelName {
+    if (!modelName) return @[];
+
+    [self ensureEngineInitialized];
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) {
+        return @[];
+    }
+
+    std::string stdName = [modelName UTF8String];
+    Model* model = frame->AllModels[stdName];
+    if (!model) {
+        return @[];
+    }
+
+    NSMutableArray *ranges = [NSMutableArray array];
+
+    // Get node information
+    size_t nodeCount = model->GetNodeCount();
+    for (size_t nodeIdx = 0; nodeIdx < nodeCount; nodeIdx++) {
+        int32_t startChannel = model->NodeStartChannel(nodeIdx);
+        size_t channelCount = model->GetChanCountPerNode();
+
+        [ranges addObject:@{
+            @"nodeIndex": @(nodeIdx),
+            @"startChannel": @(startChannel + 1), // Convert to 1-indexed
+            @"endChannel": @(startChannel + channelCount), // 1-indexed, inclusive
+            @"channelCount": @(channelCount)
+        }];
+    }
+
+    return ranges;
 }
 
 @end

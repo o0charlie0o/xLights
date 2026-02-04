@@ -212,4 +212,189 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+#pragma mark - Export Format Types
+
+/// Supported export formats for sequence conversion
+typedef NS_ENUM(NSInteger, XLExportFormat) {
+    XLExportFormatFSEQ,         // Falcon Player (.fseq) - default v2
+    XLExportFormatFSEQv1,       // Falcon Player v1 (.fseq)
+    XLExportFormatFSEQv2,       // Falcon Player v2 (.fseq)
+    XLExportFormatVideo,        // Video file (.mp4)
+    XLExportFormatGIF,          // Animated GIF (.gif)
+    XLExportFormatMinleon,      // Minleon NDB (.ndb)
+    XLExportFormatLOR,          // Light-O-Rama (.lms)
+    XLExportFormatVixen2,       // Vixen 2 (.vix)
+    XLExportFormatHLS,          // HLS (.hlsseq)
+    XLExportFormatEseq,         // Effect Sequence (.eseq)
+};
+
+#pragma mark - Import Format Types
+
+/// Supported import formats for sequence conversion
+typedef NS_ENUM(NSInteger, XLImportFormat) {
+    XLImportFormatVixen2,       // Vixen 2.x (.vix)
+    XLImportFormatVixen3,       // Vixen 3.x (.tim)
+    XLImportFormatLOR,          // Light-O-Rama (.lms, .las, .lss)
+    XLImportFormatHLS,          // HLS (.hlsseq)
+    XLImportFormatLSP,          // Light Show Pro (.msq)
+    XLImportFormatFSEQ,         // Falcon Player (.fseq)
+    XLImportFormatSuperStar,    // SuperStar (.sup)
+    XLImportFormatGlediator,    // Glediator (.led)
+    XLImportFormatConductor,    // Conductor (.seq)
+};
+
+#pragma mark - Export Sequence Dialog
+
+/// Native macOS sheet for exporting sequences to various formats.
+@interface XLExportSequenceDialog : XLBaseSheetController <NSTableViewDataSource, NSTableViewDelegate>
+
+/// Engine bridge for accessing models and sequence data
+@property (nonatomic, weak) XLEngineBridge *engineBridge;
+
+/// Show directory
+@property (nonatomic, copy) NSString *showDirectory;
+
+/// Selected export format
+@property (nonatomic, assign) XLExportFormat exportFormat;
+
+/// Export destination path
+@property (nonatomic, copy, nullable) NSString *exportPath;
+
+/// Whether to export all models or selected only
+@property (nonatomic, assign) BOOL exportAllModels;
+
+/// Selected model names for export (when not exporting all)
+@property (nonatomic, copy) NSArray<NSString *> *selectedModelNames;
+
+/// Export start time in milliseconds (0 = beginning)
+@property (nonatomic, assign) NSInteger startTimeMs;
+
+/// Export end time in milliseconds (0 = end)
+@property (nonatomic, assign) NSInteger endTimeMs;
+
+/// Include audio in video/GIF export
+@property (nonatomic, assign) BOOL includeAudio;
+
+/// Video width for video/GIF export
+@property (nonatomic, assign) NSInteger videoWidth;
+
+/// Video height for video/GIF export
+@property (nonatomic, assign) NSInteger videoHeight;
+
+/// Frame rate for video export
+@property (nonatomic, assign) NSInteger frameRate;
+
+/// GIF quality (1-100)
+@property (nonatomic, assign) NSInteger gifQuality;
+
+/// FSEQ compression level (0-9)
+@property (nonatomic, assign) NSInteger fseqCompressionLevel;
+
+/// Get file extension for export format
++ (NSString *)fileExtensionForFormat:(XLExportFormat)format;
+
+/// Get display name for export format
++ (NSString *)displayNameForFormat:(XLExportFormat)format;
+
+@end
+
+#pragma mark - Batch Convert Dialog
+
+/// Native macOS sheet for batch converting multiple sequence files.
+@interface XLBatchConvertDialog : XLBaseSheetController <NSTableViewDataSource, NSTableViewDelegate>
+
+/// Engine bridge for accessing show directory
+@property (nonatomic, weak) XLEngineBridge *engineBridge;
+
+/// Show directory to scan for sequences
+@property (nonatomic, copy) NSString *showDirectory;
+
+/// Source format filter (import from)
+@property (nonatomic, assign) XLImportFormat sourceFormat;
+
+/// Destination format (export to)
+@property (nonatomic, assign) XLExportFormat destinationFormat;
+
+/// Selected source files for conversion
+@property (nonatomic, copy, readonly) NSArray<NSString *> *selectedSourceFiles;
+
+/// Output directory for converted files
+@property (nonatomic, copy, nullable) NSString *outputDirectory;
+
+/// Whether to overwrite existing files
+@property (nonatomic, assign) BOOL overwriteExisting;
+
+/// Whether to preserve folder structure
+@property (nonatomic, assign) BOOL preserveFolderStructure;
+
+@end
+
+#pragma mark - Conversion Progress Dialog
+
+/// Non-modal dialog showing conversion progress for single or batch operations.
+@interface XLConversionProgressDialog : NSObject
+
+/// The progress window
+@property (nonatomic, strong, readonly) NSWindow *window;
+
+/// Overall progress (0.0 - 1.0)
+@property (nonatomic, assign, readonly) double overallProgress;
+
+/// Whether all conversions are complete
+@property (nonatomic, assign, readonly) BOOL isComplete;
+
+/// Whether the conversion was cancelled
+@property (nonatomic, assign, readonly) BOOL wasCancelled;
+
+/// Callback for when cancel is clicked
+@property (nonatomic, copy, nullable) void (^onCancel)(void);
+
+/// Show the progress dialog
+- (void)showForWindow:(NSWindow *)parentWindow;
+
+/// Close the dialog
+- (void)close;
+
+/// Set the current file being processed
+- (void)setCurrentFile:(NSString *)filename;
+
+/// Set the current status message
+- (void)setStatusMessage:(NSString *)message;
+
+/// Update progress for the current file (0.0 - 1.0)
+- (void)setFileProgress:(double)progress;
+
+/// Update overall progress (0.0 - 1.0)
+- (void)setOverallProgress:(double)progress;
+
+/// Mark conversion as complete with success/error message
+- (void)markCompleteWithMessage:(nullable NSString *)message success:(BOOL)success;
+
+/// Add a log entry
+- (void)addLogEntry:(NSString *)entry;
+
+/// Add an error entry (displayed in red)
+- (void)addErrorEntry:(NSString *)error;
+
+/// Add a warning entry (displayed in orange)
+- (void)addWarningEntry:(NSString *)warning;
+
+@end
+
+#pragma mark - Import Sequence Dialog Helper
+
+/// Helper class with format conversion utilities
+@interface XLImportSequenceDialog : NSObject
+
+/// Get file extension for import format
++ (NSString *)fileExtensionForFormat:(XLImportFormat)format;
+
+/// Get display name for import format
++ (NSString *)displayNameForFormat:(XLImportFormat)format;
+
+/// Get import format from file extension
++ (XLImportFormat)formatFromFileExtension:(NSString *)extension;
+
+@end
+
 NS_ASSUME_NONNULL_END

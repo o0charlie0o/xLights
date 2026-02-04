@@ -18,8 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Notification posted when an effect is selected in the sequencer.
 /// The userInfo dictionary contains:
-///   - "effectId": NSNumber with the effect ID (0 = no selection)
+///   - "effectId": NSNumber with the primary effect ID (-1 = no selection)
 ///   - "effectType": NSString with the effect type name (nil if no selection)
+///   - "selectedEffectIds": NSArray<NSNumber *> of all selected effect IDs (for multi-select)
+///   - "selectedEffectTypes": NSArray<NSString *> of effect types for each selected effect
 extern NSNotificationName const XLEffectSelectionDidChangeNotification;
 
 /// View controller for the Effect Properties Panel shown at the bottom of the main window.

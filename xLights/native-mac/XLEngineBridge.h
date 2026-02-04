@@ -148,6 +148,19 @@
 /// Duplicate a model
 - (BOOL)duplicateModel:(NSString *)modelName;
 
+/// Duplicate a model and return the new name
+- (NSString *)duplicateModelReturningName:(NSString *)modelName;
+
+/// Get complete model data for undo/redo serialization
+/// Returns all properties needed to recreate the model
+- (NSDictionary *)getModelData:(NSString *)modelName;
+
+/// Create a model from serialized data (for undo/redo)
+/// @param modelData Dictionary containing model properties from getModelData:
+/// @param modelName Name for the model
+/// @return YES if successful
+- (BOOL)createModelFromData:(NSDictionary *)modelData withName:(NSString *)modelName;
+
 #pragma mark - Model Groups
 
 /// Get all model groups with their member models
@@ -169,6 +182,28 @@
 
 /// Check if a model has a specific submodel
 - (BOOL)hasSubmodel:(NSString *)modelName submodelName:(NSString *)submodelName;
+
+/// Get detailed submodel definition
+/// Returns dictionary with: name, isRanges, vertical, bufferStyle, subBuffer, strands (array of strings)
+- (NSDictionary *)getSubmodelDefinition:(NSString *)modelName submodelName:(NSString *)submodelName;
+
+/// Create or update a submodel
+/// @param modelName The parent model name
+/// @param submodelName The submodel name
+/// @param definition Dictionary with: isRanges (BOOL), vertical (BOOL), bufferStyle (string),
+///                   subBuffer (string for buffer type), strands (array of strings for range type)
+/// @return YES if successful
+- (BOOL)setSubmodel:(NSString *)modelName
+       submodelName:(NSString *)submodelName
+         definition:(NSDictionary *)definition;
+
+/// Delete a submodel
+- (BOOL)deleteSubmodel:(NSString *)modelName submodelName:(NSString *)submodelName;
+
+/// Rename a submodel
+- (BOOL)renameSubmodel:(NSString *)modelName
+               oldName:(NSString *)oldName
+               newName:(NSString *)newName;
 
 #pragma mark - Model Geometry
 
@@ -491,6 +526,38 @@
 
 /// Get current audio playback volume
 - (NSInteger)getAudioVolume;
+
+#pragma mark - Pixel Test Operations
+
+/// Set a single channel to a specific value (0-255).
+/// @param channel Absolute channel number (1-indexed)
+/// @param value Brightness value (0-255)
+- (void)setTestChannel:(NSInteger)channel value:(NSUInteger)value;
+
+/// Set multiple channels to specific values.
+/// @param startChannel Starting absolute channel number (1-indexed)
+/// @param data NSData containing byte values for each channel
+- (void)setTestChannels:(NSInteger)startChannel data:(NSData *)data;
+
+/// Turn off all channels (all outputs set to 0)
+- (void)allTestChannelsOff;
+
+/// Start a frame for test output
+- (void)startTestFrame;
+
+/// End a frame and send test output data to controllers
+- (void)endTestFrame;
+
+/// Get the total number of channels configured
+- (NSInteger)getTotalTestChannels;
+
+/// Get channels for a specific model.
+/// Returns dictionary with: startChannel (1-indexed), channelCount, nodeCount
+- (NSDictionary *)getModelChannelInfo:(NSString *)modelName;
+
+/// Get all channel ranges for a model (including submodels).
+/// Returns array of dictionaries with: startChannel, endChannel, nodeIndex
+- (NSArray<NSDictionary *> *)getModelChannelRanges:(NSString *)modelName;
 
 #pragma mark - Utility
 

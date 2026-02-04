@@ -16,6 +16,7 @@
 #import "layout/XLModelImportSheet.h"
 #import "layout/XLManipulationHandlesRenderer.h"
 #import "layout/XLModelPropertiesView.h"
+#import "layout/XLLayoutUndoController.h"
 
 static const CGFloat kModelTreeMinWidth = 200.0;
 static const CGFloat kModelTreeDefaultWidth = 280.0;
@@ -28,6 +29,8 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 @property (nonatomic, strong) XLModelCreationSheet *modelCreationSheet;
 @property (nonatomic, strong) XLModelImportSheet *modelImportSheet;
 @property (nonatomic, strong) NSScrollView *propertiesScrollView;
+@property (nonatomic, strong, readwrite) XLLayoutUndoController *undoController;
+@property (nonatomic, assign) XLToolMode manipulationToolMode;
 
 @end
 
@@ -106,6 +109,11 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    // Initialize undo controller
+    _undoController = [[XLLayoutUndoController alloc] initWithEngineBridge:_engineBridge];
+    _undoController.delegate = self;
+
     [_modelTreeController reloadData];
 }
 
@@ -123,6 +131,7 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     _engineBridge = engineBridge;
     _modelTreeController.engineBridge = engineBridge;
     _propertiesView.engineBridge = engineBridge;
+    _undoController.engineBridge = engineBridge;
 }
 
 #pragma mark - NSSplitViewDelegate
@@ -177,9 +186,14 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 - (void)modelTree:(XLModelTreeViewController *)controller didRequestDeleteModel:(NSString *)modelName {
     NSLog(@"XLLayoutViewController: Delete model '%@' requested", modelName);
 
+    // Capture model data for undo before deletion
+    NSDictionary *modelData = [_engineBridge getModelData:modelName];
+
     // Delete via engine bridge
     BOOL success = [_engineBridge deleteModel:modelName];
     if (success) {
+        // Register undo action
+        [_undoController registerModelDeleted:modelName modelData:modelData];
         [_modelTreeController reloadData];
     }
 }
@@ -187,10 +201,18 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 - (void)modelTree:(XLModelTreeViewController *)controller didRequestDuplicateModel:(NSString *)modelName {
     NSLog(@"XLLayoutViewController: Duplicate model '%@' requested", modelName);
 
-    // Duplicate via engine bridge
-    BOOL success = [_engineBridge duplicateModel:modelName];
-    if (success) {
+    // Duplicate via engine bridge - returns the new model name
+    NSString *duplicateName = [_engineBridge duplicateModelReturningName:modelName];
+    if (duplicateName) {
+        // Get the duplicate's data for undo
+        NSDictionary *duplicateData = [_engineBridge getModelData:duplicateName];
+
+        // Register undo action
+        [_undoController registerModelDuplicated:modelName
+                                   duplicateName:duplicateName
+                                   duplicateData:duplicateData];
         [_modelTreeController reloadData];
+        [_modelTreeController selectModelWithName:duplicateName];
     }
 }
 
@@ -229,11 +251,15 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     [_modelCreationSheet showAsSheetForWindow:self.view.window
                                 withModelType:modelType
                                    completion:^(BOOL created, NSString *modelName) {
-        if (created) {
+        if (created && modelName) {
+            // Get model data for undo
+            NSDictionary *modelData = [weakSelf.engineBridge getModelData:modelName];
+
+            // Register undo action for model creation
+            [weakSelf.undoController registerModelCreated:modelName modelData:modelData];
+
             [weakSelf.modelTreeController reloadData];
-            if (modelName) {
-                [weakSelf.modelTreeController selectModelWithName:modelName];
-            }
+            [weakSelf.modelTreeController selectModelWithName:modelName];
         }
         weakSelf.modelCreationSheet = nil;
     }];
@@ -359,6 +385,34 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 
 - (void)previewView:(XLMetalPreviewView *)view didBeginManipulatingModel:(NSString *)modelName {
     NSLog(@"XLLayoutViewController: Begin manipulating model '%@'", modelName);
+
+    // Capture current transform state for undo
+    if (modelName) {
+        NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
+        if (modelInfo) {
+            XLModelTransformSnapshot snapshot;
+            snapshot.position = simd_make_float3(
+                [modelInfo[@"WorldPosX"] floatValue],
+                [modelInfo[@"WorldPosY"] floatValue],
+                [modelInfo[@"WorldPosZ"] floatValue]
+            );
+            snapshot.scale = simd_make_float3(
+                [modelInfo[@"ScaleX"] floatValue] ?: 1.0f,
+                [modelInfo[@"ScaleY"] floatValue] ?: 1.0f,
+                [modelInfo[@"ScaleZ"] floatValue] ?: 1.0f
+            );
+            snapshot.rotation = simd_make_float3(
+                [modelInfo[@"RotateX"] floatValue],
+                [modelInfo[@"RotateY"] floatValue],
+                [modelInfo[@"RotateZ"] floatValue]
+            );
+
+            [_undoController captureModelTransform:modelName snapshot:snapshot];
+
+            // Track the current tool mode for registering the right action type
+            _manipulationToolMode = _previewView.handlesRenderer.toolMode;
+        }
+    }
 }
 
 - (void)previewView:(XLMetalPreviewView *)view didManipulateModelWithDelta:(simd_float3)delta {
@@ -383,8 +437,40 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 
 - (void)previewView:(XLMetalPreviewView *)view didEndManipulatingModel:(NSString *)modelName {
     NSLog(@"XLLayoutViewController: End manipulating model '%@'", modelName);
+
+    // Register the completed manipulation for undo
+    if (modelName) {
+        XLManipulationHandlesRenderer *handles = _previewView.handlesRenderer;
+        XLModelTransform transform = [handles modelTransform];
+
+        XLModelTransformSnapshot newSnapshot;
+        newSnapshot.position = transform.position;
+        newSnapshot.scale = transform.scale;
+        newSnapshot.rotation = transform.rotation;
+
+        // Register based on the tool mode that was active
+        switch (_manipulationToolMode) {
+            case XLToolModeTranslate:
+            case XLToolModeXYTranslate:
+            case XLToolModeElevate:
+                [_undoController registerTranslate:modelName newSnapshot:newSnapshot];
+                break;
+            case XLToolModeScale:
+                [_undoController registerScale:modelName newSnapshot:newSnapshot];
+                break;
+            case XLToolModeRotate:
+                [_undoController registerRotate:modelName newSnapshot:newSnapshot];
+                break;
+            default:
+                // Default to translate for unknown modes
+                [_undoController registerTranslate:modelName newSnapshot:newSnapshot];
+                break;
+        }
+    }
+
     // Trigger a full refresh to ensure model state is synced
     [_modelTreeController reloadData];
+
     // Re-select to refresh properties view
     if (modelName) {
         NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
@@ -402,9 +488,16 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
                 forModel:(NSString *)modelName {
     NSLog(@"XLLayoutViewController: Property '%@' changed to '%@' for model '%@'", key, value, modelName);
 
+    // Get old value for undo
+    NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
+    id oldValue = modelInfo[key];
+
     // Update model via engine bridge
     BOOL success = [_engineBridge updateModelProperty:modelName key:key value:value];
     if (success) {
+        // Register property change for undo
+        [_undoController registerPropertyChange:modelName key:key oldValue:oldValue newValue:value];
+
         // Refresh the model tree if name changed
         if ([key isEqualToString:@"name"]) {
             [_modelTreeController reloadData];
@@ -423,6 +516,52 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
             [self selectModel:modelName];
         }
     }
+}
+
+#pragma mark - XLLayoutUndoDelegate
+
+- (void)layoutUndoController:(XLLayoutUndoController *)controller
+        didRestoreModelNamed:(NSString *)modelName {
+    // Refresh UI after undo/redo
+    [_modelTreeController reloadData];
+    [_previewView reloadModels];
+
+    // Re-select the model to update handles and properties
+    if (modelName) {
+        [self selectModel:modelName];
+    }
+}
+
+- (void)layoutUndoController:(XLLayoutUndoController *)controller
+         didChangeModelNamed:(NSString *)modelName
+                   wasCreate:(BOOL)wasCreate {
+    // Refresh UI after model create/delete undo/redo
+    [_modelTreeController reloadData];
+    [_previewView reloadModels];
+
+    if (wasCreate && modelName) {
+        [self selectModel:modelName];
+    } else if (!wasCreate) {
+        [self clearSelection];
+    }
+}
+
+#pragma mark - Undo/Redo Actions
+
+- (void)undo {
+    [_undoController undo];
+}
+
+- (void)redo {
+    [_undoController redo];
+}
+
+- (BOOL)canUndo {
+    return [_undoController canUndo];
+}
+
+- (BOOL)canRedo {
+    return [_undoController canRedo];
 }
 
 @end

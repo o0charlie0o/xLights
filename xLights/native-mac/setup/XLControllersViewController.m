@@ -399,6 +399,7 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
     [menu addItemWithTitle:@"Delete Controller" action:@selector(contextDeleteController:) keyEquivalent:@""];
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Upload Configuration" action:@selector(contextUploadConfig:) keyEquivalent:@""];
+    [menu addItemWithTitle:@"Upload to Selected Controllers" action:@selector(contextUploadSelectedConfigs:) keyEquivalent:@""];
 
     NSMenu *sortMenu = [[NSMenu alloc] initWithTitle:@"Sort"];
     [sortMenu addItemWithTitle:@"by Name" action:@selector(sortByName:) keyEquivalent:@""];
@@ -822,6 +823,23 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
     }
 }
 
+- (void)contextUploadSelectedConfigs:(id)sender {
+    NSIndexSet *selectedIndices = _tableView.selectedRowIndexes;
+    if (selectedIndices.count == 0) return;
+
+    if (selectedIndices.count == 1) {
+        // Single selection, use single upload method
+        if ([_delegate respondsToSelector:@selector(controllersView:didRequestUploadControllerAtIndex:)]) {
+            [_delegate controllersView:self didRequestUploadControllerAtIndex:selectedIndices.firstIndex];
+        }
+    } else {
+        // Multiple selection, use batch upload method
+        if ([_delegate respondsToSelector:@selector(controllersView:didRequestUploadControllersAtIndices:)]) {
+            [_delegate controllersView:self didRequestUploadControllersAtIndices:selectedIndices];
+        }
+    }
+}
+
 #pragma mark - Sort Menu Actions
 
 - (void)sortByName:(id)sender {
@@ -890,6 +908,11 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
         action == @selector(contextDeactivate:) ||
         action == @selector(contextUploadConfig:)) {
         return (row >= 0);
+    }
+
+    if (action == @selector(contextUploadSelectedConfigs:)) {
+        // Only enable if multiple controllers are selected
+        return (_tableView.selectedRowIndexes.count >= 2);
     }
 
     return YES;

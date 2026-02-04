@@ -27,11 +27,17 @@ typedef NS_ENUM(NSInteger, XLTimingInterval) {
 /// Native macOS sheet for creating new timing tracks.
 @interface XLNewTimingDialog : XLBaseSheetController
 
+/// The track name entered by the user
+@property (nonatomic, copy) NSString *trackName;
+
 /// The selected timing interval
 @property (nonatomic, assign) XLTimingInterval selectedInterval;
 
 /// Array of intervals to exclude from the choices
 @property (nonatomic, copy, nullable) NSArray<NSNumber *> *excludedIntervals;
+
+/// Existing track names (to prevent duplicates)
+@property (nonatomic, copy, nullable) NSArray<NSString *> *existingTrackNames;
 
 /// Get the display name for a timing interval
 + (NSString *)displayNameForInterval:(XLTimingInterval)interval;

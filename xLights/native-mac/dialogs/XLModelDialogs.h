@@ -151,26 +151,56 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Pixel Test Dialog
 
+/// Test pattern types
+typedef NS_ENUM(NSInteger, XLPixelTestPattern) {
+    XLPixelTestPatternOff = 0,
+    XLPixelTestPatternAllOn,
+    XLPixelTestPatternChase,
+    XLPixelTestPatternChase3,
+    XLPixelTestPatternChase4,
+    XLPixelTestPatternChase5,
+    XLPixelTestPatternAlternate,
+    XLPixelTestPatternTwinkle5,
+    XLPixelTestPatternTwinkle10,
+    XLPixelTestPatternTwinkle25,
+    XLPixelTestPatternTwinkle50,
+    XLPixelTestPatternShimmer,
+    XLPixelTestPatternRGBCycle,
+    XLPixelTestPatternColorBlocks
+};
+
 /// Native macOS window for testing pixels on models.
 @interface XLPixelTestDialog : NSWindowController
 
 /// Engine bridge for controlling outputs
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 
-/// Models to test
-@property (nonatomic, copy) NSArray<NSString *> *modelNames;
+/// Models to test (nil means test all selected channels)
+@property (nonatomic, copy, nullable) NSArray<NSString *> *modelNames;
 
-/// Test mode (chase, highlight, static, etc.)
-@property (nonatomic, copy) NSString *testMode;
+/// Current test pattern
+@property (nonatomic, assign) XLPixelTestPattern testPattern;
 
-/// Test color
+/// Test color (foreground/highlight)
 @property (nonatomic, strong) NSColor *testColor;
 
-/// Chase speed (ms per step)
-@property (nonatomic, assign) NSInteger chaseSpeedMs;
+/// Background color
+@property (nonatomic, strong) NSColor *backgroundColor;
+
+/// Chase speed (1-100, higher = faster)
+@property (nonatomic, assign) NSInteger chaseSpeed;
+
+/// Whether output is active
+@property (nonatomic, assign, readonly) BOOL isOutputActive;
 
 /// Show the pixel test dialog
 - (void)showWithCompletion:(void (^)(void))completion;
+
+/// Start output to controllers
+- (void)startOutput;
+
+/// Stop output to controllers
+- (void)stopOutput;
 
 @end
 
@@ -201,14 +231,46 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Generate Custom Model Dialog
 
-/// Native macOS window for generating custom models from images.
+/// Generation source type for custom model generation
+typedef NS_ENUM(NSInteger, XLCustomModelGenerationSource) {
+    XLCustomModelGenerationSourceImage = 0,    // From image file
+    XLCustomModelGenerationSourceSVGPath,       // From SVG path (placeholder)
+    XLCustomModelGenerationSourceMathFunction,  // From math function (placeholder)
+    XLCustomModelGenerationSourceGrid,          // Grid with custom spacing
+    XLCustomModelGenerationSourceImport,        // Import from other formats (placeholder)
+};
+
+/// Native macOS window for generating custom models from various sources.
 @interface XLGenerateCustomModelDialog : NSWindowController
 
-/// Source image path
+/// Engine bridge for model operations
+@property (nonatomic, weak, nullable) XLEngineBridge *engineBridge;
+
+/// Selected generation source type
+@property (nonatomic, assign) XLCustomModelGenerationSource generationSource;
+
+/// Source image path (for image source)
 @property (nonatomic, copy, nullable) NSString *sourceImagePath;
+
+/// Source image (loaded)
+@property (nonatomic, strong, nullable, readonly) NSImage *sourceImage;
 
 /// Generated node count
 @property (nonatomic, assign, readonly) NSInteger generatedNodeCount;
+
+/// Generated custom model data string (for CustomModel property)
+@property (nonatomic, copy, readonly, nullable) NSString *generatedModelData;
+
+/// Model name
+@property (nonatomic, copy) NSString *modelName;
+
+/// Grid width (generated)
+@property (nonatomic, assign, readonly) NSInteger gridWidth;
+
+/// Grid height (generated)
+@property (nonatomic, assign, readonly) NSInteger gridHeight;
+
+#pragma mark - Image Source Parameters
 
 /// Threshold for pixel detection (0-255)
 @property (nonatomic, assign) NSInteger detectionThreshold;
@@ -216,14 +278,75 @@ NS_ASSUME_NONNULL_BEGIN
 /// Minimum brightness for node detection
 @property (nonatomic, assign) NSInteger minimumBrightness;
 
-/// Model name
-@property (nonatomic, copy) NSString *modelName;
-
 /// Blur amount for preprocessing
 @property (nonatomic, assign) NSInteger blurAmount;
 
+/// Whether to invert the image (detect dark pixels instead of light)
+@property (nonatomic, assign) BOOL invertDetection;
+
+/// Scale factor for output (1 = 1 pixel = 1 node, 2 = 2x2 pixels = 1 node, etc.)
+@property (nonatomic, assign) NSInteger scaleFactor;
+
+#pragma mark - Grid Source Parameters
+
+/// Number of columns for grid generation
+@property (nonatomic, assign) NSInteger gridColumns;
+
+/// Number of rows for grid generation
+@property (nonatomic, assign) NSInteger gridRows;
+
+/// Horizontal spacing between grid nodes (pixels)
+@property (nonatomic, assign) NSInteger horizontalSpacing;
+
+/// Vertical spacing between grid nodes (pixels)
+@property (nonatomic, assign) NSInteger verticalSpacing;
+
+/// Numbering direction for grid: @"leftright" (default), @"topbottom", @"rightleft", @"bottomtop"
+@property (nonatomic, copy) NSString *gridNumberingDirection;
+
+/// Whether to snake the numbering (alternate direction on each row/column)
+@property (nonatomic, assign) BOOL gridSnakeNumbering;
+
+/// Starting corner for grid numbering: @"topleft", @"topright", @"bottomleft", @"bottomright"
+@property (nonatomic, copy) NSString *gridStartCorner;
+
+#pragma mark - SVG Path Parameters (Placeholder)
+
+/// SVG path data string (d attribute content)
+@property (nonatomic, copy, nullable) NSString *svgPathData;
+
+/// Number of nodes to place along the path
+@property (nonatomic, assign) NSInteger svgNodeCount;
+
+#pragma mark - Math Function Parameters (Placeholder)
+
+/// Math function expression (e.g., "sin(x)", "x^2 + y^2")
+@property (nonatomic, copy, nullable) NSString *mathExpression;
+
+/// X range for math function
+@property (nonatomic, assign) CGFloat mathXMin;
+@property (nonatomic, assign) CGFloat mathXMax;
+
+/// Y range for math function
+@property (nonatomic, assign) CGFloat mathYMin;
+@property (nonatomic, assign) CGFloat mathYMax;
+
+/// Resolution for math function
+@property (nonatomic, assign) NSInteger mathResolution;
+
+#pragma mark - Methods
+
 /// Show the dialog
 - (void)showWithCompletion:(void (^)(BOOL accepted))completion;
+
+/// Load an image from path
+- (BOOL)loadImageFromPath:(NSString *)path;
+
+/// Generate the custom model from current settings
+- (BOOL)generateModel;
+
+/// Get preview image showing detected pixels
+- (NSImage * _Nullable)getPreviewImage;
 
 @end
 

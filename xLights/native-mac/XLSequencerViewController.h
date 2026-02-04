@@ -60,6 +60,14 @@
 /// Called automatically by reloadSequenceData.
 - (void)refreshViewSelector;
 
+/// Refresh the timing track selector dropdown with current timing tracks.
+- (void)refreshTimingTrackSelector;
+
+#pragma mark - Timing Track Actions
+- (void)addTimingTrack:(id)sender;
+- (void)importTiming:(id)sender;
+- (void)generateTiming:(id)sender;
+
 /// Whether real sequence data is currently loaded (vs demo data).
 @property (nonatomic, readonly) BOOL isUsingRealData;
 

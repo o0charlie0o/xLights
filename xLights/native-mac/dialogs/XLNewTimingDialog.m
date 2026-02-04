@@ -10,8 +10,11 @@
 
 #import "XLNewTimingDialog.h"
 
+static const CGFloat kLabelWidth = 100.0;
+
 @interface XLNewTimingDialog ()
 
+@property (nonatomic, strong) NSTextField *trackNameField;
 @property (nonatomic, strong) NSPopUpButton *intervalPopup;
 
 @end
@@ -21,9 +24,11 @@
 - (instancetype)init {
     self = [super init];
     if (self) {
-        self.title = @"New Timing";
-        self.minWidth = 300;
-        self.minHeight = 140;
+        self.title = @"New Timing Track";
+        self.okButtonTitle = @"Create";
+        self.minWidth = 350;
+        self.minHeight = 180;
+        _trackName = @"New Timing";
         _selectedInterval = XLTimingIntervalEmpty;
     }
     return self;
@@ -60,20 +65,37 @@
 - (NSView *)buildContentView {
     NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeCenterX;
-    stack.spacing = 16;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 12;
 
-    // Label
-    NSTextField *label = [NSTextField labelWithString:@"Select New Timing Interval:"];
-    label.font = [NSFont systemFontOfSize:13];
-    [stack addArrangedSubview:label];
+    // Track name field
+    _trackNameField = [XLBaseSheetController createTextField];
+    _trackNameField.stringValue = _trackName;
+    [_trackNameField.widthAnchor constraintEqualToConstant:200].active = YES;
 
-    // Popup
+    NSStackView *nameRow = [XLBaseSheetController formRowWithLabel:@"Track Name:"
+                                                           control:_trackNameField
+                                                        labelWidth:kLabelWidth];
+    [stack addArrangedSubview:nameRow];
+
+    // Timing interval popup
     _intervalPopup = [XLBaseSheetController createPopUpButton];
     [_intervalPopup.widthAnchor constraintEqualToConstant:200].active = YES;
 
     [self populateIntervals];
-    [stack addArrangedSubview:_intervalPopup];
+
+    NSStackView *intervalRow = [XLBaseSheetController formRowWithLabel:@"Interval:"
+                                                               control:_intervalPopup
+                                                            labelWidth:kLabelWidth];
+    [stack addArrangedSubview:intervalRow];
+
+    // Help text
+    NSTextField *helpLabel = [NSTextField wrappingLabelWithString:
+        @"Choose 'Empty' for a manual timing track, or select a fixed interval for auto-generated marks."];
+    helpLabel.textColor = [NSColor secondaryLabelColor];
+    helpLabel.font = [NSFont systemFontOfSize:11];
+    [helpLabel.widthAnchor constraintLessThanOrEqualToConstant:280].active = YES;
+    [stack addArrangedSubview:helpLabel];
 
     return stack;
 }
@@ -113,9 +135,34 @@
 - (void)sheetDidLoad {
     // If there's an existing selection, select it
     [_intervalPopup selectItemWithTag:_selectedInterval];
+
+    // Make track name field first responder
+    [self.sheet makeFirstResponder:_trackNameField];
+}
+
+- (NSString *)validate {
+    NSString *name = [_trackNameField.stringValue stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    if (name.length == 0) {
+        return @"Please enter a track name.";
+    }
+
+    // Check for duplicate names
+    if (_existingTrackNames) {
+        for (NSString *existing in _existingTrackNames) {
+            if ([existing caseInsensitiveCompare:name] == NSOrderedSame) {
+                return @"A timing track with this name already exists.";
+            }
+        }
+    }
+
+    return nil;
 }
 
 - (void)okClicked:(id)sender {
+    _trackName = [_trackNameField.stringValue stringByTrimmingCharactersInSet:
+        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     _selectedInterval = (XLTimingInterval)_intervalPopup.selectedItem.tag;
     [super okClicked:sender];
 }

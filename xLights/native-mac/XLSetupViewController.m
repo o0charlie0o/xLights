@@ -11,13 +11,15 @@
 #import "XLSetupViewController.h"
 #import "XLEngineBridge.h"
 #import "setup/XLControllerInspectorViewController.h"
+#import "setup/XLUploadProgressSheet.h"
 
-@interface XLSetupViewController () <XLControllerInspectorDelegate>
+@interface XLSetupViewController () <XLControllerInspectorDelegate, XLUploadProgressSheetDelegate>
 
 @property (nonatomic, strong, readwrite) XLControllersViewController *controllersViewController;
 @property (nonatomic, strong, readwrite) XLPortConfigurationView *portConfigurationView;
 @property (nonatomic, strong, readwrite) XLControllerInspectorViewController *inspectorViewController;
 @property (nonatomic, strong) NSSplitViewController *splitViewController;
+@property (nonatomic, strong) XLUploadProgressSheet *uploadProgressSheet;
 
 @end
 
@@ -141,16 +143,49 @@
     NSString *controllerName = controllersView.controllers[index][XLControllerColumnName];
     if (!controllerName) return;
 
-    // Show upload progress
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Uploading Configuration";
-    alert.informativeText = [NSString stringWithFormat:@"Uploading to %@...", controllerName];
-    alert.alertStyle = NSAlertStyleInformational;
+    // Create and show upload progress sheet
+    _uploadProgressSheet = [[XLUploadProgressSheet alloc] initWithEngineBridge:_engineBridge];
+    _uploadProgressSheet.delegate = self;
 
-    // In production, this would call OutputEngine::uploadToController()
-    // For now, show stub feedback
-    [alert addButtonWithTitle:@"OK"];
-    [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+    [_uploadProgressSheet uploadToController:controllerName
+                           attachedToWindow:self.view.window];
+}
+
+- (void)controllersView:(XLControllersViewController *)controllersView
+    didRequestUploadControllersAtIndices:(NSIndexSet *)indices {
+    if (indices.count == 0) return;
+
+    // Collect controller names
+    NSMutableArray<NSString *> *controllerNames = [NSMutableArray arrayWithCapacity:indices.count];
+    [indices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSString *name = controllersView.controllers[idx][XLControllerColumnName];
+        if (name) {
+            [controllerNames addObject:name];
+        }
+    }];
+
+    if (controllerNames.count == 0) return;
+
+    // Create and show upload progress sheet for batch upload
+    _uploadProgressSheet = [[XLUploadProgressSheet alloc] initWithEngineBridge:_engineBridge];
+    _uploadProgressSheet.delegate = self;
+
+    [_uploadProgressSheet uploadToControllers:controllerNames
+                            attachedToWindow:self.view.window];
+}
+
+#pragma mark - XLUploadProgressSheetDelegate
+
+- (void)uploadProgressSheet:(XLUploadProgressSheet *)sheet
+     didCompleteWithResults:(NSArray<XLUploadResult *> *)results {
+    _uploadProgressSheet = nil;
+
+    // Refresh controller list to update status
+    [_controllersViewController reloadData];
+}
+
+- (void)uploadProgressSheetDidCancel:(XLUploadProgressSheet *)sheet {
+    _uploadProgressSheet = nil;
 }
 
 #pragma mark - XLPortConfigurationViewDelegate

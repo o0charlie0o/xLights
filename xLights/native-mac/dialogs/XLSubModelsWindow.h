@@ -33,6 +33,9 @@ typedef struct XLSubModelInfo {
 #define XL_MAX_STRANDS_PER_SUBMODEL 100
 #define XL_MAX_STRAND_LENGTH 1024
 
+/// Pasteboard type for submodel copy/paste
+extern NSString * const XLSubModelPasteboardType;
+
 /// Completion handler for submodels dialog
 typedef void (^XLSubModelsCompletion)(BOOL saved);
 
@@ -52,11 +55,23 @@ typedef void (^XLSubModelsCompletion)(BOOL saved);
 /// Selected node indices
 @property (nonatomic, readonly) NSMutableIndexSet *selectedNodes;
 
-/// Highlight color for selected nodes
+/// Highlighted node indices (for visual feedback while editing)
+@property (nonatomic, strong) NSMutableIndexSet *highlightedNodes;
+
+/// Color for selected nodes
 @property (nonatomic, strong) NSColor *selectionColor;
+
+/// Color for highlighted nodes (preview mode)
+@property (nonatomic, strong) NSColor *highlightColor;
 
 /// Whether in selection mode
 @property (nonatomic, assign) BOOL selectionEnabled;
+
+/// Whether to show node numbers on hover
+@property (nonatomic, assign) BOOL showNodeNumbers;
+
+/// Currently hovered node index (-1 if none)
+@property (nonatomic, readonly) NSInteger hoveredNodeIndex;
 
 /// Delegate for selection changes
 @property (nonatomic, weak) id<XLNodeSelectionDelegate> delegate;
@@ -64,17 +79,31 @@ typedef void (^XLSubModelsCompletion)(BOOL saved);
 /// Clear selection
 - (void)clearSelection;
 
+/// Clear highlights (separate from selection)
+- (void)clearHighlights;
+
+/// Highlight nodes by range string (for preview without selection)
+- (void)highlightNodesFromRangeString:(NSString *)rangeString;
+
 /// Select nodes by range string (e.g., "1-10,15,20-25")
 - (void)selectNodesFromRangeString:(NSString *)rangeString;
 
 /// Get selected nodes as range string
 - (NSString *)selectedNodesAsRangeString;
 
+/// Get node index at point (returns -1 if none)
+- (NSInteger)nodeAtPoint:(NSPoint)point;
+
+/// Scroll to make a node visible
+- (void)scrollToNode:(NSInteger)nodeIndex;
+
 @end
 
 @protocol XLNodeSelectionDelegate <NSObject>
 @optional
 - (void)nodeSelectionViewDidChangeSelection:(XLNodeSelectionView *)view;
+- (void)nodeSelectionView:(XLNodeSelectionView *)view didHoverNode:(NSInteger)nodeIndex;
+- (void)nodeSelectionView:(XLNodeSelectionView *)view didClickNode:(NSInteger)nodeIndex;
 @end
 
 /// Subbuffer panel for defining rectangular regions of a model.
@@ -109,6 +138,21 @@ typedef void (^XLSubModelsCompletion)(BOOL saved);
 /// Whether changes require layout reload
 @property (nonatomic, readonly) BOOL reloadLayout;
 
+/// Load node data from the model (call after setting engineBridge)
+- (void)loadModelNodeData;
+
+/// Copy selected submodels to pasteboard
+- (void)copySelectedSubmodels;
+
+/// Paste submodels from pasteboard
+- (void)pasteSubmodels;
+
+/// Import submodels from another model
+- (void)importFromModel:(NSString *)sourceModelName;
+
+/// Export selected submodel to file
+- (void)exportSelectedToFile:(NSURL *)fileURL;
+
 @end
 
 /// Strand definition view - grid for entering node ranges per strand.
@@ -116,6 +160,9 @@ typedef void (^XLSubModelsCompletion)(BOOL saved);
 
 /// Number of strands
 @property (nonatomic, assign) NSInteger strandCount;
+
+/// Currently selected strand row
+@property (nonatomic, readonly) NSInteger selectedRow;
 
 /// Get strand data at index
 - (NSString *)strandAtIndex:(NSInteger)index;
@@ -132,6 +179,18 @@ typedef void (^XLSubModelsCompletion)(BOOL saved);
 /// Move strand up/down
 - (void)moveStrandAtIndex:(NSInteger)from toIndex:(NSInteger)to;
 
+/// Reverse the node order in a strand
+- (void)reverseStrandAtIndex:(NSInteger)index;
+
+/// Sort nodes numerically in a strand
+- (void)sortStrandAtIndex:(NSInteger)index;
+
+/// Get all strands as array of strings
+- (NSArray<NSString *> *)allStrands;
+
+/// Set all strands from array
+- (void)setAllStrands:(NSArray<NSString *> *)strands;
+
 /// Delegate for changes
 @property (nonatomic, weak) id<XLStrandGridDelegate> delegate;
 
@@ -140,4 +199,5 @@ typedef void (^XLSubModelsCompletion)(BOOL saved);
 @protocol XLStrandGridDelegate <NSObject>
 @optional
 - (void)strandGridViewDidChange:(XLStrandGridView *)view;
+- (void)strandGridView:(XLStrandGridView *)view didSelectRow:(NSInteger)row;
 @end

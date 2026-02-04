@@ -60,6 +60,10 @@ typedef NS_ENUM(NSInteger, XLControllerStatus) {
 - (void)controllersView:(XLControllersViewController *)controllersView
     didRequestUploadControllerAtIndex:(NSInteger)index;
 
+/// Called when the user requests uploading configuration to multiple controllers.
+- (void)controllersView:(XLControllersViewController *)controllersView
+    didRequestUploadControllersAtIndices:(NSIndexSet *)indices;
+
 /// Called when the user requests activating/deactivating controllers.
 - (void)controllersView:(XLControllersViewController *)controllersView
     didRequestSetActive:(NSString *)activeState

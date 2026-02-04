@@ -22,6 +22,8 @@
 #import "XLEngineBridge.h"
 #import "XLPlaybackController.h"
 #import "XLEffectPropertiesViewController.h"
+#import "dialogs/XLNewTimingDialog.h"
+#import "dialogs/XLTimingImportDialog.h"
 
 static const CGFloat kRowHeaderWidth = 180.0;
 static const CGFloat kTimelineRulerHeight = 28.0;
@@ -298,6 +300,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 @property (nonatomic, strong) NSView *viewSelectorContainer;
 @property (nonatomic, strong) NSPopUpButton *viewSelectorPopup;
 
+// Timing track selector (in the view selector container, below view dropdown)
+@property (nonatomic, strong) NSPopUpButton *timingTrackPopup;
+
 // Effect index offset per row for fast lookup
 @property (nonatomic, assign) NSUInteger *effectOffsetPerRow;
 @property (nonatomic, assign) NSUInteger effectOffsetCapacity;
@@ -388,6 +393,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     ]];
 
     // View selector container (below track height slider, left of waveform)
+    // Contains two rows: View dropdown and Timing Track dropdown
     _viewSelectorContainer = [[NSView alloc] initWithFrame:NSZeroRect];
     _viewSelectorContainer.translatesAutoresizingMaskIntoConstraints = NO;
     _viewSelectorContainer.wantsLayer = YES;
@@ -402,30 +408,65 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     viewLabel.bordered = NO;
     viewLabel.drawsBackground = NO;
     viewLabel.textColor = [NSColor secondaryLabelColor];
-    viewLabel.font = [NSFont systemFontOfSize:11];
+    viewLabel.font = [NSFont systemFontOfSize:10];
     [viewLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_viewSelectorContainer addSubview:viewLabel];
 
     // View dropdown popup button
     _viewSelectorPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _viewSelectorPopup.translatesAutoresizingMaskIntoConstraints = NO;
-    _viewSelectorPopup.controlSize = NSControlSizeSmall;
-    _viewSelectorPopup.font = [NSFont systemFontOfSize:11];
+    _viewSelectorPopup.controlSize = NSControlSizeMini;
+    _viewSelectorPopup.font = [NSFont systemFontOfSize:10];
     _viewSelectorPopup.target = self;
     _viewSelectorPopup.action = @selector(viewSelectorChanged:);
     [_viewSelectorContainer addSubview:_viewSelectorPopup];
 
-    // Populate the view dropdown
+    // Timing label
+    NSTextField *timingLabel = [[NSTextField alloc] init];
+    timingLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    timingLabel.stringValue = @"Timing:";
+    timingLabel.editable = NO;
+    timingLabel.bordered = NO;
+    timingLabel.drawsBackground = NO;
+    timingLabel.textColor = [NSColor secondaryLabelColor];
+    timingLabel.font = [NSFont systemFontOfSize:10];
+    [timingLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_viewSelectorContainer addSubview:timingLabel];
+
+    // Timing track dropdown popup button
+    _timingTrackPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    _timingTrackPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    _timingTrackPopup.controlSize = NSControlSizeMini;
+    _timingTrackPopup.font = [NSFont systemFontOfSize:10];
+    _timingTrackPopup.target = self;
+    _timingTrackPopup.action = @selector(timingTrackChanged:);
+    [_viewSelectorContainer addSubview:_timingTrackPopup];
+
+    // Populate the dropdowns
     [self populateViewSelector];
+    [self populateTimingTrackSelector];
 
-    // Layout constraints for view selector container contents
+    // Layout constraints for view selector container contents (two rows)
+    // Row 1 (top): View label + popup
+    // Row 2 (bottom): Timing label + popup
     [NSLayoutConstraint activateConstraints:@[
+        // View row (top half)
         [viewLabel.leadingAnchor constraintEqualToAnchor:_viewSelectorContainer.leadingAnchor constant:8],
-        [viewLabel.centerYAnchor constraintEqualToAnchor:_viewSelectorContainer.centerYAnchor],
+        [viewLabel.topAnchor constraintEqualToAnchor:_viewSelectorContainer.topAnchor constant:6],
+        [viewLabel.widthAnchor constraintEqualToConstant:42],
 
-        [_viewSelectorPopup.leadingAnchor constraintEqualToAnchor:viewLabel.trailingAnchor constant:4],
-        [_viewSelectorPopup.trailingAnchor constraintLessThanOrEqualToAnchor:_viewSelectorContainer.trailingAnchor constant:-8],
-        [_viewSelectorPopup.centerYAnchor constraintEqualToAnchor:_viewSelectorContainer.centerYAnchor],
+        [_viewSelectorPopup.leadingAnchor constraintEqualToAnchor:viewLabel.trailingAnchor constant:2],
+        [_viewSelectorPopup.trailingAnchor constraintLessThanOrEqualToAnchor:_viewSelectorContainer.trailingAnchor constant:-4],
+        [_viewSelectorPopup.centerYAnchor constraintEqualToAnchor:viewLabel.centerYAnchor],
+
+        // Timing row (bottom half)
+        [timingLabel.leadingAnchor constraintEqualToAnchor:_viewSelectorContainer.leadingAnchor constant:8],
+        [timingLabel.topAnchor constraintEqualToAnchor:viewLabel.bottomAnchor constant:6],
+        [timingLabel.widthAnchor constraintEqualToConstant:42],
+
+        [_timingTrackPopup.leadingAnchor constraintEqualToAnchor:timingLabel.trailingAnchor constant:2],
+        [_timingTrackPopup.trailingAnchor constraintLessThanOrEqualToAnchor:_viewSelectorContainer.trailingAnchor constant:-4],
+        [_timingTrackPopup.centerYAnchor constraintEqualToAnchor:timingLabel.centerYAnchor],
     ]];
 
     // Timeline ruler at the top (right of track height slider)
@@ -633,8 +674,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Update all views with new sequence properties
     [self updateViewsForSequenceChange];
 
-    // Refresh the view selector dropdown
+    // Refresh the view selector and timing track dropdowns
     [self populateViewSelector];
+    [self populateTimingTrackSelector];
 
     // Load audio for the sequence
     [self loadAudioForSequence];
@@ -1343,10 +1385,15 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         NSLog(@"  Bounds check failed: row=%ld, _rowCount=%lu", (long)row, (unsigned long)_rowCount);
     }
 
-    // Post notification for effect properties panel
+    // Post notification for effect properties panel (single selection)
+    NSArray<NSNumber *> *selectedIds = (effectId >= 0) ? @[@(effectId)] : @[];
+    NSArray<NSString *> *selectedTypes = effectType ? @[effectType] : @[];
+
     NSDictionary *userInfo = @{
         @"effectId": @(effectId),
-        @"effectType": effectType ?: [NSNull null]
+        @"effectType": effectType ?: [NSNull null],
+        @"selectedEffectIds": selectedIds,
+        @"selectedEffectTypes": selectedTypes
     };
     [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
                                                         object:self
@@ -1369,7 +1416,112 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Clicking on empty area clears selection (use -1 as "no effect" sentinel)
     NSDictionary *userInfo = @{
         @"effectId": @(-1),
-        @"effectType": [NSNull null]
+        @"effectType": [NSNull null],
+        @"selectedEffectIds": @[],
+        @"selectedEffectTypes": @[]
+    };
+    [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
+                                                        object:self
+                                                      userInfo:userInfo];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didChangeSelection:(NSIndexSet *)selectedIndices
+{
+    NSLog(@"Selection changed: %lu effects selected", (unsigned long)selectedIndices.count);
+
+    if (selectedIndices.count == 0) {
+        // No selection
+        NSDictionary *userInfo = @{
+            @"effectId": @(-1),
+            @"effectType": [NSNull null],
+            @"selectedEffectIds": @[],
+            @"selectedEffectTypes": @[]
+        };
+        [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
+                                                            object:self
+                                                          userInfo:userInfo];
+        return;
+    }
+
+    // Build arrays of effect IDs and types for all selected effects
+    NSMutableArray<NSNumber *> *effectIds = [NSMutableArray arrayWithCapacity:selectedIndices.count];
+    NSMutableArray<NSString *> *effectTypes = [NSMutableArray arrayWithCapacity:selectedIndices.count];
+    __block NSInteger primaryEffectId = -1;
+    __block NSString *primaryEffectType = nil;
+
+    [selectedIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        // Find the effect ID for this render index
+        NSInteger effectId = -1;
+        NSString *effectType = nil;
+
+        // Search through effect data to find the effect at this render index
+        if (self->_effectData && idx < self->_effectCount) {
+            XLEffectEntry *eff = &self->_effectData[idx];
+            effectId = eff->effectIndex;
+
+            // Get effect type from engine
+            if (self->_engineBridge && effectId >= 0) {
+                NSDictionary *effectInfo = [self->_engineBridge getEffect:effectId];
+                effectType = effectInfo[@"effectType"];
+            }
+
+            // First effect becomes primary
+            if (primaryEffectId < 0) {
+                primaryEffectId = effectId;
+                primaryEffectType = effectType;
+            }
+
+            [effectIds addObject:@(effectId)];
+            [effectTypes addObject:effectType ?: @""];
+        }
+    }];
+
+    NSDictionary *userInfo = @{
+        @"effectId": @(primaryEffectId),
+        @"effectType": primaryEffectType ?: [NSNull null],
+        @"selectedEffectIds": effectIds,
+        @"selectedEffectTypes": effectTypes
+    };
+    [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
+                                                        object:self
+                                                      userInfo:userInfo];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestDeleteEffects:(NSIndexSet *)effectIndices
+{
+    NSLog(@"Delete requested for %lu effects", (unsigned long)effectIndices.count);
+
+    if (!_engineBridge || effectIndices.count == 0) return;
+
+    // Collect all effect IDs to delete
+    NSMutableArray<NSNumber *> *effectIdsToDelete = [NSMutableArray arrayWithCapacity:effectIndices.count];
+
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if (self->_effectData && idx < self->_effectCount) {
+            XLEffectEntry *eff = &self->_effectData[idx];
+            [effectIdsToDelete addObject:@(eff->effectIndex)];
+        }
+    }];
+
+    // Delete each effect via engine bridge
+    for (NSNumber *effectIdNum in effectIdsToDelete) {
+        NSInteger effectId = effectIdNum.integerValue;
+        if (effectId >= 0) {
+            [_engineBridge deleteEffect:effectId];
+        }
+    }
+
+    // Reload data to reflect deletions
+    [self reloadSequenceData];
+
+    // Clear selection notification
+    NSDictionary *userInfo = @{
+        @"effectId": @(-1),
+        @"effectType": [NSNull null],
+        @"selectedEffectIds": @[],
+        @"selectedEffectTypes": @[]
     };
     [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
                                                         object:self
@@ -1697,6 +1849,195 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)refreshViewSelector {
     // Re-populate the view dropdown (e.g., when sequence changes)
     [self populateViewSelector];
+}
+
+#pragma mark - Timing Track Selector
+
+- (void)populateTimingTrackSelector {
+    // Temporarily disable action to prevent triggering timingTrackChanged:
+    SEL originalAction = _timingTrackPopup.action;
+    _timingTrackPopup.action = nil;
+
+    [_timingTrackPopup removeAllItems];
+
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        [_timingTrackPopup addItemWithTitle:@"(none)"];
+        _timingTrackPopup.action = originalAction;
+        return;
+    }
+
+    // Get all timing track names from the engine bridge
+    NSArray<NSString *> *timingTracks = [self.engineBridge getTimingTracks];
+    if (timingTracks.count == 0) {
+        [_timingTrackPopup addItemWithTitle:@"(none)"];
+    } else {
+        for (NSString *trackName in timingTracks) {
+            [_timingTrackPopup addItemWithTitle:trackName];
+        }
+    }
+
+    // Select the active timing track
+    NSString *activeTrack = [self.engineBridge getActiveTimingTrackName];
+    if (activeTrack && activeTrack.length > 0) {
+        [_timingTrackPopup selectItemWithTitle:activeTrack];
+    }
+
+    // Re-enable action
+    _timingTrackPopup.action = originalAction;
+}
+
+- (void)timingTrackChanged:(NSPopUpButton *)sender {
+    NSString *selectedTrackName = sender.titleOfSelectedItem;
+    if (!selectedTrackName || [selectedTrackName isEqualToString:@"(none)"]) {
+        return;
+    }
+
+    // Check if we're already on this track
+    NSString *currentTrackName = [self.engineBridge getActiveTimingTrackName];
+    if ([selectedTrackName isEqualToString:currentTrackName]) {
+        return;
+    }
+
+    NSLog(@"XLSequencerViewController: Switching to timing track: %@", selectedTrackName);
+
+    // Switch to the selected timing track via engine bridge
+    BOOL success = [self.engineBridge setActiveTimingTrack:selectedTrackName];
+    if (success) {
+        // Reload timing marks for the ruler
+        [self reloadTimingMarksForRuler];
+        // Reload effects grid to update snap points
+        [_effectsGridView reloadData];
+    } else {
+        NSLog(@"XLSequencerViewController: Failed to switch to timing track: %@", selectedTrackName);
+        // Revert the dropdown selection
+        if (currentTrackName) {
+            [_timingTrackPopup selectItemWithTitle:currentTrackName];
+        }
+    }
+}
+
+- (void)refreshTimingTrackSelector {
+    // Re-populate the timing track dropdown (e.g., when sequence changes or tracks added)
+    [self populateTimingTrackSelector];
+}
+
+#pragma mark - Timing Track Actions
+
+- (void)addTimingTrack:(id)sender {
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        NSLog(@"XLSequencerViewController: Cannot add timing track - no sequence loaded");
+        return;
+    }
+
+    // Get existing track names to prevent duplicates
+    NSArray<NSString *> *existingTracks = [self.engineBridge getTimingTracks];
+
+    // Create and configure the dialog
+    XLNewTimingDialog *dialog = [[XLNewTimingDialog alloc] init];
+    dialog.existingTrackNames = existingTracks;
+
+    // Show the dialog
+    [dialog showSheetOnWindow:self.view.window completionHandler:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            NSString *trackName = dialog.trackName;
+            XLTimingInterval interval = dialog.selectedInterval;
+
+            NSLog(@"XLSequencerViewController: Creating timing track '%@' with interval %ld",
+                  trackName, (long)interval);
+
+            // Get the timing name for this interval (nil for empty track)
+            NSString *timingName = [XLNewTimingDialog timingNameForInterval:interval];
+
+            // Create the timing track via engine bridge
+            BOOL success = [self.engineBridge createTimingTrack:trackName timingType:timingName];
+            if (success) {
+                NSLog(@"XLSequencerViewController: Created timing track '%@'", trackName);
+
+                // Set it as the active timing track
+                [self.engineBridge setActiveTimingTrack:trackName];
+
+                // Refresh the UI
+                [self populateTimingTrackSelector];
+                [self reloadTimingMarksForRuler];
+                [self reloadSequenceData];
+            } else {
+                NSLog(@"XLSequencerViewController: Failed to create timing track '%@'", trackName);
+            }
+        }
+    }];
+}
+
+- (void)importTiming:(id)sender {
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        NSLog(@"XLSequencerViewController: Cannot import timing - no sequence loaded");
+        return;
+    }
+
+    // Create and configure the import dialog
+    XLTimingImportDialog *dialog = [[XLTimingImportDialog alloc] init];
+
+    // Show the dialog
+    [dialog showSheetOnWindow:self.view.window completionHandler:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            XLTimingSource source = dialog.source;
+            NSString *trackName = dialog.trackName;
+            NSString *sourceFilePath = dialog.sourceFilePath;
+
+            NSLog(@"XLSequencerViewController: Importing timing from source %ld as '%@'",
+                  (long)source, trackName);
+
+            // Handle different import sources
+            switch (source) {
+                case XLTimingSourceAudioAnalysis:
+                case XLTimingSourceVAMP:
+                    // Placeholder - audio analysis not yet implemented
+                    NSLog(@"XLSequencerViewController: Audio analysis import not yet implemented");
+                    break;
+
+                case XLTimingSourceMIDI:
+                    // Placeholder - MIDI import not yet implemented
+                    NSLog(@"XLSequencerViewController: MIDI import not yet implemented");
+                    break;
+
+                case XLTimingSourceLyrics:
+                    // Placeholder - lyrics import not yet implemented
+                    NSLog(@"XLSequencerViewController: Lyrics import not yet implemented");
+                    break;
+
+                case XLTimingSourcePapagayo:
+                    // Placeholder - Papagayo import not yet implemented
+                    NSLog(@"XLSequencerViewController: Papagayo import not yet implemented");
+                    break;
+
+                case XLTimingSourceOtherSequence: {
+                    // Import from another sequence
+                    if (sourceFilePath) {
+                        // For now, import all timing tracks from the source sequence
+                        // A more complete implementation would let the user select which tracks
+                        BOOL success = [self.engineBridge importTimingTrack:nil
+                                                               fromSequence:sourceFilePath
+                                                                asTrackName:trackName];
+                        if (success) {
+                            NSLog(@"XLSequencerViewController: Imported timing from '%@' as '%@'",
+                                  sourceFilePath, trackName);
+                            [self.engineBridge setActiveTimingTrack:trackName];
+                            [self populateTimingTrackSelector];
+                            [self reloadTimingMarksForRuler];
+                            [self reloadSequenceData];
+                        } else {
+                            NSLog(@"XLSequencerViewController: Failed to import timing track");
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }];
+}
+
+- (void)generateTiming:(id)sender {
+    // Generate timing from audio is similar to import, just pre-select audio analysis
+    [self importTiming:sender];
 }
 
 #pragma mark - Zoom Level Persistence

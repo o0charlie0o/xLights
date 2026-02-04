@@ -14,6 +14,7 @@
 #import "layout/XLMetalPreviewView.h"
 #import "layout/XLModelTreeViewController.h"
 #import "layout/XLModelPropertiesView.h"
+#import "layout/XLLayoutUndoController.h"
 
 @class XLEngineBridge;
 
@@ -22,7 +23,7 @@
 /// Displays Metal-based 3D preview, model tree, and manipulation handles.
 /// Layout: Left sidebar (model tree) | Center (Metal preview) | Right sidebar (properties)
 /// The preview already uses Metal with integrated 2D/3D manipulation handles.
-@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLModelPropertiesDelegate>
+@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLModelPropertiesDelegate, XLLayoutUndoDelegate>
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 
@@ -34,6 +35,9 @@
 
 /// The model properties view (right sidebar)
 @property (nonatomic, strong, readonly) XLModelPropertiesView *propertiesView;
+
+/// The undo controller for model manipulation operations
+@property (nonatomic, strong, readonly) XLLayoutUndoController *undoController;
 
 /// Show the model creation sheet for a given model type
 - (void)showModelCreationSheetForType:(NSString *)modelType;
@@ -63,5 +67,17 @@
 - (void)setGridSnapSize:(float)snapSize;
 - (void)setAngleSnapDegrees:(float)angleDegrees;
 - (void)setEdgeSnapEnabled:(BOOL)enabled;
+
+/// Undo the last model manipulation
+- (void)undo;
+
+/// Redo the last undone model manipulation
+- (void)redo;
+
+/// Returns YES if undo is available
+- (BOOL)canUndo;
+
+/// Returns YES if redo is available
+- (BOOL)canRedo;
 
 @end
