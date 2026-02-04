@@ -65,11 +65,9 @@
         return nil;
     }
 
-    AVAudioFormat *processingFormat = [[AVAudioFormat alloc]
-        initWithCommonFormat:AVAudioPCMFormatFloat32
-                  sampleRate:audioFile.fileFormat.sampleRate
-                    channels:(AVAudioChannelCount)audioFile.fileFormat.channelCount
-                 interleaved:YES];
+    // Use the file's processing format (non-interleaved Float32) - this is what AVAudioFile expects
+    // Requesting interleaved format causes error -50 on some files
+    AVAudioFormat *processingFormat = audioFile.processingFormat;
 
     AVAudioFrameCount frameCount = (AVAudioFrameCount)audioFile.length;
     if (frameCount == 0) {
@@ -100,10 +98,11 @@
     }
 
     if (processingFormat.isInterleaved) {
+        // Interleaved: copy directly
         const float *src = buffer.floatChannelData[0];
         memcpy(samples, src, totalSamples * sizeof(float));
     } else {
-        // Convert non-interleaved to interleaved
+        // Non-interleaved (typical case): convert to interleaved for our processing
         for (NSUInteger ch = 0; ch < channelCount; ch++) {
             const float *channelData = buffer.floatChannelData[ch];
             for (NSUInteger i = 0; i < readFrames; i++) {

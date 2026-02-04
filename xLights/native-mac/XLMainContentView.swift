@@ -18,18 +18,47 @@ import AppKit
 final class XLAppState {
     var currentTab: XLTab = .sequencer
     var inspectorVisible: Bool = true
-    var bottomPanelVisible: Bool = true
+
+    // Top panel visibility - each panel can be toggled independently
+    var visibleTopPanels: Set<XLTopPanelTab> = [.effects, .colors, .layerBlending, .layerSettings]
 
     // Persisted sizes for split views
     var inspectorWidth: CGFloat = 300
-    var bottomPanelHeight: CGFloat = 250
+    var topPanelHeight: CGFloat = 250
+
+    // Panel width proportions (0.0-1.0) - stored as proportion of total width
+    // When panels are shown/hidden, widths are recalculated to maintain proportions
+    var panelWidthProportions: [XLTopPanelTab: CGFloat] = [
+        .effects: 0.25,
+        .colors: 0.25,
+        .layerBlending: 0.25,
+        .layerSettings: 0.25
+    ]
 
     // Shared engine bridge - created once, passed to all view controllers
     let engineBridge: XLEngineBridge
 
+    // Effect selection state - shared across sequencer and properties panel
+    let effectSelectionState: EffectSelectionState
+
+    // Computed property for whether any top panel is visible
+    var topPanelVisible: Bool {
+        !visibleTopPanels.isEmpty
+    }
+
     init() {
         engineBridge = XLEngineBridge()
+        effectSelectionState = EffectSelectionState()
+        effectSelectionState.engineBridge = engineBridge
         loadState()
+    }
+
+    func toggleTopPanel(_ panel: XLTopPanelTab) {
+        if visibleTopPanels.contains(panel) {
+            visibleTopPanels.remove(panel)
+        } else {
+            visibleTopPanels.insert(panel)
+        }
     }
 
     private func loadState() {
@@ -38,27 +67,82 @@ final class XLAppState {
            let tab = XLTab(rawValue: tabIndex) {
             currentTab = tab
         }
+        if let panelBits = defaults.object(forKey: "XLVisibleTopPanels") as? Int {
+            visibleTopPanels = XLTopPanelTab.setFromBitmask(panelBits)
+        }
         if defaults.object(forKey: "XLInspectorVisible") != nil {
             inspectorVisible = defaults.bool(forKey: "XLInspectorVisible")
-        }
-        if defaults.object(forKey: "XLBottomPanelVisible") != nil {
-            bottomPanelVisible = defaults.bool(forKey: "XLBottomPanelVisible")
         }
         if defaults.object(forKey: "XLInspectorWidth") != nil {
             inspectorWidth = defaults.double(forKey: "XLInspectorWidth")
         }
-        if defaults.object(forKey: "XLBottomPanelHeight") != nil {
-            bottomPanelHeight = defaults.double(forKey: "XLBottomPanelHeight")
+        if defaults.object(forKey: "XLTopPanelHeight") != nil {
+            topPanelHeight = defaults.double(forKey: "XLTopPanelHeight")
+        }
+        if let widthsDict = defaults.dictionary(forKey: "XLPanelWidthProportions") as? [String: Double] {
+            for (key, value) in widthsDict {
+                if let rawValue = Int(key), let tab = XLTopPanelTab(rawValue: rawValue) {
+                    panelWidthProportions[tab] = CGFloat(value)
+                }
+            }
         }
     }
 
     func saveState() {
         let defaults = UserDefaults.standard
         defaults.set(currentTab.rawValue, forKey: "XLCurrentTab")
+        defaults.set(XLTopPanelTab.bitmask(from: visibleTopPanels), forKey: "XLVisibleTopPanels")
         defaults.set(inspectorVisible, forKey: "XLInspectorVisible")
-        defaults.set(bottomPanelVisible, forKey: "XLBottomPanelVisible")
         defaults.set(inspectorWidth, forKey: "XLInspectorWidth")
-        defaults.set(bottomPanelHeight, forKey: "XLBottomPanelHeight")
+        defaults.set(topPanelHeight, forKey: "XLTopPanelHeight")
+        // Save panel width proportions
+        var widthsDict: [String: Double] = [:]
+        for (tab, proportion) in panelWidthProportions {
+            widthsDict[String(tab.rawValue)] = Double(proportion)
+        }
+        defaults.set(widthsDict, forKey: "XLPanelWidthProportions")
+    }
+
+    /// Get the width for a panel given the total available width and visible panels
+    func panelWidth(for panel: XLTopPanelTab, totalWidth: CGFloat, visiblePanels: [XLTopPanelTab]) -> CGFloat {
+        guard visiblePanels.contains(panel) else { return 0 }
+
+        // Calculate total proportion of visible panels
+        let totalProportion = visiblePanels.reduce(0.0) { $0 + (panelWidthProportions[$1] ?? 0.25) }
+        let panelProportion = panelWidthProportions[panel] ?? 0.25
+
+        // Normalize to get actual width
+        let handleWidth: CGFloat = CGFloat(max(0, visiblePanels.count - 1)) * 2.0
+        let availableWidth = totalWidth - handleWidth
+        return (panelProportion / totalProportion) * availableWidth
+    }
+
+    /// Adjust panel widths when dragging a resize handle between two panels
+    func adjustPanelWidths(leftPanel: XLTopPanelTab, rightPanel: XLTopPanelTab, delta: CGFloat, totalWidth: CGFloat, visiblePanels: [XLTopPanelTab]) {
+        let handleWidth: CGFloat = CGFloat(max(0, visiblePanels.count - 1)) * 2.0
+        let availableWidth = totalWidth - handleWidth
+        guard availableWidth > 0 else { return }
+
+        // Calculate total proportion of visible panels for normalization
+        let totalProportion = visiblePanels.reduce(0.0) { $0 + (panelWidthProportions[$1] ?? 0.25) }
+
+        // Convert delta to proportion change
+        let deltaProportion = (delta / availableWidth) * totalProportion
+
+        // Get current proportions
+        let leftProportion = panelWidthProportions[leftPanel] ?? 0.25
+        let rightProportion = panelWidthProportions[rightPanel] ?? 0.25
+
+        // Calculate new proportions with minimum width constraint (10% of total)
+        let minProportion: CGFloat = 0.1 * totalProportion / CGFloat(visiblePanels.count)
+        let newLeftProportion = max(minProportion, leftProportion + deltaProportion)
+        let newRightProportion = max(minProportion, rightProportion - deltaProportion)
+
+        // Only apply if both panels would remain above minimum
+        if newLeftProportion >= minProportion && newRightProportion >= minProportion {
+            panelWidthProportions[leftPanel] = newLeftProportion
+            panelWidthProportions[rightPanel] = newRightProportion
+        }
     }
 }
 
@@ -88,6 +172,43 @@ enum XLTab: Int, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Top Panel Tab Enum
+
+enum XLTopPanelTab: Int, CaseIterable, Identifiable, Hashable {
+    case effects = 0
+    case colors = 1
+    case layerBlending = 2
+    case layerSettings = 3
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .effects: return "Effects"
+        case .colors: return "Colors"
+        case .layerBlending: return "Blending"
+        case .layerSettings: return "Settings"
+        }
+    }
+
+    // Bitmask helpers for UserDefaults persistence
+    var bitmask: Int { 1 << rawValue }
+
+    static func bitmask(from set: Set<XLTopPanelTab>) -> Int {
+        set.reduce(0) { $0 | $1.bitmask }
+    }
+
+    static func setFromBitmask(_ bits: Int) -> Set<XLTopPanelTab> {
+        var result = Set<XLTopPanelTab>()
+        for tab in allCases {
+            if bits & tab.bitmask != 0 {
+                result.insert(tab)
+            }
+        }
+        return result
+    }
+}
+
 // MARK: - Main Content View
 
 /// Main SwiftUI content view using NavigationSplitView for Logic Pro X-style layout.
@@ -107,8 +228,8 @@ struct XLMainContentView: View {
             // Using HStack with explicit frame control instead of HSplitView
             // to avoid SwiftUI split view bugs when toggling panels
             HStack(spacing: 0) {
-                // Main content + bottom panel
-                mainContentWithBottomPanel
+                // Main content + top panel (at top, like regular xLights)
+                mainContentWithTopPanel
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 // Inspector (right side) - always in hierarchy but zero-width when hidden
@@ -142,25 +263,124 @@ struct XLMainContentView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("xLights")
     }
 
-    // MARK: - Main Content with Bottom Panel
+    // MARK: - Main Content with Top Panel
 
     @ViewBuilder
-    private var mainContentWithBottomPanel: some View {
+    private var mainContentWithTopPanel: some View {
         // Using VStack instead of VSplitView to avoid SwiftUI bugs when toggling panels
         VStack(spacing: 0) {
+            // Top panel (like regular xLights) - only on sequencer tab
+            if appState.topPanelVisible && appState.currentTab == .sequencer {
+                topPanelWithTabs
+                    .frame(height: appState.topPanelHeight)
+
+                // Draggable resize handle
+                TopPanelResizeHandle(height: $appState.topPanelHeight)
+                    .frame(height: 2)
+            }
+
             // Tab content area - takes all available space
             tabContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
 
-            // Bottom panel (properties/effects) - fixed height when visible
-            if appState.bottomPanelVisible {
-                Divider()
-                bottomPanel
-                    .frame(height: appState.bottomPanelHeight)
+    // MARK: - Top Panel with Toggles
+
+    @ViewBuilder
+    private var topPanelWithTabs: some View {
+        VStack(spacing: 0) {
+            // Multi-select toggle buttons (centered)
+            HStack(spacing: 0) {
+                Spacer()
+                topPanelToggleButtons
+                Spacer()
             }
+            .padding(.vertical, 6)
+
+            Divider()
+
+            // Visible panels side by side
+            topPanelContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: - Top Panel Toggle Buttons
+
+    @ViewBuilder
+    private var topPanelToggleButtons: some View {
+        HStack(spacing: 1) {
+            ForEach(XLTopPanelTab.allCases) { tab in
+                Button {
+                    appState.toggleTopPanel(tab)
+                } label: {
+                    Text(tab.title)
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(TopPanelToggleButtonStyle(
+                    isSelected: appState.visibleTopPanels.contains(tab),
+                    isFirst: tab == XLTopPanelTab.allCases.first,
+                    isLast: tab == XLTopPanelTab.allCases.last
+                ))
+            }
+        }
+        .background(Color(nsColor: .separatorColor))
+        .clipShape(RoundedRectangle(cornerRadius: 5))
+    }
+
+    // MARK: - Top Panel Content
+
+    @ViewBuilder
+    private var topPanelContent: some View {
+        let visiblePanels = XLTopPanelTab.allCases.filter { appState.visibleTopPanels.contains($0) }
+
+        if visiblePanels.isEmpty {
+            Color.clear
+        } else {
+            GeometryReader { geometry in
+                HStack(spacing: 0) {
+                    ForEach(Array(visiblePanels.enumerated()), id: \.element.id) { index, panel in
+                        panelView(for: panel)
+                            .frame(
+                                width: appState.panelWidth(for: panel, totalWidth: geometry.size.width, visiblePanels: visiblePanels),
+                                height: geometry.size.height
+                            )
+
+                        // Add resize handle between panels (not after the last one)
+                        if index < visiblePanels.count - 1 {
+                            let leftPanel = panel
+                            let rightPanel = visiblePanels[index + 1]
+                            HorizontalPanelResizeHandle(
+                                leftPanel: leftPanel,
+                                rightPanel: rightPanel,
+                                totalWidth: geometry.size.width,
+                                visiblePanels: visiblePanels,
+                                appState: appState
+                            )
+                            .frame(width: 2)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func panelView(for panel: XLTopPanelTab) -> some View {
+        switch panel {
+        case .effects:
+            EffectPaletteGridView(engineBridge: appState.engineBridge)
+        case .colors:
+            ColorPaletteView(engineBridge: appState.engineBridge)
+        case .layerBlending:
+            LayerBlendingView(engineBridge: appState.engineBridge)
+        case .layerSettings:
+            LayerSettingsView(engineBridge: appState.engineBridge)
         }
     }
 
@@ -178,49 +398,26 @@ struct XLMainContentView: View {
         }
     }
 
-    // MARK: - Bottom Panel
-
-    @ViewBuilder
-    private var bottomPanel: some View {
-        // TODO: Re-enable effect properties panel after fixing memory corruption issues
-        // XLEffectPropertiesView(engineBridge: appState.engineBridge)
-
-        // Placeholder while panel is disabled
-        VStack {
-            Spacer()
-            Text("Effect Properties Panel")
-                .foregroundColor(.secondary)
-            Text("(Temporarily disabled)")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: NSColor(white: 0.15, alpha: 1.0)))
-    }
-
     // MARK: - Inspector Panel
 
     @ViewBuilder
     private var inspectorPanel: some View {
-        XLInspectorView(engineBridge: appState.engineBridge)
+        // Context-sensitive inspector:
+        // - When on sequencer tab with effect selected: show effect properties
+        // - Otherwise: show general inspector
+        if appState.currentTab == .sequencer {
+            EffectPropertiesView(state: appState.effectSelectionState)
+        } else {
+            XLInspectorView(engineBridge: appState.engineBridge)
+        }
     }
 
     // MARK: - Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // Playback controls centered in toolbar
         ToolbarItemGroup(placement: .principal) {
-            Picker("Tab", selection: $appState.currentTab) {
-                ForEach(XLTab.allCases) { tab in
-                    Text(tab.title).tag(tab)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 250)
-        }
-
-        ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 appState.engineBridge.play()
             } label: {
@@ -246,21 +443,280 @@ struct XLMainContentView: View {
             }
         }
 
-        ToolbarItemGroup(placement: .automatic) {
+        // Panel toggles on the right
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                // Toggle all panels on/off
+                if appState.visibleTopPanels.isEmpty {
+                    appState.visibleTopPanels = [.effects, .colors, .layerBlending, .layerSettings]
+                } else {
+                    appState.visibleTopPanels.removeAll()
+                }
+            } label: {
+                Label("Palettes", systemImage: "rectangle.split.1x2")
+            }
+
             Button {
                 appState.inspectorVisible.toggle()
             } label: {
                 Label("Inspector", systemImage: "sidebar.right")
             }
-
-            Button {
-                appState.bottomPanelVisible.toggle()
-            } label: {
-                Label("Properties", systemImage: "rectangle.split.1x2")
-            }
         }
     }
 }
+
+// MARK: - Top Panel Toggle Button Style
+
+struct TopPanelToggleButtonStyle: ButtonStyle {
+    let isSelected: Bool
+    let isFirst: Bool
+    let isLast: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isSelected ? .white : .primary)
+            .background(
+                isSelected
+                    ? Color.accentColor
+                    : Color(nsColor: .controlBackgroundColor)
+            )
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
+    }
+}
+
+// MARK: - Top Panel Resize Handle
+
+/// A draggable handle for resizing the top panel height.
+/// Provides visual feedback and cursor change on hover.
+/// Uses NSView-based drag tracking for smooth, low-latency resizing.
+struct TopPanelResizeHandle: NSViewRepresentable {
+    @Binding var height: CGFloat
+
+    private let minHeight: CGFloat = 100
+    private let maxHeight: CGFloat = 500
+
+    func makeNSView(context: Context) -> ResizeHandleNSView {
+        let view = ResizeHandleNSView()
+        view.onDrag = { delta in
+            let newHeight = self.height + delta
+            self.height = min(max(newHeight, self.minHeight), self.maxHeight)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: ResizeHandleNSView, context: Context) {
+        // No updates needed
+    }
+}
+
+/// AppKit view for smooth drag handling without SwiftUI gesture overhead.
+class ResizeHandleNSView: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+
+    private var isDragging = false
+    private var isHovering = false
+    private var lastY: CGFloat = 0
+    private var trackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        updateAppearance()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea!)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 2)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        NSCursor.resizeUpDown.push()
+        updateAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        NSCursor.pop()
+        updateAppearance()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        lastY = event.locationInWindow.y
+        updateAppearance()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        let currentY = event.locationInWindow.y
+        // Negate delta: dragging down (negative Y change) should increase height
+        let delta = -(currentY - lastY)
+        lastY = currentY
+        onDrag?(delta)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+        updateAppearance()
+    }
+
+    private func updateAppearance() {
+        if isDragging || isHovering {
+            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.5).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.separatorColor.cgColor
+        }
+    }
+}
+
+// MARK: - Horizontal Panel Resize Handle
+
+/// A draggable handle for resizing panels horizontally within the top panel area.
+/// Uses NSView-based drag tracking for smooth, low-latency resizing.
+struct HorizontalPanelResizeHandle: NSViewRepresentable {
+    let leftPanel: XLTopPanelTab
+    let rightPanel: XLTopPanelTab
+    let totalWidth: CGFloat
+    let visiblePanels: [XLTopPanelTab]
+    let appState: XLAppState
+
+    func makeNSView(context: Context) -> HorizontalResizeHandleNSView {
+        let view = HorizontalResizeHandleNSView()
+        view.onDrag = { [appState] delta in
+            appState.adjustPanelWidths(
+                leftPanel: leftPanel,
+                rightPanel: rightPanel,
+                delta: delta,
+                totalWidth: totalWidth,
+                visiblePanels: visiblePanels
+            )
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: HorizontalResizeHandleNSView, context: Context) {
+        // Update the callback with current values
+        nsView.onDrag = { [appState] delta in
+            appState.adjustPanelWidths(
+                leftPanel: leftPanel,
+                rightPanel: rightPanel,
+                delta: delta,
+                totalWidth: totalWidth,
+                visiblePanels: visiblePanels
+            )
+        }
+    }
+}
+
+/// AppKit view for smooth horizontal drag handling.
+class HorizontalResizeHandleNSView: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+
+    private var isDragging = false
+    private var isHovering = false
+    private var lastX: CGFloat = 0
+    private var trackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+
+    private func setupView() {
+        wantsLayer = true
+        updateAppearance()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea!)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 2, height: NSView.noIntrinsicMetric)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        NSCursor.resizeLeftRight.push()
+        updateAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        NSCursor.pop()
+        updateAppearance()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        lastX = event.locationInWindow.x
+        updateAppearance()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isDragging else { return }
+        let currentX = event.locationInWindow.x
+        let delta = currentX - lastX
+        lastX = currentX
+        onDrag?(delta)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+        updateAppearance()
+    }
+
+    private func updateAppearance() {
+        if isDragging || isHovering {
+            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.5).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.separatorColor.cgColor
+        }
+    }
+}
+
+// MARK: - Color Palette View (Placeholder)
+
+// ColorPaletteView is now implemented in ColorPaletteView.swift
+// LayerBlendingView is now implemented in LayerBlendingView.swift
 
 // MARK: - Preview
 

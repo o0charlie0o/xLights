@@ -16,6 +16,9 @@
 
 @class XLEffectsGridView;
 
+/// Maximum length of effect type name stored in XLEffectRenderInfo
+#define XL_EFFECT_TYPE_NAME_MAX 32
+
 /// Describes a single effect block for rendering.
 /// IMPORTANT: This struct must NOT contain ObjC object pointers (NSColor *, NSString *, etc.)
 /// because it is stored in NSValue via valueWithBytes:objCType: which bypasses ARC.
@@ -27,6 +30,7 @@ typedef struct {
     NSInteger layer;
     NSInteger effectIndex;
     uint32_t colorARGB;       // 0 means use palette color from effectIndex
+    char effectTypeName[XL_EFFECT_TYPE_NAME_MAX];  // Effect type name for icon display
     BOOL selected;
     BOOL locked;
     BOOL renderDisabled;
@@ -46,7 +50,7 @@ typedef struct {
 
 - (instancetype)initWithLayer:(CAMetalLayer *)metalLayer;
 
-/// Full draw pass: grid lines, effect blocks, selection, playback indicator.
+/// Full draw pass: grid lines, effect blocks, selection, playback indicator, drop preview.
 /// Call from the view's display cycle.
 ///
 /// Both effects and timing marks are passed as plain C arrays (pointer + count)
@@ -64,7 +68,11 @@ typedef struct {
    selectedEffectID:(NSInteger)selectedEffectID
  playbackPositionMS:(CGFloat)playbackPositionMS
    timingMarkValues:(const CGFloat *)timingMarkValues
-    timingMarkCount:(NSUInteger)timingMarkCount;
+    timingMarkCount:(NSUInteger)timingMarkCount
+      dropIndicator:(BOOL)showDropIndicator
+        dropRow:(NSInteger)dropRow
+    dropStartMS:(CGFloat)dropStartMS
+      dropEndMS:(CGFloat)dropEndMS;
 
 /// Map from effect type index to display color.
 + (NSColor *)colorForEffectIndex:(NSInteger)effectIndex;

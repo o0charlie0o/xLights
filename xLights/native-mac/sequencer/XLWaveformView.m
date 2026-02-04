@@ -21,6 +21,8 @@ static const CGFloat kPlayheadWidth = 1.0;
 static const CGFloat kWaveR = 0.51, kWaveG = 0.70, kWaveB = 0.81;  // 130/255, 178/255, 207/255
 static const CGFloat kBgR = 0.08, kBgG = 0.08, kBgB = 0.08;
 static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
+static const CGFloat kCursorR = 1.0, kCursorG = 1.0, kCursorB = 1.0;  // White cursor line
+static const CGFloat kCursorAlpha = 0.6;
 static const CGFloat kCenterLineGray = 0.25;
 
 // Maximum number of waveform overview buckets to pre-compute.
@@ -89,6 +91,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _zoomLevel = kDefaultZoomLevel;
     _scrollOffsetX = 0.0;
     _playbackPositionMS = -1.0;
+    _cursorPositionMS = -1.0;
     _sequenceLengthMS = 0.0;
     _showStereo = NO;
     _waveformColor = nil;
@@ -103,6 +106,17 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _cachedHeight = 0;
 
     self.wantsLayer = YES;
+
+    // Set up mouse tracking for cursor line display
+    NSTrackingAreaOptions options = NSTrackingMouseEnteredAndExited
+                                  | NSTrackingMouseMoved
+                                  | NSTrackingActiveInActiveApp
+                                  | NSTrackingInVisibleRect;
+    NSTrackingArea *trackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                               options:options
+                                                                 owner:self
+                                                              userInfo:nil];
+    [self addTrackingArea:trackingArea];
 
     [self setupDisplayLink];
 }
@@ -243,11 +257,15 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
         _cachedWaveformPath = NULL;
     }
     _needsRedraw = YES;
+    // Trigger immediate redraw for smooth synchronized scrolling
+    [self.layer setNeedsDisplay];
 }
 
 - (void)setPlaybackPositionMS:(CGFloat)playbackPositionMS {
     _playbackPositionMS = playbackPositionMS;
     _needsRedraw = YES;
+    // Trigger immediate redraw for responsive playhead updates
+    [self.layer setNeedsDisplay];
 }
 
 - (void)setSequenceLengthMS:(CGFloat)sequenceLengthMS {
@@ -260,8 +278,16 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _needsRedraw = YES;
 }
 
+- (void)setCursorPositionMS:(CGFloat)cursorPositionMS {
+    if (fabs(cursorPositionMS - _cursorPositionMS) < 0.01) return;
+    _cursorPositionMS = cursorPositionMS;
+    _needsRedraw = YES;
+    [self.layer setNeedsDisplay];
+}
+
 - (void)setNeedsDisplay {
     _needsRedraw = YES;
+    [self.layer setNeedsDisplay];
 }
 
 #pragma mark - Coordinate Conversion
@@ -318,6 +344,19 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
             CGContextBeginPath(ctx);
             CGContextMoveToPoint(ctx, playX, 0);
             CGContextAddLineToPoint(ctx, playX, height);
+            CGContextStrokePath(ctx);
+        }
+    }
+
+    // Draw cursor position indicator (mouse tracking from effects grid)
+    if (_cursorPositionMS >= 0 && _cursorPositionMS <= _sequenceLengthMS) {
+        CGFloat cursorX = [self pointXForTimeMS:_cursorPositionMS];
+        if (cursorX >= 0 && cursorX <= width) {
+            CGContextSetRGBStrokeColor(ctx, kCursorR, kCursorG, kCursorB, kCursorAlpha);
+            CGContextSetLineWidth(ctx, kPlayheadWidth);
+            CGContextBeginPath(ctx);
+            CGContextMoveToPoint(ctx, cursorX, 0);
+            CGContextAddLineToPoint(ctx, cursorX, height);
             CGContextStrokePath(ctx);
         }
     }
@@ -547,6 +586,9 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _dragging = YES;
     _playbackPositionMS = timeMS;
     _needsRedraw = YES;
+    // Force immediate synchronous redraw before delegate call (which may block)
+    [self.layer setNeedsDisplay];
+    [self.layer displayIfNeeded];
 
     if ([_delegate respondsToSelector:@selector(waveformView:didSeekToTimeMS:)]) {
         [_delegate waveformView:self didSeekToTimeMS:timeMS];
@@ -562,6 +604,9 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
     _playbackPositionMS = timeMS;
     _needsRedraw = YES;
+    // Force immediate synchronous redraw before delegate call (which may block)
+    [self.layer setNeedsDisplay];
+    [self.layer displayIfNeeded];
 
     if ([_delegate respondsToSelector:@selector(waveformView:didSeekToTimeMS:)]) {
         [_delegate waveformView:self didSeekToTimeMS:timeMS];
@@ -570,6 +615,19 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)mouseUp:(NSEvent *)event {
     _dragging = NO;
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    CGFloat timeMS = [self timeMSForPointX:loc.x];
+
+    // Update cursor position (will trigger redraw via setter)
+    self.cursorPositionMS = timeMS;
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    // Clear cursor position when mouse leaves
+    self.cursorPositionMS = -1;
 }
 
 - (void)scrollWheel:(NSEvent *)event {

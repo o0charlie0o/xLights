@@ -99,6 +99,11 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didChangeScrollOffset:(CGPoint)scrollOffset;
 
+/// The mouse cursor position changed (for syncing cursor line in waveform).
+/// Position is -1 when the mouse has exited the grid.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didMoveCursorToTimeMS:(CGFloat)timeMS;
+
 /// An effect was moved to a new time position (same row, horizontal only).
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didMoveEffectAtRow:(NSInteger)fromRow
@@ -195,6 +200,9 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 
 /// Whether to snap effect edges to timing marks during drag/resize. Default: YES.
 @property (nonatomic, assign) BOOL snapToTimingMarks;
+
+/// Disable drawing SF Symbol icons on effect blocks (for performance testing). Default: NO.
+@property (nonatomic, assign) BOOL disableIconDrawing;
 
 /// Reload all data from the data source and redraw.
 - (void)reloadData;

@@ -101,7 +101,13 @@ This is an Objective-C++ bridging layer. The existing Metal rendering code alrea
 
 ## Key Technical Decisions
 
-1. **AppKit, not SwiftUI**: SwiftUI doesn't have the control fidelity needed for a timeline editor or 3D viewport. Use AppKit with Swift where possible, Objective-C++ at the bridging layer.
+1. **Technology Priority Order**: Use the highest-level technology that can accomplish the task:
+   1. **Swift + SwiftUI** (preferred) — Use for standard UI components, inspectors, dialogs, and anywhere SwiftUI's declarative approach works well
+   2. **Swift + AppKit** — Drop down to AppKit when SwiftUI lacks the control fidelity (e.g., custom timeline views, complex drag interactions)
+   3. **Objective-C / Objective-C++** — Use at the bridging layer to interface with C++ engine code
+   4. **C++** — The existing rendering engine remains C++; don't rewrite it
+
+   The original guide said "AppKit, not SwiftUI" but SwiftUI has matured significantly. Prefer SwiftUI where it works, but don't fight it for complex custom views like the timeline editor or 3D viewport where AppKit gives more control.
 
 2. **Fixed split regions, not docking**: Use the Logic Pro approach — fixed split regions with collapsible inspectors. `NSToolbar` controls visibility. This is simpler to build, more native-feeling, and avoids reinventing `wxAuiManager`.
 
@@ -371,3 +377,483 @@ Agents working on specific phases should familiarize themselves with these files
 5. **Match the surrounding code style.** See `CLAUDE.md` section 16 for contribution guidelines. Keep commits concise, don't add unnecessary comments, match the style of nearby code.
 
 6. **Test with real sequences.** The engine abstraction must handle real `.xlights` files, not just toy examples. Test with sequences that have multiple models, layered effects, and audio sync.
+
+---
+
+## Current UI Layout Decisions
+
+> **Important**: These decisions reflect the current implementation. Do not revert these without explicit user approval.
+
+### Sequencer Tab Layout
+
+The Sequencer tab uses a split layout optimized for timeline editing:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Toolbar (playback controls, render, [Palettes] [Inspector]) │
+├─────────────────────────────────────────────────────────────┤
+│            [Effects] [Colors] [Blending] [Settings]         │  ← Multi-select toggles (centered)
+├─────────────────────────────────────────────────────────────┤
+│   Visible Panels Side-by-Side (width shared equally)        │
+│   ┌─────────────────┬─────────────────┬─────────────────┐   │
+│   │ Effects Grid    │ Colors Panel    │ Blending Panel  │   │  ← Example: 3 panels visible
+│   └─────────────────┴─────────────────┴─────────────────┘   │
+├────────────────┬────────────────────────────────────────────┤
+│ Track Height   │    Timeline Ruler                          │
+│ Slider [─●──]  │    0s    5s    10s   15s   20s   ...       │
+├────────────────┼────────────────────────────┬───────────────┤
+│                │    Waveform                │               │
+│                │    ▁▂▃▅▆▇█▇▆▅▃▂▁▂▃▅▆▇█▇▆▅▃ │               │
+├────────────────┼────────────────────────────┤   Inspector   │
+│                │                            │   (Right)     │
+│  Row Headings  │   Sequencer Timeline       │               │
+│  (Track names) │   (Effects Grid)           │  Effect Props │
+│                │                            │  when effect  │
+│                │                            │  selected     │
+├────────────────┴────────────────────────────┤               │
+│               Transport Bar                 │               │
+└─────────────────────────────────────────────┴───────────────┘
+```
+
+#### Key Layout Decisions
+
+1. **Top Panel with Multi-Select Toggles**: The top panel uses a **multi-select toggle bar** (centered) where multiple panels can be visible simultaneously:
+   - **Effects**: Horizontal grid of effect types for drag-and-drop to timeline
+   - **Colors**: Color palettes and color picker (to be implemented)
+   - **Blending**: Blend modes, opacity, mask settings (to be implemented)
+   - **Settings**: Buffer settings, rotation, zoom (to be implemented)
+   - Visible panels are displayed **side-by-side**, sharing the available width equally
+   - Clicking a toggle shows/hides that panel without affecting others
+
+2. **Effect Properties Location**: Effect properties appear in the **right inspector panel** when an effect is selected on the sequencer tab. The inspector is context-sensitive—it shows effect properties on the Sequencer tab and general model/sequence info on other tabs.
+
+3. **Timeline Full Width**: The sequencer timeline and effects grid extend to **full width** (minus the toggleable inspector). The top panel does not take horizontal space from the timeline.
+
+4. **Effect Palette Grid Design**:
+   - Two-row horizontal LazyHGrid layout
+   - Effects sorted alphabetically ascending (A-Z)
+   - Each cell shows effect icon (colored square with first letter) and name
+   - Supports drag-and-drop to timeline via `NSDraggingSource` protocol
+   - Uses custom `XLEffectTypePasteboardType` pasteboard type
+
+5. **Top Panel Resizable**: The top panel (Effects/Colors/Blending/Settings area) can be resized:
+   - **Vertical resize**: Drag the handle at the bottom of the panel (just above the timeline ruler)
+     - Height constrained between 100px and 500px
+     - Height persisted in UserDefaults (`XLTopPanelHeight`)
+   - **Horizontal resize**: When multiple panels are visible, drag the dividers between them
+     - Each panel has a minimum width (10% of available space)
+     - Panel width proportions persisted in UserDefaults (`XLPanelWidthProportions`)
+     - Uses native AppKit NSView for smooth, low-latency dragging
+   - Both handles highlight on hover and during drag
+   - Cursor changes to appropriate resize cursor (up/down or left/right)
+
+6. **Panel Visibility Toggles** (toolbar button order, left to right):
+   - Palettes: Toggled via toolbar button (rectangle.split.1x2 icon) — shows/hides entire top panel area
+   - Inspector: Toggled via toolbar button (sidebar.right icon) — **far right**
+   - Individual top panels toggled via the multi-select buttons in the top panel header
+   - All visibility states persisted in UserDefaults (using bitmask for top panels)
+
+7. **Track Height Slider** (Logic Pro X style):
+   - Located in the **top-left corner** (above track labels, left of timeline ruler)
+   - Fills the empty space at coordinates (0,0) to (rowHeaderWidth, timelineRulerHeight)
+   - Slider adjusts all track heights uniformly (16px to 80px)
+   - Small/large track icons on either side of the slider
+   - Persisted in UserDefaults (`XLSequencerRowHeight`)
+   - Syncs row height between row headings and effects grid views
+
+8. **Waveform Position**:
+   - Located **above the timeline** (below the top panel area, above the effects grid)
+   - Aligned with the timeline ruler (starts at row header width, extends to right edge)
+   - Height: 60px fixed
+   - Synchronized scrolling and zoom with timeline ruler and effects grid
+   - Shows audio waveform when sequence has media file loaded
+
+### SwiftUI vs AppKit Components
+
+| Component | Technology | Reason |
+|-----------|------------|--------|
+| Top Panel Toggle Bar | SwiftUI (custom ButtonStyle) | Multi-select toggle buttons, centered layout |
+| Effect Palette Grid | SwiftUI + NSViewRepresentable | SwiftUI for layout, AppKit drag source for proper pasteboard support |
+| Color Palette Panel | SwiftUI (placeholder) | To be implemented |
+| Layer Blending Panel | SwiftUI | Comprehensive layer mixing, color adjustments, transitions, roto-zoom |
+| Layer Settings Panel | SwiftUI | Buffer/Roto-Zoom controls with tabbed interface |
+| Effect Properties Panel | SwiftUI | Declarative property display, metadata-driven controls |
+| Top Panel Resize Handle (Vertical) | NSViewRepresentable + AppKit | Smooth vertical panel height adjustment |
+| Panel Resize Handle (Horizontal) | NSViewRepresentable + AppKit | Smooth horizontal panel width adjustment between visible panels |
+| Sequencer Timeline | AppKit (Objective-C) | Complex interactions, Metal rendering |
+| Waveform View | AppKit (Objective-C) | Audio visualization, synchronized scroll/zoom |
+| Row Headings | AppKit (Objective-C) | Track labels, expand/collapse |
+| Track Height Slider | AppKit (Objective-C) | Part of sequencer view controller |
+| Inspector Container | SwiftUI | NavigationSplitView for panel management |
+
+### Effect Drag-and-Drop Implementation
+
+The effect palette uses a hybrid SwiftUI/AppKit approach:
+
+1. **SwiftUI `LazyHGrid`** handles layout and scrolling
+2. **`NSViewRepresentable`** wraps each effect cell
+3. **Custom `EffectDragSourceView`** (NSView subclass) implements `NSDraggingSource`
+4. **Pasteboard type**: `XLEffectTypePasteboardType` ("com.xlights.effectType")
+
+This approach is necessary because SwiftUI's native drag-and-drop doesn't properly support custom pasteboard types needed for the Objective-C timeline drop target.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `native-mac/XLMainContentView.swift` | Main layout, panel visibility, tab switching, top panel toggles |
+| `native-mac/LayerSettingsView.swift` | Buffer/Roto-Zoom settings panel (SwiftUI) |
+| `native-mac/LayerBlendingView.swift` | Layer blending/mix mode panel (SwiftUI) |
+| `native-mac/EffectPaletteGridView.swift` | Effect palette horizontal grid with drag source |
+| `native-mac/EffectPropertiesView.swift` | Effect properties inspector panel |
+| `native-mac/EffectSelectionState.swift` | Shared state for effect selection across views |
+| `native-mac/XLSequencerViewController.m` | Sequencer layout, track height slider, view coordination |
+| `native-mac/sequencer/XLRowHeadingsView.h/m` | Row headings (track names, expand/collapse) |
+| `native-mac/sequencer/XLEffectsGridView.h/m` | Metal-backed effects timeline grid |
+| `native-mac/sequencer/XLWaveformView.h/m` | Audio waveform display (above timeline) |
+| `native-mac/sequencer/XLTimelineRulerView.h/m` | Timeline ruler with time markers |
+| `native-mac/sequencer/XLScrollCoordinator.h/m` | Synchronized scrolling between views |
+
+---
+
+## Sequencer Data Structures & Implementation Notes
+
+### Row and Effect Data Model
+
+The sequencer uses C-array structures for performance and direct integration with the C++ engine:
+
+```objc
+// XLSequencerViewController.m
+XLRowEntry* _rowData;       // Array of row metadata (track name, type, visibility)
+XLEffectEntry* _effectData; // Array of all effects across all tracks
+NSUInteger _rowCount;       // Number of tracks
+NSUInteger _effectCount;    // Total effect count
+```
+
+#### XLRowEntry Structure
+
+```objc
+typedef struct {
+    NSString* __unsafe_unretained name;  // Track/element name
+    XLElementType type;                   // Model, ModelGroup, Timing, etc.
+    BOOL visible;                         // Track visibility
+    BOOL expandable;                      // Has children (submodels, strands, group members)
+    BOOL expanded;                        // Currently showing children
+    NSInteger elementIndex;               // Stable index for effect association
+} XLRowEntry;
+```
+
+#### XLEffectEntry Structure
+
+```objc
+typedef struct {
+    NSInteger elementIndex;   // Links to XLRowEntry.elementIndex (stable reference)
+    CGFloat startTime;        // Effect start in seconds
+    CGFloat endTime;          // Effect end in seconds
+    NSString* __unsafe_unretained effectType;  // Effect type name
+    NSInteger layerIndex;     // Layer within element
+} XLEffectEntry;
+```
+
+### Effect-to-Row Association
+
+**Critical Design Decision**: Effects are associated with rows via `elementIndex`, not row position.
+
+When rows are reordered (drag-and-drop), the `_rowData` array is shuffled but `elementIndex` values remain stable. Effect lookup iterates through `_effectData` and matches by `elementIndex`:
+
+```objc
+- (NSInteger)effectsGrid:(XLEffectsGridView *)gridView numberOfEffectsInRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData || !_effectData) return 0;
+    NSInteger elementIndex = _rowData[row].elementIndex;
+    NSInteger count = 0;
+    for (NSUInteger i = 0; i < _effectCount; i++) {
+        if (_effectData[i].elementIndex == elementIndex) {
+            count++;
+        }
+    }
+    return count;
+}
+```
+
+This ensures effects move with their tracks during reordering rather than staying at their visual row position.
+
+### Element Type Detection
+
+The engine bridge (`XLEngineBridge.mm`) determines element types by querying the underlying C++ model:
+
+```objc
+// XLEngineBridge.mm - getSequenceElementAtIndex:
+Model* model = frame->AllModels[elem->GetName()];
+if (model && model->GetDisplayAs() == "ModelGroup") {
+    typeString = @"group";
+    isGroup = YES;
+}
+```
+
+The bridge returns additional metadata for UI display:
+- `isGroup` - Whether element is a model group
+- `hasSubmodels` - Element has submodel children
+- `hasStrands` - Element has strand children
+- `submodelCount` / `strandCount` - Number of children
+
+### Track Type Icons
+
+Row headings display SF Symbol icons based on element type:
+
+| Element Type | SF Symbol | Description |
+|--------------|-----------|-------------|
+| `XLElementTypeModel` | `lightbulb` | Individual prop/model |
+| `XLElementTypeModelGroup` | `square.grid.2x2` | Group of models |
+| `XLElementTypeTiming` | `metronome` | Timing track |
+| `XLElementTypeSubmodel` | `rectangle.split.3x1` | Submodel of a model |
+| `XLElementTypeStrand` | `point.3.connected.trianglepath.dotted` | Strand/string |
+
+### Timing Track Ordering
+
+Timing tracks are always displayed at the top of the sequencer, regardless of the order they are returned by the engine. After loading sequence data, `sortRowsWithTimingFirst` performs a stable partition:
+
+1. Timing tracks (`XLElementTypeTiming`) are collected first
+2. All other tracks (models, groups, etc.) follow
+3. Relative order within each group is preserved
+
+```objc
+// XLSequencerViewController.m - sortRowsWithTimingFirst
+// Partitions _rowData so timing tracks appear first while preserving relative order
+```
+
+This matches the standard xLights behavior where timing tracks are always visible at the top of the sequencer for easy access.
+
+**TODO**: Timing tracks have special functionality - they can be toggled to display grid lines at timing segments on the effects grid. This needs to be implemented.
+
+### Layer Expansion
+
+Elements with multiple effect layers can be expanded to show individual layer rows:
+
+**XLRowEntry Layer Fields:**
+```objc
+NSInteger layerIndex;    // -1 for main element row, 0+ for specific layer rows
+BOOL isLayerRow;         // YES if this is a layer sub-row (not the main element)
+```
+
+**Behavior:**
+- Elements with `effectLayerCount > 1` show as expandable (except timing tracks)
+- Main row displays layer count in name: `"Mega Tree [3]"`
+- When **collapsed**: Main row shows ALL effects from all layers overlaid
+- When **expanded**: Main row shows layer 0 effects, sub-rows show layers 1, 2, etc.
+- Layer sub-rows display as `"   [Layer 2]"` with indent
+
+**Data Source Logic:**
+```objc
+// numberOfEffectsInRow:
+if (rowEntry->isLayerRow) {
+    // Show only effects for this specific layer
+} else if (rowEntry->expanded) {
+    // Main row expanded: show only layer 0
+} else {
+    // Main row collapsed: show ALL effects from all layers
+}
+```
+
+**Expand/Collapse Toggle (`didToggleExpandAtRow:`):**
+- Expanding: Inserts `(layerCount - 1)` layer sub-rows after the main row
+- Collapsing: Removes consecutive layer sub-rows belonging to that element
+
+### Expand/Collapse State (Submodels/Strands)
+
+**Current Status**: Expand/collapse for submodels and strands is **disabled** pending child element loading implementation.
+
+```objc
+// XLSequencerViewController.m - updateSequencerData
+row->expandable = NO;  // TODO: Enable when child loading implemented
+row->expanded = NO;
+```
+
+When enabled, expandable tracks will show disclosure arrows. Expanding a track will:
+1. Query engine bridge for child elements (submodels, strands, or group members)
+2. Insert child rows below parent in `_rowData`
+3. Refresh effects grid to show child effects
+
+**TODO**: Implement `getChildElementsForElement:` in `XLEngineBridge.mm` to return submodel/strand/group member data.
+
+---
+
+## Top Panel Implementations
+
+### Layer Settings Panel (`LayerSettingsView.swift`)
+
+The Layer Settings panel provides controls for buffer rendering and roto-zoom transformations. It uses a tabbed interface implemented in SwiftUI.
+
+**File**: `native-mac/LayerSettingsView.swift`
+
+#### Tab Structure
+
+```
+┌──────────────────────────────────────────┐
+│    [Buffer]  [Roto-Zoom]                 │  ← Segmented picker
+├──────────────────────────────────────────┤
+│  (Tab-specific content)                  │
+└──────────────────────────────────────────┘
+```
+
+#### Buffer Tab Controls
+
+| Control | Type | Range/Options | Description |
+|---------|------|---------------|-------------|
+| Render Style | Picker | Default, Per Preview, Per Model Default, Per Model Per Preview, Single Line, As Pixels | How the effect renders to the buffer |
+| Buffer Stagger | Stepper + TextField | -100 to 100 | Offset timing between strands |
+| Camera | Picker | 2D, 3D | Camera mode for rendering |
+| Transformation | Picker | None, Rotate CC/CW 90°, Rotate 180°, Flip V/H, etc. | Buffer transformation |
+| Blur | Slider | 1-15 | Blur intensity |
+| Overlay Background | Toggle | On/Off | Whether to overlay effect on background |
+
+#### Roto-Zoom Tab Controls
+
+| Control | Type | Range | Description |
+|---------|------|-------|-------------|
+| Preset | Picker | None, Rotate Left/Right, Zoom In/Out, Rotate & Zoom | Quick presets |
+| **2D Rotation Section** |
+| Rotation | Slider | 0-100% | Rotation percentage |
+| Rotations | Slider | 0-20x (0.1 step) | Number of full rotations |
+| Pivot X | Slider | 0-100% | Horizontal pivot point |
+| Pivot Y | Slider | 0-100% | Vertical pivot point |
+| **Zoom Section** |
+| Zoom | Slider | 0-3x (0.1 step) | Zoom multiplier |
+| Quality | Slider | 1-10 | Zoom quality level |
+| **3D Rotation Section** |
+| X Rotation | Slider | 0-360° | X-axis rotation |
+| X Pivot | Slider | 0-100% | X-axis pivot point |
+| Y Rotation | Slider | 0-360° | Y-axis rotation |
+| Y Pivot | Slider | 0-100% | Y-axis pivot point |
+| Rotation Order | Picker | X-Y-Z, X-Z-Y, Y-X-Z, Y-Z-X, Z-X-Y, Z-Y-X | Order of rotation transforms |
+
+#### Implementation Details
+
+**Enums**:
+- `LayerSettingsTab` - Buffer, RotoZoom tab selection
+- `RenderStyle` - Buffer rendering style options
+- `BufferTransformation` - Buffer transformation options
+- `RotoZoomPreset` - Preset rotation/zoom configurations
+- `RotationOrder` - 3D rotation order options
+
+**Helper Views**:
+- `SettingsRow<Content>` - Label + content row with consistent spacing
+- `SliderRow` - Slider with label and formatted value display
+
+**Preset Application**:
+The Roto-Zoom tab includes preset buttons that automatically configure multiple values:
+```swift
+// Example: applyPreset(.rotateAndZoom)
+rotation = 50
+rotations = 1
+zoom = 1.5
+pivotPointX = 50
+pivotPointY = 50
+```
+
+**TODO**: Wire Layer Settings panel state to engine bridge to affect actual rendering. Currently the controls are functional but not connected to the C++ effect rendering pipeline.
+
+### Layer Blending Panel (`LayerBlendingView.swift`)
+
+The Layer Blending panel provides comprehensive controls for layer mixing, color adjustments, transitions, and special effects. It uses collapsible disclosure sections implemented in SwiftUI.
+
+**File**: `native-mac/LayerBlendingView.swift`
+
+#### Section Structure
+
+```
+┌──────────────────────────────────────────┐
+│ ▼ Layer Blending                         │  ← Collapsible section
+│   Mix Type, Threshold, Morph, Canvas     │
+├──────────────────────────────────────────┤
+│ ▼ Color Adjustments                      │
+│   Brightness, Hue, Saturation, etc.      │
+├──────────────────────────────────────────┤
+│ ▶ Transitions (collapsed by default)     │
+├──────────────────────────────────────────┤
+│ ▶ Buffer                                 │
+├──────────────────────────────────────────┤
+│ ▶ Roto-Zoom                              │
+├──────────────────────────────────────────┤
+│ ▶ Special Effects                        │
+└──────────────────────────────────────────┘
+```
+
+#### Section Controls
+
+**Layer Blending Section**:
+| Control | Type | Options/Range | Description |
+|---------|------|---------------|-------------|
+| Mix Type | Picker | 24+ mix modes | Blending mode (Normal, Layered, Mask, Additive, etc.) |
+| Mix Threshold | Slider | 0-100% | Effect mix threshold |
+| Layer Morph | Toggle | On/Off | Enable layer morphing |
+| Canvas | Toggle | On/Off | Canvas mode |
+
+**Color Adjustments Section**:
+| Control | Type | Range | Description |
+|---------|------|-------|-------------|
+| Brightness | Slider | 0-400% | Overall brightness |
+| Hue Adjust | Slider | -100 to 100 | Hue shift |
+| Saturation | Slider | -100 to 100 | Saturation adjustment |
+| Value | Slider | -100 to 100 | Value adjustment |
+| Contrast | Slider | -100 to 100 | Contrast adjustment |
+| Brightness as Level | Toggle | On/Off | Use brightness as level |
+
+**Transitions Section**:
+| Control | Type | Options/Range | Description |
+|---------|------|---------------|-------------|
+| Fade In/Out | TextField | Seconds | Fade duration |
+| In/Out Transition Type | Picker | 22 transition types | Fade, Wipe, Clock, etc. |
+| In/Out Adjust | Slider | 0-100 | Transition adjustment |
+| In/Out Reverse | Toggle | On/Off | Reverse transition direction |
+
+**Buffer Section**:
+| Control | Type | Options/Range | Description |
+|---------|------|---------------|-------------|
+| Transform | Picker | 8 options | Buffer transformation |
+| Blur | Slider | 1-15 px | Blur amount |
+| Stagger | Stepper | -100 to 100 | Buffer stagger |
+| Persistent | Toggle | On/Off | Persistent buffer |
+
+**Roto-Zoom Section**:
+| Control | Type | Range | Description |
+|---------|------|-------|-------------|
+| Rotation Order | Picker | 6 orders | X-Y-Z, Y-X-Z, etc. |
+| Z Rotation/Rotations | Sliders | 0-100, 0-20x | Roll rotation |
+| Pivot X/Y | Sliders | 0-100% | Pivot points |
+| X/Y Rotation | Sliders | 0-360° | Pitch/Yaw rotation |
+| X/Y Pivot | Sliders | 0-100% | Per-axis pivot |
+| Zoom | Slider | 0-3x | Zoom multiplier |
+| Quality | Stepper | 1-10 | Zoom quality |
+
+**Special Effects Section**:
+| Control | Type | Range | Description |
+|---------|------|-------|-------------|
+| Sparkle Frequency | Stepper | 0-200 | Sparkle frequency |
+| Music Sparkles | Toggle | On/Off | Audio-reactive sparkles |
+| Chroma Key Enable | Toggle | On/Off | Enable chroma keying |
+| Chroma Sensitivity | Slider | 1-255 | Key sensitivity |
+| Chroma Color | ColorWell | Color | Key color |
+| Freeze at Frame | Stepper | 0-99999 | Frame to freeze at |
+| Suppress Until | Stepper | 0-99999 | Frame to suppress until |
+
+#### Implementation Details
+
+**State Management**:
+- `LayerBlendingState` - Observable class holding all blending settings
+- Listens for `XLEffectSelectionDidChangeNotification` to sync with effect selection
+- Uses Combine for notification observation
+
+**Mix Types** (`MixType` enum): 24 blend modes including Normal, Effect 1/2, Mask 1/2, Unmask 1/2, True Unmask 1/2, Reveals, Layered, Average, Bottom-Top, Left-Right, Shadow, Additive, Subtractive, As Brightness, Max, Min, Highlight, Highlight Vibrant
+
+**Transition Types** (`TransitionType` enum): 22 transitions including Fade, Wipe, Clock, From Middle, Square, Circle Explode/Implode, Blinds, Blend, Slide Checks, Fold, Dissolve, Circular Swirl, Bow Tie, Zoom, Doorway, Blobs, Pinwheel, Star, Shatter
+
+**Reusable Components**:
+- `DisclosureSection` - Collapsible section with icon and title
+- `LabeledSlider` - Slider with label and formatted value
+- `LabeledPicker` - Dropdown picker with label
+- `LabeledTextField` - Text field with label
+- `LabeledStepper` - Stepper with label and value display
+- `LabeledColorWell` - Color picker with label
+- `ColorWellView` - NSViewRepresentable wrapper for NSColorWell
+
+**TODO**: Wire Layer Blending panel state to engine bridge to affect actual rendering. Currently the controls are functional but not connected to the C++ effect rendering pipeline.

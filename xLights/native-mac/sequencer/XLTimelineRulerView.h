@@ -67,6 +67,9 @@
 /// Current playback position in seconds.
 @property (nonatomic, assign) NSTimeInterval playbackPosition;
 
+/// Playback rate multiplier (1.0 = normal speed). Used for interpolation.
+@property (nonatomic, assign) CGFloat playbackRate;
+
 /// Whether playback is currently active.
 @property (nonatomic, assign, getter=isPlaying) BOOL playing;
 

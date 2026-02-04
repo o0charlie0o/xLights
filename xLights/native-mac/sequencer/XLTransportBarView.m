@@ -17,6 +17,8 @@ static const CGFloat kTimeFontSize = 10.0;
 static const CGFloat kButtonSpacing = 2.0;
 static const CGFloat kSectionSpacing = 12.0;
 
+static const CGFloat kZoomSliderWidth = 80.0;
+
 @interface XLTransportBarView ()
 
 @property (nonatomic, strong) NSButton *rewindButton;
@@ -33,6 +35,11 @@ static const CGFloat kSectionSpacing = 12.0;
 @property (nonatomic, strong) NSButton *renderButton;
 @property (nonatomic, strong) NSView *topBorder;
 
+// Zoom controls
+@property (nonatomic, strong) NSImageView *zoomOutIcon;
+@property (nonatomic, strong) NSSlider *zoomSlider;
+@property (nonatomic, strong) NSImageView *zoomInIcon;
+
 @end
 
 @implementation XLTransportBarView
@@ -45,11 +52,15 @@ static const CGFloat kSectionSpacing = 12.0;
         _playbackRate = 1.0;
         _totalDurationMS = 60000.0;
         _currentPositionMS = 0.0;
+        _zoomLevel = 0.1;
+        _minZoomLevel = 0.001;
+        _maxZoomLevel = 5.0;
         [self setupView];
         [self setupControls];
         [self setupLayout];
         [self updateTimeDisplay];
         [self updatePlayPauseIcon];
+        [self updateZoomSlider];
     }
     return self;
 }
@@ -158,6 +169,51 @@ static const CGFloat kSectionSpacing = 12.0;
     _renderButton = [self makeSymbolButton:@"gearshape.fill"
                                accessLabel:@"Render"
                                     action:@selector(renderAction:)];
+
+    // Zoom controls - minus icon, slider, plus icon
+    _zoomOutIcon = [[NSImageView alloc] init];
+    _zoomOutIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    _zoomOutIcon.imageScaling = NSImageScaleProportionallyDown;
+    NSImage *zoomOutImage = [NSImage imageWithSystemSymbolName:@"minus.magnifyingglass"
+                                      accessibilityDescription:@"Zoom Out"];
+    if (zoomOutImage) {
+        NSImageSymbolConfiguration *config =
+            [NSImageSymbolConfiguration configurationWithPointSize:10
+                                                            weight:NSFontWeightMedium
+                                                             scale:NSImageSymbolScaleSmall];
+        _zoomOutIcon.image = [zoomOutImage imageWithSymbolConfiguration:config];
+    }
+    _zoomOutIcon.contentTintColor = [NSColor secondaryLabelColor];
+    [_zoomOutIcon setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self addSubview:_zoomOutIcon];
+
+    _zoomSlider = [[NSSlider alloc] init];
+    _zoomSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    _zoomSlider.minValue = 0.0;  // Will be log-scaled
+    _zoomSlider.maxValue = 1.0;
+    _zoomSlider.doubleValue = 0.5;
+    _zoomSlider.continuous = YES;
+    _zoomSlider.target = self;
+    _zoomSlider.action = @selector(zoomSliderAction:);
+    _zoomSlider.controlSize = NSControlSizeSmall;
+    [_zoomSlider setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self addSubview:_zoomSlider];
+
+    _zoomInIcon = [[NSImageView alloc] init];
+    _zoomInIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    _zoomInIcon.imageScaling = NSImageScaleProportionallyDown;
+    NSImage *zoomInImage = [NSImage imageWithSystemSymbolName:@"plus.magnifyingglass"
+                                     accessibilityDescription:@"Zoom In"];
+    if (zoomInImage) {
+        NSImageSymbolConfiguration *config =
+            [NSImageSymbolConfiguration configurationWithPointSize:10
+                                                            weight:NSFontWeightMedium
+                                                             scale:NSImageSymbolScaleSmall];
+        _zoomInIcon.image = [zoomInImage imageWithSymbolConfiguration:config];
+    }
+    _zoomInIcon.contentTintColor = [NSColor secondaryLabelColor];
+    [_zoomInIcon setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self addSubview:_zoomInIcon];
 }
 
 - (NSButton *)makeSymbolButton:(NSString *)symbolName
@@ -254,7 +310,22 @@ static const CGFloat kSectionSpacing = 12.0;
         [_renderButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [_renderButton.widthAnchor constraintEqualToConstant:kButtonSize],
         [_renderButton.heightAnchor constraintEqualToConstant:kButtonSize],
-        [_renderButton.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-kSectionSpacing],
+
+        // Zoom controls - after render button
+        [_zoomOutIcon.leadingAnchor constraintEqualToAnchor:_renderButton.trailingAnchor constant:kSectionSpacing],
+        [_zoomOutIcon.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_zoomOutIcon.widthAnchor constraintEqualToConstant:16.0],
+        [_zoomOutIcon.heightAnchor constraintEqualToConstant:16.0],
+
+        [_zoomSlider.leadingAnchor constraintEqualToAnchor:_zoomOutIcon.trailingAnchor constant:4.0],
+        [_zoomSlider.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_zoomSlider.widthAnchor constraintEqualToConstant:kZoomSliderWidth],
+
+        [_zoomInIcon.leadingAnchor constraintEqualToAnchor:_zoomSlider.trailingAnchor constant:4.0],
+        [_zoomInIcon.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_zoomInIcon.widthAnchor constraintEqualToConstant:16.0],
+        [_zoomInIcon.heightAnchor constraintEqualToConstant:16.0],
+        [_zoomInIcon.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-kSectionSpacing],
     ]];
 }
 
@@ -308,6 +379,21 @@ static const CGFloat kSectionSpacing = 12.0;
     [_ratePopup selectItemWithTitle:rateTitle];
 }
 
+- (void)setZoomLevel:(CGFloat)zoomLevel {
+    _zoomLevel = MAX(_minZoomLevel, MIN(zoomLevel, _maxZoomLevel));
+    [self updateZoomSlider];
+}
+
+- (void)setMinZoomLevel:(CGFloat)minZoomLevel {
+    _minZoomLevel = minZoomLevel;
+    [self updateZoomSlider];
+}
+
+- (void)setMaxZoomLevel:(CGFloat)maxZoomLevel {
+    _maxZoomLevel = maxZoomLevel;
+    [self updateZoomSlider];
+}
+
 #pragma mark - Display
 
 - (void)updateTimeDisplay {
@@ -340,6 +426,20 @@ static const CGFloat kSectionSpacing = 12.0;
     _playPauseButton.contentTintColor = _isPlaying
         ? [NSColor controlAccentColor]
         : [NSColor secondaryLabelColor];
+}
+
+- (void)updateZoomSlider {
+    // Use logarithmic scaling for more intuitive zoom control
+    // Convert zoomLevel to slider position (0.0 to 1.0)
+    if (_maxZoomLevel <= _minZoomLevel || _minZoomLevel <= 0) return;
+
+    CGFloat logMin = log(_minZoomLevel);
+    CGFloat logMax = log(_maxZoomLevel);
+    CGFloat logCurrent = log(_zoomLevel);
+
+    CGFloat sliderPos = (logCurrent - logMin) / (logMax - logMin);
+    sliderPos = MAX(0.0, MIN(1.0, sliderPos));
+    _zoomSlider.doubleValue = sliderPos;
 }
 
 #pragma mark - Actions
@@ -431,6 +531,24 @@ static const CGFloat kSectionSpacing = 12.0;
 
 - (void)renderAction:(id)sender {
     [_engineBridge renderAll];
+}
+
+- (void)zoomSliderAction:(id)sender {
+    // Convert slider position (0.0 to 1.0) to zoom level using logarithmic scaling
+    CGFloat sliderPos = _zoomSlider.doubleValue;
+
+    if (_maxZoomLevel <= _minZoomLevel || _minZoomLevel <= 0) return;
+
+    CGFloat logMin = log(_minZoomLevel);
+    CGFloat logMax = log(_maxZoomLevel);
+    CGFloat logZoom = logMin + sliderPos * (logMax - logMin);
+    CGFloat newZoom = exp(logZoom);
+
+    _zoomLevel = MAX(_minZoomLevel, MIN(newZoom, _maxZoomLevel));
+
+    if ([_delegate respondsToSelector:@selector(transportBar:didChangeZoomLevel:)]) {
+        [_delegate transportBar:self didChangeZoomLevel:_zoomLevel];
+    }
 }
 
 #pragma mark - Keyboard Support

@@ -15,6 +15,13 @@ import AppKit
 
 /// SwiftUI-based main window controller.
 /// This replaces XLMainWindowController (ObjC/AppKit) to solve window resize issues.
+/// Notification posted when sequence data changes and views should reload
+let XLSequenceDataDidChangeNotification = NSNotification.Name("XLSequenceDataDidChangeNotification")
+
+/// Global reference to the engine bridge for ObjC access
+/// nonisolated(unsafe) because it's only set/accessed from main thread
+nonisolated(unsafe) private var sSwiftEngineBridge: XLEngineBridge?
+
 @MainActor
 final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
 
@@ -22,16 +29,20 @@ final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
 
     init() {
         appState = XLAppState()
+        // Store engine bridge in global for ObjC access
+        sSwiftEngineBridge = appState.engineBridge
 
         // Create window with standard macOS chrome
         let window = NSWindow(
             contentRect: NSRect(x: 100, y: 100, width: 1600, height: 1000),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
 
-        window.title = "xLights — Native macOS Preview"
+        // Hide title but keep the toolbar area
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = false
         window.minSize = NSSize(width: 1024, height: 600)
 
         // Dark appearance
@@ -134,5 +145,46 @@ public func XLCloseSwiftUIWindow() {
     DispatchQueue.main.async {
         sSwiftWindowController?.close()
         sSwiftWindowController = nil
+        sSwiftEngineBridge = nil
+    }
+}
+
+// MARK: - ObjC-Accessible Helper Class
+
+/// Helper class to provide ObjC-accessible interface to SwiftUI window state.
+/// Use this instead of @_cdecl functions for ObjC interop with object types.
+@objc(XLSwiftUIWindowHelper)
+public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
+
+    /// Shared instance for ObjC access
+    @objc public static let shared = XLSwiftUIWindowHelper()
+
+    private override init() {
+        super.init()
+    }
+
+    /// Get the engine bridge from the SwiftUI window controller.
+    /// Returns nil if no SwiftUI window is active.
+    @objc public var engineBridge: XLEngineBridge? {
+        let bridge = sSwiftEngineBridge
+        NSLog("XLSwiftUIWindowHelper.engineBridge: returning %@", bridge != nil ? "bridge" : "nil")
+        return bridge
+    }
+
+    /// Check if the SwiftUI window is the current key window.
+    @objc public var isSwiftUIWindowKey: Bool {
+        guard let swiftWindow = sSwiftWindowController?.window else {
+            NSLog("XLSwiftUIWindowHelper.isSwiftUIWindowKey: no swift window controller, returning false")
+            return false
+        }
+        let isKey = swiftWindow.isKeyWindow
+        NSLog("XLSwiftUIWindowHelper.isSwiftUIWindowKey: swiftWindow.isKeyWindow = %d", isKey)
+        return isKey
+    }
+
+    /// Notify the SwiftUI window that sequence data has changed and views should reload.
+    @objc public func notifySequenceDataChanged() {
+        NSLog("XLSwiftUIWindowHelper.notifySequenceDataChanged: posting notification")
+        NotificationCenter.default.post(name: XLSequenceDataDidChangeNotification, object: nil)
     }
 }

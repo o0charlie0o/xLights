@@ -52,6 +52,10 @@
 /// Current playback position in milliseconds (-1 = not shown).
 @property (nonatomic, assign) CGFloat playbackPositionMS;
 
+/// Mouse cursor position in milliseconds from the effects grid (-1 = not shown).
+/// This shows a vertical line indicating where the mouse is in the timeline.
+@property (nonatomic, assign) CGFloat cursorPositionMS;
+
 /// Total sequence duration in milliseconds.
 @property (nonatomic, assign) CGFloat sequenceLengthMS;
 

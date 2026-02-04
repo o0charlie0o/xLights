@@ -12,14 +12,13 @@
 #import "XLEngineBridge.h"
 #import "layout/XLMetalPreviewView.h"
 #import "sequencer/XLAudioPlayer.h"
-#import <QuartzCore/CVDisplayLink.h>
 
 @interface XLPlaybackController () <XLAudioPlayerDelegate> {
-    CVDisplayLinkRef _displayLink;
     CFAbsoluteTime _lastFrameTime;
     CFAbsoluteTime _playbackStartTime;
     NSInteger _playbackStartPositionMS;
     BOOL _useNativeAudio;
+    dispatch_source_t _fallbackTimer;
 }
 
 @property (nonatomic, assign, readwrite) BOOL isPlaying;
@@ -29,23 +28,8 @@
 @property (nonatomic, assign, readwrite) NSInteger frameTimeMS;
 
 @property (nonatomic, strong) dispatch_queue_t playbackQueue;
-@property (nonatomic, strong) NSTimer *playbackTimer;
 
 @end
-
-// Display link callback for frame timing
-static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
-                                            const CVTimeStamp *inNow,
-                                            const CVTimeStamp *inOutputTime,
-                                            CVOptionFlags flagsIn,
-                                            CVOptionFlags *flagsOut,
-                                            void *displayLinkContext) {
-    @autoreleasepool {
-        XLPlaybackController *controller = (__bridge XLPlaybackController *)displayLinkContext;
-        [controller displayLinkFired];
-    }
-    return kCVReturnSuccess;
-}
 
 @implementation XLPlaybackController
 
@@ -70,79 +54,110 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
         // Create native audio player
         _audioPlayer = [[XLAudioPlayer alloc] init];
         _audioPlayer.delegate = self;
-
-        [self setupDisplayLink];
     }
     return self;
 }
 
 - (void)dealloc {
-    [self stopDisplayLink];
+    [self stopPlaybackTimer];
 }
 
-#pragma mark - Display Link Setup
+#pragma mark - Playback Timer
 
-- (void)setupDisplayLink {
-    CVDisplayLinkCreateWithActiveCGDisplays(&_displayLink);
-    CVDisplayLinkSetOutputCallback(_displayLink, &PlaybackDisplayLinkCallback, (__bridge void *)self);
+- (void)startPlaybackTimer {
+    // When using native audio, the audio player's timer drives updates
+    // Only start the fallback timer for sequences without audio
+    if (_useNativeAudio && _audioPlayer.isLoaded) {
+        NSLog(@"XLPlaybackController: Using audio player timer for position updates");
+        return;
+    }
+
+    [self stopPlaybackTimer];
+
+    NSLog(@"XLPlaybackController: Starting fallback GCD timer for non-audio playback");
+
+    // Use GCD dispatch_source for reliable timing (same approach as XLAudioPlayer)
+    _fallbackTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+
+    // 50ms interval (20Hz) like original xLights
+    uint64_t interval = 50 * NSEC_PER_MSEC;
+    uint64_t leeway = 1 * NSEC_PER_MSEC;  // 1ms leeway
+
+    dispatch_source_set_timer(_fallbackTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, interval),
+                              interval,
+                              leeway);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_fallbackTimer, ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf) {
+            [strongSelf playbackTimerFired];
+        }
+    });
+
+    dispatch_resume(_fallbackTimer);
 }
 
-- (void)startDisplayLink {
-    if (_displayLink && !CVDisplayLinkIsRunning(_displayLink)) {
-        CVDisplayLinkStart(_displayLink);
+- (void)stopPlaybackTimer {
+    if (_fallbackTimer) {
+        dispatch_source_cancel(_fallbackTimer);
+        _fallbackTimer = nil;
+        NSLog(@"XLPlaybackController: Fallback timer stopped");
     }
 }
 
-- (void)stopDisplayLink {
-    if (_displayLink && CVDisplayLinkIsRunning(_displayLink)) {
-        CVDisplayLinkStop(_displayLink);
+- (void)playbackTimerFired {
+    // When using native audio, the audio player's timer drives updates
+    // This method is only used for sequences without audio or when using engine audio
+    if (_useNativeAudio && _audioPlayer.isLoaded) {
+        return;  // Audio player callback handles updates
     }
-}
 
-- (void)displayLinkFired {
     if (!_isPlaying || _isPaused) return;
 
-    // Calculate current playback position based on elapsed time
+    // Calculate current playback position based on elapsed time (wall clock timing)
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     CFAbsoluteTime elapsed = now - _playbackStartTime;
-    NSInteger newPositionMS = _playbackStartPositionMS + (NSInteger)(elapsed * 1000.0 * _playbackRate);
+    NSInteger precisePositionMS = _playbackStartPositionMS + (NSInteger)(elapsed * 1000.0 * _playbackRate);
 
-    // Snap to frame boundaries
-    if (_frameTimeMS > 0) {
-        newPositionMS = (newPositionMS / _frameTimeMS) * _frameTimeMS;
-    }
+    // Clamp to valid range
+    if (precisePositionMS < 0) precisePositionMS = 0;
 
     // Check for end of sequence
-    if (newPositionMS >= _durationMS) {
+    if (precisePositionMS >= _durationMS) {
         if (_loopEnabled) {
             // Loop back to start
-            newPositionMS = 0;
+            precisePositionMS = 0;
             _playbackStartTime = now;
             _playbackStartPositionMS = 0;
         } else {
             // Stop at end
-            newPositionMS = _durationMS;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self stop];
-            });
+            precisePositionMS = _durationMS;
+            [self stop];
             return;
         }
     }
 
-    // Only update if position actually changed
-    if (newPositionMS != _positionMS) {
-        _positionMS = newPositionMS;
+    // Notify delegate with precise position for smooth UI updates
+    if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
+        [_delegate playbackController:self didUpdatePositionMS:precisePositionMS];
+    }
 
-        // Render the frame for preview
-        if (_renderToPreview) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self renderFrameAtTime:newPositionMS];
+    // Snap to frame boundaries for rendering (we only render at sequence frame rate)
+    NSInteger snappedPositionMS = precisePositionMS;
+    if (_frameTimeMS > 0) {
+        snappedPositionMS = (precisePositionMS / _frameTimeMS) * _frameTimeMS;
+    }
 
-                // Notify delegate of position change
-                if ([self.delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
-                    [self.delegate playbackController:self didUpdatePositionMS:newPositionMS];
-                }
-            });
+    // Update position but do NOT call heavy renderFrame during playback
+    // Heavy re-rendering should only happen when effects change, not during playback
+    if (snappedPositionMS != _positionMS) {
+        _positionMS = snappedPositionMS;
+
+        // Update preview position for display (lightweight)
+        if (_previewView) {
+            _previewView.playbackPositionMS = snappedPositionMS;
         }
     }
 }
@@ -248,7 +263,7 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     // Start the playback loop (for frame timing and preview rendering)
-    [self startDisplayLink];
+    [self startPlaybackTimer];
 
     // Start audio playback (if audio is available)
     if (_useNativeAudio && _audioPlayer.isLoaded) {
@@ -273,7 +288,7 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
     if (!_isPlaying || _isPaused) return;
 
     _isPaused = YES;
-    [self stopDisplayLink];
+    [self stopPlaybackTimer];
 
     // Pause audio
     if (_useNativeAudio && _audioPlayer.isLoaded) {
@@ -295,7 +310,7 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _isPlaying = NO;
     _isPaused = NO;
 
-    [self stopDisplayLink];
+    [self stopPlaybackTimer];
 
     // Reset position
     _positionMS = 0;
@@ -401,8 +416,19 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)renderFrameAtTime:(NSInteger)timeMS {
+    // NOTE: This method is called for seek/scrub operations (user-initiated),
+    // NOT during playback. During playback, we read pre-rendered data from _seqData.
+    // This must run on the main thread because the C++ engine uses wxWidgets.
+
     if (!_engineBridge) {
-        NSLog(@"XLPlaybackController: Cannot render frame - engine bridge not available");
+        return;
+    }
+
+    // Ensure we're on main thread for wxWidgets calls
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self renderFrameAtTime:timeMS];
+        });
         return;
     }
 
@@ -414,7 +440,7 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
     @try {
         [_engineBridge renderFrame:timeMS];
 
-        // Get rendered pixel data for each model and update the preview (if preview view is available)
+        // Get rendered pixel data for each model and update the preview
         if (_previewView) {
             NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
             if (modelNames && modelNames.count > 0) {
@@ -437,7 +463,6 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
                 }
             }
 
-            // Tell preview to update for this time
             [_previewView updatePreviewForTime:timeMS];
         }
     } @catch (NSException *exception) {
@@ -459,10 +484,34 @@ static CVReturn PlaybackDisplayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)audioPlayer:(XLAudioPlayer *)player didUpdatePosition:(CGFloat)positionMS {
-    // When using native audio, sync our position to audio position
-    // This ensures visual elements stay in sync with audio
+    // When using native audio, the audio player's timer drives our updates
+    // This ensures visual elements stay perfectly in sync with audio
     if (_useNativeAudio && _isPlaying && !_isPaused) {
-        _positionMS = (NSInteger)positionMS;
+        NSInteger audioPositionMS = (NSInteger)positionMS;
+
+        // Notify delegate with the audio-driven position for smooth UI updates
+        // This is lightweight - just updates playhead positions in views
+        if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
+            [_delegate playbackController:self didUpdatePositionMS:audioPositionMS];
+        }
+
+        // Snap to frame boundaries for position tracking
+        NSInteger snappedPositionMS = audioPositionMS;
+        if (_frameTimeMS > 0) {
+            snappedPositionMS = (audioPositionMS / _frameTimeMS) * _frameTimeMS;
+        }
+
+        // Update position but do NOT call heavy renderFrame during playback
+        // The sequence data is already pre-rendered - preview can read from _seqData
+        // Heavy re-rendering should only happen when effects change, not during playback
+        if (snappedPositionMS != _positionMS) {
+            _positionMS = snappedPositionMS;
+
+            // Update preview position for display (lightweight)
+            if (_previewView) {
+                _previewView.playbackPositionMS = snappedPositionMS;
+            }
+        }
     }
 }
 

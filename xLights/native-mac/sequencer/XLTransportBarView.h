@@ -24,6 +24,7 @@
 - (void)transportBar:(XLTransportBarView *)bar didChangePlaybackRate:(CGFloat)rate;
 - (void)transportBar:(XLTransportBarView *)bar didToggleLoop:(BOOL)loopEnabled;
 - (void)transportBar:(XLTransportBarView *)bar didToggleOutput:(BOOL)outputEnabled;
+- (void)transportBar:(XLTransportBarView *)bar didChangeZoomLevel:(CGFloat)zoomLevel;
 @end
 
 @interface XLTransportBarView : NSView
@@ -48,6 +49,15 @@
 
 /// Playback rate (1.0 = normal, 0.5 = half, 2.0 = double).
 @property (nonatomic, assign) CGFloat playbackRate;
+
+/// Timeline zoom level (pixels per ms). Default 0.1.
+@property (nonatomic, assign) CGFloat zoomLevel;
+
+/// Minimum allowed zoom level. Default 0.001.
+@property (nonatomic, assign) CGFloat minZoomLevel;
+
+/// Maximum allowed zoom level. Default 5.0.
+@property (nonatomic, assign) CGFloat maxZoomLevel;
 
 /// Update the time display for current position.
 - (void)updateTimeDisplay;

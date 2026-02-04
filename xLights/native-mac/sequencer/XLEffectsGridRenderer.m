@@ -34,6 +34,17 @@ typedef struct {
     float cornerRadius;
 } RoundedRectVertex;
 
+typedef struct {
+    simd_float2 position;
+    simd_float2 texCoord;
+} TexturedVertex;
+
+// Icon atlas configuration (2x for Retina)
+static const NSInteger kIconAtlasSize = 1024;     // Atlas texture size (1024x1024 for Retina)
+static const NSInteger kIconCellSize = 64;        // Each icon cell size (2x for Retina)
+static const NSInteger kIconsPerRow = 16;         // 1024/64 = 16 icons per row
+static const NSInteger kMaxIconVertices = 8192;   // Max icon quads (6 verts each)
+
 static const NSInteger kMaxGridLineVertices = 8192;
 static const NSInteger kMaxEffectVertices = 32768;
 static const CGFloat kEffectBlockCornerRadius = 3.0;
@@ -43,6 +54,10 @@ static const CGFloat kEffectBlockInset = 1.0;
 static const NSUInteger kGridLineBufferSize = kMaxGridLineVertices * sizeof(SimpleVertex);
 static const NSUInteger kEffectBlockBufferSize = kMaxEffectVertices * sizeof(RoundedRectVertex);
 static const NSUInteger kOutlineBufferSize = 4096 * sizeof(RoundedRectVertex);
+static const NSUInteger kIconBufferSize = kMaxIconVertices * sizeof(TexturedVertex);
+
+// Triple-buffering to prevent CPU/GPU race conditions during scrolling
+static const NSInteger kMaxInflightFrames = 3;
 
 /// Per-frame scalar rendering parameters, passed by value to sub-draw methods.
 /// All data stays on the stack (no heap/ivar involvement) to avoid stale or
@@ -58,19 +73,33 @@ typedef struct {
     CGFloat playbackPositionMS;
 } XLGridFrameParams;
 
-@interface XLEffectsGridRenderer ()
+@interface XLEffectsGridRenderer () {
+    // Triple-buffered vertex buffers to prevent CPU/GPU race conditions during scrolling.
+    // While the GPU is rendering frame N, the CPU can write to frame N+1 and N+2 buffers.
+    id<MTLBuffer> _gridLineBuffers[kMaxInflightFrames];
+    id<MTLBuffer> _effectBlockBuffers[kMaxInflightFrames];
+    id<MTLBuffer> _outlineBuffers[kMaxInflightFrames];
+    id<MTLBuffer> _iconBuffers[kMaxInflightFrames];
+    NSInteger _currentBufferIndex;
+    dispatch_semaphore_t _frameSemaphore;
+    NSInteger _nextIconIndex;
+}
 
 @property (nonatomic, strong) id<MTLDevice> device;
 @property (nonatomic, strong) id<MTLCommandQueue> commandQueue;
 @property (nonatomic, strong) id<MTLRenderPipelineState> linePipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> effectBlockPipeline;
 @property (nonatomic, strong) id<MTLRenderPipelineState> outlinePipeline;
+@property (nonatomic, strong) id<MTLRenderPipelineState> iconPipeline;
 
-// Pre-allocated reusable Metal buffers to avoid per-frame allocations
-@property (nonatomic, strong) id<MTLBuffer> gridLineBuffer;
-@property (nonatomic, strong) id<MTLBuffer> effectBlockBuffer;
-@property (nonatomic, strong) id<MTLBuffer> outlineBuffer;
+// Icon texture atlas
+@property (nonatomic, strong) id<MTLTexture> iconAtlasTexture;
+@property (nonatomic, strong) id<MTLSamplerState> iconSampler;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *iconAtlasMap;
+
+// Single-buffered (small data, updated infrequently, less contention)
 @property (nonatomic, strong) id<MTLBuffer> playbackBuffer;
+@property (nonatomic, strong) id<MTLBuffer> dropIndicatorBuffer;
 
 @end
 
@@ -110,6 +139,9 @@ typedef struct {
 
             // Pre-allocate reusable Metal buffers
             [self allocateReusableBuffers];
+
+            // Build icon texture atlas
+            [self buildIconAtlas];
         } @catch (NSException *exception) {
             NSLog(@"XLEffectsGridRenderer: Exception during initialization: %@ - %@",
                   exception.name, exception.reason);
@@ -125,25 +157,40 @@ typedef struct {
 }
 
 - (void)allocateReusableBuffers {
-    // Grid line buffer - shared storage for CPU writes, GPU reads
-    _gridLineBuffer = [_device newBufferWithLength:kGridLineBufferSize
-                                           options:MTLResourceStorageModeShared];
-    [_gridLineBuffer setLabel:@"GridLineBuffer"];
+    // Initialize triple-buffering semaphore - allows up to 3 frames in flight
+    _frameSemaphore = dispatch_semaphore_create(kMaxInflightFrames);
+    _currentBufferIndex = 0;
 
-    // Effect block buffer
-    _effectBlockBuffer = [_device newBufferWithLength:kEffectBlockBufferSize
-                                              options:MTLResourceStorageModeShared];
-    [_effectBlockBuffer setLabel:@"EffectBlockBuffer"];
+    // Allocate triple-buffered vertex buffers for grid lines, effect blocks, and outlines.
+    // This prevents CPU/GPU race conditions: while GPU renders buffer N,
+    // CPU can safely write to buffers N+1 and N+2.
+    for (NSInteger i = 0; i < kMaxInflightFrames; i++) {
+        _gridLineBuffers[i] = [_device newBufferWithLength:kGridLineBufferSize
+                                                   options:MTLResourceStorageModeShared];
+        [_gridLineBuffers[i] setLabel:[NSString stringWithFormat:@"GridLineBuffer_%ld", (long)i]];
 
-    // Outline buffer for selected effects
-    _outlineBuffer = [_device newBufferWithLength:kOutlineBufferSize
-                                          options:MTLResourceStorageModeShared];
-    [_outlineBuffer setLabel:@"OutlineBuffer"];
+        _effectBlockBuffers[i] = [_device newBufferWithLength:kEffectBlockBufferSize
+                                                      options:MTLResourceStorageModeShared];
+        [_effectBlockBuffers[i] setLabel:[NSString stringWithFormat:@"EffectBlockBuffer_%ld", (long)i]];
 
-    // Playback indicator buffer (6 vertices for 2 triangles)
+        _outlineBuffers[i] = [_device newBufferWithLength:kOutlineBufferSize
+                                                  options:MTLResourceStorageModeShared];
+        [_outlineBuffers[i] setLabel:[NSString stringWithFormat:@"OutlineBuffer_%ld", (long)i]];
+
+        _iconBuffers[i] = [_device newBufferWithLength:kIconBufferSize
+                                               options:MTLResourceStorageModeShared];
+        [_iconBuffers[i] setLabel:[NSString stringWithFormat:@"IconBuffer_%ld", (long)i]];
+    }
+
+    // Playback indicator buffer (6 vertices for 2 triangles) - single buffered, small data
     _playbackBuffer = [_device newBufferWithLength:6 * sizeof(SimpleVertex)
                                            options:MTLResourceStorageModeShared];
     [_playbackBuffer setLabel:@"PlaybackBuffer"];
+
+    // Drop indicator buffer (6 vertices for 2 triangles forming a rounded rect)
+    _dropIndicatorBuffer = [_device newBufferWithLength:6 * sizeof(RoundedRectVertex)
+                                                options:MTLResourceStorageModeShared];
+    [_dropIndicatorBuffer setLabel:@"DropIndicatorBuffer"];
 }
 
 - (BOOL)buildPipelines {
@@ -262,6 +309,40 @@ typedef struct {
         "    float4 color = in.color;\n"
         "    color.a *= outline;\n"
         "    return color;\n"
+        "}\n"
+        "\n"
+        "// Icon rendering shaders (textured quads)\n"
+        "struct IconVertexIn {\n"
+        "    float2 position [[attribute(0)]];\n"
+        "    float2 texCoord [[attribute(1)]];\n"
+        "};\n"
+        "\n"
+        "struct IconVertexOut {\n"
+        "    float4 position [[position]];\n"
+        "    float2 texCoord;\n"
+        "};\n"
+        "\n"
+        "vertex IconVertexOut iconVertexShader(\n"
+        "    IconVertexIn in [[stage_in]],\n"
+        "    constant EffectsGridUniforms &uniforms [[buffer(1)]])\n"
+        "{\n"
+        "    IconVertexOut out;\n"
+        "    float2 pos = in.position;\n"
+        "    float2 ndc = (pos / uniforms.viewportSize) * 2.0 - 1.0;\n"
+        "    ndc.y = -ndc.y;\n"
+        "    out.position = float4(ndc, 0.0, 1.0);\n"
+        "    out.texCoord = in.texCoord;\n"
+        "    return out;\n"
+        "}\n"
+        "\n"
+        "fragment float4 iconFragmentShader(\n"
+        "    IconVertexOut in [[stage_in]],\n"
+        "    texture2d<float> iconAtlas [[texture(0)]],\n"
+        "    sampler iconSampler [[sampler(0)]])\n"
+        "{\n"
+        "    float4 texColor = iconAtlas.sample(iconSampler, in.texCoord);\n"
+        "    // Icons are white on transparent - use alpha as mask\n"
+        "    return texColor;\n"
         "}\n";
 
     id<MTLLibrary> library = [_device newLibraryWithSource:shaderSource options:nil error:&error];
@@ -345,6 +426,43 @@ typedef struct {
         }
     }
 
+    // Icon pipeline (textured quads)
+    {
+        MTLVertexDescriptor *vertexDesc = [[MTLVertexDescriptor alloc] init];
+        vertexDesc.attributes[0].format = MTLVertexFormatFloat2;
+        vertexDesc.attributes[0].offset = offsetof(TexturedVertex, position);
+        vertexDesc.attributes[0].bufferIndex = 0;
+        vertexDesc.attributes[1].format = MTLVertexFormatFloat2;
+        vertexDesc.attributes[1].offset = offsetof(TexturedVertex, texCoord);
+        vertexDesc.attributes[1].bufferIndex = 0;
+        vertexDesc.layouts[0].stride = sizeof(TexturedVertex);
+
+        MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
+        desc.vertexFunction = [library newFunctionWithName:@"iconVertexShader"];
+        desc.fragmentFunction = [library newFunctionWithName:@"iconFragmentShader"];
+        desc.vertexDescriptor = vertexDesc;
+        desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        desc.colorAttachments[0].blendingEnabled = YES;
+        desc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+        desc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+        desc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+        desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+
+        _iconPipeline = [_device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (!_iconPipeline) {
+            NSLog(@"XLEffectsGridRenderer: Icon pipeline error: %@", error);
+            return NO;
+        }
+
+        // Create sampler for icon texture
+        MTLSamplerDescriptor *samplerDesc = [[MTLSamplerDescriptor alloc] init];
+        samplerDesc.minFilter = MTLSamplerMinMagFilterLinear;
+        samplerDesc.magFilter = MTLSamplerMinMagFilterLinear;
+        samplerDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+        samplerDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        _iconSampler = [_device newSamplerStateWithDescriptor:samplerDesc];
+    }
+
     return YES;
 }
 
@@ -363,9 +481,26 @@ typedef struct {
  playbackPositionMS:(CGFloat)playbackPositionMS
    timingMarkValues:(const CGFloat *)timingMarkValues
     timingMarkCount:(NSUInteger)timingMarkCount
+      dropIndicator:(BOOL)showDropIndicator
+            dropRow:(NSInteger)dropRow
+        dropStartMS:(CGFloat)dropStartMS
+          dropEndMS:(CGFloat)dropEndMS
 {
+    // Wait for a buffer slot to become available (blocks if all 3 are in-flight).
+    // This prevents CPU from writing to a buffer the GPU is still reading.
+    dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
+
     id<CAMetalDrawable> drawable = [layer nextDrawable];
-    if (!drawable) return;
+    if (!drawable) {
+        // Release semaphore if we can't get a drawable
+        dispatch_semaphore_signal(_frameSemaphore);
+        return;
+    }
+
+    // Capture current buffer index for this frame (local copy for thread safety)
+    NSInteger bufferIndex = _currentBufferIndex;
+    // Rotate to next buffer for the next frame
+    _currentBufferIndex = (_currentBufferIndex + 1) % kMaxInflightFrames;
 
     // All per-frame state lives on the stack — no ivars, no heap pointers
     // that could become stale due to concurrent mutation.
@@ -387,10 +522,16 @@ typedef struct {
     passDesc.colorAttachments[0].clearColor = MTLClearColorMake(0.118, 0.118, 0.118, 1.0);
 
     id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
-    if (!commandBuffer) return;
+    if (!commandBuffer) {
+        dispatch_semaphore_signal(_frameSemaphore);
+        return;
+    }
 
     id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:passDesc];
-    if (!encoder) return;
+    if (!encoder) {
+        dispatch_semaphore_signal(_frameSemaphore);
+        return;
+    }
 
     EffectsGridUniforms uniforms;
     uniforms.viewportSize = simd_make_float2(viewSize.width, viewSize.height);
@@ -401,12 +542,32 @@ typedef struct {
     uniforms.padding1 = 0;
 
     [self drawGridLinesWithEncoder:encoder uniforms:uniforms params:fp
+                       bufferIndex:bufferIndex
                   timingMarkValues:timingMarkValues timingMarkCount:timingMarkCount];
     [self drawEffectBlocksWithEncoder:encoder uniforms:uniforms params:fp
+                          bufferIndex:bufferIndex
                               effects:effects effectCount:effectCount];
+
+    [self drawIconsWithEncoder:encoder uniforms:uniforms params:fp
+                   bufferIndex:bufferIndex
+                       effects:effects effectCount:effectCount];
+
+    // Draw drop indicator (ghost effect) during palette drag
+    if (showDropIndicator && dropRow >= 0) {
+        [self drawDropIndicatorWithEncoder:encoder uniforms:uniforms params:fp
+                                       row:dropRow startMS:dropStartMS endMS:dropEndMS];
+    }
+
     [self drawPlaybackIndicatorWithEncoder:encoder uniforms:uniforms params:fp];
 
     [encoder endEncoding];
+
+    // Signal semaphore when GPU completes this frame, allowing CPU to reuse the buffer
+    __block dispatch_semaphore_t semaphore = _frameSemaphore;
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> _Nonnull buffer) {
+        dispatch_semaphore_signal(semaphore);
+    }];
+
     [commandBuffer presentDrawable:drawable];
     [commandBuffer commit];
 }
@@ -416,6 +577,7 @@ typedef struct {
 - (void)drawGridLinesWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                         uniforms:(EffectsGridUniforms)uniforms
                           params:(XLGridFrameParams)fp
+                     bufferIndex:(NSInteger)bufferIndex
                 timingMarkValues:(const CGFloat *)timingMarkValues
                  timingMarkCount:(NSUInteger)timingMarkCount
 {
@@ -426,8 +588,9 @@ typedef struct {
     NSInteger totalRows = fp.totalRows;
     CGFloat sequenceLengthMS = fp.sequenceLengthMS;
 
-    // Write directly into pre-allocated buffer (avoids NSMutableData allocations)
-    SimpleVertex *vertices = (SimpleVertex *)_gridLineBuffer.contents;
+    // Write directly into pre-allocated buffer for this frame (triple-buffered)
+    id<MTLBuffer> gridLineBuffer = _gridLineBuffers[bufferIndex];
+    SimpleVertex *vertices = (SimpleVertex *)gridLineBuffer.contents;
     NSUInteger vertexCount = 0;
     NSUInteger maxVertices = kGridLineBufferSize / sizeof(SimpleVertex);
 
@@ -500,9 +663,9 @@ typedef struct {
 
     if (vertexCount == 0) return;
 
-    // Use pre-allocated buffer - data is already written
+    // Use pre-allocated triple-buffered buffer - data is already written
     [encoder setRenderPipelineState:_linePipeline];
-    [encoder setVertexBuffer:_gridLineBuffer offset:0 atIndex:0];
+    [encoder setVertexBuffer:gridLineBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexCount];
 }
@@ -512,6 +675,7 @@ typedef struct {
 - (void)drawEffectBlocksWithEncoder:(id<MTLRenderCommandEncoder>)encoder
                            uniforms:(EffectsGridUniforms)uniforms
                              params:(XLGridFrameParams)fp
+                        bufferIndex:(NSInteger)bufferIndex
                             effects:(const XLEffectRenderInfo *)effects
                         effectCount:(NSUInteger)effectCount
 {
@@ -522,9 +686,11 @@ typedef struct {
 
     if (!effects || effectCount == 0) return;
 
-    // Write directly into pre-allocated buffers
-    RoundedRectVertex *blockVertices = (RoundedRectVertex *)_effectBlockBuffer.contents;
-    RoundedRectVertex *outlineVertices = (RoundedRectVertex *)_outlineBuffer.contents;
+    // Write directly into pre-allocated triple-buffered buffers for this frame
+    id<MTLBuffer> effectBlockBuffer = _effectBlockBuffers[bufferIndex];
+    id<MTLBuffer> outlineBuffer = _outlineBuffers[bufferIndex];
+    RoundedRectVertex *blockVertices = (RoundedRectVertex *)effectBlockBuffer.contents;
+    RoundedRectVertex *outlineVertices = (RoundedRectVertex *)outlineBuffer.contents;
     NSUInteger blockVertexCount = 0;
     NSUInteger outlineVertexCount = 0;
     NSUInteger maxBlockVertices = kEffectBlockBufferSize / sizeof(RoundedRectVertex);
@@ -616,21 +782,76 @@ typedef struct {
         }
     }
 
-    // Draw filled effect blocks using pre-allocated buffer
+    // Draw filled effect blocks using pre-allocated triple-buffered buffer
     if (blockVertexCount > 0) {
         [encoder setRenderPipelineState:_effectBlockPipeline];
-        [encoder setVertexBuffer:_effectBlockBuffer offset:0 atIndex:0];
+        [encoder setVertexBuffer:effectBlockBuffer offset:0 atIndex:0];
         [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:blockVertexCount];
     }
 
-    // Draw selection outlines on top using pre-allocated buffer
+    // Draw selection outlines on top using pre-allocated triple-buffered buffer
     if (outlineVertexCount > 0) {
         [encoder setRenderPipelineState:_outlinePipeline];
-        [encoder setVertexBuffer:_outlineBuffer offset:0 atIndex:0];
+        [encoder setVertexBuffer:outlineBuffer offset:0 atIndex:0];
         [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:outlineVertexCount];
     }
+}
+
+#pragma mark - Drop Indicator
+
+- (void)drawDropIndicatorWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                            uniforms:(EffectsGridUniforms)uniforms
+                              params:(XLGridFrameParams)fp
+                                 row:(NSInteger)row
+                             startMS:(CGFloat)startMS
+                               endMS:(CGFloat)endMS
+{
+    if (!_dropIndicatorBuffer) return;
+
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+
+    CGFloat x1 = startMS * zoomLevel - scrollOffset.x;
+    CGFloat x2 = endMS * zoomLevel - scrollOffset.x;
+    CGFloat y1 = row * rowHeight - scrollOffset.y + kEffectBlockInset;
+    CGFloat y2 = (row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
+
+    // Skip if off-screen or invalid
+    if (x2 < 0 || x1 > viewSize.width) return;
+    if (y2 < 0 || y1 > viewSize.height) return;
+    if (x2 <= x1 || y2 <= y1) return;
+
+    // Semi-transparent white/blue ghost effect
+    simd_float4 ghostColor = simd_make_float4(0.5, 0.7, 1.0, 0.5);
+
+    simd_float2 rectMin = simd_make_float2(x1, y1);
+    simd_float2 rectMax = simd_make_float2(x2, y2);
+    float cornerRadius = (float)kEffectBlockCornerRadius;
+
+    // Write to dedicated drop indicator buffer
+    RoundedRectVertex *vptr = (RoundedRectVertex *)_dropIndicatorBuffer.contents;
+
+    for (int i = 0; i < 6; i++) {
+        vptr[i].color = ghostColor;
+        vptr[i].rectMin = rectMin;
+        vptr[i].rectMax = rectMax;
+        vptr[i].cornerRadius = cornerRadius;
+    }
+    vptr[0].position = simd_make_float2(x1, y1);
+    vptr[1].position = simd_make_float2(x2, y1);
+    vptr[2].position = simd_make_float2(x1, y2);
+    vptr[3].position = simd_make_float2(x2, y1);
+    vptr[4].position = simd_make_float2(x2, y2);
+    vptr[5].position = simd_make_float2(x1, y2);
+
+    [encoder setRenderPipelineState:_effectBlockPipeline];
+    [encoder setVertexBuffer:_dropIndicatorBuffer offset:0 atIndex:0];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 }
 
 #pragma mark - Playback Indicator
@@ -723,6 +944,305 @@ static const NSUInteger kEffectColorPaletteCount = sizeof(kEffectColorPalette) /
     if (effectIndex < 0) idx = 0;
     const XLEffectColorEntry *e = &kEffectColorPalette[idx];
     return [NSColor colorWithRed:e->r green:e->g blue:e->b alpha:e->a];
+}
+
+#pragma mark - Icon Atlas
+
+// Effect type to SF Symbol mapping (same as XLEffectsGridView)
+static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
+
++ (NSDictionary<NSString *, NSString *> *)effectIconMapping {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        sEffectIconMapping = @{
+            @"Adjust": @"slider.horizontal.3",
+            @"Arpeggio": @"music.note.list",
+            @"Bars": @"chart.bar.fill",
+            @"Butterfly": @"bird.fill",
+            @"Candle": @"flame",
+            @"Circles": @"circle.grid.3x3.fill",
+            @"ColorWash": @"paintbrush.fill",
+            @"Curtain": @"rectangle.split.2x1.fill",
+            @"DMX": @"slider.vertical.3",
+            @"Duplicate": @"plus.square.on.square",
+            @"Faces": @"face.smiling.fill",
+            @"Fan": @"fan.fill",
+            @"Fill": @"square.fill",
+            @"Fire": @"flame.fill",
+            @"Fireworks": @"sparkles",
+            @"Galaxy": @"staroflife.fill",
+            @"Garlands": @"leaf.fill",
+            @"Glediator": @"square.grid.3x3.fill",
+            @"Guitar": @"guitars.fill",
+            @"Kaleidoscope": @"camera.filters",
+            @"Life": @"heart.fill",
+            @"Lightning": @"bolt.fill",
+            @"Lines": @"line.3.horizontal",
+            @"Liquid": @"drop.fill",
+            @"Marquee": @"text.badge.star",
+            @"Meteors": @"moonphase.waning.crescent",
+            @"Morph": @"arrow.triangle.2.circlepath",
+            @"MovingHead": @"light.beacon.max.fill",
+            @"Music": @"music.note",
+            @"Off": @"power.circle",
+            @"On": @"lightbulb.fill",
+            @"Piano": @"pianokeys",
+            @"Pictures": @"photo.fill",
+            @"Pinwheel": @"rotate.3d",
+            @"Plasma": @"waveform",
+            @"Ripple": @"drop.circle.fill",
+            @"Servo": @"gearshape.2.fill",
+            @"Shader": @"paintpalette.fill",
+            @"Shape": @"star.fill",
+            @"Shimmer": @"sparkle",
+            @"Shockwave": @"waveform.circle.fill",
+            @"SingleStrand": @"line.diagonal",
+            @"Sketch": @"pencil.tip",
+            @"Snowflakes": @"snowflake",
+            @"Snowstorm": @"cloud.snow.fill",
+            @"Spirals": @"tornado",
+            @"Spirograph": @"circle.circle",
+            @"State": @"switch.2",
+            @"Strobe": @"light.max",
+            @"Tendril": @"leaf.arrow.circlepath",
+            @"Text": @"textformat",
+            @"Tree": @"tree.fill",
+            @"Twinkle": @"sparkles",
+            @"Video": @"video.fill",
+            @"VUMeter": @"chart.bar.fill",
+            @"Warp": @"arrow.up.and.down.and.arrow.left.and.right",
+            @"Wave": @"water.waves"
+        };
+    });
+    return sEffectIconMapping;
+}
+
+- (void)buildIconAtlas {
+    self.iconAtlasMap = [NSMutableDictionary dictionary];
+    _nextIconIndex = 0;
+
+    // Create texture descriptor
+    MTLTextureDescriptor *texDesc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:kIconAtlasSize
+                                    height:kIconAtlasSize
+                                 mipmapped:NO];
+    texDesc.usage = MTLTextureUsageShaderRead;
+    _iconAtlasTexture = [_device newTextureWithDescriptor:texDesc];
+    [_iconAtlasTexture setLabel:@"IconAtlas"];
+
+    // Create a bitmap context to draw icons into
+    NSInteger bytesPerRow = kIconAtlasSize * 4;
+    NSMutableData *atlasData = [NSMutableData dataWithLength:kIconAtlasSize * bytesPerRow];
+    unsigned char *pixels = (unsigned char *)atlasData.mutableBytes;
+
+    // Clear to transparent
+    memset(pixels, 0, atlasData.length);
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(pixels,
+                                              kIconAtlasSize, kIconAtlasSize,
+                                              8, bytesPerRow,
+                                              colorSpace,
+                                              kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(colorSpace);
+
+    if (!ctx) {
+        NSLog(@"XLEffectsGridRenderer: Failed to create icon atlas context");
+        return;
+    }
+
+    // Flip context for correct orientation
+    CGContextTranslateCTM(ctx, 0, kIconAtlasSize);
+    CGContextScaleCTM(ctx, 1.0, -1.0);
+
+    NSDictionary<NSString *, NSString *> *iconMapping = [XLEffectsGridRenderer effectIconMapping];
+
+    // Render each icon into the atlas
+    for (NSString *effectType in iconMapping) {
+        NSString *symbolName = iconMapping[effectType];
+        NSImage *symbol = [NSImage imageWithSystemSymbolName:symbolName
+                                    accessibilityDescription:effectType];
+        if (!symbol) {
+            symbol = [NSImage imageWithSystemSymbolName:@"questionmark.square.fill"
+                                accessibilityDescription:@"Unknown"];
+        }
+
+        // Configure symbol for white color at the cell size (larger for Retina quality)
+        NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration
+            configurationWithPointSize:kIconCellSize * 0.7
+                                weight:NSFontWeightMedium];
+        config = [config configurationByApplyingConfiguration:
+                  [NSImageSymbolConfiguration configurationWithPaletteColors:@[[NSColor whiteColor]]]];
+        NSImage *configuredSymbol = [symbol imageWithSymbolConfiguration:config];
+
+        // Calculate position in atlas
+        NSInteger atlasIndex = _nextIconIndex;
+        NSInteger col = atlasIndex % kIconsPerRow;
+        NSInteger row = atlasIndex / kIconsPerRow;
+        CGFloat x = col * kIconCellSize;
+        CGFloat y = row * kIconCellSize;
+
+        // Draw the symbol centered in its cell
+        NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:NO];
+        [NSGraphicsContext saveGraphicsState];
+        [NSGraphicsContext setCurrentContext:gc];
+
+        NSSize symbolSize = configuredSymbol.size;
+        CGFloat drawX = x + (kIconCellSize - symbolSize.width) / 2.0;
+        CGFloat drawY = y + (kIconCellSize - symbolSize.height) / 2.0;
+        [configuredSymbol drawAtPoint:NSMakePoint(drawX, drawY)
+                             fromRect:NSZeroRect
+                            operation:NSCompositingOperationSourceOver
+                             fraction:1.0];
+
+        [NSGraphicsContext restoreGraphicsState];
+
+        // Store mapping
+        self.iconAtlasMap[effectType] = @(atlasIndex);
+        _nextIconIndex++;
+
+        // Safety check
+        if (_nextIconIndex >= kIconsPerRow * kIconsPerRow) {
+            NSLog(@"XLEffectsGridRenderer: Icon atlas full, stopping at %ld icons", (long)_nextIconIndex);
+            break;
+        }
+    }
+
+    CGContextRelease(ctx);
+
+    // Upload to Metal texture
+    MTLRegion region = MTLRegionMake2D(0, 0, kIconAtlasSize, kIconAtlasSize);
+    [_iconAtlasTexture replaceRegion:region
+                         mipmapLevel:0
+                           withBytes:pixels
+                         bytesPerRow:bytesPerRow];
+
+    NSLog(@"XLEffectsGridRenderer: Built icon atlas with %ld icons", (long)_nextIconIndex);
+}
+
+- (NSInteger)atlasIndexForEffectType:(const char *)effectTypeName {
+    if (!effectTypeName || effectTypeName[0] == '\0') return -1;
+    if (!self.iconAtlasMap) return -1;
+
+    NSString *key = [NSString stringWithUTF8String:effectTypeName];
+    if (!key) return -1;
+
+    NSNumber *indexNum = self.iconAtlasMap[key];
+    if (indexNum) {
+        return indexNum.integerValue;
+    }
+    return -1;  // Unknown effect type
+}
+
+- (void)getUVsForAtlasIndex:(NSInteger)atlasIndex
+                      uvMin:(simd_float2 *)outUVMin
+                      uvMax:(simd_float2 *)outUVMax
+{
+    if (atlasIndex < 0) {
+        *outUVMin = simd_make_float2(0, 0);
+        *outUVMax = simd_make_float2(0, 0);
+        return;
+    }
+
+    NSInteger col = atlasIndex % kIconsPerRow;
+    NSInteger row = atlasIndex / kIconsPerRow;
+
+    CGFloat cellUVSize = (CGFloat)kIconCellSize / (CGFloat)kIconAtlasSize;
+    CGFloat u0 = col * cellUVSize;
+    CGFloat v0 = row * cellUVSize;
+    CGFloat u1 = u0 + cellUVSize;
+    CGFloat v1 = v0 + cellUVSize;
+
+    *outUVMin = simd_make_float2(u0, v0);
+    *outUVMax = simd_make_float2(u1, v1);
+}
+
+- (void)drawIconsWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                    uniforms:(EffectsGridUniforms)uniforms
+                      params:(XLGridFrameParams)fp
+                 bufferIndex:(NSInteger)bufferIndex
+                     effects:(const XLEffectRenderInfo *)effects
+                 effectCount:(NSUInteger)effectCount
+{
+    if (!_iconAtlasTexture || !self.iconAtlasMap || !effects || effectCount == 0) return;
+
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+
+    // Write to triple-buffered icon buffer
+    id<MTLBuffer> iconBuffer = _iconBuffers[bufferIndex];
+    if (!iconBuffer) return;
+    TexturedVertex *vertices = (TexturedVertex *)iconBuffer.contents;
+    if (!vertices) return;
+    NSUInteger vertexCount = 0;
+    NSUInteger maxVertices = kIconBufferSize / sizeof(TexturedVertex);
+
+    CGFloat msPerPixel = 1.0 / zoomLevel;
+    CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
+    CGFloat visibleEndMS = visibleStartMS + viewSize.width * msPerPixel;
+    CGFloat visibleStartRow = scrollOffset.y / rowHeight;
+    CGFloat visibleEndRow = (scrollOffset.y + viewSize.height) / rowHeight;
+
+    CGFloat minWidthForIcons = 48.0;  // Minimum effect width to show icon
+    CGFloat iconSize = 36.0;          // Icon size in pixels
+
+    for (NSUInteger ei = 0; ei < effectCount; ei++) {
+        XLEffectRenderInfo info = effects[ei];
+
+        // Frustum culling
+        if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
+            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        CGFloat x1 = info.startTimeMS * zoomLevel - scrollOffset.x;
+        CGFloat x2 = info.endTimeMS * zoomLevel - scrollOffset.x;
+        CGFloat effectWidth = x2 - x1;
+
+        // Skip if effect is too narrow for an icon
+        if (effectWidth < minWidthForIcons) continue;
+
+        // Get atlas index for this effect type
+        NSInteger atlasIndex = [self atlasIndexForEffectType:info.effectTypeName];
+        if (atlasIndex < 0) continue;
+
+        // Get UVs for this icon
+        simd_float2 uvMin, uvMax;
+        [self getUVsForAtlasIndex:atlasIndex uvMin:&uvMin uvMax:&uvMax];
+
+        // Calculate icon position (centered in effect block)
+        CGFloat y1 = info.row * rowHeight - scrollOffset.y;
+        CGFloat centerX = (x1 + x2) / 2.0;
+        CGFloat centerY = y1 + rowHeight / 2.0;
+
+        CGFloat halfIcon = iconSize / 2.0;
+        CGFloat ix0 = centerX - halfIcon;
+        CGFloat iy0 = centerY - halfIcon;
+        CGFloat ix1 = centerX + halfIcon;
+        CGFloat iy1 = centerY + halfIcon;
+
+        // Check buffer capacity (6 vertices per icon quad)
+        if (vertexCount + 6 > maxVertices) break;
+
+        // Two triangles forming the icon quad (UV Y flipped for correct orientation)
+        vertices[vertexCount++] = (TexturedVertex){ simd_make_float2(ix0, iy0), simd_make_float2(uvMin.x, uvMax.y) };
+        vertices[vertexCount++] = (TexturedVertex){ simd_make_float2(ix1, iy0), simd_make_float2(uvMax.x, uvMax.y) };
+        vertices[vertexCount++] = (TexturedVertex){ simd_make_float2(ix0, iy1), simd_make_float2(uvMin.x, uvMin.y) };
+        vertices[vertexCount++] = (TexturedVertex){ simd_make_float2(ix1, iy0), simd_make_float2(uvMax.x, uvMax.y) };
+        vertices[vertexCount++] = (TexturedVertex){ simd_make_float2(ix1, iy1), simd_make_float2(uvMax.x, uvMin.y) };
+        vertices[vertexCount++] = (TexturedVertex){ simd_make_float2(ix0, iy1), simd_make_float2(uvMin.x, uvMin.y) };
+    }
+
+    if (vertexCount == 0) return;
+
+    [encoder setRenderPipelineState:_iconPipeline];
+    [encoder setVertexBuffer:iconBuffer offset:0 atIndex:0];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+    [encoder setFragmentTexture:_iconAtlasTexture atIndex:0];
+    [encoder setFragmentSamplerState:_iconSampler atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vertexCount];
 }
 
 @end

@@ -51,14 +51,43 @@ struct XLLayoutTabView: NSViewControllerRepresentable {
 struct XLSequencerTabView: NSViewControllerRepresentable {
     let engineBridge: XLEngineBridge
 
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
     func makeNSViewController(context: Context) -> XLSequencerViewController {
         let viewController = XLSequencerViewController()
         viewController.engineBridge = engineBridge
+        context.coordinator.viewController = viewController
+        context.coordinator.startObserving()
         return viewController
     }
 
     func updateNSViewController(_ nsViewController: XLSequencerViewController, context: Context) {
         // Update if needed when SwiftUI state changes
+    }
+
+    class Coordinator: @unchecked Sendable {
+        weak var viewController: XLSequencerViewController?
+        private var observer: NSObjectProtocol?
+
+        func startObserving() {
+            observer = NotificationCenter.default.addObserver(
+                forName: XLSequenceDataDidChangeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.viewController?.reloadSequenceData()
+                }
+            }
+        }
+
+        deinit {
+            if let observer = observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
     }
 }
 

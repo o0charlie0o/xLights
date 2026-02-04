@@ -13,11 +13,13 @@
 #include "../xLightsMain.h"
 #include "../effects/EffectManager.h"
 #include "../effects/RenderableEffect.h"
+#include "../effects/EffectPanelUtils.h"
 #include "../sequencer/SequenceElements.h"
 #include "../sequencer/Element.h"
 #include "../sequencer/Effect.h"
 #include "../sequencer/EffectLayer.h"
 
+#include <wx/tokenzr.h>
 #include <algorithm>
 
 namespace xlEngine {
@@ -182,13 +184,44 @@ std::vector<ParameterDefinition> EffectEngine::buildDefaultParameters(const std:
                         for (auto it = sm.begin(); it != sm.end(); ++it) {
                             sampleSettings[it->first] = it->second;
                         }
-                        foundSample = true;
+                        // Only consider this a valid sample if we got actual settings
+                        if (!sampleSettings.empty()) {
+                            foundSample = true;
+                        }
                         break;
                     }
                 }
                 if (foundSample) break;
             }
             if (foundSample) break;
+        }
+    }
+
+    // If no sample settings found from existing effects, get defaults from the effect panel
+    if (sampleSettings.empty() && _frame) {
+        xlEffectPanel* panel = re->GetPanel(_frame);
+        if (panel) {
+            // Set controls to defaults
+            re->SetDefaultParameters();
+
+            // Extract default settings string from the panel
+            wxString defaultsStr = re->GetEffectString();
+            if (!defaultsStr.empty()) {
+                // Parse the comma-separated key=value pairs
+                wxStringTokenizer tokenizer(defaultsStr, ",");
+                while (tokenizer.HasMoreTokens()) {
+                    wxString token = tokenizer.GetNextToken();
+                    int eqPos = token.Find('=');
+                    if (eqPos != wxNOT_FOUND) {
+                        wxString key = token.Left(eqPos);
+                        wxString value = token.Mid(eqPos + 1);
+                        // Unescape any special characters
+                        value.Replace("&comma;", ",");
+                        value.Replace("&amp;", "&");
+                        sampleSettings[key.ToStdString()] = value.ToStdString();
+                    }
+                }
+            }
         }
     }
 
@@ -233,10 +266,34 @@ std::vector<ParameterDefinition> EffectEngine::buildDefaultParameters(const std:
             pd.defaultValue = 0;
             pd.supportsValueCurve = true;
 
-            // Try to parse the current value as the default
-            try {
-                pd.defaultValue = std::stod(value);
-            } catch (...) {}
+            // Try to parse the current value as the default (safely)
+            if (!value.empty()) {
+                // Check if value looks like a number before parsing
+                bool isNumeric = true;
+                bool hasDigit = false;
+                bool hasDot = false;
+                for (size_t i = 0; i < value.size(); ++i) {
+                    char c = value[i];
+                    if (c == '-' || c == '+') {
+                        if (i != 0) { isNumeric = false; break; }
+                    } else if (c == '.') {
+                        if (hasDot) { isNumeric = false; break; }
+                        hasDot = true;
+                    } else if (c >= '0' && c <= '9') {
+                        hasDigit = true;
+                    } else {
+                        isNumeric = false;
+                        break;
+                    }
+                }
+                if (isNumeric && hasDigit) {
+                    try {
+                        pd.defaultValue = std::stod(value);
+                    } catch (const std::exception&) {
+                        // Keep default of 0
+                    }
+                }
+            }
 
             // Build the value curve key from the slider key
             std::string vcKey = "E_VALUECURVE_" + key.substr(key.find("SLIDER_") + 7);

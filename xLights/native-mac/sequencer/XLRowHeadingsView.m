@@ -16,8 +16,6 @@ static const CGFloat kDisclosureLeftPadding = 4.0;
 static const CGFloat kIconSize = 14.0;
 static const CGFloat kIconPadding = 3.0;
 static const CGFloat kIndentWidth = 16.0;
-static const CGFloat kMuteSoloButtonWidth = 16.0;
-static const CGFloat kMuteSoloButtonPadding = 2.0;
 static const CGFloat kDragInsertionLineHeight = 2.0;
 
 #pragma mark - Row Cell Layer
@@ -141,7 +139,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         _cachedRowCount = [_dataSource numberOfRowsInRowHeadings:self];
     }
     [self rebuildRowCells];
-    [self layoutRowCells];
+    [self layoutRowCellsForceRedraw:YES];
 }
 
 #pragma mark - Row Cell Management
@@ -215,6 +213,10 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 }
 
 - (void)layoutRowCells {
+    [self layoutRowCellsForceRedraw:NO];
+}
+
+- (void)layoutRowCellsForceRedraw:(BOOL)forceRedraw {
     CGFloat viewWidth = NSWidth(self.bounds);
     CGFloat viewHeight = NSHeight(self.bounds);
 
@@ -231,9 +233,13 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         if (!cell) continue;
         if ((NSInteger)i >= firstVisible && (NSInteger)i <= lastVisible) {
             CGFloat y = (CGFloat)i * _rowHeight - _verticalScrollOffset;
+            BOOL wasHidden = cell.hidden;
             cell.frame = CGRectMake(0, y, viewWidth, _rowHeight);
             cell.hidden = NO;
-            [cell setNeedsDisplay];
+            // Only redraw if cell was previously hidden (newly visible) or forced
+            if (wasHidden || forceRedraw) {
+                [cell setNeedsDisplay];
+            }
         } else {
             cell.hidden = YES;
         }
@@ -272,7 +278,8 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 
 - (void)layout {
     [super layout];
-    [self layoutRowCells];
+    // Bounds changed, need to redraw cells at new width
+    [self layoutRowCellsForceRedraw:YES];
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
@@ -333,29 +340,8 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
                             size:kIconSize];
     xCursor += kIconSize + kIconPadding;
 
-    // Right side: mute/solo buttons area
-    CGFloat rightEdge = w - kMuteSoloButtonPadding;
-    CGFloat muteX = rightEdge - kMuteSoloButtonWidth;
-    CGFloat soloX = muteX - kMuteSoloButtonPadding - kMuteSoloButtonWidth;
-
-    // Draw solo button (S)
-    [self drawSmallButtonInContext:ctx
-                               at:CGRectMake(soloX, (h - kMuteSoloButtonWidth) / 2.0,
-                                             kMuteSoloButtonWidth, kMuteSoloButtonWidth)
-                            label:'S'
-                            color:CGColorCreateGenericRGB(0.8, 0.7, 0.2, 1.0)
-                           active:NO];
-
-    // Draw mute button (M)
-    [self drawSmallButtonInContext:ctx
-                               at:CGRectMake(muteX, (h - kMuteSoloButtonWidth) / 2.0,
-                                             kMuteSoloButtonWidth, kMuteSoloButtonWidth)
-                            label:'M'
-                            color:CGColorCreateGenericRGB(0.8, 0.3, 0.3, 1.0)
-                           active:NO];
-
-    // Name label (truncated with ellipsis)
-    CGFloat maxTextWidth = soloX - kMuteSoloButtonPadding - xCursor;
+    // Name label (truncated with ellipsis) - extends to right edge with padding
+    CGFloat maxTextWidth = w - kIconPadding - xCursor;
     if (maxTextWidth > 0 && cell.name.length > 0) {
         [self drawTextInContext:ctx
                            text:cell.name
@@ -401,7 +387,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     NSString *symbolName = nil;
     switch (type) {
         case XLElementTypeModel:
-            symbolName = @"square.grid.2x2";
+            symbolName = @"lightbulb";  // Single light/prop
             break;
         case XLElementTypeSubmodel:
             symbolName = @"cube";
@@ -413,7 +399,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
             symbolName = @"metronome";
             break;
         case XLElementTypeModelGroup:
-            symbolName = @"folder";
+            symbolName = @"square.grid.2x2";  // Group of items
             break;
     }
 
@@ -442,56 +428,6 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
                      hints:nil];
 
     [NSGraphicsContext restoreGraphicsState];
-}
-
-- (void)drawSmallButtonInContext:(CGContextRef)ctx
-                              at:(CGRect)rect
-                           label:(char)label
-                           color:(CGColorRef)color
-                          active:(BOOL)active {
-    CGContextSaveGState(ctx);
-
-    // Button background
-    CGFloat cornerRadius = 3.0;
-    if (active) {
-        CGContextSetFillColorWithColor(ctx, color);
-    } else {
-        CGContextSetRGBFillColor(ctx, 0.22, 0.22, 0.22, 1.0);
-    }
-
-    CGPathRef path = CGPathCreateWithRoundedRect(rect, cornerRadius, cornerRadius, NULL);
-    CGContextAddPath(ctx, path);
-    CGContextFillPath(ctx);
-    CGPathRelease(path);
-
-    // Button border
-    CGContextSetRGBStrokeColor(ctx, 0.35, 0.35, 0.35, 1.0);
-    CGContextSetLineWidth(ctx, 0.5);
-    path = CGPathCreateWithRoundedRect(rect, cornerRadius, cornerRadius, NULL);
-    CGContextAddPath(ctx, path);
-    CGContextStrokePath(ctx);
-    CGPathRelease(path);
-
-    // Label character
-    NSString *labelStr = [NSString stringWithFormat:@"%c", label];
-    NSDictionary *attrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:8.0 weight:NSFontWeightBold],
-        NSForegroundColorAttributeName: active
-            ? [NSColor blackColor]
-            : [NSColor colorWithWhite:0.55 alpha:1.0],
-    };
-
-    NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
-    [NSGraphicsContext saveGraphicsState];
-    [NSGraphicsContext setCurrentContext:gc];
-
-    NSSize textSize = [labelStr sizeWithAttributes:attrs];
-    CGFloat tx = rect.origin.x + (rect.size.width - textSize.width) / 2.0;
-    CGFloat ty = rect.origin.y + (rect.size.height - textSize.height) / 2.0;
-    [labelStr drawAtPoint:NSMakePoint(tx, ty) withAttributes:attrs];
-
-    [NSGraphicsContext restoreGraphicsState];
-    CGContextRestoreGState(ctx);
 }
 
 - (void)drawTextInContext:(CGContextRef)ctx
@@ -621,22 +557,6 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 
     [menu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem *solo = [[NSMenuItem alloc] initWithTitle:@"Solo"
-                                                 action:@selector(contextSolo:)
-                                          keyEquivalent:@""];
-    solo.target = self;
-    solo.tag = row;
-    [menu addItem:solo];
-
-    NSMenuItem *mute = [[NSMenuItem alloc] initWithTitle:@"Mute"
-                                                 action:@selector(contextMute:)
-                                          keyEquivalent:@""];
-    mute.target = self;
-    mute.tag = row;
-    [menu addItem:mute];
-
-    [menu addItem:[NSMenuItem separatorItem]];
-
     NSMenuItem *rename = [[NSMenuItem alloc] initWithTitle:@"Rename..."
                                                    action:@selector(contextRename:)
                                             keyEquivalent:@""];
@@ -655,14 +575,6 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 
 - (void)contextDeleteElement:(NSMenuItem *)sender {
     NSLog(@"XLRowHeadingsView: Delete Element for row %ld", (long)sender.tag);
-}
-
-- (void)contextSolo:(NSMenuItem *)sender {
-    NSLog(@"XLRowHeadingsView: Solo for row %ld", (long)sender.tag);
-}
-
-- (void)contextMute:(NSMenuItem *)sender {
-    NSLog(@"XLRowHeadingsView: Mute for row %ld", (long)sender.tag);
 }
 
 - (void)contextRename:(NSMenuItem *)sender {

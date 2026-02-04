@@ -7,6 +7,11 @@
 #import "XLEngineBridge.h"
 #import "XLSequencerViewController.h"
 
+// Import Swift generated header for XLSwiftUIWindowHelper
+#if __has_include("xLights-Swift.h")
+#import "xLights-Swift.h"
+#endif
+
 @interface XLAppDelegate ()
 
 @property (nonatomic, strong) XLDocumentController *documentController;
@@ -113,18 +118,37 @@
 #pragma mark - Sequence Actions
 
 - (IBAction)newSequence:(id)sender {
-    // Get the key window's main window controller
     NSWindow *keyWindow = [NSApp keyWindow];
-    NSWindowController *windowController = keyWindow.windowController;
+    XLEngineBridge *engineBridge = nil;
+    BOOL isSwiftUIWindow = NO;
 
-    // Check if this is an XLMainWindowController
-    if (![windowController isKindOfClass:[XLMainWindowController class]]) {
-        NSLog(@"XLAppDelegate: newSequence - no main window controller available");
-        return;
+    NSLog(@"XLAppDelegate: newSequence called, keyWindow=%@, title=%@",
+          keyWindow, keyWindow.title);
+
+    // Check if SwiftUI window is key using helper class
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    BOOL swiftUIIsKey = swiftHelper.isSwiftUIWindowKey;
+    NSLog(@"XLAppDelegate: isSwiftUIWindowKey returned %d", swiftUIIsKey);
+
+    if (swiftUIIsKey) {
+        engineBridge = swiftHelper.engineBridge;
+        isSwiftUIWindow = YES;
+        NSLog(@"XLAppDelegate: newSequence - using SwiftUI window, engineBridge=%@", engineBridge);
+    } else {
+        // Check for XLMainWindowController (ObjC window)
+        NSWindowController *windowController = keyWindow.windowController;
+        NSLog(@"XLAppDelegate: windowController class = %@", NSStringFromClass([windowController class]));
+        if ([windowController isKindOfClass:[XLMainWindowController class]]) {
+            XLMainWindowController *mainController = (XLMainWindowController *)windowController;
+            engineBridge = mainController.engineBridge;
+            NSLog(@"XLAppDelegate: newSequence - using ObjC window");
+        }
     }
 
-    XLMainWindowController *mainController = (XLMainWindowController *)windowController;
-    XLEngineBridge *engineBridge = mainController.engineBridge;
+    if (!engineBridge) {
+        NSLog(@"XLAppDelegate: newSequence - no engine bridge available");
+        return;
+    }
 
     // Get show directory from user defaults
     NSString *showDirectory = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
@@ -157,11 +181,18 @@
                 NSLog(@"XLAppDelegate: Created new sequence - duration: %ld sec, frame: %ld ms, audio: %@",
                       (long)dialog.durationSeconds, (long)frameMS, audioFile ?: @"(none)");
 
-                // Reload the sequencer view
-                [mainController.sequencerViewController reloadSequenceData];
-
-                // Switch to the sequencer tab
-                [mainController switchToTab:2];
+                if (isSwiftUIWindow) {
+                    // Notify SwiftUI window to reload
+                    [[XLSwiftUIWindowHelper shared] notifySequenceDataChanged];
+                } else {
+                    // Reload the ObjC sequencer view
+                    NSWindowController *wc = keyWindow.windowController;
+                    if ([wc isKindOfClass:[XLMainWindowController class]]) {
+                        XLMainWindowController *mainController = (XLMainWindowController *)wc;
+                        [mainController.sequencerViewController reloadSequenceData];
+                        [mainController switchToTab:2];
+                    }
+                }
             } else {
                 NSAlert *alert = [[NSAlert alloc] init];
                 alert.messageText = @"Failed to Create Sequence";

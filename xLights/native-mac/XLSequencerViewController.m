@@ -34,11 +34,13 @@ static const CGFloat kEffectPaletteWidth = 160.0;
 typedef struct {
     char name[256];       // Copy of name (avoids dangling pointer issues)
     XLElementType type;
-    BOOL expandable;
-    BOOL expanded;
+    BOOL expandable;      // Has multiple layers that can be expanded
+    BOOL expanded;        // Currently showing layer sub-rows
     NSInteger indent;
     NSInteger elementIndex;  // Index into SequenceElements for real data
     NSInteger effectLayerCount;
+    NSInteger layerIndex;    // -1 for main element row, 0+ for specific layer rows
+    BOOL isLayerRow;         // YES if this is a layer sub-row (not the main element)
 } XLRowEntry;
 
 // Effect data stored as plain C struct for real sequence effects
@@ -49,10 +51,59 @@ typedef struct {
     CGFloat startTimeMS;
     CGFloat endTimeMS;
     NSInteger effectTypeIndex;
+    uint32_t colorARGB;  // Pre-computed color from effect type name
+    char effectTypeName[XL_EFFECT_TYPE_NAME_MAX];  // Effect type name for icon display
     BOOL selected;
     BOOL locked;
     BOOL renderDisabled;
 } XLEffectEntry;
+
+/// Compute a consistent hash for a string (matching Swift's simple hash for color generation)
+static NSUInteger XLSimpleStringHash(NSString *string) {
+    NSUInteger hash = 0;
+    NSUInteger len = string.length;
+    for (NSUInteger i = 0; i < len; i++) {
+        hash = hash * 31 + [string characterAtIndex:i];
+    }
+    return hash;
+}
+
+/// Convert HSB to ARGB (matching SwiftUI's Color(hue:saturation:brightness:))
+static uint32_t XLColorARGBFromHSB(CGFloat hue, CGFloat saturation, CGFloat brightness) {
+    CGFloat r, g, b;
+
+    NSInteger hi = (NSInteger)(hue * 6.0) % 6;
+    CGFloat f = hue * 6.0 - floor(hue * 6.0);
+    CGFloat p = brightness * (1.0 - saturation);
+    CGFloat q = brightness * (1.0 - f * saturation);
+    CGFloat t = brightness * (1.0 - (1.0 - f) * saturation);
+
+    switch (hi) {
+        case 0: r = brightness; g = t; b = p; break;
+        case 1: r = q; g = brightness; b = p; break;
+        case 2: r = p; g = brightness; b = t; break;
+        case 3: r = p; g = q; b = brightness; break;
+        case 4: r = t; g = p; b = brightness; break;
+        default: r = brightness; g = p; b = q; break;
+    }
+
+    uint8_t ri = (uint8_t)(r * 255.0);
+    uint8_t gi = (uint8_t)(g * 255.0);
+    uint8_t bi = (uint8_t)(b * 255.0);
+
+    return (0xFF << 24) | (ri << 16) | (gi << 8) | bi;
+}
+
+/// Compute effect color from type name (matching SwiftUI EffectPaletteGridView algorithm)
+static uint32_t XLColorForEffectTypeName(NSString *effectTypeName) {
+    if (!effectTypeName || effectTypeName.length == 0) {
+        return 0xFF808080;  // Gray fallback
+    }
+
+    NSUInteger hash = XLSimpleStringHash(effectTypeName);
+    CGFloat hue = (CGFloat)(hash % 360) / 360.0;
+    return XLColorARGBFromHSB(hue, 0.7, 0.7);
+}
 
 @interface XLSequencerViewController () <XLTimelineRulerDelegate,
                                           XLEffectsGridDataSource,
@@ -91,6 +142,16 @@ typedef struct {
 @property (nonatomic, strong, readwrite) XLEffectPaletteView *effectPaletteView;
 @property (nonatomic, strong) NSLayoutConstraint *effectPaletteWidthConstraint;
 
+// Track height slider (top-left corner)
+@property (nonatomic, strong) NSView *trackHeightSliderContainer;
+@property (nonatomic, strong) NSSlider *trackHeightSlider;
+@property (nonatomic, assign) CGFloat minRowHeight;
+@property (nonatomic, assign) CGFloat maxRowHeight;
+
+// View selector dropdown (below track height slider, left of waveform)
+@property (nonatomic, strong) NSView *viewSelectorContainer;
+@property (nonatomic, strong) NSPopUpButton *viewSelectorPopup;
+
 // Effect index offset per row for fast lookup
 @property (nonatomic, assign) NSUInteger *effectOffsetPerRow;
 @property (nonatomic, assign) NSUInteger effectOffsetCapacity;
@@ -112,7 +173,116 @@ typedef struct {
     // Try to load real data, fall back to demo
     [self reloadSequenceData];
 
-    // Timeline ruler at the top
+    // Track height slider defaults
+    _minRowHeight = 16.0;
+    _maxRowHeight = 80.0;
+
+    // Load saved row height preference (default 22.0)
+    CGFloat savedRowHeight = [[NSUserDefaults standardUserDefaults] doubleForKey:@"XLSequencerRowHeight"];
+    if (savedRowHeight < _minRowHeight || savedRowHeight > _maxRowHeight) {
+        savedRowHeight = 22.0;  // Use default if invalid
+    }
+
+    // Track height slider container (top-left corner, above track labels)
+    _trackHeightSliderContainer = [[NSView alloc] initWithFrame:NSZeroRect];
+    _trackHeightSliderContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    _trackHeightSliderContainer.wantsLayer = YES;
+    _trackHeightSliderContainer.layer.backgroundColor = CGColorCreateGenericRGB(0.12, 0.12, 0.12, 1.0);
+    [view addSubview:_trackHeightSliderContainer];
+
+    // Small track icon (left side of slider)
+    NSImageView *smallTrackIcon = [[NSImageView alloc] init];
+    smallTrackIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    NSImage *smallIcon = [NSImage imageWithSystemSymbolName:@"rectangle.split.1x2"
+                                   accessibilityDescription:@"Small tracks"];
+    NSImageSymbolConfiguration *smallConfig =
+        [NSImageSymbolConfiguration configurationWithPointSize:8 weight:NSFontWeightRegular scale:NSImageSymbolScaleSmall];
+    smallTrackIcon.image = [smallIcon imageWithSymbolConfiguration:smallConfig];
+    smallTrackIcon.contentTintColor = [NSColor secondaryLabelColor];
+    [_trackHeightSliderContainer addSubview:smallTrackIcon];
+
+    // Large track icon (right side of slider)
+    NSImageView *largeTrackIcon = [[NSImageView alloc] init];
+    largeTrackIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    NSImage *largeIcon = [NSImage imageWithSystemSymbolName:@"rectangle.split.1x2"
+                                   accessibilityDescription:@"Large tracks"];
+    NSImageSymbolConfiguration *largeConfig =
+        [NSImageSymbolConfiguration configurationWithPointSize:11 weight:NSFontWeightRegular scale:NSImageSymbolScaleMedium];
+    largeTrackIcon.image = [largeIcon imageWithSymbolConfiguration:largeConfig];
+    largeTrackIcon.contentTintColor = [NSColor secondaryLabelColor];
+    [_trackHeightSliderContainer addSubview:largeTrackIcon];
+
+    // Track height slider
+    _trackHeightSlider = [[NSSlider alloc] init];
+    _trackHeightSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    _trackHeightSlider.minValue = _minRowHeight;
+    _trackHeightSlider.maxValue = _maxRowHeight;
+    _trackHeightSlider.doubleValue = savedRowHeight;
+    _trackHeightSlider.continuous = YES;
+    _trackHeightSlider.target = self;
+    _trackHeightSlider.action = @selector(trackHeightSliderChanged:);
+    _trackHeightSlider.controlSize = NSControlSizeMini;
+    [_trackHeightSliderContainer addSubview:_trackHeightSlider];
+
+    // Layout constraints for track height slider container contents
+    [NSLayoutConstraint activateConstraints:@[
+        [smallTrackIcon.leadingAnchor constraintEqualToAnchor:_trackHeightSliderContainer.leadingAnchor constant:8],
+        [smallTrackIcon.centerYAnchor constraintEqualToAnchor:_trackHeightSliderContainer.centerYAnchor],
+        [smallTrackIcon.widthAnchor constraintEqualToConstant:12],
+        [smallTrackIcon.heightAnchor constraintEqualToConstant:12],
+
+        [_trackHeightSlider.leadingAnchor constraintEqualToAnchor:smallTrackIcon.trailingAnchor constant:4],
+        [_trackHeightSlider.trailingAnchor constraintEqualToAnchor:largeTrackIcon.leadingAnchor constant:-4],
+        [_trackHeightSlider.centerYAnchor constraintEqualToAnchor:_trackHeightSliderContainer.centerYAnchor],
+
+        [largeTrackIcon.trailingAnchor constraintEqualToAnchor:_trackHeightSliderContainer.trailingAnchor constant:-8],
+        [largeTrackIcon.centerYAnchor constraintEqualToAnchor:_trackHeightSliderContainer.centerYAnchor],
+        [largeTrackIcon.widthAnchor constraintEqualToConstant:12],
+        [largeTrackIcon.heightAnchor constraintEqualToConstant:12],
+    ]];
+
+    // View selector container (below track height slider, left of waveform)
+    _viewSelectorContainer = [[NSView alloc] initWithFrame:NSZeroRect];
+    _viewSelectorContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    _viewSelectorContainer.wantsLayer = YES;
+    _viewSelectorContainer.layer.backgroundColor = CGColorCreateGenericRGB(0.12, 0.12, 0.12, 1.0);
+    [view addSubview:_viewSelectorContainer];
+
+    // View label
+    NSTextField *viewLabel = [[NSTextField alloc] init];
+    viewLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    viewLabel.stringValue = @"View:";
+    viewLabel.editable = NO;
+    viewLabel.bordered = NO;
+    viewLabel.drawsBackground = NO;
+    viewLabel.textColor = [NSColor secondaryLabelColor];
+    viewLabel.font = [NSFont systemFontOfSize:11];
+    [viewLabel setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_viewSelectorContainer addSubview:viewLabel];
+
+    // View dropdown popup button
+    _viewSelectorPopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    _viewSelectorPopup.translatesAutoresizingMaskIntoConstraints = NO;
+    _viewSelectorPopup.controlSize = NSControlSizeSmall;
+    _viewSelectorPopup.font = [NSFont systemFontOfSize:11];
+    _viewSelectorPopup.target = self;
+    _viewSelectorPopup.action = @selector(viewSelectorChanged:);
+    [_viewSelectorContainer addSubview:_viewSelectorPopup];
+
+    // Populate the view dropdown
+    [self populateViewSelector];
+
+    // Layout constraints for view selector container contents
+    [NSLayoutConstraint activateConstraints:@[
+        [viewLabel.leadingAnchor constraintEqualToAnchor:_viewSelectorContainer.leadingAnchor constant:8],
+        [viewLabel.centerYAnchor constraintEqualToAnchor:_viewSelectorContainer.centerYAnchor],
+
+        [_viewSelectorPopup.leadingAnchor constraintEqualToAnchor:viewLabel.trailingAnchor constant:4],
+        [_viewSelectorPopup.trailingAnchor constraintLessThanOrEqualToAnchor:_viewSelectorContainer.trailingAnchor constant:-8],
+        [_viewSelectorPopup.centerYAnchor constraintEqualToAnchor:_viewSelectorContainer.centerYAnchor],
+    ]];
+
+    // Timeline ruler at the top (right of track height slider)
     _timelineRuler = [[XLTimelineRulerView alloc] initWithFrame:NSZeroRect];
     _timelineRuler.translatesAutoresizingMaskIntoConstraints = NO;
     _timelineRuler.delegate = self;
@@ -125,7 +295,7 @@ typedef struct {
     _rowHeadingsView.translatesAutoresizingMaskIntoConstraints = NO;
     _rowHeadingsView.dataSource = self;
     _rowHeadingsView.delegate = self;
-    _rowHeadingsView.rowHeight = 22.0;
+    _rowHeadingsView.rowHeight = savedRowHeight;
     [view addSubview:_rowHeadingsView];
 
     // Effects grid (Metal-backed timeline)
@@ -133,6 +303,7 @@ typedef struct {
     _effectsGridView.translatesAutoresizingMaskIntoConstraints = NO;
     _effectsGridView.dataSource = self;
     _effectsGridView.delegate = self;
+    _effectsGridView.rowHeight = savedRowHeight;  // Sync with row headings
     [view addSubview:_effectsGridView];
 
     // Undo controller for effect operations
@@ -155,15 +326,13 @@ typedef struct {
     _transportBar.delegate = self;
     _transportBar.engineBridge = self.engineBridge;
     _transportBar.totalDurationMS = _sequenceDurationMS;
+    // Initialize zoom properties to match effects grid
+    _transportBar.minZoomLevel = _effectsGridView.minZoomLevel;
+    _transportBar.maxZoomLevel = _effectsGridView.maxZoomLevel;
+    _transportBar.zoomLevel = _effectsGridView.zoomLevel;
     [view addSubview:_transportBar];
 
-    // Effect palette view (right sidebar for dragging effects onto timeline)
-    _effectPaletteView = [[XLEffectPaletteView alloc] initWithFrame:NSZeroRect];
-    _effectPaletteView.translatesAutoresizingMaskIntoConstraints = NO;
-    _effectPaletteView.engineBridge = self.engineBridge;
-    _effectPaletteView.delegate = self;
-    _effectPaletteVisible = YES;
-    [view addSubview:_effectPaletteView];
+    // Effect palette moved to bottom panel in SwiftUI - no longer in sequencer view
 
     // Set up scroll coordinator for synchronized scrolling
     _scrollCoordinator = [[XLScrollCoordinator alloc] init];
@@ -181,45 +350,51 @@ typedef struct {
 
     // Set scroll/zoom limits based on sequence properties
     CGFloat rowCount = (CGFloat)_rowCount;
-    CGFloat rowHeight = 22.0;
     _scrollCoordinator.maxHorizontalScrollOffset = _sequenceDurationMS * _scrollCoordinator.zoomLevel;
-    _scrollCoordinator.maxVerticalScrollOffset = rowCount * rowHeight;
+    _scrollCoordinator.maxVerticalScrollOffset = rowCount * savedRowHeight;
 
-    // Create effect palette width constraint (stored so we can animate show/hide)
-    _effectPaletteWidthConstraint = [_effectPaletteView.widthAnchor constraintEqualToConstant:kEffectPaletteWidth];
-
-    // Layout constraints
+    // Layout constraints (effect palette removed - now in top SwiftUI panel)
+    // Layout order from top to bottom:
+    // 1. Track height slider (left) | Timeline ruler (right)
+    // 2. View selector (left) | Waveform (right) - waveform aligned with timeline
+    // 3. Row headings (left) | Effects grid (right)
+    // 4. Transport bar (full width)
     [NSLayoutConstraint activateConstraints:@[
-        // Effect palette: right side, from top to above waveform
-        [_effectPaletteView.topAnchor constraintEqualToAnchor:view.topAnchor],
-        [_effectPaletteView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        _effectPaletteWidthConstraint,
-        [_effectPaletteView.bottomAnchor constraintEqualToAnchor:_waveformView.topAnchor],
+        // Track height slider container: top-left corner
+        [_trackHeightSliderContainer.topAnchor constraintEqualToAnchor:view.topAnchor],
+        [_trackHeightSliderContainer.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_trackHeightSliderContainer.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
+        [_trackHeightSliderContainer.heightAnchor constraintEqualToConstant:kTimelineRulerHeight],
 
-        // Timeline ruler: right of row header column, left of palette at top
+        // Timeline ruler: right of track height slider, extends to right edge
         [_timelineRuler.topAnchor constraintEqualToAnchor:view.topAnchor],
-        [_timelineRuler.leadingAnchor constraintEqualToAnchor:view.leadingAnchor
-                                                     constant:kRowHeaderWidth],
-        [_timelineRuler.trailingAnchor constraintEqualToAnchor:_effectPaletteView.leadingAnchor],
+        [_timelineRuler.leadingAnchor constraintEqualToAnchor:_trackHeightSliderContainer.trailingAnchor],
+        [_timelineRuler.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         [_timelineRuler.heightAnchor constraintEqualToConstant:kTimelineRulerHeight],
 
-        // Row headings: left side, below ruler, above waveform
-        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_timelineRuler.bottomAnchor],
+        // View selector container: below track height slider, left of waveform
+        [_viewSelectorContainer.topAnchor constraintEqualToAnchor:_trackHeightSliderContainer.bottomAnchor],
+        [_viewSelectorContainer.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_viewSelectorContainer.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
+        [_viewSelectorContainer.heightAnchor constraintEqualToConstant:kWaveformHeight],
+
+        // Waveform: below timeline ruler, aligned with timeline (right of view selector)
+        [_waveformView.topAnchor constraintEqualToAnchor:_timelineRuler.bottomAnchor],
+        [_waveformView.leadingAnchor constraintEqualToAnchor:_viewSelectorContainer.trailingAnchor],
+        [_waveformView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_waveformView.heightAnchor constraintEqualToConstant:kWaveformHeight],
+
+        // Row headings: left side, below view selector, above transport bar
+        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_viewSelectorContainer.bottomAnchor],
         [_rowHeadingsView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [_rowHeadingsView.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
-        [_rowHeadingsView.bottomAnchor constraintEqualToAnchor:_waveformView.topAnchor],
+        [_rowHeadingsView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
 
-        // Effects grid: main area, right of row headings, below ruler, above waveform, left of palette
-        [_effectsGridView.topAnchor constraintEqualToAnchor:_timelineRuler.bottomAnchor],
+        // Effects grid: main area, right of row headings, below waveform, above transport bar
+        [_effectsGridView.topAnchor constraintEqualToAnchor:_waveformView.bottomAnchor],
         [_effectsGridView.leadingAnchor constraintEqualToAnchor:_rowHeadingsView.trailingAnchor],
-        [_effectsGridView.trailingAnchor constraintEqualToAnchor:_effectPaletteView.leadingAnchor],
-        [_effectsGridView.bottomAnchor constraintEqualToAnchor:_waveformView.topAnchor],
-
-        // Waveform: full width, above transport bar
-        [_waveformView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
-        [_waveformView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        [_waveformView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
-        [_waveformView.heightAnchor constraintEqualToConstant:kWaveformHeight],
+        [_effectsGridView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_effectsGridView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
 
         // Transport bar: full width at the very bottom
         [_transportBar.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
@@ -235,7 +410,6 @@ typedef struct {
     [super viewDidLoad];
     [_effectsGridView reloadData];
     [_rowHeadingsView reloadData];
-    [_effectPaletteView reloadEffectTypes];
 
     // Load audio if sequence has media file
     [self loadAudioForSequence];
@@ -312,6 +486,9 @@ typedef struct {
 
     // Update all views with new sequence properties
     [self updateViewsForSequenceChange];
+
+    // Refresh the view selector dropdown
+    [self populateViewSelector];
 
     // Load audio for the sequence
     [self loadAudioForSequence];
@@ -408,34 +585,34 @@ typedef struct {
         return;
     }
 
-    // Allocate row data
-    _rowCapacity = (NSUInteger)elementCount + 32;
-    _rowCount = (NSUInteger)elementCount;
-    _rowData = (XLRowEntry *)calloc(_rowCapacity, sizeof(XLRowEntry));
-
-    // Allocate effect offset array
-    _effectOffsetCapacity = _rowCapacity;
-    _effectOffsetPerRow = (NSUInteger *)calloc(_effectOffsetCapacity, sizeof(NSUInteger));
-
-    // Count total effects first
+    // First pass: count total effects from ALL layers
     NSUInteger totalEffects = 0;
-    for (NSUInteger i = 0; i < _rowCount; i++) {
+    for (NSUInteger i = 0; i < (NSUInteger)elementCount; i++) {
         NSDictionary *elem = elements[i];
         NSInteger layerCount = [elem[@"effectLayerCount"] integerValue];
-        // For now, just count layer 0 effects
-        if (layerCount > 0) {
-            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:(NSInteger)i layer:0];
+        for (NSInteger layer = 0; layer < layerCount; layer++) {
+            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:(NSInteger)i layer:layer];
             totalEffects += effects.count;
         }
     }
 
-    // Allocate effect data
+    // Allocate row data - one row per element initially (collapsed state)
+    // Will grow dynamically when layers are expanded
+    _rowCapacity = (NSUInteger)elementCount + 32;
+    _rowCount = (NSUInteger)elementCount;
+    _rowData = (XLRowEntry *)calloc(_rowCapacity, sizeof(XLRowEntry));
+
+    // Allocate effect offset array (not used with new layer system, but keep for compatibility)
+    _effectOffsetCapacity = _rowCapacity;
+    _effectOffsetPerRow = (NSUInteger *)calloc(_effectOffsetCapacity, sizeof(NSUInteger));
+
+    // Allocate effect data for ALL layers
     _effectCapacity = totalEffects + 64;
     _effectCount = 0;
     _effectData = (XLEffectEntry *)calloc(_effectCapacity, sizeof(XLEffectEntry));
 
     // Populate row and effect data
-    for (NSUInteger i = 0; i < _rowCount; i++) {
+    for (NSUInteger i = 0; i < (NSUInteger)elementCount; i++) {
         NSDictionary *elem = elements[i];
         XLRowEntry *row = &_rowData[i];
 
@@ -449,30 +626,43 @@ typedef struct {
             strcpy(row->name, "");
         }
 
-        // Set type
+        // Set type based on element dictionary
         NSString *typeStr = elem[@"type"];
+        BOOL isGroup = [elem[@"isGroup"] boolValue];
+
         if ([typeStr isEqualToString:@"timing"]) {
             row->type = XLElementTypeTiming;
         } else if ([typeStr isEqualToString:@"submodel"]) {
             row->type = XLElementTypeSubmodel;
         } else if ([typeStr isEqualToString:@"strand"]) {
             row->type = XLElementTypeStrand;
+        } else if (isGroup || [typeStr isEqualToString:@"group"]) {
+            row->type = XLElementTypeModelGroup;
         } else {
             row->type = XLElementTypeModel;
         }
 
         row->effectLayerCount = [elem[@"effectLayerCount"] integerValue];
-        row->expandable = (row->effectLayerCount > 1);
-        row->expanded = ![elem[@"collapsed"] boolValue];
-        row->indent = 0; // TODO: Calculate based on group hierarchy
         row->elementIndex = (NSInteger)i;
+        row->indent = 0;
+        row->layerIndex = -1;  // -1 means this is the main element row (not a layer sub-row)
+        row->isLayerRow = NO;
 
-        // Store effect offset for this row
+        // Elements with multiple layers are expandable (except timing tracks)
+        if (row->type != XLElementTypeTiming && row->effectLayerCount > 1) {
+            row->expandable = YES;
+            row->expanded = NO;  // Start collapsed
+        } else {
+            row->expandable = NO;
+            row->expanded = NO;
+        }
+
+        // Store effect offset for this row (legacy, kept for compatibility)
         _effectOffsetPerRow[i] = _effectCount;
 
-        // Load effects for layer 0
-        if (row->effectLayerCount > 0) {
-            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:(NSInteger)i layer:0];
+        // Load effects from ALL layers for this element
+        for (NSInteger layer = 0; layer < row->effectLayerCount; layer++) {
+            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:(NSInteger)i layer:layer];
             for (NSDictionary *eff in effects) {
                 if (_effectCount >= _effectCapacity) {
                     // Grow the array
@@ -482,11 +672,22 @@ typedef struct {
 
                 XLEffectEntry *entry = &_effectData[_effectCount];
                 entry->elementIndex = (NSInteger)i;
-                entry->layerIndex = 0;
+                entry->layerIndex = layer;  // Store the actual layer index
                 entry->effectIndex = [eff[@"id"] integerValue];
                 entry->startTimeMS = [eff[@"startTimeMS"] doubleValue];
                 entry->endTimeMS = [eff[@"endTimeMS"] doubleValue];
                 entry->effectTypeIndex = [eff[@"effectIndex"] integerValue];
+
+                // Store effect type name and compute color
+                NSString *effectTypeName = eff[@"effectType"];
+                entry->colorARGB = XLColorForEffectTypeName(effectTypeName);
+                if (effectTypeName) {
+                    strncpy(entry->effectTypeName, [effectTypeName UTF8String], XL_EFFECT_TYPE_NAME_MAX - 1);
+                    entry->effectTypeName[XL_EFFECT_TYPE_NAME_MAX - 1] = '\0';
+                } else {
+                    entry->effectTypeName[0] = '\0';
+                }
+
                 entry->selected = [eff[@"selected"] boolValue];
                 entry->locked = [eff[@"protected"] boolValue];
                 entry->renderDisabled = NO;
@@ -496,8 +697,54 @@ typedef struct {
         }
     }
 
+    // Sort rows so timing tracks always appear at the top
+    // This is the standard xLights behavior - timing tracks are always first
+    [self sortRowsWithTimingFirst];
+
     NSLog(@"XLSequencerViewController: Loaded %lu elements with %lu effects from real sequence (duration: %.0f ms)",
           (unsigned long)_rowCount, (unsigned long)_effectCount, _sequenceDurationMS);
+}
+
+- (void)sortRowsWithTimingFirst {
+    if (!_rowData || _rowCount < 2) return;
+
+    // Count timing tracks
+    NSUInteger timingCount = 0;
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].type == XLElementTypeTiming) {
+            timingCount++;
+        }
+    }
+
+    if (timingCount == 0 || timingCount == _rowCount) {
+        // Nothing to sort - either no timing tracks or all timing tracks
+        return;
+    }
+
+    // Allocate temporary arrays for stable partition
+    XLRowEntry *timingRows = (XLRowEntry *)malloc(timingCount * sizeof(XLRowEntry));
+    XLRowEntry *otherRows = (XLRowEntry *)malloc((_rowCount - timingCount) * sizeof(XLRowEntry));
+
+    NSUInteger timingIdx = 0;
+    NSUInteger otherIdx = 0;
+
+    // Partition into timing and non-timing (preserving relative order)
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].type == XLElementTypeTiming) {
+            timingRows[timingIdx++] = _rowData[i];
+        } else {
+            otherRows[otherIdx++] = _rowData[i];
+        }
+    }
+
+    // Copy timing tracks first, then other tracks
+    memcpy(_rowData, timingRows, timingCount * sizeof(XLRowEntry));
+    memcpy(&_rowData[timingCount], otherRows, (_rowCount - timingCount) * sizeof(XLRowEntry));
+
+    free(timingRows);
+    free(otherRows);
+
+    NSLog(@"XLSequencerViewController: Sorted %lu timing tracks to top", (unsigned long)timingCount);
 }
 
 - (void)buildDemoData {
@@ -584,6 +831,17 @@ typedef struct {
     _effectCount = 0;
     _effectData = (XLEffectEntry *)calloc(_effectCapacity, sizeof(XLEffectEntry));
 
+    // Demo effect type names for consistent coloring
+    static NSString * const kDemoEffectTypes[] = {
+        @"Fire", @"Bars", @"Butterfly", @"Candle", @"Circles", @"ColorWash",
+        @"Curtain", @"Fireworks", @"Galaxy", @"Garlands", @"Lightning",
+        @"Liquid", @"Marquee", @"Meteors", @"Morph", @"Music", @"Pinwheel",
+        @"Plasma", @"Ripple", @"Shimmer", @"Snowflakes", @"Spirals",
+        @"Strobe", @"Twinkle", @"Wave", @"Text", @"Pictures", @"Video",
+        @"On", @"Off"
+    };
+    static const NSUInteger kDemoEffectTypeCount = sizeof(kDemoEffectTypes) / sizeof(kDemoEffectTypes[0]);
+
     // Create demo effects
     for (NSUInteger row = 0; row < _rowCount; row++) {
         _effectOffsetPerRow[row] = _effectCount;
@@ -598,6 +856,11 @@ typedef struct {
             eff->startTimeMS = baseOffset + 500;
             eff->endTimeMS = baseOffset + 3500 + j * 1000;
             eff->effectTypeIndex = (row + j) % 30;
+            // Use consistent color and effect type name
+            NSString *effectTypeName = kDemoEffectTypes[(row + j) % kDemoEffectTypeCount];
+            eff->colorARGB = XLColorForEffectTypeName(effectTypeName);
+            strncpy(eff->effectTypeName, [effectTypeName UTF8String], XL_EFFECT_TYPE_NAME_MAX - 1);
+            eff->effectTypeName[XL_EFFECT_TYPE_NAME_MAX - 1] = '\0';
             eff->selected = NO;
             eff->locked = (row == 3 && j == 0);
             eff->renderDisabled = (row == 7 && j == 0);
@@ -681,18 +944,39 @@ typedef struct {
 }
 
 - (NSInteger)effectsGrid:(XLEffectsGridView *)gridView numberOfEffectsInRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_rowCount || !_effectOffsetPerRow) return 0;
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData || !_effectData) return 0;
 
-    // Calculate effect count by finding the range between this row's offset and the next
-    NSUInteger startOffset = _effectOffsetPerRow[row];
-    NSUInteger endOffset;
-    if ((NSUInteger)row + 1 < _rowCount) {
-        endOffset = _effectOffsetPerRow[row + 1];
+    XLRowEntry *rowEntry = &_rowData[row];
+    NSInteger elementIndex = rowEntry->elementIndex;
+    NSInteger count = 0;
+
+    // Determine which layer(s) to show based on row type
+    if (rowEntry->isLayerRow) {
+        // Layer sub-row: show only effects for this specific layer
+        NSInteger targetLayer = rowEntry->layerIndex;
+        for (NSUInteger i = 0; i < _effectCount; i++) {
+            if (_effectData[i].elementIndex == elementIndex &&
+                _effectData[i].layerIndex == targetLayer) {
+                count++;
+            }
+        }
+    } else if (rowEntry->expanded) {
+        // Main row when expanded: show only layer 0 (other layers shown in sub-rows)
+        for (NSUInteger i = 0; i < _effectCount; i++) {
+            if (_effectData[i].elementIndex == elementIndex &&
+                _effectData[i].layerIndex == 0) {
+                count++;
+            }
+        }
     } else {
-        endOffset = _effectCount;
+        // Main row when collapsed: show ALL effects from all layers
+        for (NSUInteger i = 0; i < _effectCount; i++) {
+            if (_effectData[i].elementIndex == elementIndex) {
+                count++;
+            }
+        }
     }
-
-    return (NSInteger)(endOffset - startOffset);
+    return count;
 }
 
 - (XLEffectRenderInfo)effectsGrid:(XLEffectsGridView *)gridView
@@ -702,25 +986,45 @@ typedef struct {
     XLEffectRenderInfo info;
     memset(&info, 0, sizeof(info));
 
-    if (row < 0 || row >= (NSInteger)_rowCount || !_effectOffsetPerRow || !_effectData) {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData || !_effectData) {
         return info;
     }
 
-    NSUInteger offset = _effectOffsetPerRow[row] + (NSUInteger)effectIndex;
-    if (offset >= _effectCount) {
-        return info;
-    }
+    XLRowEntry *rowEntry = &_rowData[row];
+    NSInteger elementIndex = rowEntry->elementIndex;
+    NSInteger matchIndex = 0;
 
-    XLEffectEntry *eff = &_effectData[offset];
-    info.startTimeMS = eff->startTimeMS;
-    info.endTimeMS = eff->endTimeMS;
-    info.row = row;
-    info.layer = eff->layerIndex;
-    info.effectIndex = eff->effectTypeIndex;
-    info.colorARGB = 0;  // 0 = use palette color from effectIndex
-    info.selected = eff->selected;
-    info.locked = eff->locked;
-    info.renderDisabled = eff->renderDisabled;
+    // Determine which layer(s) to show based on row type
+    for (NSUInteger i = 0; i < _effectCount; i++) {
+        if (_effectData[i].elementIndex != elementIndex) continue;
+
+        // Filter by layer based on row type
+        if (rowEntry->isLayerRow) {
+            // Layer sub-row: show only effects for this specific layer
+            if (_effectData[i].layerIndex != rowEntry->layerIndex) continue;
+        } else if (rowEntry->expanded) {
+            // Main row when expanded: show only layer 0
+            if (_effectData[i].layerIndex != 0) continue;
+        }
+        // else: collapsed main row shows all layers
+
+        if (matchIndex == effectIndex) {
+            XLEffectEntry *eff = &_effectData[i];
+            info.startTimeMS = eff->startTimeMS;
+            info.endTimeMS = eff->endTimeMS;
+            info.row = row;
+            info.layer = eff->layerIndex;
+            info.effectIndex = eff->effectTypeIndex;
+            info.colorARGB = eff->colorARGB;
+            strncpy(info.effectTypeName, eff->effectTypeName, XL_EFFECT_TYPE_NAME_MAX - 1);
+            info.effectTypeName[XL_EFFECT_TYPE_NAME_MAX - 1] = '\0';
+            info.selected = eff->selected;
+            info.locked = eff->locked;
+            info.renderDisabled = eff->renderDisabled;
+            return info;
+        }
+        matchIndex++;
+    }
 
     return info;
 }
@@ -746,21 +1050,35 @@ typedef struct {
     NSLog(@"Selected effect at row %ld, index %ld", (long)row, (long)effectIndex);
 
     // Get the actual effect ID from our data
-    NSInteger effectId = 0;
+    // Use -1 as sentinel for "no effect" since 0 can be a valid effect ID
+    NSInteger effectId = -1;
     NSString *effectType = nil;
 
-    if (row >= 0 && row < (NSInteger)_rowCount && _effectOffsetPerRow && _effectData) {
-        NSUInteger offset = _effectOffsetPerRow[row] + (NSUInteger)effectIndex;
-        if (offset < _effectCount) {
-            XLEffectEntry *eff = &_effectData[offset];
-            effectId = eff->effectIndex;
+    if (row >= 0 && row < (NSInteger)_rowCount && _rowData && _effectData) {
+        // Find effect by matching elementIndex - this works correctly after row reordering
+        NSInteger elementIndex = _rowData[row].elementIndex;
+        NSInteger matchIndex = 0;
+        for (NSUInteger i = 0; i < _effectCount; i++) {
+            if (_effectData[i].elementIndex == elementIndex) {
+                if (matchIndex == effectIndex) {
+                    XLEffectEntry *eff = &_effectData[i];
+                    effectId = eff->effectIndex;
+                    NSLog(@"  Found effect: effectIndex=%ld, startTimeMS=%.0f, endTimeMS=%.0f",
+                          (long)eff->effectIndex, eff->startTimeMS, eff->endTimeMS);
 
-            // Get effect type from engine if available
-            if (_engineBridge && effectId > 0) {
-                NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
-                effectType = effectInfo[@"effectType"];
+                    // Get effect type from engine if available (effectId >= 0 is valid)
+                    if (_engineBridge && effectId >= 0) {
+                        NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+                        effectType = effectInfo[@"effectType"];
+                        NSLog(@"  effectType from engine: %@", effectType);
+                    }
+                    break;
+                }
+                matchIndex++;
             }
         }
+    } else {
+        NSLog(@"  Bounds check failed: row=%ld, _rowCount=%lu", (long)row, (unsigned long)_rowCount);
     }
 
     // Post notification for effect properties panel
@@ -786,9 +1104,9 @@ typedef struct {
 {
     NSLog(@"Clicked at time %.0fms, row %ld", timeMS, (long)row);
 
-    // Clicking on empty area clears selection
+    // Clicking on empty area clears selection (use -1 as "no effect" sentinel)
     NSDictionary *userInfo = @{
-        @"effectId": @(0),
+        @"effectId": @(-1),
         @"effectType": [NSNull null]
     };
     [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
@@ -809,6 +1127,13 @@ typedef struct {
     // Use scroll coordinator for synchronized scroll
     [_scrollCoordinator viewDidScrollHorizontally:scrollOffset.x fromView:gridView];
     [_scrollCoordinator viewDidScrollVertically:scrollOffset.y fromView:gridView];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didMoveCursorToTimeMS:(CGFloat)timeMS
+{
+    // Forward cursor position to waveform view for synchronized cursor line
+    _waveformView.cursorPositionMS = timeMS;
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -857,7 +1182,16 @@ typedef struct {
 
 - (NSString *)rowHeadings:(XLRowHeadingsView *)view nameForRow:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return @"";
-    return [NSString stringWithUTF8String:_rowData[row].name];
+
+    XLRowEntry *rowEntry = &_rowData[row];
+    NSString *name = [NSString stringWithUTF8String:rowEntry->name];
+
+    // For main rows (not layer sub-rows), append layer count if > 1
+    if (!rowEntry->isLayerRow && rowEntry->effectLayerCount > 1) {
+        return [NSString stringWithFormat:@"%@ [%ld]", name, (long)rowEntry->effectLayerCount];
+    }
+
+    return name;
 }
 
 - (XLElementType)rowHeadings:(XLRowHeadingsView *)view elementTypeForRow:(NSInteger)row {
@@ -885,9 +1219,81 @@ typedef struct {
 - (void)rowHeadings:(XLRowHeadingsView *)view didToggleExpandAtRow:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
 
-    _rowData[row].expanded = !_rowData[row].expanded;
-    NSLog(@"Toggled expand for row %ld: %s", (long)row, _rowData[row].name);
+    XLRowEntry *mainRow = &_rowData[row];
+
+    // Only allow expand/collapse on main element rows with multiple layers
+    if (mainRow->isLayerRow || !mainRow->expandable) return;
+
+    BOOL wasExpanded = mainRow->expanded;
+    mainRow->expanded = !wasExpanded;
+
+    NSLog(@"Toggled expand for row %ld: %s (layers: %ld)", (long)row, mainRow->name, (long)mainRow->effectLayerCount);
+
+    if (!wasExpanded) {
+        // EXPANDING: Insert layer rows after the main row
+        NSInteger layersToInsert = mainRow->effectLayerCount - 1;  // Layer 0 is shown on main row
+        if (layersToInsert <= 0) return;
+
+        // Ensure capacity
+        NSUInteger newRowCount = _rowCount + (NSUInteger)layersToInsert;
+        if (newRowCount > _rowCapacity) {
+            _rowCapacity = newRowCount + 16;
+            _rowData = (XLRowEntry *)realloc(_rowData, _rowCapacity * sizeof(XLRowEntry));
+        }
+
+        // Shift rows down to make room
+        NSInteger insertPos = row + 1;
+        if (insertPos < (NSInteger)_rowCount) {
+            memmove(&_rowData[insertPos + layersToInsert], &_rowData[insertPos],
+                    (_rowCount - (NSUInteger)insertPos) * sizeof(XLRowEntry));
+        }
+
+        // Insert layer rows
+        for (NSInteger i = 0; i < layersToInsert; i++) {
+            XLRowEntry *layerRow = &_rowData[insertPos + i];
+            memset(layerRow, 0, sizeof(XLRowEntry));
+
+            // Format name as "   [Layer 2]" etc (layer numbers are 1-indexed for display)
+            snprintf(layerRow->name, sizeof(layerRow->name), "   [Layer %ld]", (long)(i + 2));
+
+            layerRow->type = mainRow->type;
+            layerRow->elementIndex = mainRow->elementIndex;
+            layerRow->effectLayerCount = mainRow->effectLayerCount;
+            layerRow->layerIndex = i + 1;  // Layer 1, 2, 3, etc.
+            layerRow->isLayerRow = YES;
+            layerRow->indent = 1;
+            layerRow->expandable = NO;
+            layerRow->expanded = NO;
+        }
+
+        _rowCount = newRowCount;
+
+    } else {
+        // COLLAPSING: Remove layer rows after the main row
+        // Find how many consecutive layer rows to remove
+        NSInteger layersToRemove = 0;
+        for (NSInteger i = row + 1; i < (NSInteger)_rowCount; i++) {
+            if (_rowData[i].isLayerRow && _rowData[i].elementIndex == mainRow->elementIndex) {
+                layersToRemove++;
+            } else {
+                break;
+            }
+        }
+
+        if (layersToRemove > 0) {
+            // Shift rows up to close the gap
+            NSInteger removeStart = row + 1;
+            NSInteger removeEnd = removeStart + layersToRemove;
+            if (removeEnd < (NSInteger)_rowCount) {
+                memmove(&_rowData[removeStart], &_rowData[removeEnd],
+                        (_rowCount - (NSUInteger)removeEnd) * sizeof(XLRowEntry));
+            }
+            _rowCount -= (NSUInteger)layersToRemove;
+        }
+    }
+
     [_rowHeadingsView reloadData];
+    [_effectsGridView reloadData];
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view didSelectRow:(NSInteger)row {
@@ -921,9 +1327,6 @@ typedef struct {
 
     _rowData[insertIdx] = moved;
 
-    // Note: We would also need to update effect offsets here for real data
-    // For now, this is primarily useful with demo data
-
     [_rowHeadingsView reloadData];
     [_effectsGridView reloadData];
 }
@@ -931,6 +1334,107 @@ typedef struct {
 - (void)rowHeadings:(XLRowHeadingsView *)view didChangeVerticalScrollOffset:(CGFloat)offsetY {
     // Use scroll coordinator for synchronized vertical scroll
     [_scrollCoordinator viewDidScrollVertically:offsetY fromView:view];
+}
+
+#pragma mark - Track Height Slider
+
+- (void)trackHeightSliderChanged:(NSSlider *)sender {
+    CGFloat rowHeight = sender.doubleValue;
+
+    // Sync row height to both views
+    _rowHeadingsView.rowHeight = rowHeight;
+    _effectsGridView.rowHeight = rowHeight;
+
+    // Update scroll coordinator max vertical offset
+    CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
+    CGFloat maxScrollY = _rowCount * rowHeight - viewHeight;
+    _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
+
+    // Save preference
+    [[NSUserDefaults standardUserDefaults] setDouble:rowHeight forKey:@"XLSequencerRowHeight"];
+}
+
+#pragma mark - View Selector
+
+- (void)populateViewSelector {
+    // Temporarily disable action to prevent triggering viewSelectorChanged:
+    SEL originalAction = _viewSelectorPopup.action;
+    _viewSelectorPopup.action = nil;
+
+    [_viewSelectorPopup removeAllItems];
+
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        [_viewSelectorPopup addItemWithTitle:@"Master View"];
+        _viewSelectorPopup.action = originalAction;
+        return;
+    }
+
+    // Get all view names from the engine bridge
+    NSArray<NSString *> *viewNames = [self.engineBridge getViewNames];
+    for (NSString *viewName in viewNames) {
+        [_viewSelectorPopup addItemWithTitle:viewName];
+    }
+
+    // Select the current view
+    NSString *currentViewName = [self.engineBridge getCurrentViewName];
+    if (currentViewName) {
+        [_viewSelectorPopup selectItemWithTitle:currentViewName];
+    }
+
+    // Re-enable action
+    _viewSelectorPopup.action = originalAction;
+}
+
+- (void)viewSelectorChanged:(NSPopUpButton *)sender {
+    NSString *selectedViewName = sender.titleOfSelectedItem;
+    if (!selectedViewName) return;
+
+    // Check if we're already on this view
+    NSString *currentViewName = [self.engineBridge getCurrentViewName];
+    if ([selectedViewName isEqualToString:currentViewName]) {
+        return;
+    }
+
+    NSLog(@"XLSequencerViewController: Switching to view: %@", selectedViewName);
+
+    // Switch to the selected view via engine bridge
+    BOOL success = [self.engineBridge setCurrentView:selectedViewName];
+    if (success) {
+        // Reload just the elements for the new view (lighter weight than full reloadSequenceData)
+        [self reloadElementsForCurrentView];
+    } else {
+        NSLog(@"XLSequencerViewController: Failed to switch to view: %@", selectedViewName);
+        // Revert the dropdown selection
+        if (currentViewName) {
+            [_viewSelectorPopup selectItemWithTitle:currentViewName];
+        }
+    }
+}
+
+- (void)reloadElementsForCurrentView {
+    // Reload just the element/effect data without reloading sequence info, audio, etc.
+    if (self.engineBridge && [self.engineBridge isSequenceLoaded]) {
+        [self loadRealSequenceData];
+    } else {
+        [self buildDemoData];
+    }
+
+    // Update scroll limits for new row count
+    if (_scrollCoordinator) {
+        CGFloat rowHeight = _effectsGridView.rowHeight;
+        CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
+        CGFloat maxScrollY = _rowCount * rowHeight - viewHeight;
+        _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
+    }
+
+    // Reload the grid views
+    [_effectsGridView reloadData];
+    [_rowHeadingsView reloadData];
+}
+
+- (void)refreshViewSelector {
+    // Re-populate the view dropdown (e.g., when sequence changes)
+    [self populateViewSelector];
 }
 
 #pragma mark - XLWaveformViewDelegate
@@ -1027,6 +1531,22 @@ typedef struct {
     NSLog(@"Output %@", outputEnabled ? @"enabled" : @"disabled");
 }
 
+- (void)transportBar:(XLTransportBarView *)bar didChangeZoomLevel:(CGFloat)zoomLevel {
+    // Use scroll coordinator for synchronized zoom centered on the playhead position
+    // Convert playhead time (ms) to pixel position in view coordinates
+    CGFloat playheadMS = bar.currentPositionMS;
+    CGFloat currentZoom = _scrollCoordinator.zoomLevel;
+    CGFloat playheadPixelX = playheadMS * currentZoom - _scrollCoordinator.horizontalScrollOffset;
+
+    // If playhead is off-screen or at zero, fall back to view center
+    CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
+    if (playheadPixelX < 0 || playheadPixelX > viewWidth || playheadMS <= 0) {
+        playheadPixelX = viewWidth / 2.0;
+    }
+
+    [_scrollCoordinator setZoomLevel:zoomLevel centeredOnPointX:playheadPixelX];
+}
+
 #pragma mark - XLScrollCoordinatorDelegate
 
 - (void)scrollCoordinator:(XLScrollCoordinator *)coordinator didChangeHorizontalScrollOffset:(CGFloat)offsetX {
@@ -1049,12 +1569,16 @@ typedef struct {
     CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
     CGFloat maxScroll = _sequenceDurationMS * zoomLevel - viewWidth;
     coordinator.maxHorizontalScrollOffset = fmax(0, maxScroll);
+
+    // Keep transport bar zoom slider in sync
+    _transportBar.zoomLevel = zoomLevel;
 }
 
 #pragma mark - XLPlaybackControllerDelegate
 
 - (void)playbackControllerDidStartPlayback:(XLPlaybackController *)controller {
     _transportBar.isPlaying = YES;
+    _timelineRuler.playbackRate = controller.playbackRate;
     _timelineRuler.playing = YES;
 }
 
@@ -1073,6 +1597,13 @@ typedef struct {
 }
 
 - (void)playbackController:(XLPlaybackController *)controller didUpdatePositionMS:(NSInteger)positionMS {
+    // Debug: log every 60 calls (~1 second at 60fps)
+    static int updateCount = 0;
+    updateCount++;
+    if (updateCount % 60 == 0) {
+        NSLog(@"XLSequencerViewController: didUpdatePositionMS called, pos=%ld, updateCount=%d", (long)positionMS, updateCount);
+    }
+
     // Update all views with the new playback position
     _transportBar.currentPositionMS = (CGFloat)positionMS;
     _timelineRuler.playbackPosition = positionMS / 1000.0;

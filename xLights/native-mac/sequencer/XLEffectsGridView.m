@@ -11,6 +11,7 @@
 #import "XLEffectsGridView.h"
 #import "XLEffectsGridRenderer.h"
 #import "XLUndoController.h"
+#import <QuartzCore/CATransaction.h>
 
 // Pasteboard type for effect drags from the palette
 NSPasteboardType const XLEffectTypePasteboardType = @"com.xlights.effectType";
@@ -38,6 +39,9 @@ static const NSInteger kMenuTagPaste = 1003;
 static const NSInteger kMenuTagDelete = 1004;
 static const NSInteger kMenuTagEditSettings = 1005;
 
+// SF Symbol icon mapping for effect types (matching Swift EffectPaletteGridView)
+static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
+
 @interface XLEffectsGridView () {
     dispatch_source_t _displayTimer;
 
@@ -54,6 +58,9 @@ static const NSInteger kMenuTagEditSettings = 1005;
     BOOL *_selectedEffects;
     NSUInteger _selectedEffectsCapacity;
     NSUInteger _selectedEffectsCount;  // cached count for quick access
+
+    // Icon overlay layer for drawing SF Symbols on effect blocks
+    CALayer *_iconOverlayLayer;
 }
 
 @property (nonatomic, strong) CAMetalLayer *metalLayer;
@@ -103,10 +110,78 @@ static const NSInteger kMenuTagEditSettings = 1005;
 
 // Display link
 @property (nonatomic, assign) BOOL needsRedraw;
+@property (nonatomic, assign) BOOL isDrawing;  // Guard against concurrent draws
 
 @end
 
 @implementation XLEffectsGridView
+
+#pragma mark - Class Initialization
+
++ (void)initialize {
+    if (self == [XLEffectsGridView class]) {
+        // Initialize the effect icon mapping (matching Swift EffectPaletteGridView)
+        sEffectIconMapping = @{
+            @"Adjust": @"slider.horizontal.3",
+            @"Arpeggio": @"music.note.list",
+            @"Bars": @"chart.bar.fill",
+            @"Butterfly": @"bird.fill",
+            @"Candle": @"flame",
+            @"Circles": @"circle.grid.3x3.fill",
+            @"ColorWash": @"paintbrush.fill",
+            @"Curtain": @"rectangle.split.2x1.fill",
+            @"DMX": @"slider.vertical.3",
+            @"Duplicate": @"plus.square.on.square",
+            @"Faces": @"face.smiling.fill",
+            @"Fan": @"fan.fill",
+            @"Fill": @"square.fill",
+            @"Fire": @"flame.fill",
+            @"Fireworks": @"sparkles",
+            @"Galaxy": @"staroflife.fill",
+            @"Garlands": @"leaf.fill",
+            @"Glediator": @"square.grid.3x3.fill",
+            @"Guitar": @"guitars.fill",
+            @"Kaleidoscope": @"camera.filters",
+            @"Life": @"heart.fill",
+            @"Lightning": @"bolt.fill",
+            @"Lines": @"line.3.horizontal",
+            @"Liquid": @"drop.fill",
+            @"Marquee": @"text.badge.star",
+            @"Meteors": @"moonphase.waning.crescent",
+            @"Morph": @"arrow.triangle.2.circlepath",
+            @"MovingHead": @"light.beacon.max.fill",
+            @"Music": @"music.note",
+            @"Off": @"power.circle",
+            @"On": @"lightbulb.fill",
+            @"Piano": @"pianokeys",
+            @"Pictures": @"photo.fill",
+            @"Pinwheel": @"rotate.3d",
+            @"Plasma": @"waveform",
+            @"Ripple": @"drop.circle.fill",
+            @"Servo": @"gearshape.2.fill",
+            @"Shader": @"paintpalette.fill",
+            @"Shape": @"star.fill",
+            @"Shimmer": @"sparkle",
+            @"Shockwave": @"waveform.circle.fill",
+            @"SingleStrand": @"line.diagonal",
+            @"Sketch": @"pencil.tip",
+            @"Snowflakes": @"snowflake",
+            @"Snowstorm": @"cloud.snow.fill",
+            @"Spirals": @"tornado",
+            @"Spirograph": @"circle.circle",
+            @"State": @"switch.2",
+            @"Strobe": @"light.max",
+            @"Tendril": @"leaf.arrow.circlepath",
+            @"Text": @"textformat",
+            @"Tree": @"tree.fill",
+            @"Twinkle": @"sparkles",
+            @"Video": @"video.fill",
+            @"VUMeter": @"chart.bar.fill",
+            @"Warp": @"arrow.up.and.down.and.arrow.left.and.right",
+            @"Wave": @"water.waves"
+        };
+    }
+}
 
 #pragma mark - Initialization
 
@@ -148,6 +223,9 @@ static const NSInteger kMenuTagEditSettings = 1005;
     _selectedEffectsCapacity = 0;
     _selectedEffectsCount = 0;
 
+    // Disable icon drawing for performance testing
+    _disableIconDrawing = YES;
+
     // Drop state
     _isReceivingDrop = NO;
     _dropTargetRow = -1;
@@ -173,6 +251,20 @@ static const NSInteger kMenuTagEditSettings = 1005;
     if (!_renderer) {
         NSLog(@"XLEffectsGridView: Metal renderer unavailable, grid will not render");
     }
+
+    // Add icon overlay layer on top of Metal layer
+    _iconOverlayLayer = [CALayer layer];
+    _iconOverlayLayer.contentsScale = self.window.backingScaleFactor ?: 2.0;
+    _iconOverlayLayer.frame = self.bounds;
+    _iconOverlayLayer.backgroundColor = nil;  // Transparent
+    // Disable all implicit animations on this layer to keep it in sync with Metal
+    _iconOverlayLayer.actions = @{
+        @"contents": [NSNull null],
+        @"bounds": [NSNull null],
+        @"position": [NSNull null],
+        @"frame": [NSNull null]
+    };
+    [self.layer addSublayer:_iconOverlayLayer];
 
     // Display timer is created lazily in viewDidMoveToWindow when the view
     // first gets a window. Starting it here (before the view has a window,
@@ -309,6 +401,7 @@ static const NSInteger kMenuTagEditSettings = 1005;
     [super viewDidMoveToWindow];
     if (self.window) {
         _metalLayer.contentsScale = self.window.backingScaleFactor;
+        _iconOverlayLayer.contentsScale = self.window.backingScaleFactor;
         if (!_displayTimer) {
             [self setupDisplayTimer];
         }
@@ -319,8 +412,17 @@ static const NSInteger kMenuTagEditSettings = 1005;
 
 - (void)setFrameSize:(NSSize)newSize {
     [super setFrameSize:newSize];
+
+    // Disable implicit animations during resize to keep Metal and overlay layers in sync
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
     _metalLayer.drawableSize = CGSizeMake(newSize.width * _metalLayer.contentsScale,
                                            newSize.height * _metalLayer.contentsScale);
+    _iconOverlayLayer.frame = CGRectMake(0, 0, newSize.width, newSize.height);
+
+    [CATransaction commit];
+
     _needsRedraw = YES;
 }
 
@@ -452,7 +554,9 @@ static const NSInteger kMenuTagEditSettings = 1005;
 
 - (void)drawGrid {
     if (!_renderer || !_metalLayer || !self.window) return;
+    if (_isDrawing) return;  // Prevent concurrent draws which cause jitter
 
+    _isDrawing = YES;
     _needsRedraw = NO;
 
     CGSize viewSize = _metalLayer.drawableSize;
@@ -478,7 +582,118 @@ static const NSInteger kMenuTagEditSettings = 1005;
           selectedEffectID:_selectedEffectID
        playbackPositionMS:_playbackPositionMS
          timingMarkValues:_timingMarkValues
-          timingMarkCount:_timingMarkCount];
+          timingMarkCount:_timingMarkCount
+            dropIndicator:_isReceivingDrop
+                  dropRow:_dropTargetRow
+              dropStartMS:_dropTargetStartMS
+                dropEndMS:_dropTargetEndMS];
+
+    // Draw effect icons on the overlay layer (can be disabled for performance testing)
+    if (!_disableIconDrawing) {
+        [self drawEffectIcons];
+    } else {
+        _iconOverlayLayer.contents = nil;
+    }
+
+    _isDrawing = NO;
+}
+
+- (void)drawEffectIcons {
+    if (!_renderEffects || _renderEffectCount == 0) {
+        _iconOverlayLayer.contents = nil;
+        return;
+    }
+
+    // Disable implicit animations to prevent jitter during resize
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    // Update overlay layer frame to match view bounds
+    _iconOverlayLayer.frame = self.bounds;
+
+    CGFloat viewHeight = self.bounds.size.height;
+
+    // Only draw icons if effect blocks are wide enough (minimum 24pt)
+    CGFloat minWidthForIcons = 24.0;
+
+    // Create image context for drawing icons
+    // NSImage uses bottom-left origin by default, same as our view's coordinate calculations
+    // when we account for the flip. We'll calculate positions directly without a global flip.
+    NSImage *iconImage = [[NSImage alloc] initWithSize:self.bounds.size];
+    [iconImage lockFocus];
+
+    // Calculate visible region
+    CGFloat msPerPixel = 1.0 / _zoomLevel;
+    CGFloat visibleStartMS = _scrollOffset.x * msPerPixel;
+    CGFloat visibleEndMS = visibleStartMS + self.bounds.size.width * msPerPixel;
+    CGFloat visibleStartRow = _scrollOffset.y / _rowHeight;
+    CGFloat visibleEndRow = (self.bounds.size.height + _scrollOffset.y) / _rowHeight;
+
+    // Draw icons for visible effects
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        XLEffectRenderInfo info = _renderEffects[i];
+
+        // Skip effects outside visible region
+        if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
+            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        // Calculate effect block position
+        CGFloat x1 = info.startTimeMS * _zoomLevel - _scrollOffset.x;
+        CGFloat x2 = info.endTimeMS * _zoomLevel - _scrollOffset.x;
+        CGFloat effectWidth = x2 - x1;
+
+        // Skip if effect is too narrow for an icon
+        if (effectWidth < minWidthForIcons) continue;
+
+        // Calculate Y in view coordinates (flipped: row 0 at top)
+        // Our view is flipped (top-left origin), but NSImage is not (bottom-left origin)
+        // So we need to convert: imageY = viewHeight - viewY - height
+        CGFloat viewY = info.row * _rowHeight - _scrollOffset.y;
+        CGFloat centerX = (x1 + x2) / 2.0;
+
+        // Get the SF Symbol for this effect type
+        NSString *effectTypeName = [NSString stringWithUTF8String:info.effectTypeName];
+        if (effectTypeName.length == 0) continue;
+
+        NSString *symbolName = sEffectIconMapping[effectTypeName];
+        if (!symbolName) symbolName = @"questionmark.square.fill";
+
+        NSImage *symbolImage = [NSImage imageWithSystemSymbolName:symbolName
+                                         accessibilityDescription:effectTypeName];
+        if (!symbolImage) continue;
+
+        // Configure symbol for white color
+        NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration configurationWithPointSize:10
+                                                                                             weight:NSFontWeightMedium];
+        config = [config configurationByApplyingConfiguration:
+                  [NSImageSymbolConfiguration configurationWithPaletteColors:@[[NSColor whiteColor]]]];
+        NSImage *configuredSymbol = [symbolImage imageWithSymbolConfiguration:config];
+
+        // Calculate icon size and position (centered in the effect block)
+        CGFloat iconSize = MIN(14.0, effectWidth - 4.0);
+
+        // Convert view coordinates (top-left origin) to image coordinates (bottom-left origin)
+        // viewY is the top of the row in view coords
+        // centerY in view coords = viewY + rowHeight/2
+        // In image coords (bottom-left origin): imageY = viewHeight - viewCenterY - iconSize/2
+        CGFloat viewCenterY = viewY + _rowHeight / 2.0;
+        CGFloat imageY = viewHeight - viewCenterY - iconSize / 2.0;
+
+        CGRect iconRect = CGRectMake(centerX - iconSize / 2.0,
+                                     imageY,
+                                     iconSize, iconSize);
+
+        // Draw the symbol (it will render right-side up in image coordinates)
+        [configuredSymbol drawInRect:iconRect];
+    }
+
+    [iconImage unlockFocus];
+
+    // Set the image as layer contents
+    _iconOverlayLayer.contents = iconImage;
+
+    [CATransaction commit];
 }
 
 #pragma mark - Coordinate Conversion
@@ -513,6 +728,8 @@ static const NSInteger kMenuTagEditSettings = 1005;
 - (void)setPlaybackPositionMS:(CGFloat)positionMS animated:(BOOL)animated {
     _playbackPositionMS = positionMS;
     _needsRedraw = YES;
+    // Trigger immediate redraw for responsive playhead updates
+    [self.layer setNeedsDisplay];
 }
 
 - (void)clampScrollOffset {
@@ -1259,6 +1476,20 @@ static const NSInteger kMenuTagEditSettings = 1005;
             [[NSCursor arrowCursor] set];
             break;
     }
+
+    // Notify delegate of cursor position for waveform sync
+    CGFloat timeMS;
+    [self convertPoint:loc toTimeMS:&timeMS row:NULL];
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveCursorToTimeMS:)]) {
+        [_delegate effectsGrid:self didMoveCursorToTimeMS:timeMS];
+    }
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    // Notify delegate that cursor has left the grid
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveCursorToTimeMS:)]) {
+        [_delegate effectsGrid:self didMoveCursorToTimeMS:-1];
+    }
 }
 
 #pragma mark - Keyboard Events
@@ -1680,35 +1911,58 @@ static const NSInteger kMenuTagEditSettings = 1005;
     NSInteger row;
     [self convertPoint:dragPoint toTimeMS:&timeMS row:&row];
 
+    // Safety: if no rows, can't drop
+    if (_totalRows <= 0) {
+        _dropTargetRow = -1;
+        return;
+    }
+
     row = MAX(0, MIN(row, _totalRows - 1));
 
-    // Determine the drop time range. Try to snap to timing marks.
+    // Safety: need valid sequence length and zoom
+    if (_sequenceLengthMS <= 0 || _zoomLevel <= 0) {
+        _dropTargetRow = -1;
+        return;
+    }
+
+    // Default: center the effect on the cursor position
     CGFloat startMS = timeMS - kDefaultDropDurationMS / 2.0;
     CGFloat endMS = timeMS + kDefaultDropDurationMS / 2.0;
+
+    // Snap to nearest timing marks if enabled
+    if (_snapToTimingMarks && _timingMarkCount > 0 && _timingMarkValues && _zoomLevel > 0) {
+        // Snap the start to the nearest timing mark
+        CGFloat snappedStart = [self snapTimeMS:startMS];
+        // Snap the end to the nearest timing mark
+        CGFloat snappedEnd = [self snapTimeMS:endMS];
+
+        // Use whichever snap is closer to maintain position near cursor
+        CGFloat snapDeltaStart = fabs(snappedStart - startMS);
+        CGFloat snapDeltaEnd = fabs(snappedEnd - endMS);
+        CGFloat snapThresholdMS = kSnapThresholdPixels / _zoomLevel;
+
+        if (snapDeltaStart <= snapDeltaEnd && snapDeltaStart <= snapThresholdMS) {
+            // Snap start, keep duration fixed
+            startMS = snappedStart;
+            endMS = snappedStart + kDefaultDropDurationMS;
+        } else if (snapDeltaEnd <= snapThresholdMS) {
+            // Snap end, keep duration fixed
+            endMS = snappedEnd;
+            startMS = snappedEnd - kDefaultDropDurationMS;
+        }
+        // Otherwise keep unsnapped position
+    }
+
+    // Clamp to sequence bounds
     startMS = MAX(0, startMS);
     endMS = MIN(endMS, _sequenceLengthMS);
 
-    // Snap to timing marks if within range
-    if (_snapToTimingMarks && _timingMarkCount > 0 && _timingMarkValues) {
-        CGFloat bestSnapStart = startMS;
-        CGFloat bestSnapEnd = endMS;
-        BOOL foundTimingSpan = NO;
-
-        // Find the timing mark pair that encompasses the drop point
-        for (NSUInteger i = 0; i + 1 < _timingMarkCount; i++) {
-            CGFloat markStart = _timingMarkValues[i];
-            CGFloat markEnd = _timingMarkValues[i + 1];
-            if (timeMS >= markStart && timeMS < markEnd) {
-                bestSnapStart = markStart;
-                bestSnapEnd = markEnd;
-                foundTimingSpan = YES;
-                break;
-            }
-        }
-
-        if (foundTimingSpan) {
-            startMS = bestSnapStart;
-            endMS = bestSnapEnd;
+    // Ensure minimum duration
+    if (endMS - startMS < kMinimumEffectWidthMS) {
+        endMS = startMS + kMinimumEffectWidthMS;
+        if (endMS > _sequenceLengthMS) {
+            endMS = _sequenceLengthMS;
+            startMS = MAX(0, endMS - kMinimumEffectWidthMS);
         }
     }
 

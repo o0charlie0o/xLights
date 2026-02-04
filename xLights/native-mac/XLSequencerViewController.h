@@ -56,6 +56,10 @@
 /// Call this when a sequence is loaded or unloaded, or when elements/effects change.
 - (void)reloadSequenceData;
 
+/// Refresh the view selector dropdown with current views.
+/// Called automatically by reloadSequenceData.
+- (void)refreshViewSelector;
+
 /// Whether real sequence data is currently loaded (vs demo data).
 @property (nonatomic, readonly) BOOL isUsingRealData;
 

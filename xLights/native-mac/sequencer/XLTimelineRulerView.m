@@ -29,8 +29,12 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 
 @property (nonatomic, assign) BOOL dragging;
 @property (nonatomic, strong) CALayer *playheadLayer;
-@property (nonatomic, strong) CADisplayLink *displayLink;
+@property (nonatomic, strong) NSTimer *playheadTimer;
 @property (nonatomic, assign) CFTimeInterval lastDisplayLinkTimestamp;
+
+// For smooth playhead interpolation during playback
+@property (nonatomic, assign) NSTimeInterval lastSyncedPosition;
+@property (nonatomic, assign) CFAbsoluteTime lastSyncTime;
 
 @end
 
@@ -60,9 +64,12 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     _scrollOffset = 0.0;
     _sequenceDuration = 0.0;
     _playbackPosition = 0.0;
+    _playbackRate = 1.0;
     _frameRate = 20;
     _playing = NO;
     _dragging = NO;
+    _lastSyncedPosition = 0.0;
+    _lastSyncTime = 0;
 
     [self setupPlayheadLayer];
 }
@@ -331,6 +338,8 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 
 - (void)setPlaybackPosition:(NSTimeInterval)position animated:(BOOL)animated {
     _playbackPosition = position;
+    _lastSyncedPosition = position;
+    _lastSyncTime = CFAbsoluteTimeGetCurrent();
     if (animated) {
         [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
             context.duration = 0.05;
@@ -343,6 +352,9 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 
 - (void)setPlaybackPosition:(NSTimeInterval)playbackPosition {
     _playbackPosition = playbackPosition;
+    _lastSyncedPosition = playbackPosition;
+    _lastSyncTime = CFAbsoluteTimeGetCurrent();
+    // Update visual position - playback controller sends updates at 60fps
     [self updatePlayheadPosition];
 }
 
@@ -370,9 +382,14 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     BOOL wasPlaying = _playing;
     _playing = playing;
     if (playing && !wasPlaying) {
+        // Initialize interpolation state when playback starts
+        _lastSyncedPosition = _playbackPosition;
+        _lastSyncTime = CFAbsoluteTimeGetCurrent();
         [self startDisplayLink];
     } else if (!playing && wasPlaying) {
         [self stopDisplayLink];
+        // Reset interpolation state
+        _lastSyncTime = 0;
     }
 }
 
@@ -531,30 +548,51 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     return snapped / 1000.0;
 }
 
-#pragma mark - CADisplayLink
+#pragma mark - Playhead Timer
 
 - (void)startDisplayLink {
-    if (_displayLink) return;
+    if (_playheadTimer) return;
 
-    _displayLink = [self.window.screen displayLinkWithTarget:self selector:@selector(displayLinkFired:)];
-    if (!_displayLink) {
-        // Fallback for older macOS
-        _displayLink = [NSScreen.mainScreen displayLinkWithTarget:self selector:@selector(displayLinkFired:)];
-    }
-    if (_displayLink) {
-        [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        _lastDisplayLinkTimestamp = 0;
-    }
-}
-
-- (void)stopDisplayLink {
-    [_displayLink invalidate];
-    _displayLink = nil;
+    // Use NSTimer instead of CADisplayLink - more reliable for this use case
+    // 60fps update rate for smooth playhead animation
+    _playheadTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
+                                                      target:self
+                                                    selector:@selector(playheadTimerFired:)
+                                                    userInfo:nil
+                                                     repeats:YES];
+    // Add to common run loop modes so it fires during tracking
+    [[NSRunLoop mainRunLoop] addTimer:_playheadTimer forMode:NSRunLoopCommonModes];
     _lastDisplayLinkTimestamp = 0;
 }
 
-- (void)displayLinkFired:(CADisplayLink *)link {
+- (void)stopDisplayLink {
+    if (_playheadTimer) {
+        [_playheadTimer invalidate];
+        _playheadTimer = nil;
+    }
+    _lastDisplayLinkTimestamp = 0;
+}
+
+- (void)playheadTimerFired:(NSTimer *)timer {
     if (!_playing) return;
+
+    // Interpolate the playhead position based on elapsed time since last sync
+    // This provides smooth 60fps animation even when position updates are less frequent
+    if (_lastSyncTime > 0 && _playbackRate > 0) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        CFAbsoluteTime elapsed = now - _lastSyncTime;
+        NSTimeInterval interpolatedPosition = _lastSyncedPosition + (elapsed * _playbackRate);
+
+        // Clamp to valid range
+        if (interpolatedPosition < 0) interpolatedPosition = 0;
+        if (_sequenceDuration > 0 && interpolatedPosition > _sequenceDuration) {
+            interpolatedPosition = _sequenceDuration;
+        }
+
+        // Update the visual position directly without triggering sync update
+        _playbackPosition = interpolatedPosition;
+    }
+
     [self updatePlayheadPosition];
 }
 

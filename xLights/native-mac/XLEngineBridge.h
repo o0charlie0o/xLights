@@ -287,6 +287,23 @@
 - (void)uploadOutputToController:(NSString *)controllerName
                       completion:(void (^)(BOOL success, NSString *message))completion;
 
+#pragma mark - Sequence Views
+
+/// Get list of all view names (Master View is always first)
+- (NSArray<NSString *> *)getViewNames;
+
+/// Get the currently selected view name
+- (NSString *)getCurrentViewName;
+
+/// Get the currently selected view index (0 = Master View)
+- (NSInteger)getCurrentViewIndex;
+
+/// Set the current view by name. Returns YES on success.
+- (BOOL)setCurrentView:(NSString *)viewName;
+
+/// Set the current view by index. Returns YES on success.
+- (BOOL)setCurrentViewIndex:(NSInteger)viewIndex;
+
 #pragma mark - Sequence Elements (for Sequencer View)
 
 /// Get the number of elements (rows) in the sequence

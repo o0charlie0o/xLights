@@ -27,6 +27,11 @@
 #include "../sequencer/Element.h"
 #include "../sequencer/Effect.h"
 #include "../sequencer/EffectLayer.h"
+#include "../SequenceViewManager.h"
+
+// Model classes for group detection
+#include "../models/Model.h"
+#include "../models/ModelGroup.h"
 
 // Audio support
 #include "../AudioManager.h"
@@ -1427,6 +1432,151 @@
     });
 }
 
+#pragma mark - Sequence Views
+
+- (NSArray<NSString *> *)getViewNames {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return @[@"Master View"];
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @[@"Master View"];
+
+    SequenceViewManager* viewManager = frame->GetViewsManager();
+    if (!viewManager) return @[@"Master View"];
+
+    NSMutableArray<NSString *> *viewNames = [NSMutableArray array];
+
+    // Get all views - Master View is always first
+    auto views = viewManager->GetViews();
+    for (auto* view : views) {
+        if (view) {
+            NSString *name = [NSString stringWithUTF8String:view->GetName().c_str()];
+            [viewNames addObject:name];
+        }
+    }
+
+    // Ensure at least Master View exists
+    if (viewNames.count == 0) {
+        [viewNames addObject:@"Master View"];
+    }
+
+    return [viewNames copy];
+}
+
+- (NSString *)getCurrentViewName {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return @"Master View";
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @"Master View";
+
+    SequenceViewManager* viewManager = frame->GetViewsManager();
+    if (!viewManager) return @"Master View";
+
+    SequenceView* currentView = viewManager->GetSelectedView();
+    if (!currentView) return @"Master View";
+
+    return [NSString stringWithUTF8String:currentView->GetName().c_str()];
+}
+
+- (NSInteger)getCurrentViewIndex {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return 0;
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return 0;
+
+    SequenceElements& elements = frame->GetSequenceElements();
+    return (NSInteger)elements.GetCurrentView();
+}
+
+- (BOOL)setCurrentView:(NSString *)viewName {
+    if (!viewName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return NO;
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return NO;
+
+    SequenceElements& elements = frame->GetSequenceElements();
+    SequenceViewManager* viewManager = frame->GetViewsManager();
+    if (!viewManager) return NO;
+
+    std::string stdViewName = [viewName UTF8String];
+
+    // Find the view index by name
+    int viewIndex = viewManager->GetViewIndex(stdViewName);
+    if (viewIndex < 0) {
+        return NO;
+    }
+
+    // Only populate view for non-Master views (index > 0)
+    // Master View (index 0) already contains all elements
+    if (viewIndex > 0) {
+        std::string modelsString = elements.GetViewModels(stdViewName);
+        elements.AddMissingModelsToSequence(modelsString);
+        elements.PopulateView(modelsString, viewIndex);
+    }
+
+    // Set as current view
+    elements.SetCurrentView(viewIndex);
+
+    // Set timing visibility for this view
+    elements.SetTimingVisibility(stdViewName);
+
+    return YES;
+}
+
+- (BOOL)setCurrentViewIndex:(NSInteger)viewIndex {
+    [self ensureEngineInitialized];
+    if (!_sequenceEngine || !_sequenceEngine->isSequenceLoaded()) {
+        return NO;
+    }
+
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return NO;
+
+    SequenceElements& elements = frame->GetSequenceElements();
+    SequenceViewManager* viewManager = frame->GetViewsManager();
+    if (!viewManager) return NO;
+
+    // Validate index
+    if (viewIndex < 0 || viewIndex >= viewManager->GetViewCount()) {
+        return NO;
+    }
+
+    // Get the view at this index
+    SequenceView* view = viewManager->GetView((int)viewIndex);
+    if (!view) return NO;
+
+    std::string viewName = view->GetName();
+
+    // Only populate view for non-Master views (index > 0)
+    // Master View (index 0) already contains all elements
+    if (viewIndex > 0) {
+        std::string modelsString = elements.GetViewModels(viewName);
+        elements.AddMissingModelsToSequence(modelsString);
+        elements.PopulateView(modelsString, (int)viewIndex);
+    }
+
+    // Set as current view
+    elements.SetCurrentView((int)viewIndex);
+
+    // Set timing visibility for this view
+    elements.SetTimingVisibility(viewName);
+
+    return YES;
+}
+
 #pragma mark - Sequence Elements (for Sequencer View)
 
 - (NSInteger)getSequenceElementCount {
@@ -1440,7 +1590,8 @@
     if (!frame) return 0;
 
     SequenceElements& elements = frame->GetSequenceElements();
-    return (NSInteger)elements.GetElementCount();
+    int currentView = elements.GetCurrentView();
+    return (NSInteger)elements.GetElementCount(currentView);
 }
 
 - (NSDictionary *)getSequenceElementAtIndex:(NSInteger)index {
@@ -1453,22 +1604,48 @@
     if (!frame) return nil;
 
     SequenceElements& elements = frame->GetSequenceElements();
-    if (index < 0 || index >= (NSInteger)elements.GetElementCount()) {
+    int currentView = elements.GetCurrentView();
+    if (index < 0 || index >= (NSInteger)elements.GetElementCount(currentView)) {
         return nil;
     }
 
-    Element* elem = elements.GetElement((size_t)index);
+    Element* elem = elements.GetElement((size_t)index, currentView);
     if (!elem) return nil;
 
     NSString *typeString;
+    BOOL isGroup = NO;
+    BOOL hasSubmodels = NO;
+    BOOL hasStrands = NO;
+    NSInteger submodelCount = 0;
+    NSInteger strandCount = 0;
+
     ElementType type = elem->GetType();
     switch (type) {
         case ElementType::ELEMENT_TYPE_TIMING:
             typeString = @"timing";
             break;
-        case ElementType::ELEMENT_TYPE_MODEL:
-            typeString = @"model";
+        case ElementType::ELEMENT_TYPE_MODEL: {
+            // Check if this is actually a model group
+            ModelElement* modelElem = dynamic_cast<ModelElement*>(elem);
+            if (modelElem) {
+                submodelCount = modelElem->GetSubModelCount();
+                strandCount = modelElem->GetStrandCount();
+                hasSubmodels = (submodelCount > 0);
+                hasStrands = (strandCount > 0);
+
+                // Check underlying model to see if it's a group
+                Model* model = frame->AllModels[elem->GetName()];
+                if (model && model->GetDisplayAs() == "ModelGroup") {
+                    typeString = @"group";
+                    isGroup = YES;
+                } else {
+                    typeString = @"model";
+                }
+            } else {
+                typeString = @"model";
+            }
             break;
+        }
         case ElementType::ELEMENT_TYPE_SUBMODEL:
             typeString = @"submodel";
             break;
@@ -1486,6 +1663,11 @@
         @"effectLayerCount": @(elem->GetEffectLayerCount()),
         @"visible": @(elem->GetVisible()),
         @"collapsed": @(elem->GetCollapsed()),
+        @"isGroup": @(isGroup),
+        @"hasSubmodels": @(hasSubmodels),
+        @"hasStrands": @(hasStrands),
+        @"submodelCount": @(submodelCount),
+        @"strandCount": @(strandCount),
     };
 }
 
@@ -1499,9 +1681,10 @@
     if (!frame) return @[];
 
     SequenceElements& elements = frame->GetSequenceElements();
+    int currentView = elements.GetCurrentView();
     NSMutableArray *result = [NSMutableArray array];
 
-    for (size_t i = 0; i < elements.GetElementCount(); i++) {
+    for (size_t i = 0; i < elements.GetElementCount(currentView); i++) {
         NSDictionary *info = [self getSequenceElementAtIndex:(NSInteger)i];
         if (info) {
             NSMutableDictionary *infoWithIndex = [info mutableCopy];
@@ -1523,11 +1706,12 @@
     if (!frame) return @[];
 
     SequenceElements& elements = frame->GetSequenceElements();
-    if (index < 0 || index >= (NSInteger)elements.GetElementCount()) {
+    int currentView = elements.GetCurrentView();
+    if (index < 0 || index >= (NSInteger)elements.GetElementCount(currentView)) {
         return @[];
     }
 
-    Element* elem = elements.GetElement((size_t)index);
+    Element* elem = elements.GetElement((size_t)index, currentView);
     if (!elem) return @[];
 
     if (layer < 0 || layer >= (NSInteger)elem->GetEffectLayerCount()) {
@@ -1664,11 +1848,47 @@
         NSMutableDictionary *dict = [NSMutableDictionary dictionary];
         dict[@"key"] = [NSString stringWithUTF8String:param.key.c_str()];
         dict[@"displayLabel"] = [NSString stringWithUTF8String:param.displayLabel.c_str()];
-        dict[@"type"] = @((int)param.type);
+
+        // Convert ParameterType enum to string to match Swift enum rawValue
+        NSString *typeStr = @"string";
+        switch (param.type) {
+            case xlEngine::ParameterType::Int:
+                typeStr = @"int";
+                break;
+            case xlEngine::ParameterType::Float:
+                typeStr = @"float";
+                break;
+            case xlEngine::ParameterType::Bool:
+                typeStr = @"bool";
+                break;
+            case xlEngine::ParameterType::String:
+                typeStr = @"string";
+                break;
+            case xlEngine::ParameterType::Color:
+                typeStr = @"color";
+                break;
+            case xlEngine::ParameterType::Choice:
+                typeStr = @"choice";
+                break;
+            case xlEngine::ParameterType::File:
+                typeStr = @"file";
+                break;
+            case xlEngine::ParameterType::ValueCurve:
+                typeStr = @"valueCurve";
+                break;
+            case xlEngine::ParameterType::Font:
+                typeStr = @"font";
+                break;
+            case xlEngine::ParameterType::ColorCurve:
+                typeStr = @"colorCurve";
+                break;
+        }
+        dict[@"type"] = typeStr;
+
         dict[@"group"] = [NSString stringWithUTF8String:param.group.c_str()];
         dict[@"minValue"] = @(param.minValue);
         dict[@"maxValue"] = @(param.maxValue);
-        dict[@"defaultValue"] = @(param.defaultValue);
+        dict[@"defaultValue"] = [NSString stringWithFormat:@"%.2f", param.defaultValue];
         dict[@"supportsValueCurve"] = @(param.supportsValueCurve);
 
         NSMutableArray *choices = [NSMutableArray arrayWithCapacity:param.choices.size()];
