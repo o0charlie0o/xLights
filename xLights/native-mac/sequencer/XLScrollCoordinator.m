@@ -373,4 +373,57 @@ static const CGFloat kDefaultZoom = 0.1;
     }
 }
 
+#pragma mark - Zoom Presets
+
+- (void)zoomToFitSequenceLength:(CGFloat)sequenceLengthMS viewWidth:(CGFloat)viewWidth {
+    if (sequenceLengthMS <= 0 || viewWidth <= 0) return;
+
+    // Add a small margin (5% on each side) for visual comfort
+    CGFloat marginFraction = 0.05;
+    CGFloat effectiveWidth = viewWidth * (1.0 - 2.0 * marginFraction);
+
+    // Calculate zoom level to fit sequence in view
+    CGFloat newZoom = effectiveWidth / sequenceLengthMS;
+    newZoom = [self clampZoomLevel:newZoom];
+
+    _zoomLevel = newZoom;
+
+    // Reset horizontal scroll to show from the beginning with margin
+    _horizontalScrollOffset = -viewWidth * marginFraction;
+    _horizontalScrollOffset = [self clampHorizontalOffset:_horizontalScrollOffset];
+
+    [self syncZoomToAllViews];
+    [self syncHorizontalScrollToAllViews];
+
+    if ([_delegate respondsToSelector:@selector(scrollCoordinator:didChangeZoomLevel:)]) {
+        [_delegate scrollCoordinator:self didChangeZoomLevel:_zoomLevel];
+    }
+    if ([_delegate respondsToSelector:@selector(scrollCoordinator:didChangeHorizontalScrollOffset:)]) {
+        [_delegate scrollCoordinator:self didChangeHorizontalScrollOffset:_horizontalScrollOffset];
+    }
+}
+
+- (void)setZoomLevel:(CGFloat)zoomLevel centeredOnPlayheadMS:(CGFloat)playheadMS viewWidth:(CGFloat)viewWidth {
+    CGFloat clamped = [self clampZoomLevel:zoomLevel];
+    if (fabs(clamped - _zoomLevel) < 0.00001) return;
+
+    CGFloat oldZoom = _zoomLevel;
+    _zoomLevel = clamped;
+
+    // Calculate the pixel position of the playhead before zoom
+    CGFloat playheadPixelBefore = playheadMS * oldZoom;
+
+    // We want the playhead to be in the center of the view after zoom
+    // newScrollOffset = playheadMS * newZoom - viewWidth / 2
+    CGFloat newHScroll = playheadMS * _zoomLevel - viewWidth / 2.0;
+    _horizontalScrollOffset = [self clampHorizontalOffset:newHScroll];
+
+    [self syncZoomToAllViews];
+    [self syncHorizontalScrollToAllViews];
+
+    if ([_delegate respondsToSelector:@selector(scrollCoordinator:didChangeZoomLevel:)]) {
+        [_delegate scrollCoordinator:self didChangeZoomLevel:_zoomLevel];
+    }
+}
+
 @end

@@ -148,4 +148,17 @@
 /// Scroll to make a specific time and row visible.
 - (void)scrollToTimeMS:(CGFloat)timeMS row:(NSInteger)row withRowHeight:(CGFloat)rowHeight animated:(BOOL)animated;
 
+#pragma mark - Zoom Presets
+
+/// Zoom to fit the entire sequence in the view.
+/// @param sequenceLengthMS The total sequence length in milliseconds.
+/// @param viewWidth The width of the view in points.
+- (void)zoomToFitSequenceLength:(CGFloat)sequenceLengthMS viewWidth:(CGFloat)viewWidth;
+
+/// Zoom centered on the current playhead position.
+/// @param zoomLevel The new zoom level.
+/// @param playheadMS The current playhead position in milliseconds.
+/// @param viewWidth The width of the view in points.
+- (void)setZoomLevel:(CGFloat)zoomLevel centeredOnPlayheadMS:(CGFloat)playheadMS viewWidth:(CGFloat)viewWidth;
+
 @end

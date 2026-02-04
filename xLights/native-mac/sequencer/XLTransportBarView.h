@@ -25,6 +25,7 @@
 - (void)transportBar:(XLTransportBarView *)bar didToggleLoop:(BOOL)loopEnabled;
 - (void)transportBar:(XLTransportBarView *)bar didToggleOutput:(BOOL)outputEnabled;
 - (void)transportBar:(XLTransportBarView *)bar didChangeZoomLevel:(CGFloat)zoomLevel;
+- (void)transportBarDidRequestFitToWindow:(XLTransportBarView *)bar;
 @end
 
 @interface XLTransportBarView : NSView

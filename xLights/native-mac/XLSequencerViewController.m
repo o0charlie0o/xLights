@@ -94,15 +94,161 @@ static uint32_t XLColorARGBFromHSB(CGFloat hue, CGFloat saturation, CGFloat brig
     return (0xFF << 24) | (ri << 16) | (gi << 8) | bi;
 }
 
-/// Compute effect color from type name (matching SwiftUI EffectPaletteGridView algorithm)
+/// Effect color lookup table for visually meaningful colors
+static NSDictionary<NSString *, NSNumber *> *sEffectColorMap = nil;
+
+static void XLInitEffectColorMap(void) {
+    if (sEffectColorMap) return;
+    sEffectColorMap = @{
+        // Fire/Heat effects - Red/Orange
+        @"Fire": @0xFFFF4400,
+        @"Fireworks": @0xFFFF6600,
+        @"Candle": @0xFFFF8800,
+        @"Meteors": @0xFFFF5500,
+
+        // Snow/Ice effects - White/Light Blue
+        @"Snowflakes": @0xFFE8F4FF,
+        @"Snowstorm": @0xFFD0E8FF,
+
+        // Water effects - Blue
+        @"Wave": @0xFF0088DD,
+        @"Liquid": @0xFF0066CC,
+        @"Ripple": @0xFF0099EE,
+
+        // Nature effects - Green
+        @"Tree": @0xFF228B22,
+        @"Life": @0xFF32CD32,
+        @"Garlands": @0xFF2E8B57,
+        @"Tendril": @0xFF3CB371,
+
+        // Light effects - Yellow/Warm White
+        @"On": @0xFFFFDD00,
+        @"Off": @0xFF444444,
+        @"Strobe": @0xFFFFFF88,
+        @"Shimmer": @0xFFFFEE66,
+        @"Twinkle": @0xFFFFDD88,
+
+        // Music/Audio effects - Purple/Magenta
+        @"Music": @0xFF9933FF,
+        @"VUMeter": @0xFFAA44FF,
+        @"Piano": @0xFF8844CC,
+        @"Guitar": @0xFF7733BB,
+        @"Arpeggio": @0xFFBB55DD,
+
+        // Shape/Pattern effects - Cyan/Teal
+        @"Bars": @0xFF00AACC,
+        @"Circles": @0xFF00BBDD,
+        @"Lines": @0xFF0099BB,
+        @"Marquee": @0xFF00CCEE,
+        @"Shape": @0xFF00AAAA,
+
+        // Motion/Transform effects - Orange
+        @"Spirals": @0xFFFF8800,
+        @"Spirograph": @0xFFFF9922,
+        @"Pinwheel": @0xFFFFAA44,
+        @"Warp": @0xFFEE7700,
+        @"Kaleidoscope": @0xFFFF7755,
+        @"Morph": @0xFFFF8866,
+        @"Fan": @0xFFFFBB66,
+
+        // Galaxy/Space effects - Deep Blue/Purple
+        @"Galaxy": @0xFF3333AA,
+        @"Plasma": @0xFF6644BB,
+        @"Shockwave": @0xFF5555CC,
+
+        // Color effects - Rainbow/Gradient
+        @"ColorWash": @0xFFFF66AA,
+        @"Butterfly": @0xFFFF88CC,
+        @"Fill": @0xFF66AAFF,
+
+        // Text/Picture effects - Neutral
+        @"Text": @0xFF888888,
+        @"Pictures": @0xFF779988,
+        @"Video": @0xFF667788,
+        @"Glediator": @0xFF778899,
+
+        // DMX/Control effects - Steel Blue
+        @"DMX": @0xFF4682B4,
+        @"Servo": @0xFF5588AA,
+        @"State": @0xFF6699BB,
+        @"MovingHead": @0xFF5599BB,
+
+        // Misc effects
+        @"Lightning": @0xFFFFFF00,
+        @"Curtain": @0xFFCC6699,
+        @"Faces": @0xFFFFCC99,
+        @"Duplicate": @0xFF888888,
+        @"Adjust": @0xFF999999,
+        @"Shader": @0xFF66CCAA,
+        @"Sketch": @0xFFBBBBBB,
+        @"SingleStrand": @0xFF77AACC,
+    };
+}
+
+/// Compute effect color from type name using lookup table with fallback to hash
 static uint32_t XLColorForEffectTypeName(NSString *effectTypeName) {
     if (!effectTypeName || effectTypeName.length == 0) {
         return 0xFF808080;  // Gray fallback
     }
 
+    // Initialize lookup table on first call
+    XLInitEffectColorMap();
+
+    // Check lookup table first
+    NSNumber *colorNum = sEffectColorMap[effectTypeName];
+    if (colorNum) {
+        return colorNum.unsignedIntValue;
+    }
+
+    // Fallback to hash-based color for unknown effects
     NSUInteger hash = XLSimpleStringHash(effectTypeName);
     CGFloat hue = (CGFloat)(hash % 360) / 360.0;
     return XLColorARGBFromHSB(hue, 0.7, 0.7);
+}
+
+/// Parse a hex color string (#RRGGBB or #AARRGGBB) to ARGB uint32
+static uint32_t XLParseHexColor(NSString *hexString) {
+    if (!hexString || hexString.length == 0) {
+        return 0xFF808080;  // Gray fallback
+    }
+
+    // Remove # prefix if present
+    if ([hexString hasPrefix:@"#"]) {
+        hexString = [hexString substringFromIndex:1];
+    }
+
+    unsigned int colorValue = 0;
+    NSScanner *scanner = [NSScanner scannerWithString:hexString];
+    [scanner scanHexInt:&colorValue];
+
+    // If only RGB (6 chars), add full alpha
+    if (hexString.length == 6) {
+        colorValue = 0xFF000000 | colorValue;
+    }
+
+    return (uint32_t)colorValue;
+}
+
+/// Extract the first palette color from a palette string
+/// Format: "C_BUTTON_Palette1=#FF0000,C_CHECKBOX_Palette1=1,..."
+static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
+    if (!paletteString || paletteString.length == 0) {
+        return nil;
+    }
+
+    // Split by comma
+    NSArray *pairs = [paletteString componentsSeparatedByString:@","];
+    for (NSString *pair in pairs) {
+        // Look for C_BUTTON_Palette1=
+        if ([pair hasPrefix:@"C_BUTTON_Palette1="]) {
+            NSString *value = [pair substringFromIndex:[@"C_BUTTON_Palette1=" length]];
+            // Unescape special characters
+            value = [value stringByReplacingOccurrencesOfString:@"&comma;" withString:@","];
+            value = [value stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
+            return value;
+        }
+    }
+    return nil;
 }
 
 @interface XLSequencerViewController () <XLTimelineRulerDelegate,
@@ -492,6 +638,9 @@ static uint32_t XLColorForEffectTypeName(NSString *effectTypeName) {
 
     // Load audio for the sequence
     [self loadAudioForSequence];
+
+    // Load saved zoom level for this sequence (if any)
+    [self loadZoomLevelForCurrentSequence];
 }
 
 - (void)updateViewsForSequenceChange {
@@ -680,7 +829,21 @@ static uint32_t XLColorForEffectTypeName(NSString *effectTypeName) {
 
                 // Store effect type name and compute color
                 NSString *effectTypeName = eff[@"effectType"];
-                entry->colorARGB = XLColorForEffectTypeName(effectTypeName);
+
+                // Special handling for "On" effect - use the actual palette color
+                if ([effectTypeName isEqualToString:@"On"]) {
+                    NSInteger effectId = [eff[@"id"] integerValue];
+                    NSString *paletteString = [self.engineBridge getEffectPalette:effectId];
+                    NSString *firstColor = XLExtractFirstPaletteColor(paletteString);
+                    if (firstColor && firstColor.length > 0) {
+                        entry->colorARGB = XLParseHexColor(firstColor);
+                    } else {
+                        entry->colorARGB = XLColorForEffectTypeName(effectTypeName);
+                    }
+                } else {
+                    entry->colorARGB = XLColorForEffectTypeName(effectTypeName);
+                }
+
                 if (effectTypeName) {
                     strncpy(entry->effectTypeName, [effectTypeName UTF8String], XL_EFFECT_TYPE_NAME_MAX - 1);
                     entry->effectTypeName[XL_EFFECT_TYPE_NAME_MAX - 1] = '\0';
@@ -1437,6 +1600,46 @@ static uint32_t XLColorForEffectTypeName(NSString *effectTypeName) {
     [self populateViewSelector];
 }
 
+#pragma mark - Zoom Level Persistence
+
+- (NSString *)zoomLevelKeyForCurrentSequence {
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        return nil;
+    }
+
+    NSDictionary *seqInfo = [self.engineBridge getSequenceInfo];
+    NSString *filePath = seqInfo[@"filePath"];
+    if (!filePath || filePath.length == 0) {
+        return nil;
+    }
+
+    // Create a stable key from the file path
+    // Use the file name + a hash of the full path for uniqueness
+    NSString *fileName = [filePath lastPathComponent];
+    NSUInteger pathHash = [filePath hash];
+    return [NSString stringWithFormat:@"XLSequencerZoom_%@_%lu", fileName, (unsigned long)pathHash];
+}
+
+- (void)saveZoomLevelForCurrentSequence {
+    NSString *key = [self zoomLevelKeyForCurrentSequence];
+    if (!key) return;
+
+    CGFloat zoomLevel = _scrollCoordinator.zoomLevel;
+    [[NSUserDefaults standardUserDefaults] setDouble:zoomLevel forKey:key];
+}
+
+- (void)loadZoomLevelForCurrentSequence {
+    NSString *key = [self zoomLevelKeyForCurrentSequence];
+    if (!key) return;
+
+    CGFloat savedZoom = [[NSUserDefaults standardUserDefaults] doubleForKey:key];
+    if (savedZoom > 0) {
+        // Apply the saved zoom level
+        [_scrollCoordinator setZoomLevel:savedZoom];
+        _transportBar.zoomLevel = savedZoom;
+    }
+}
+
 #pragma mark - XLWaveformViewDelegate
 
 - (void)waveformView:(XLWaveformView *)view didSeekToTimeMS:(CGFloat)timeMS {
@@ -1545,6 +1748,17 @@ static uint32_t XLColorForEffectTypeName(NSString *effectTypeName) {
     }
 
     [_scrollCoordinator setZoomLevel:zoomLevel centeredOnPointX:playheadPixelX];
+
+    // Save zoom level for the current sequence
+    [self saveZoomLevelForCurrentSequence];
+}
+
+- (void)transportBarDidRequestFitToWindow:(XLTransportBarView *)bar {
+    CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
+    [_scrollCoordinator zoomToFitSequenceLength:_sequenceDurationMS viewWidth:viewWidth];
+
+    // Save zoom level for the current sequence
+    [self saveZoomLevelForCurrentSequence];
 }
 
 #pragma mark - XLScrollCoordinatorDelegate
@@ -1572,6 +1786,9 @@ static uint32_t XLColorForEffectTypeName(NSString *effectTypeName) {
 
     // Keep transport bar zoom slider in sync
     _transportBar.zoomLevel = zoomLevel;
+
+    // Save zoom level for the current sequence
+    [self saveZoomLevelForCurrentSequence];
 }
 
 #pragma mark - XLPlaybackControllerDelegate

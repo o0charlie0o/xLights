@@ -39,6 +39,7 @@ static const CGFloat kZoomSliderWidth = 80.0;
 @property (nonatomic, strong) NSImageView *zoomOutIcon;
 @property (nonatomic, strong) NSSlider *zoomSlider;
 @property (nonatomic, strong) NSImageView *zoomInIcon;
+@property (nonatomic, strong) NSButton *fitToWindowButton;
 
 @end
 
@@ -214,6 +215,11 @@ static const CGFloat kZoomSliderWidth = 80.0;
     _zoomInIcon.contentTintColor = [NSColor secondaryLabelColor];
     [_zoomInIcon setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [self addSubview:_zoomInIcon];
+
+    // Fit to Window button
+    _fitToWindowButton = [self makeSymbolButton:@"arrow.left.and.right.righttriangle.left.righttriangle.right"
+                                    accessLabel:@"Fit to Window"
+                                         action:@selector(fitToWindowAction:)];
 }
 
 - (NSButton *)makeSymbolButton:(NSString *)symbolName
@@ -325,7 +331,13 @@ static const CGFloat kZoomSliderWidth = 80.0;
         [_zoomInIcon.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [_zoomInIcon.widthAnchor constraintEqualToConstant:16.0],
         [_zoomInIcon.heightAnchor constraintEqualToConstant:16.0],
-        [_zoomInIcon.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-kSectionSpacing],
+
+        // Fit to Window button after zoom controls
+        [_fitToWindowButton.leadingAnchor constraintEqualToAnchor:_zoomInIcon.trailingAnchor constant:kButtonSpacing],
+        [_fitToWindowButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_fitToWindowButton.widthAnchor constraintEqualToConstant:kButtonSize],
+        [_fitToWindowButton.heightAnchor constraintEqualToConstant:kButtonSize],
+        [_fitToWindowButton.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-kSectionSpacing],
     ]];
 }
 
@@ -548,6 +560,12 @@ static const CGFloat kZoomSliderWidth = 80.0;
 
     if ([_delegate respondsToSelector:@selector(transportBar:didChangeZoomLevel:)]) {
         [_delegate transportBar:self didChangeZoomLevel:_zoomLevel];
+    }
+}
+
+- (void)fitToWindowAction:(id)sender {
+    if ([_delegate respondsToSelector:@selector(transportBarDidRequestFitToWindow:)]) {
+        [_delegate transportBarDidRequestFitToWindow:self];
     }
 }
 
