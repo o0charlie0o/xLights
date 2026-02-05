@@ -1092,7 +1092,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     [_pixelDataLock lock];
     if (pixelData && pixelData.length > 0) {
-        _renderedPixelData[modelName] = [pixelData copy];
+        _renderedPixelData[modelName] = pixelData;
         _renderedPixelWidths[modelName] = @(width);
         _renderedPixelHeights[modelName] = @(height);
     } else {
@@ -1159,16 +1159,28 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    // Cmd+scroll = zoom (works with both trackpad and mouse)
+    if (event.modifierFlags & NSEventModifierFlagCommand) {
+        float delta = (float)event.scrollingDeltaY;
+        float sensitivity = event.hasPreciseScrollingDeltas ? 0.01f : 0.05f;
+        [_cameraController zoomByDelta:delta sensitivity:sensitivity];
+        _contentDirty = YES;
+        if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
+            [_delegate previewView:self didChangeCamera:_cameraController];
+        }
+        return;
+    }
+
     if (event.momentumPhase != NSEventPhaseNone && event.momentumPhase != NSEventPhaseBegan) {
-        // Two-finger pan from trackpad scrolling
+        // Two-finger pan from trackpad momentum scrolling
         float dx = (float)event.scrollingDeltaX;
         float dy = (float)event.scrollingDeltaY;
-        [_cameraController panByDeltaX:-dx deltaY:-dy sensitivity:0.003f];
+        [_cameraController panByDeltaX:dx deltaY:dy sensitivity:0.003f];
     } else if (event.hasPreciseScrollingDeltas) {
         // Trackpad two-finger scroll = pan
         float dx = (float)event.scrollingDeltaX;
         float dy = (float)event.scrollingDeltaY;
-        [_cameraController panByDeltaX:-dx deltaY:-dy sensitivity:0.003f];
+        [_cameraController panByDeltaX:dx deltaY:dy sensitivity:0.003f];
     } else {
         // Mouse scroll wheel = zoom
         float delta = (float)event.scrollingDeltaY;

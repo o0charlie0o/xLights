@@ -27,8 +27,10 @@
 @property (nonatomic, assign, readwrite) NSInteger positionMS;
 @property (nonatomic, assign, readwrite) NSInteger durationMS;
 @property (nonatomic, assign, readwrite) NSInteger frameTimeMS;
+@property (nonatomic, assign, readwrite) BOOL renderInProgress;
 
 @property (nonatomic, strong) dispatch_queue_t playbackQueue;
+@property (nonatomic, strong) dispatch_queue_t renderQueue;
 
 @end
 
@@ -54,6 +56,8 @@
         _loopRegionEndMS = -1;
 
         _playbackQueue = dispatch_queue_create("com.xlights.playback", DISPATCH_QUEUE_SERIAL);
+        _renderQueue = dispatch_queue_create("com.xlights.render", DISPATCH_QUEUE_SERIAL);
+        _renderInProgress = NO;
 
         // Create native audio player
         _audioPlayer = [[XLAudioPlayer alloc] init];
@@ -442,64 +446,77 @@
 }
 
 - (void)renderFrameAtTime:(NSInteger)timeMS {
-    // NOTE: This method is called for seek/scrub operations (user-initiated),
-    // NOT during playback. During playback, we read pre-rendered data from _seqData.
-    // This must run on the main thread because the C++ engine uses wxWidgets.
+    if (!_engineBridge) return;
 
-    if (!_engineBridge) {
-        return;
-    }
-
-    // Ensure we're on main thread for wxWidgets calls
-    if (![NSThread isMainThread]) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self renderFrameAtTime:timeMS];
-        });
-        return;
-    }
+    // Drop frame if a background render is already in progress
+    if (_renderInProgress) return;
 
     // Clamp time to valid range
     if (timeMS < 0) timeMS = 0;
     if (_durationMS > 0 && timeMS > _durationMS) timeMS = _durationMS;
 
-    // Request the engine to render this frame
-    @try {
-        [_engineBridge renderFrame:timeMS];
+    _renderInProgress = YES;
 
-        // Get rendered pixel data for each model and update the preview
-        if (_previewView) {
-            NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
-            if (modelNames && modelNames.count > 0) {
-                for (NSString *modelName in modelNames) {
-                    if (!modelName || modelName.length == 0) continue;
+    XLEngineBridge *bridge = _engineBridge;
+    __weak typeof(self) weakSelf = self;
 
-                    NSDictionary *frameBuffer = [_engineBridge getFrameBuffer:modelName];
-                    if (frameBuffer) {
-                        NSData *pixels = frameBuffer[@"pixels"];
-                        NSUInteger width = [frameBuffer[@"width"] unsignedIntegerValue];
-                        NSUInteger height = [frameBuffer[@"height"] unsignedIntegerValue];
+    dispatch_async(_renderQueue, ^{
+        @try {
+            // FSEQ read + buffer building happens off the main thread
+            [bridge renderFrame:timeMS];
 
-                        if (pixels && pixels.length > 0 && width > 0 && height > 0) {
-                            [_previewView setRenderedPixels:pixels
-                                                   forModel:modelName
-                                                      width:width
-                                                     height:height];
-                        }
-                    }
+            // Collect all model frame buffers while still on background thread
+            NSArray<NSString *> *modelNames = [bridge getModelNamesExcludingGroups];
+            NSMutableArray<NSDictionary *> *frameUpdates = [NSMutableArray new];
+
+            for (NSString *modelName in modelNames) {
+                if (!modelName || modelName.length == 0) continue;
+
+                NSDictionary *frameBuffer = [bridge getFrameBuffer:modelName];
+                if (frameBuffer) {
+                    [frameUpdates addObject:frameBuffer];
                 }
             }
 
-            [_previewView updatePreviewForTime:timeMS];
-        }
-    } @catch (NSException *exception) {
-        NSLog(@"XLPlaybackController: Exception rendering frame at %ldms: %@ - %@",
-              (long)timeMS, exception.name, exception.reason);
-    }
+            // Switch to main thread only for the lightweight UI update
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (!strongSelf) return;
 
-    // Notify delegate
-    if ([_delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {
-        [_delegate playbackController:self didRenderFrameAtMS:timeMS];
-    }
+                if (strongSelf->_previewView && frameUpdates.count > 0) {
+                    for (NSDictionary *fb in frameUpdates) {
+                        NSData *pixels = fb[@"pixels"];
+                        NSUInteger width = [fb[@"width"] unsignedIntegerValue];
+                        NSUInteger height = [fb[@"height"] unsignedIntegerValue];
+                        NSString *name = fb[@"modelName"];
+
+                        if (pixels && pixels.length > 0 && width > 0 && height > 0) {
+                            [strongSelf->_previewView setRenderedPixels:pixels
+                                                               forModel:name
+                                                                  width:width
+                                                                 height:height];
+                        }
+                    }
+
+                    [strongSelf->_previewView updatePreviewForTime:timeMS];
+                }
+
+                strongSelf.renderInProgress = NO;
+
+                // Notify delegate
+                if ([strongSelf.delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {
+                    [strongSelf.delegate playbackController:strongSelf didRenderFrameAtMS:timeMS];
+                }
+            });
+        } @catch (NSException *exception) {
+            NSLog(@"XLPlaybackController: Exception rendering frame at %ldms: %@ - %@",
+                  (long)timeMS, exception.name, exception.reason);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (strongSelf) strongSelf.renderInProgress = NO;
+            });
+        }
+    });
 }
 
 #pragma mark - XLAudioPlayerDelegate

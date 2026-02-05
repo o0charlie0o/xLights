@@ -147,4 +147,8 @@
 /// @param timeMS Time position in milliseconds.
 - (void)renderFrameAtTime:(NSInteger)timeMS;
 
+/// Whether a background render is currently in progress.
+/// When YES, new render requests are dropped to prevent queue buildup.
+@property (nonatomic, readonly) BOOL renderInProgress;
+
 @end
