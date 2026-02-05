@@ -1163,7 +1163,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (event.modifierFlags & NSEventModifierFlagCommand) {
         float delta = (float)event.scrollingDeltaY;
         float sensitivity = event.hasPreciseScrollingDeltas ? 0.01f : 0.05f;
-        [_cameraController zoomByDelta:delta sensitivity:sensitivity];
+        [_cameraController zoomByDelta:-delta sensitivity:sensitivity];
         _contentDirty = YES;
         if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
             [_delegate previewView:self didChangeCamera:_cameraController];

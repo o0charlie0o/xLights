@@ -184,6 +184,19 @@ void XLSetCommandPaletteVisible(bool visible) {
     }
 }
 
+- (IBAction)togglePreview:(id)sender {
+    // Find the main window controller and forward to its sequencer view controller.
+    // This acts as a responder chain fallback when no view has first responder status.
+    for (NSWindow *window in [NSApp windows]) {
+        NSWindowController *wc = window.windowController;
+        if ([wc isKindOfClass:[XLMainWindowController class]]) {
+            XLMainWindowController *mainController = (XLMainWindowController *)wc;
+            [mainController.sequencerViewController toggleHousePreview];
+            return;
+        }
+    }
+}
+
 #pragma mark - Private Helpers
 
 - (void)loadShowFolderPath:(NSString *)path {
