@@ -89,6 +89,10 @@
 /// Seek to the end of the sequence.
 - (void)seekToEnd:(id)sender;
 
+#pragma mark - House Preview
+/// Toggle the floating house preview window.
+- (void)toggleHousePreview;
+
 /// Whether real sequence data is currently loaded (vs demo data).
 @property (nonatomic, readonly) BOOL isUsingRealData;
 

@@ -11,6 +11,7 @@
 #import "XLModelImportSheet.h"
 #import "../XLEngineBridge.h"
 #import <objc/runtime.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 // File type constants - using C strings to avoid heap issues
 static const char * const kXModelExtension = "xmodel";

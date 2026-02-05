@@ -68,6 +68,7 @@ enum class ElementType { ELEMENT_TYPE_TIMING, ELEMENT_TYPE_MODEL, ELEMENT_TYPE_S
 #include <vector>
 #include <map>
 #include <memory>
+#include <set>
 
 // Static singleton instance for standalone mode
 static XLEngineBridge *_sharedBridge = nil;
@@ -99,6 +100,9 @@ static XLEngineBridge *_sharedBridge = nil;
     BOOL _standaloneMode;       // YES = using native providers, NO = using xLightsFrame
     BOOL _legacySupportEnabled; // YES = will fall back to xLightsFrame if available
     std::string _showFolderPath;
+
+    // --- Native Mode View Selection ---
+    NSInteger _currentViewIndex;  // 0 = Master View, 1+ = custom views
 }
 
 #pragma mark - Lifecycle
@@ -177,10 +181,16 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 #endif
 
-    // If we have a show folder loaded, initialize in standalone mode
+    // Initialize in standalone mode
+    // In native build, always initialize providers (show folder is optional)
+    // In legacy build, only initialize if we have a show folder
+#ifdef XLIGHTS_NATIVE
+    [self initializeStandaloneProviders];
+#else
     if (!_showFolderPath.empty()) {
         [self initializeStandaloneProviders];
     }
+#endif
 }
 
 - (void)initializeStandaloneProviders {
@@ -193,6 +203,21 @@ static XLEngineBridge *_sharedBridge = nil;
         _nativeOutputProvider = std::make_unique<xlEngine::NativeOutputProvider>();
         _nativeEffectProvider = std::make_unique<xlEngine::NativeEffectProvider>();
         _nativeRenderProvider = std::make_unique<xlEngine::NativeRenderProvider>();
+
+        // Populate effect types for the native provider
+        // This list matches the known xLights effect types
+        std::vector<std::string> effectTypes = {
+            "Adjust", "Arpeggio", "Bars", "Butterfly", "Candle", "Circles",
+            "ColorWash", "Curtain", "DMX", "Duplicate", "Faces", "Fan",
+            "Fill", "Fire", "Fireworks", "Galaxy", "Garlands", "Glediator",
+            "Guitar", "Kaleidoscope", "Life", "Lightning", "Lines", "Liquid",
+            "Marquee", "Meteors", "Morph", "MovingHead", "Music", "Off", "On",
+            "Piano", "Pictures", "Pinwheel", "Plasma", "Ripple", "Servo",
+            "Shader", "Shape", "Shimmer", "Shockwave", "SingleStrand", "Sketch",
+            "Snowflakes", "Snowstorm", "Spirals", "Spirograph", "State", "Strobe",
+            "Tendril", "Text", "Tree", "Twinkle", "Video", "VUMeter", "Warp", "Wave"
+        };
+        _nativeEffectProvider->setEffectTypes(effectTypes);
 
         // Load data from show folder
         if (!_showFolderPath.empty()) {
@@ -209,6 +234,10 @@ static XLEngineBridge *_sharedBridge = nil;
         _outputEngine = std::make_unique<xlEngine::OutputEngine>(_nativeOutputProvider.get());
         _effectEngine = std::make_unique<xlEngine::EffectEngine>(_nativeEffectProvider.get());
         _renderEngine = std::make_unique<xlEngine::RenderEngine>(_nativeRenderProvider.get());
+
+        // Give RenderEngine access to model and output providers for FSEQ rendering
+        _renderEngine->setModelProvider(_nativeModelProvider.get());
+        _renderEngine->setOutputProvider(_nativeOutputProvider.get());
 
         _standaloneMode = YES;
         _engineInitialized = YES;
@@ -306,6 +335,12 @@ static XLEngineBridge *_sharedBridge = nil;
         std::string stdPath = [path UTF8String];
         bool result = _sequenceEngine->loadSequence(stdPath);
         NSLog(@"XLEngineBridge: loadSequence(%@) = %s", path, result ? "YES" : "NO");
+
+        if (result) {
+            // Try to load the corresponding FSEQ file for playback rendering
+            [self loadFSEQForSequence:path];
+        }
+
         return result ? YES : NO;
     } @catch (NSException *exception) {
         NSLog(@"XLEngineBridge: Exception loading sequence '%@': %@ - %@",
@@ -355,9 +390,62 @@ static XLEngineBridge *_sharedBridge = nil;
         return NO;
     }
 
+    // Close any loaded FSEQ file
+    if (_renderEngine) {
+        _renderEngine->closeFSEQ();
+    }
+
     bool result = _sequenceEngine->closeSequence();
     NSLog(@"XLEngineBridge: closeSequence() = %s", result ? "YES" : "NO");
     return result ? YES : NO;
+}
+
+- (void)loadFSEQForSequence:(NSString *)sequencePath {
+    if (!_renderEngine || !sequencePath) return;
+
+    // Derive FSEQ path from sequence path: replace .xLights extension with .fseq
+    NSString *fseqPath = nil;
+    NSString *ext = [sequencePath pathExtension];
+
+    if ([ext caseInsensitiveCompare:@"xLights"] == NSOrderedSame ||
+        [ext caseInsensitiveCompare:@"xml"] == NSOrderedSame) {
+        fseqPath = [[sequencePath stringByDeletingPathExtension] stringByAppendingPathExtension:@"fseq"];
+    } else {
+        // Try appending .fseq to the base name
+        fseqPath = [sequencePath stringByAppendingString:@".fseq"];
+    }
+
+    // Check if the FSEQ file exists
+    if (![[NSFileManager defaultManager] fileExistsAtPath:fseqPath]) {
+        // Also try in the show folder
+        if (!_showFolderPath.empty()) {
+            NSString *filename = [[sequencePath lastPathComponent] stringByDeletingPathExtension];
+            NSString *altPath = [NSString stringWithFormat:@"%s/%@.fseq",
+                                 _showFolderPath.c_str(), filename];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:altPath]) {
+                fseqPath = altPath;
+            } else {
+                NSLog(@"XLEngineBridge: No FSEQ file found for sequence: %@", sequencePath);
+                NSLog(@"XLEngineBridge: Tried: %@ and %@", fseqPath, altPath);
+                return;
+            }
+        } else {
+            NSLog(@"XLEngineBridge: No FSEQ file found at: %@", fseqPath);
+            return;
+        }
+    }
+
+    std::string stdFseqPath = [fseqPath UTF8String];
+    bool loaded = _renderEngine->loadFSEQ(stdFseqPath);
+
+    if (loaded) {
+        int numFrames = _renderEngine->getNumFrames();
+        int stepTime = _renderEngine->getFrameTimeMS();
+        NSLog(@"XLEngineBridge: Loaded FSEQ file: %@ (%d frames, %dms step time)",
+              fseqPath, numFrames, stepTime);
+    } else {
+        NSLog(@"XLEngineBridge: Failed to load FSEQ file: %@", fseqPath);
+    }
 }
 
 - (BOOL)isSequenceLoaded {
@@ -1737,8 +1825,23 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
 #ifdef XLIGHTS_NATIVE
-    // Native mode - return default for now
-    return @[@"Master View"];
+    // Native mode - get views from NativeModelProvider
+    if (!_nativeModelProvider) {
+        return @[@"Master View"];
+    }
+
+    NSMutableArray<NSString *> *viewNames = [NSMutableArray array];
+    auto names = _nativeModelProvider->getViewNames();
+    for (const auto& name : names) {
+        [viewNames addObject:[NSString stringWithUTF8String:name.c_str()]];
+    }
+
+    // Ensure at least Master View exists
+    if (viewNames.count == 0) {
+        [viewNames addObject:@"Master View"];
+    }
+
+    return [viewNames copy];
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[@"Master View"];
@@ -1772,6 +1875,13 @@ static XLEngineBridge *_sharedBridge = nil;
         return @"Master View";
     }
 #ifdef XLIGHTS_NATIVE
+    // Native mode - return selected view name
+    if (_nativeModelProvider) {
+        auto viewNames = _nativeModelProvider->getViewNames();
+        if ((size_t)_currentViewIndex < viewNames.size()) {
+            return [NSString stringWithUTF8String:viewNames[_currentViewIndex].c_str()];
+        }
+    }
     return @"Master View";
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
@@ -1793,7 +1903,8 @@ static XLEngineBridge *_sharedBridge = nil;
         return 0;
     }
 #ifdef XLIGHTS_NATIVE
-    return 0;
+    // Native mode - return stored view index
+    return _currentViewIndex;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return 0;
@@ -1810,6 +1921,20 @@ static XLEngineBridge *_sharedBridge = nil;
         return NO;
     }
 #ifdef XLIGHTS_NATIVE
+    // Native mode - store view selection and find the view index
+    if (!_nativeModelProvider) return NO;
+
+    std::string stdViewName = [viewName UTF8String];
+    auto viewNames = _nativeModelProvider->getViewNames();
+
+    // Find the view index
+    for (size_t i = 0; i < viewNames.size(); i++) {
+        if (viewNames[i] == stdViewName) {
+            _currentViewIndex = (NSInteger)i;
+            NSLog(@"XLEngineBridge: Set current view to '%s' (index %zu)", stdViewName.c_str(), i);
+            return YES;
+        }
+    }
     return NO;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
@@ -1840,7 +1965,19 @@ static XLEngineBridge *_sharedBridge = nil;
         return NO;
     }
 #ifdef XLIGHTS_NATIVE
-    return NO;
+    // Native mode - validate and store view index
+    if (!_nativeModelProvider) return NO;
+
+    size_t viewCount = _nativeModelProvider->getViewCount();
+    if (viewIndex < 0 || (size_t)viewIndex >= viewCount) return NO;
+
+    _currentViewIndex = viewIndex;
+    auto viewNames = _nativeModelProvider->getViewNames();
+    if ((size_t)viewIndex < viewNames.size()) {
+        NSLog(@"XLEngineBridge: Set current view index to %ld ('%s')",
+              (long)viewIndex, viewNames[viewIndex].c_str());
+    }
+    return YES;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
@@ -1967,7 +2104,68 @@ static XLEngineBridge *_sharedBridge = nil;
         return @[];
     }
 #ifdef XLIGHTS_NATIVE
-    return @[];  // Native mode stub
+    // Get elements from native sequence provider
+    if (!_nativeSequenceProvider) {
+        return @[];
+    }
+
+    const auto& elements = _nativeSequenceProvider->getElements();
+
+    // Get models for current view (if not Master View)
+    std::set<std::string> viewModels;
+    bool filterByView = false;
+    if (_currentViewIndex > 0 && _nativeModelProvider) {
+        auto viewInfo = _nativeModelProvider->getViewAtIndex((size_t)_currentViewIndex);
+        for (const auto& modelName : viewInfo.models) {
+            viewModels.insert(modelName);
+        }
+        filterByView = !viewModels.empty();
+    }
+
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:elements.size()];
+
+    for (size_t i = 0; i < elements.size(); i++) {
+        const auto& elem = elements[i];
+
+        // Filter by view if not Master View
+        if (filterByView && elem.type != "timing") {
+            if (viewModels.find(elem.name) == viewModels.end()) {
+                continue; // Skip elements not in view
+            }
+        }
+
+        // Determine type string
+        NSString* typeString = @"model";
+        if (elem.type == "timing") {
+            typeString = @"timing";
+        }
+
+        // Count total effects across all layers
+        NSInteger effectCount = 0;
+        for (const auto& layer : elem.layers) {
+            effectCount += layer.effects.size();
+        }
+
+        NSDictionary* info = @{
+            @"index": @(i),
+            @"name": [NSString stringWithUTF8String:elem.name.c_str()],
+            @"type": typeString,
+            @"effectLayerCount": @(elem.layers.size()),
+            @"effectCount": @(effectCount),
+            @"visible": @(elem.visible),
+            @"collapsed": @(elem.collapsed),
+            @"isGroup": @NO,
+            @"hasSubmodels": @NO,
+            @"hasStrands": @NO,
+            @"submodelCount": @0,
+            @"strandCount": @0,
+        };
+        [result addObject:info];
+    }
+
+    NSLog(@"XLEngineBridge: getSequenceElements returning %lu elements (view index %ld)",
+          (unsigned long)result.count, (long)_currentViewIndex);
+    return result;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
@@ -1995,7 +2193,42 @@ static XLEngineBridge *_sharedBridge = nil;
         return @[];
     }
 #ifdef XLIGHTS_NATIVE
-    return @[];  // Native mode stub
+    // Get effects from native sequence provider
+    if (!_nativeSequenceProvider) {
+        return @[];
+    }
+
+    const auto& elements = _nativeSequenceProvider->getElements();
+    if (index < 0 || (size_t)index >= elements.size()) {
+        NSLog(@"getEffectsForElementAtIndex: index %ld out of range (size=%zu)", (long)index, elements.size());
+        return @[];
+    }
+
+    const auto& elem = elements[index];
+    NSLog(@"getEffectsForElementAtIndex: index=%ld element='%s' layer=%ld/%zu",
+          (long)index, elem.name.c_str(), (long)layer, elem.layers.size());
+    if (layer < 0 || (size_t)layer >= elem.layers.size()) {
+        return @[];
+    }
+
+    const auto& effectLayer = elem.layers[layer];
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:effectLayer.effects.size()];
+
+    for (size_t i = 0; i < effectLayer.effects.size(); i++) {
+        const auto& eff = effectLayer.effects[i];
+        [result addObject:@{
+            @"id": @(i),
+            @"effectType": [NSString stringWithUTF8String:eff.name.c_str()],
+            @"effectIndex": @(eff.effectIndex),
+            @"startTimeMS": @(eff.startTimeMS),
+            @"endTimeMS": @(eff.endTimeMS),
+            @"paletteIndex": @(eff.paletteIndex),
+            @"selected": @NO,
+            @"protected": @NO,
+        }];
+    }
+
+    return result;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];

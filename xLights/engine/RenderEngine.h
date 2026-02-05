@@ -40,9 +40,12 @@
 #include <memory>
 
 #include "interfaces/IRenderProvider.h"
+#include "interfaces/IModelProvider.h"
+#include "interfaces/IOutputProvider.h"
 
 class xLightsFrame;
 class PixelBufferClass;
+class FSEQFile;
 
 namespace xlEngine {
 
@@ -299,6 +302,26 @@ public:
     // Get the total number of frames in the current sequence.
     int getNumFrames() const;
 
+#ifdef XLIGHTS_NATIVE
+    // --- FSEQ Playback (Native Build Only) ---
+
+    // Set the model provider for accessing model data during FSEQ rendering.
+    void setModelProvider(IModelProvider* provider);
+
+    // Set the output provider for resolving controller channel mappings.
+    void setOutputProvider(IOutputProvider* provider);
+
+    // Load an FSEQ file for playback rendering.
+    // Returns true if the file was loaded and channel mappings were resolved.
+    bool loadFSEQ(const std::string& fseqPath);
+
+    // Close the currently loaded FSEQ file and release resources.
+    void closeFSEQ();
+
+    // Check if an FSEQ file is loaded.
+    bool isFSEQLoaded() const;
+#endif
+
 private:
     // Notification helpers
     void notifyModelFrameRendered(const std::string& modelName, int timeMS);
@@ -313,7 +336,35 @@ private:
 
     IRenderProvider* _provider; // render provider interface
 
-#ifndef XLIGHTS_NATIVE
+#ifdef XLIGHTS_NATIVE
+    // --- FSEQ Playback State (Native Build) ---
+    IModelProvider* _modelProvider = nullptr;
+    IOutputProvider* _outputProvider = nullptr;
+
+    std::unique_ptr<FSEQFile> _fseqFile;
+    std::vector<uint8_t> _currentFrameData;
+    int _currentFrameIndex = -1;
+    bool _fseqLoaded = false;
+
+    // Cached channel info per model for FSEQ rendering
+    struct ModelChannelInfo {
+        uint32_t absStartChannel = 0;  // 0-based absolute channel in FSEQ data
+        uint32_t nodeCount = 0;
+        uint32_t chansPerNode = 3;     // default RGB
+        int bufferWidth = 0;
+        int bufferHeight = 0;
+        std::vector<std::pair<int,int>> nodeBufCoords; // (bufX, bufY) per node
+    };
+    std::map<std::string, ModelChannelInfo> _modelChannelMap;
+
+    // Controller name → absolute start channel (1-based, from xlights_networks.xml)
+    std::map<std::string, int32_t> _controllerStartChannels;
+
+    // Channel resolution helpers
+    void buildModelChannelMap();
+    void buildControllerChannelMap();
+    uint32_t resolveStartChannel(const std::string& startChannelStr);
+#else
     // Owned adapter when constructed with xLightsFrame* (legacy mode)
     std::unique_ptr<class RenderContextAdapter> _ownedAdapter;
 

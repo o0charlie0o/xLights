@@ -171,6 +171,32 @@ std::vector<std::string> NativeModelProvider::getSubmodels(const std::string& mo
     return result;
 }
 
+bool NativeModelProvider::hasModel(const std::string& name) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    if (_externalManager) {
+        return _externalManager->GetModel(name) != nullptr;
+    }
+
+    if (_models.find(name) != _models.end()) {
+        return true;
+    }
+
+    // Fallback: check name list (for standalone XML-loaded models)
+    return std::find(_modelNames.begin(), _modelNames.end(), name) != _modelNames.end();
+}
+
+std::map<std::string, std::string> NativeModelProvider::getModelAttributes(const std::string& name) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _modelAttributes.find(name);
+    if (it != _modelAttributes.end()) {
+        return it->second;
+    }
+    return {};
+}
+
 // MARK: - Native Model Loading
 
 bool NativeModelProvider::loadModelsFromShowFolder(const std::string& showFolderPath)
@@ -440,7 +466,7 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
         return false;
     }
 
-    // Parse XML to extract model names only
+    // Parse XML to extract model names and attributes
     NSError* error = nil;
     NSString* content = [NSString stringWithContentsOfFile:filePath
                                                   encoding:NSUTF8StringEncoding
@@ -456,26 +482,97 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
 
     std::lock_guard<std::mutex> lock(_mutex);
     _modelNames.clear();
+    _modelAttributes.clear();
     for (NSXMLElement* elem in modelElements) {
         NSXMLNode* nameAttr = [elem attributeForName:@"name"];
         if (nameAttr && nameAttr.stringValue) {
-            _modelNames.push_back([nameAttr.stringValue UTF8String]);
+            std::string name = [nameAttr.stringValue UTF8String];
+            _modelNames.push_back(name);
+
+            // Store all XML attributes for this model
+            std::map<std::string, std::string> attrs;
+            for (NSXMLNode* attr in [elem attributes]) {
+                if (attr.name && attr.stringValue) {
+                    attrs[[attr.name UTF8String]] = [attr.stringValue UTF8String];
+                }
+            }
+            _modelAttributes[name] = std::move(attrs);
         }
     }
 
-    NSLog(@"NativeModelProvider: Loaded %zu model names from XML", _modelNames.size());
+    // Parse views
+    parseViewsFromXML([content UTF8String]);
+
+    NSLog(@"NativeModelProvider: Loaded %zu models with attributes from XML", _modelNames.size());
     return true;
+}
+
+bool NativeModelProvider::hasModel(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _modelAttributes.find(name) != _modelAttributes.end();
+}
+
+std::map<std::string, std::string> NativeModelProvider::getModelAttributes(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _modelAttributes.find(name);
+    if (it != _modelAttributes.end()) {
+        return it->second;
+    }
+    return {};
 }
 
 void NativeModelProvider::clearModels() {
     std::lock_guard<std::mutex> lock(_mutex);
     _modelNames.clear();
+    _modelAttributes.clear();
+    _views.clear();
     _showFolderPath.clear();
 }
 
 std::string NativeModelProvider::getShowFolderPath() const {
     std::lock_guard<std::mutex> lock(_mutex);
     return _showFolderPath;
+}
+
+std::vector<std::string> NativeModelProvider::getViewNames() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::vector<std::string> names;
+    names.reserve(_views.size() + 1);
+    names.push_back("Master View");  // Always include Master View first
+    for (const auto& view : _views) {
+        names.push_back(view.name);
+    }
+    return names;
+}
+
+SequenceViewInfo NativeModelProvider::getView(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const auto& view : _views) {
+        if (view.name == name) {
+            return view;
+        }
+    }
+    return SequenceViewInfo{};
+}
+
+size_t NativeModelProvider::getViewCount() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _views.size() + 1;  // +1 for Master View
+}
+
+SequenceViewInfo NativeModelProvider::getViewAtIndex(size_t index) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (index == 0) {
+        // Return empty Master View (all models)
+        SequenceViewInfo masterView;
+        masterView.name = "Master View";
+        masterView.models = _modelNames;
+        return masterView;
+    }
+    if (index - 1 >= _views.size()) {
+        return SequenceViewInfo{};
+    }
+    return _views[index - 1];
 }
 
 bool NativeModelProvider::addModel(std::unique_ptr<Model> model) {
@@ -496,6 +593,59 @@ void NativeModelProvider::rebuildModelNamesList() {
 
 bool NativeModelProvider::parseModelsFromXML(const std::string& xmlContent) {
     return false; // Use loadModelsFromFile instead
+}
+
+void NativeModelProvider::parseViewsFromXML(const std::string& xmlContent) {
+    // Parse views from xlights_rgbeffects.xml
+    // Views are stored as: <views><view name="Groups" models="Model1,Model2,..."/></views>
+
+    if (xmlContent.empty()) {
+        return;
+    }
+
+    NSData* xmlData = [NSData dataWithBytes:xmlContent.c_str() length:xmlContent.size()];
+    NSError* error = nil;
+    NSXMLDocument* xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (error || !xmlDoc) {
+        NSLog(@"NativeModelProvider: Failed to parse XML for views: %@", error.localizedDescription);
+        return;
+    }
+
+    // Find views element - try XPath first
+    NSArray<NSXMLElement*>* viewElements = [xmlDoc.rootElement nodesForXPath:@"//views/view" error:&error];
+    if (error) {
+        NSLog(@"NativeModelProvider: XPath error for views: %@", error.localizedDescription);
+        return;
+    }
+
+    // Clear existing views (but keep _views as the internal storage)
+    _views.clear();
+
+    for (NSXMLElement* viewElem in viewElements) {
+        NSXMLNode* nameAttr = [viewElem attributeForName:@"name"];
+        NSXMLNode* modelsAttr = [viewElem attributeForName:@"models"];
+
+        if (nameAttr && nameAttr.stringValue) {
+            SequenceViewInfo viewInfo;
+            viewInfo.name = [nameAttr.stringValue UTF8String];
+
+            // Parse models attribute (comma-separated list)
+            if (modelsAttr && modelsAttr.stringValue && [modelsAttr.stringValue length] > 0) {
+                NSArray<NSString*>* modelNames = [modelsAttr.stringValue componentsSeparatedByString:@","];
+                for (NSString* modelName in modelNames) {
+                    NSString* trimmedName = [modelName stringByTrimmingCharactersInSet:
+                                            [NSCharacterSet whitespaceCharacterSet]];
+                    if (trimmedName.length > 0) {
+                        viewInfo.models.push_back([trimmedName UTF8String]);
+                    }
+                }
+            }
+
+            _views.push_back(viewInfo);
+        }
+    }
+
+    NSLog(@"NativeModelProvider: Loaded %zu views from XML", _views.size());
 }
 
 } // namespace xlEngine

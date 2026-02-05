@@ -48,6 +48,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 @interface XLMetalPreviewView () {
     CVDisplayLinkRef _displayLink;
+    int _renderLogCount;
 }
 
 @property (nonatomic, strong) id<MTLDevice> device;
@@ -121,10 +122,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)commonInit {
-    self.wantsLayer = YES;
-
+    // Create the Metal device BEFORE setting wantsLayer, because wantsLayer = YES
+    // triggers makeBackingLayer synchronously, which needs _device for the CAMetalLayer.
     _device = MTLCreateSystemDefaultDevice();
     _queue = [_device newCommandQueue];
+
+    self.wantsLayer = YES;
+
     _sampleCount = kDefaultMSAASampleCount;
 
     _cameraController = [[XLCameraController alloc] init];
@@ -308,6 +312,65 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (!_gridPipelineState) {
         NSLog(@"XLMetalPreviewView: Failed to create grid pipeline: %@", error);
     }
+
+    // Build a separate pipeline for model points with controllable point size
+    NSString *modelShaderSource = @
+        "#include <metal_stdlib>\n"
+        "using namespace metal;\n"
+        "\n"
+        "struct ModelVertex {\n"
+        "    float3 position [[attribute(0)]];\n"
+        "    float4 color    [[attribute(1)]];\n"
+        "};\n"
+        "\n"
+        "struct ModelUniforms {\n"
+        "    float4x4 viewProjection;\n"
+        "    float pointSize;\n"
+        "};\n"
+        "\n"
+        "struct ModelOut {\n"
+        "    float4 position [[position]];\n"
+        "    float pointSize [[point_size]];\n"
+        "    float4 color;\n"
+        "};\n"
+        "\n"
+        "vertex ModelOut modelVertexShader(\n"
+        "    ModelVertex in [[stage_in]],\n"
+        "    constant ModelUniforms &uniforms [[buffer(1)]]) {\n"
+        "    ModelOut out;\n"
+        "    out.position = uniforms.viewProjection * float4(in.position, 1.0);\n"
+        "    out.pointSize = uniforms.pointSize;\n"
+        "    out.color = in.color;\n"
+        "    return out;\n"
+        "}\n"
+        "\n"
+        "fragment float4 modelFragmentShader(ModelOut in [[stage_in]]) {\n"
+        "    return in.color;\n"
+        "}\n";
+
+    id<MTLLibrary> modelLib = [_device newLibraryWithSource:modelShaderSource options:nil error:&error];
+    if (!modelLib) {
+        NSLog(@"XLMetalPreviewView: Failed to compile model shaders: %@", error);
+        return;
+    }
+
+    MTLRenderPipelineDescriptor *modelPipeDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    modelPipeDesc.vertexFunction = [modelLib newFunctionWithName:@"modelVertexShader"];
+    modelPipeDesc.fragmentFunction = [modelLib newFunctionWithName:@"modelFragmentShader"];
+    modelPipeDesc.vertexDescriptor = vertexDesc; // Same vertex layout
+    modelPipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    modelPipeDesc.colorAttachments[0].blendingEnabled = YES;
+    modelPipeDesc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    modelPipeDesc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    modelPipeDesc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    modelPipeDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    modelPipeDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    modelPipeDesc.sampleCount = _sampleCount;
+
+    _modelPipelineState = [_device newRenderPipelineStateWithDescriptor:modelPipeDesc error:&error];
+    if (!_modelPipelineState) {
+        NSLog(@"XLMetalPreviewView: Failed to create model pipeline: %@", error);
+    }
 }
 
 - (void)buildGridVertices {
@@ -450,7 +513,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (!shouldRender) return;
 
     _needsRenderFlag = NO;
-    _contentDirty = NO;
+    // Don't clear _contentDirty here — renderFrame clears it after a successful render.
+    // This ensures we retry if nextDrawable returns nil (e.g. window not yet visible).
 
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     NSTimeInterval dt = now - _lastFrameTime;
@@ -501,9 +565,25 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)renderFrame {
     @autoreleasepool {
         id<CAMetalDrawable> drawable = [_mlayer nextDrawable];
-        if (!drawable) return;
+        if (!drawable) {
+            if (_renderLogCount < 5) {
+                NSLog(@"[HousePreview] renderFrame: NO drawable! mlayer=%@ device=%@ drawableSize=%@",
+                      _mlayer, _mlayer.device, NSStringFromSize(NSSizeFromCGSize(_mlayer.drawableSize)));
+                _renderLogCount++;
+            }
+            return;
+        }
+
+        // Successfully got a drawable — clear the content dirty flag
+        _contentDirty = NO;
 
         CGSize drawableSize = _mlayer.drawableSize;
+        if (_renderLogCount < 5) {
+            NSLog(@"[HousePreview] renderFrame: drawable OK, size=%.0fx%.0f, modelVertexCount=%lu, gridVertexCount=%lu",
+                  drawableSize.width, drawableSize.height,
+                  (unsigned long)_modelVertexCount, (unsigned long)_gridVertexCount);
+            _renderLogCount++;
+        }
         [self ensureTexturesForSize:drawableSize];
 
         if (!_msaaTexture || !_depthTexture) return;
@@ -560,11 +640,20 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
 
         // Render model nodes as points
-        if (_modelVertexBuffer && _modelVertexCount > 0 && _gridPipelineState) {
+        if (_modelVertexBuffer && _modelVertexCount > 0 && _modelPipelineState) {
             [encoder pushDebugGroup:@"Models"];
-            [encoder setRenderPipelineState:_gridPipelineState];
+            [encoder setRenderPipelineState:_modelPipelineState];
             [encoder setVertexBuffer:_modelVertexBuffer offset:0 atIndex:0];
-            [encoder setVertexBytes:&viewProjection length:sizeof(simd_float4x4) atIndex:1];
+
+            // Pack viewProjection + pointSize into uniforms buffer
+            struct {
+                simd_float4x4 viewProjection;
+                float pointSize;
+            } modelUniforms;
+            modelUniforms.viewProjection = viewProjection;
+            modelUniforms.pointSize = 2.0f;
+            [encoder setVertexBytes:&modelUniforms length:sizeof(modelUniforms) atIndex:1];
+
             [encoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:_modelVertexCount];
             [encoder popDebugGroup];
         }
@@ -657,11 +746,18 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         bbMax.z = fmaxf(bbMax.z, maxZ);
     }
 
+    NSLog(@"[HousePreview] frameAllModels: hasModels=%d, modelDataCache.count=%lu",
+          hasModels, (unsigned long)_modelDataCache.count);
+
     if (!hasModels) {
         // Default scene volume if no models
         bbMin = (simd_float3){-500.0f, 0.0f, -500.0f};
         bbMax = (simd_float3){500.0f, 500.0f, 500.0f};
     }
+
+    NSLog(@"[HousePreview] frameAllModels: bb=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f) drawableSize=%.0fx%.0f",
+          bbMin.x, bbMin.y, bbMin.z, bbMax.x, bbMax.y, bbMax.z,
+          _mlayer.drawableSize.width, _mlayer.drawableSize.height);
 
     float aspect = (float)_mlayer.drawableSize.width / (float)_mlayer.drawableSize.height;
     [_cameraController frameBoundingBoxMin:bbMin max:bbMax aspect:aspect];
@@ -674,7 +770,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)reloadModels {
+    NSLog(@"[HousePreview] reloadModels: engineBridge=%@, view.frame=%@",
+          _engineBridge, NSStringFromRect(self.frame));
+
     if (!_engineBridge) {
+        NSLog(@"[HousePreview] reloadModels: NO engine bridge — clearing models");
         _modelDataCache = @[];
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
@@ -685,10 +785,25 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // Get all model names and their node data
     NSMutableArray<NSDictionary *> *modelData = [[NSMutableArray alloc] init];
     NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
+    NSLog(@"[HousePreview] reloadModels: got %lu model names",
+          (unsigned long)modelNames.count);
 
+    NSUInteger skippedCount = 0;
     for (NSString *modelName in modelNames) {
         NSDictionary *info = [_engineBridge getModelInfo:modelName];
-        if (!info) continue;
+        if (!info) {
+            skippedCount++;
+            continue;
+        }
+
+        // Filter by LayoutGroup: only show models in "Default" or "All Previews"
+        NSString *layoutGroup = info[@"LayoutGroup"];
+        if (layoutGroup && layoutGroup.length > 0 &&
+            ![layoutGroup isEqualToString:@"Default"] &&
+            ![layoutGroup isEqualToString:@"All Previews"]) {
+            skippedCount++;
+            continue;
+        }
 
         NSArray<NSDictionary *> *nodes = [_engineBridge getModelNodes:modelName];
         NSDictionary *bounds = [_engineBridge getModelBounds:modelName];
@@ -704,7 +819,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     _modelDataCache = [modelData copy];
+    NSLog(@"[HousePreview] reloadModels: cached %lu models (%lu skipped — no info), building vertices...",
+          (unsigned long)_modelDataCache.count, (unsigned long)skippedCount);
     [self buildModelVertices];
+    NSLog(@"[HousePreview] reloadModels: done — modelVertexCount=%lu",
+          (unsigned long)_modelVertexCount);
     _contentDirty = YES;
 }
 

@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLControllerModelWindow.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat kWindowWidth = 1200.0;
 static const CGFloat kWindowHeight = 800.0;

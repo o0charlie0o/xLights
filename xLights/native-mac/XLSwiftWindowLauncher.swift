@@ -22,6 +22,9 @@ let XLSequenceDataDidChangeNotification = NSNotification.Name("XLSequenceDataDid
 /// nonisolated(unsafe) because it's only set/accessed from main thread
 nonisolated(unsafe) private var sSwiftEngineBridge: XLEngineBridge?
 
+/// Global reference to the app state for ObjC access (for inspector toggle, etc.)
+nonisolated(unsafe) private var sSwiftAppState: XLAppState?
+
 @MainActor
 final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
 
@@ -29,8 +32,9 @@ final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
 
     init() {
         appState = XLAppState()
-        // Store engine bridge in global for ObjC access
+        // Store engine bridge and app state in globals for ObjC access
         sSwiftEngineBridge = appState.engineBridge
+        sSwiftAppState = appState
 
         // Create window with standard macOS chrome
         let window = NSWindow(
@@ -186,5 +190,33 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
     @objc public func notifySequenceDataChanged() {
         NSLog("XLSwiftUIWindowHelper.notifySequenceDataChanged: posting notification")
         NotificationCenter.default.post(name: XLSequenceDataDidChangeNotification, object: nil)
+    }
+
+    /// Toggle the inspector panel visibility.
+    @objc public func toggleInspector() {
+        DispatchQueue.main.async {
+            guard let appState = sSwiftAppState else {
+                NSLog("XLSwiftUIWindowHelper.toggleInspector: no app state available")
+                return
+            }
+            let wasVisible = appState.inspectorVisible
+            appState.inspectorVisible.toggle()
+            NSLog("XLSwiftUIWindowHelper.toggleInspector: %d -> %d", wasVisible, appState.inspectorVisible)
+        }
+    }
+
+    /// Get the current inspector visibility state.
+    @objc public var isInspectorVisible: Bool {
+        return sSwiftAppState?.inspectorVisible ?? false
+    }
+
+    /// Toggle the house preview window via the sequencer view controller.
+    @objc public func toggleHousePreview() {
+        DispatchQueue.main.async {
+            // Send the togglePreview: action through the responder chain.
+            // XLSequencerViewController implements togglePreview: which forwards to toggleHousePreview.
+            let sel = NSSelectorFromString("togglePreview:")
+            NSApp.sendAction(sel, to: nil, from: nil)
+        }
     }
 }

@@ -10,6 +10,7 @@
 
 #import "XLSequenceDialogs.h"
 #import "../XLEngineBridge.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat kLabelWidth = 120.0;
 

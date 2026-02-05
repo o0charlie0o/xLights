@@ -36,6 +36,7 @@ static const CGFloat kMaxPlaybackRate = 4.0;
 @property (nonatomic, assign) NSTimeInterval lastKnownHostTime;
 @property (nonatomic, assign) AVAudioFramePosition scheduledStartFrame;
 @property (nonatomic, assign) BOOL isScheduled;
+@property (nonatomic, assign) NSUInteger scheduleGeneration;  // Detects stale completion handlers
 
 @end
 
@@ -68,6 +69,7 @@ static const CGFloat kMaxPlaybackRate = 4.0;
         _lastKnownHostTime = 0;
         _scheduledStartFrame = 0;
         _isScheduled = NO;
+        _scheduleGeneration = 0;
 
         _timerQueue = dispatch_queue_create("org.xlights.audioplayer.timer", DISPATCH_QUEUE_SERIAL);
 
@@ -257,6 +259,7 @@ static const CGFloat kMaxPlaybackRate = 4.0;
 }
 
 - (void)stop {
+    _scheduleGeneration++;  // Invalidate any pending completion handlers
     [_playerNode stop];
     _lastKnownFrame = 0;
     _isScheduled = NO;
@@ -289,6 +292,7 @@ static const CGFloat kMaxPlaybackRate = 4.0;
     BOOL wasPlaying = (_playbackState == XLAudioPlaybackStatePlaying);
 
     if (wasPlaying) {
+        _scheduleGeneration++;  // Invalidate old completion handler before stopping
         [_playerNode stop];
     }
 
@@ -362,6 +366,7 @@ static const CGFloat kMaxPlaybackRate = 4.0;
 
     _scheduledStartFrame = startFrame;
     _isScheduled = YES;
+    NSUInteger currentGeneration = _scheduleGeneration;
 
     __weak typeof(self) weakSelf = self;
     [_playerNode scheduleBuffer:segmentBuffer
@@ -370,7 +375,10 @@ static const CGFloat kMaxPlaybackRate = 4.0;
               completionHandler:^{
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (strongSelf && strongSelf.playbackState == XLAudioPlaybackStatePlaying) {
+            if (!strongSelf) return;
+            // Ignore stale completion handlers from previous play/stop cycles
+            if (strongSelf.scheduleGeneration != currentGeneration) return;
+            if (strongSelf.playbackState == XLAudioPlaybackStatePlaying) {
                 [strongSelf handlePlaybackEnd];
             }
         });
@@ -471,9 +479,13 @@ static const CGFloat kMaxPlaybackRate = 4.0;
 
 - (void)notifyPositionUpdate {
     CGFloat positionMS = self.currentPositionMS;
+    NSUInteger currentGeneration = _scheduleGeneration;
 
     if ([_delegate respondsToSelector:@selector(audioPlayer:didUpdatePosition:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            // Discard stale updates queued before stop was called
+            if (self.scheduleGeneration != currentGeneration) return;
+            if (self.playbackState != XLAudioPlaybackStatePlaying) return;
             [self.delegate audioPlayer:self didUpdatePosition:positionMS];
         });
     }

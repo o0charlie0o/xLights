@@ -393,7 +393,7 @@ static const CGFloat kLabelWidth = 140.0;
 @interface XLRenameDialog ()
 
 @property (nonatomic, strong) NSTextField *nameField;
-@property (nonatomic, copy, readwrite) NSString *newName;
+@property (nonatomic, copy, readwrite) NSString *enteredName;
 
 @end
 
@@ -460,7 +460,7 @@ static const CGFloat kLabelWidth = 140.0;
 }
 
 - (void)okClicked:(id)sender {
-    _newName = _nameField.stringValue;
+    _enteredName = _nameField.stringValue;
     [super okClicked:sender];
 }
 

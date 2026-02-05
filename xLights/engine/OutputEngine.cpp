@@ -43,11 +43,100 @@ void OutputEngine::initialize(IOutputProvider* provider) {
     _initialized = (provider != nullptr);
 }
 
-std::vector<ControllerConfig> OutputEngine::getControllers() const { return {}; }
-ControllerConfig OutputEngine::getController(const std::string& name) const { return {}; }
-bool OutputEngine::controllerExists(const std::string& name) const { return false; }
-int OutputEngine::getControllerCount() const { return 0; }
-std::vector<std::string> OutputEngine::getControllerNames() const { return {}; }
+std::vector<ControllerConfig> OutputEngine::getControllers() const {
+    if (!_provider) return {};
+    std::vector<ControllerConfig> result;
+    size_t count = _provider->getControllerCount();
+    for (size_t i = 0; i < count; ++i) {
+        auto info = _provider->getController(i);
+        if (info) {
+            ControllerConfig cfg;
+            cfg.name = info->name;
+            cfg.ip = info->ip;
+            cfg.description = info->description;
+            cfg.vendor = info->vendor;
+            cfg.model = info->model;
+            cfg.variant = info->variant;
+            cfg.protocol = info->protocol;
+            cfg.channels = info->channels;
+            cfg.startChannel = info->startChannel;
+            cfg.endChannel = info->endChannel;
+            cfg.outputCount = info->outputCount;
+            cfg.commPort = info->commPort;
+            cfg.active = info->active ? ActiveState::Active : ActiveState::Inactive;
+            cfg.autoLayout = info->autoLayout;
+            cfg.autoSize = info->autoSize;
+            cfg.managed = info->managed;
+            // Map controller type
+            switch (info->type) {
+                case OutputControllerType::Ethernet:
+                    cfg.type = ControllerType::Ethernet;
+                    break;
+                case OutputControllerType::Serial:
+                    cfg.type = ControllerType::Serial;
+                    break;
+                case OutputControllerType::Null:
+                default:
+                    cfg.type = ControllerType::Null;
+                    break;
+            }
+            result.push_back(cfg);
+        }
+    }
+    return result;
+}
+
+ControllerConfig OutputEngine::getController(const std::string& name) const {
+    if (!_provider) return {};
+    auto info = _provider->getControllerByName(name);
+    if (!info) return {};
+    ControllerConfig cfg;
+    cfg.name = info->name;
+    cfg.ip = info->ip;
+    cfg.description = info->description;
+    cfg.vendor = info->vendor;
+    cfg.model = info->model;
+    cfg.variant = info->variant;
+    cfg.protocol = info->protocol;
+    cfg.channels = info->channels;
+    cfg.startChannel = info->startChannel;
+    cfg.endChannel = info->endChannel;
+    cfg.outputCount = info->outputCount;
+    cfg.commPort = info->commPort;
+    cfg.active = info->active ? ActiveState::Active : ActiveState::Inactive;
+    cfg.autoLayout = info->autoLayout;
+    cfg.autoSize = info->autoSize;
+    cfg.managed = info->managed;
+    // Map controller type
+    switch (info->type) {
+        case OutputControllerType::Ethernet:
+            cfg.type = ControllerType::Ethernet;
+            break;
+        case OutputControllerType::Serial:
+            cfg.type = ControllerType::Serial;
+            break;
+        case OutputControllerType::Null:
+        default:
+            cfg.type = ControllerType::Null;
+            break;
+    }
+    return cfg;
+}
+
+bool OutputEngine::controllerExists(const std::string& name) const {
+    if (!_provider) return false;
+    return _provider->getControllerByName(name).has_value();
+}
+
+int OutputEngine::getControllerCount() const {
+    if (!_provider) return 0;
+    return static_cast<int>(_provider->getControllerCount());
+}
+
+std::vector<std::string> OutputEngine::getControllerNames() const {
+    if (!_provider) return {};
+    return _provider->getControllerNames();
+}
 OperationResult OutputEngine::addController(const ControllerConfig& config) { return {false, "Native build: not implemented"}; }
 OperationResult OutputEngine::removeController(const std::string& name) { return {false, "Native build: not implemented"}; }
 OperationResult OutputEngine::updateController(const std::string& name, const ControllerConfig& config) { return {false, "Native build: not implemented"}; }

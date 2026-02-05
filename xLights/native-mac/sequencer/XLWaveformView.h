@@ -28,6 +28,16 @@
 /// Called when the zoom level changes (e.g. from pinch gesture).
 - (void)waveformView:(XLWaveformView *)view didChangeZoomLevel:(CGFloat)zoomLevel centeredOnPointX:(CGFloat)pointX;
 
+/// Called when the user drags to select a loop region on the waveform.
+- (void)waveformView:(XLWaveformView *)view didSelectLoopRegionFromTimeMS:(CGFloat)startMS toTimeMS:(CGFloat)endMS;
+
+/// Called when the loop region is cleared (click or Escape).
+- (void)waveformViewDidClearLoopRegion:(XLWaveformView *)view;
+
+/// Forward a key event to the delegate for handling via key bindings.
+/// Return YES if the delegate handled the event, NO to pass it up the responder chain.
+- (BOOL)waveformView:(XLWaveformView *)view shouldHandleKeyEvent:(NSEvent *)event;
+
 @end
 
 /// CALayer-backed waveform display view for the native macOS sequencer.
@@ -65,12 +75,24 @@
 /// Waveform fill color. If nil, defaults to a classic green.
 @property (nonatomic, strong) NSColor *waveformColor;
 
+/// Loop region start in milliseconds (-1 = no region).
+@property (nonatomic, assign) CGFloat loopRegionStartMS;
+
+/// Loop region end in milliseconds (-1 = no region).
+@property (nonatomic, assign) CGFloat loopRegionEndMS;
+
+/// Whether a valid loop region is currently set.
+@property (nonatomic, readonly) BOOL hasLoopRegion;
+
 /// Load audio sample data for display.
 /// Generates the internal waveform overview used for rendering.
 - (void)loadAudioData:(XLAudioSampleData *)audioData;
 
 /// Clear the waveform display and release cached overview data.
 - (void)clearWaveform;
+
+/// Clear the loop region selection.
+- (void)clearLoopRegion;
 
 /// Force a redraw on the next display cycle.
 - (void)setNeedsDisplay;

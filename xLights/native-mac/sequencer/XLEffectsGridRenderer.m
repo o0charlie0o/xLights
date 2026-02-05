@@ -100,6 +100,7 @@ typedef struct {
 // Single-buffered (small data, updated infrequently, less contention)
 @property (nonatomic, strong) id<MTLBuffer> playbackBuffer;
 @property (nonatomic, strong) id<MTLBuffer> dropIndicatorBuffer;
+@property (nonatomic, strong) id<MTLBuffer> rubberBandBuffer;
 
 @end
 
@@ -191,6 +192,11 @@ typedef struct {
     _dropIndicatorBuffer = [_device newBufferWithLength:6 * sizeof(RoundedRectVertex)
                                                 options:MTLResourceStorageModeShared];
     [_dropIndicatorBuffer setLabel:@"DropIndicatorBuffer"];
+
+    // Rubber band selection buffer (6 vertices for fill + up to 512 for dashed border)
+    _rubberBandBuffer = [_device newBufferWithLength:520 * sizeof(SimpleVertex)
+                                             options:MTLResourceStorageModeShared];
+    [_rubberBandBuffer setLabel:@"RubberBandBuffer"];
 }
 
 - (BOOL)buildPipelines {
@@ -485,6 +491,8 @@ typedef struct {
             dropRow:(NSInteger)dropRow
         dropStartMS:(CGFloat)dropStartMS
           dropEndMS:(CGFloat)dropEndMS
+   rubberBandActive:(BOOL)rubberBandActive
+     rubberBandRect:(NSRect)rubberBandRect
 {
     // Wait for a buffer slot to become available (blocks if all 3 are in-flight).
     // This prevents CPU from writing to a buffer the GPU is still reading.
@@ -556,6 +564,11 @@ typedef struct {
     if (showDropIndicator && dropRow >= 0) {
         [self drawDropIndicatorWithEncoder:encoder uniforms:uniforms params:fp
                                        row:dropRow startMS:dropStartMS endMS:dropEndMS];
+    }
+
+    // Draw rubber band selection rectangle
+    if (rubberBandActive) {
+        [self drawRubberBandWithEncoder:encoder uniforms:uniforms params:fp rect:rubberBandRect];
     }
 
     [self drawPlaybackIndicatorWithEncoder:encoder uniforms:uniforms params:fp];
@@ -852,6 +865,77 @@ typedef struct {
     [encoder setVertexBuffer:_dropIndicatorBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+}
+
+#pragma mark - Rubber Band Selection
+
+- (void)drawRubberBandWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                         uniforms:(EffectsGridUniforms)uniforms
+                           params:(XLGridFrameParams)fp
+                             rect:(NSRect)rect
+{
+    if (!_rubberBandBuffer) return;
+    if (rect.size.width < 1 && rect.size.height < 1) return;
+
+    CGFloat x1 = rect.origin.x;
+    CGFloat y1 = rect.origin.y;
+    CGFloat x2 = rect.origin.x + rect.size.width;
+    CGFloat y2 = rect.origin.y + rect.size.height;
+
+    // Normalize coordinates (handle negative size from drag direction)
+    if (x1 > x2) { CGFloat t = x1; x1 = x2; x2 = t; }
+    if (y1 > y2) { CGFloat t = y1; y1 = y2; y2 = t; }
+
+    // White dashed border only (no fill)
+    simd_float4 borderColor = simd_make_float4(1.0, 1.0, 1.0, 0.8);
+
+    SimpleVertex *vptr = (SimpleVertex *)_rubberBandBuffer.contents;
+    NSUInteger vertexIndex = 0;
+
+    // Dashed border - draw alternating segments
+    CGFloat dashLength = 4.0;
+    CGFloat gapLength = 4.0;
+    CGFloat patternLength = dashLength + gapLength;
+
+    // Top edge (left to right)
+    CGFloat edgeLength = x2 - x1;
+    for (CGFloat pos = 0; pos < edgeLength && vertexIndex + 2 <= 520; pos += patternLength) {
+        CGFloat dashEnd = MIN(pos + dashLength, edgeLength);
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x1 + pos, y1), borderColor };
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x1 + dashEnd, y1), borderColor };
+    }
+
+    // Right edge (top to bottom)
+    edgeLength = y2 - y1;
+    for (CGFloat pos = 0; pos < edgeLength && vertexIndex + 2 <= 520; pos += patternLength) {
+        CGFloat dashEnd = MIN(pos + dashLength, edgeLength);
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x2, y1 + pos), borderColor };
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x2, y1 + dashEnd), borderColor };
+    }
+
+    // Bottom edge (right to left)
+    edgeLength = x2 - x1;
+    for (CGFloat pos = 0; pos < edgeLength && vertexIndex + 2 <= 520; pos += patternLength) {
+        CGFloat dashEnd = MIN(pos + dashLength, edgeLength);
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x2 - pos, y2), borderColor };
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x2 - dashEnd, y2), borderColor };
+    }
+
+    // Left edge (bottom to top)
+    edgeLength = y2 - y1;
+    for (CGFloat pos = 0; pos < edgeLength && vertexIndex + 2 <= 520; pos += patternLength) {
+        CGFloat dashEnd = MIN(pos + dashLength, edgeLength);
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x1, y2 - pos), borderColor };
+        vptr[vertexIndex++] = (SimpleVertex){ simd_make_float2(x1, y2 - dashEnd), borderColor };
+    }
+
+    // Draw dashed border only
+    if (vertexIndex > 0) {
+        [encoder setRenderPipelineState:_linePipeline];
+        [encoder setVertexBuffer:_rubberBandBuffer offset:0 atIndex:0];
+        [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexIndex];
+    }
 }
 
 #pragma mark - Playback Indicator

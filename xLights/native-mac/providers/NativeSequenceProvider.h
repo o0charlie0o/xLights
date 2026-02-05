@@ -49,9 +49,11 @@
 #ifdef __OBJC__
 @class XLAudioPlayer;
 @class NSXMLDocument;
+@class NSXMLElement;
 @class NSTimer;
 #else
 typedef void* id;
+typedef void* NSXMLElement;
 #endif
 
 namespace xlEngine {
@@ -81,6 +83,30 @@ struct NativeSequenceMetadata {
         if (frameMS <= 0) return 20.0;
         return 1000.0 / frameMS;
     }
+};
+
+/// An effect within a sequence element layer.
+struct NativeSequenceEffect {
+    std::string name;                // Effect type name (e.g., "On", "Bars", "Fire")
+    int startTimeMS = 0;             // Start time in milliseconds
+    int endTimeMS = 0;               // End time in milliseconds
+    int paletteIndex = 0;            // Index into color palettes
+    int effectIndex = 0;             // Index into effect definitions
+    std::string settings;            // Effect settings string
+};
+
+/// A layer within a sequence element (model/timing track).
+struct NativeSequenceLayer {
+    std::vector<NativeSequenceEffect> effects;
+};
+
+/// A sequence element (model or timing track).
+struct NativeSequenceElement {
+    std::string name;                // Element name (model or timing track name)
+    std::string type;                // "model" or "timing"
+    bool visible = true;
+    bool collapsed = false;
+    std::vector<NativeSequenceLayer> layers;
 };
 
 /// Native macOS implementation of ISequenceProvider.
@@ -184,6 +210,14 @@ public:
     /// @return true if audio is available and loaded.
     bool hasAudioMedia() const;
 
+    /// Get all sequence elements (models and timing tracks).
+    /// @return Vector of sequence elements with their effects.
+    const std::vector<NativeSequenceElement>& getElements() const;
+
+    /// Get element count.
+    /// @return Number of elements in the sequence.
+    size_t getElementCount() const;
+
     /// Callback type for frame tick notifications during playback.
     /// The callback receives the current position in seconds.
     using FrameTickCallback = std::function<void(double positionSeconds)>;
@@ -198,6 +232,10 @@ private:
     // Sequence metadata
     NativeSequenceMetadata _metadata;
     std::atomic<bool> _sequenceLoaded{false};
+
+    // Sequence elements (models and timing tracks with their effects)
+    std::vector<NativeSequenceElement> _elements;
+    mutable std::mutex _elementsMutex;
 
     // Playback state
     std::atomic<PlaybackState> _playbackState{PlaybackState::Stopped};
@@ -226,6 +264,7 @@ private:
 
     // Private methods
     bool parseSequenceXML(const std::string& filePath);
+    void parseElementEffects(NSXMLElement* root);
     std::string resolveMediaPath(const std::string& mediaFile);
     void loadAudioMedia(const std::string& mediaPath);
     void unloadAudioMedia();

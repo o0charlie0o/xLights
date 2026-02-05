@@ -10,6 +10,10 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifdef __cplusplus
+#include <string>
+#endif
+
 // XLDocumentBridge: C++ interface for integrating XLDocument with xLightsFrame.
 //
 // This header provides a C++ API that the existing wxWidgets code can use
@@ -20,6 +24,8 @@
 // Usage from xLightsFrame:
 //   XLDocumentBridge::setCurrentDocument(frame, document);
 //   XLDocumentBridge::updateDocumentDirtyState(frame, isDirty);
+
+#ifdef __cplusplus
 
 #ifdef __OBJC__
 @class XLDocument;
@@ -62,3 +68,5 @@ public:
     /// Close the current document.
     static void closeDocument(xLightsFrame* frame);
 };
+
+#endif // __cplusplus

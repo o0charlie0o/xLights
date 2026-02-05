@@ -21,6 +21,9 @@
 #include "../models/Model.h"
 #include "../sequencer/SequenceElements.h"
 #include "../SequenceData.h"
+#else
+#include "../FSEQFile.h"
+#include "ModelEngine.h"
 #endif
 
 #include <algorithm>
@@ -28,8 +31,16 @@
 namespace xlEngine {
 
 #ifdef XLIGHTS_NATIVE
-// Native build: stub implementation
-// The native build uses NativeRenderProvider instead of the legacy adapter
+// Native build: FSEQ-based rendering implementation
+// Reads pre-rendered channel data from FSEQ files and maps to model pixels.
+
+// Helper to parse StartChannel strings
+static std::string trimString(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
 
 RenderEngine::RenderEngine(IRenderProvider* provider)
     : _provider(provider)
@@ -38,6 +49,7 @@ RenderEngine::RenderEngine(IRenderProvider* provider)
 
 RenderEngine::~RenderEngine()
 {
+    closeFSEQ();
     std::lock_guard<std::mutex> lock(_listenerMutex);
     _listeners.clear();
 }
@@ -59,22 +71,374 @@ void RenderEngine::removeListener(RenderEngineListener* listener)
         _listeners.end());
 }
 
-void RenderEngine::renderFrame(int timeMS) {}
-void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS) {}
-void RenderEngine::renderAll(RenderCompleteCallback callback) { if (callback) callback(false); }
-void RenderEngine::renderRange(int startMS, int endMS, bool clear, RenderCompleteCallback callback) { if (callback) callback(false); }
+// --- FSEQ Provider Setters ---
+
+void RenderEngine::setModelProvider(IModelProvider* provider)
+{
+    _modelProvider = provider;
+}
+
+void RenderEngine::setOutputProvider(IOutputProvider* provider)
+{
+    _outputProvider = provider;
+}
+
+// --- FSEQ Loading ---
+
+bool RenderEngine::loadFSEQ(const std::string& fseqPath)
+{
+    closeFSEQ();
+
+    _fseqFile.reset(FSEQFile::openFSEQFile(fseqPath));
+    if (!_fseqFile) {
+        return false;
+    }
+
+    // Prepare for reading all channels
+    _fseqFile->prepareRead({});
+
+    // Build controller channel map for resolving !ControllerName:offset references
+    buildControllerChannelMap();
+
+    // Build model-to-channel mapping
+    buildModelChannelMap();
+
+    _fseqLoaded = true;
+    _currentFrameIndex = -1;
+    _currentFrameData.clear();
+
+    return true;
+}
+
+void RenderEngine::closeFSEQ()
+{
+    _fseqFile.reset();
+    _fseqLoaded = false;
+    _currentFrameIndex = -1;
+    _currentFrameData.clear();
+    _modelChannelMap.clear();
+    _controllerStartChannels.clear();
+
+    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+    _bufferCache.clear();
+}
+
+bool RenderEngine::isFSEQLoaded() const
+{
+    return _fseqLoaded;
+}
+
+// --- Controller Channel Map ---
+
+void RenderEngine::buildControllerChannelMap()
+{
+    _controllerStartChannels.clear();
+    if (!_outputProvider) return;
+
+    size_t count = _outputProvider->getControllerCount();
+    for (size_t i = 0; i < count; i++) {
+        auto info = _outputProvider->getController(i);
+        if (info.has_value() && !info->name.empty() && info->startChannel > 0) {
+            _controllerStartChannels[info->name] = info->startChannel;
+        }
+    }
+}
+
+// --- StartChannel Resolution ---
+
+uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
+{
+    std::string sc = trimString(startChannelStr);
+    if (sc.empty()) return 0;
+
+    // Format 1: Plain number (e.g., "124123") - 1-based
+    if (sc[0] >= '0' && sc[0] <= '9') {
+        try {
+            int ch = std::stoi(sc);
+            return (ch > 0) ? static_cast<uint32_t>(ch - 1) : 0;
+        } catch (...) {
+            return 0;
+        }
+    }
+
+    // Format 2: Controller reference (e.g., "!FPP-Chance:1")
+    if (sc[0] == '!' && sc.size() > 1) {
+        size_t colonPos = sc.find(':');
+        if (colonPos != std::string::npos) {
+            std::string controllerName = sc.substr(1, colonPos - 1);
+            std::string offsetStr = sc.substr(colonPos + 1);
+            int offset = 1;
+            try { offset = std::stoi(offsetStr); } catch (...) {}
+
+            auto it = _controllerStartChannels.find(controllerName);
+            if (it != _controllerStartChannels.end()) {
+                // Controller startChannel is 1-based, offset is 1-based
+                // Absolute channel = controllerStart + offset - 1 (still 1-based)
+                // Convert to 0-based: subtract 1 more
+                int32_t absChannel = it->second + offset - 2;
+                return (absChannel >= 0) ? static_cast<uint32_t>(absChannel) : 0;
+            }
+        }
+        return 0;
+    }
+
+    // Format 3: Model reference (e.g., ">ModelName:1")
+    if (sc[0] == '>' && sc.size() > 1 && _modelProvider) {
+        size_t colonPos = sc.find(':');
+        if (colonPos != std::string::npos) {
+            std::string refModelName = sc.substr(1, colonPos - 1);
+            std::string offsetStr = sc.substr(colonPos + 1);
+            int offset = 1;
+            try { offset = std::stoi(offsetStr); } catch (...) {}
+
+            // Look up the referenced model's StartChannel and resolve recursively
+            auto refAttrs = _modelProvider->getModelAttributes(refModelName);
+            auto refIt = refAttrs.find("StartChannel");
+            if (refIt != refAttrs.end()) {
+                uint32_t refStart = resolveStartChannel(refIt->second);
+                // Offset is 1-based relative to the referenced model's start
+                return refStart + static_cast<uint32_t>(offset - 1);
+            }
+        }
+        return 0;
+    }
+
+    return 0;
+}
+
+// --- Model Channel Map ---
+
+void RenderEngine::buildModelChannelMap()
+{
+    _modelChannelMap.clear();
+    if (!_modelProvider) return;
+
+    auto modelNames = _modelProvider->getModelNames();
+    // Use a temporary ModelEngine to get node data
+    ModelEngine tempEngine(_modelProvider);
+
+    for (const auto& name : modelNames) {
+        auto attrs = _modelProvider->getModelAttributes(name);
+        if (attrs.empty()) continue;
+
+        // Skip groups
+        auto displayAs = attrs.find("DisplayAs");
+        if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+
+        // Get StartChannel
+        auto scIt = attrs.find("StartChannel");
+        if (scIt == attrs.end() || scIt->second.empty()) continue;
+
+        uint32_t absStart = resolveStartChannel(scIt->second);
+
+        // Get node data for buffer mapping
+        auto nodes = tempEngine.getModelNodes(name);
+        if (nodes.empty()) continue;
+
+        // Determine channels per node from StringType
+        uint32_t chansPerNode = 3; // default RGB
+        auto stIt = attrs.find("StringType");
+        if (stIt != attrs.end()) {
+            const std::string& st = stIt->second;
+            if (st.find("4 Channel") != std::string::npos ||
+                st.find("RGBW") != std::string::npos) {
+                chansPerNode = 4;
+            } else if (st.find("Single Color") != std::string::npos) {
+                chansPerNode = 1;
+            }
+        }
+
+        // Calculate buffer dimensions from node coordinates
+        int maxBufX = 0, maxBufY = 0;
+        for (const auto& node : nodes) {
+            if (node.bufX > maxBufX) maxBufX = node.bufX;
+            if (node.bufY > maxBufY) maxBufY = node.bufY;
+        }
+
+        ModelChannelInfo info;
+        info.absStartChannel = absStart;
+        info.nodeCount = static_cast<uint32_t>(nodes.size());
+        info.chansPerNode = chansPerNode;
+        info.bufferWidth = maxBufX + 1;
+        info.bufferHeight = maxBufY + 1;
+
+        info.nodeBufCoords.reserve(nodes.size());
+        for (const auto& node : nodes) {
+            info.nodeBufCoords.push_back({node.bufX, node.bufY});
+        }
+
+        _modelChannelMap[name] = std::move(info);
+    }
+}
+
+// --- Frame Rendering ---
+
+void RenderEngine::renderFrame(int timeMS)
+{
+    if (!_fseqLoaded || !_fseqFile) return;
+
+    int stepTime = _fseqFile->getStepTime();
+    if (stepTime <= 0) stepTime = 50;
+
+    int frameIndex = timeMS / stepTime;
+    if (frameIndex < 0) frameIndex = 0;
+    int numFrames = static_cast<int>(_fseqFile->getNumFrames());
+    if (numFrames > 0 && frameIndex >= numFrames) {
+        frameIndex = numFrames - 1;
+    }
+
+    // Skip if we already have this frame cached
+    if (frameIndex == _currentFrameIndex) return;
+
+    // Read frame data from FSEQ
+    FSEQFile::FrameData* fd = _fseqFile->getFrame(static_cast<uint32_t>(frameIndex));
+    if (!fd) return;
+
+    uint32_t maxCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
+    _currentFrameData.resize(maxCh, 0);
+    fd->readFrame(_currentFrameData.data(), maxCh);
+    delete fd;
+    _currentFrameIndex = frameIndex;
+
+    // Build FrameBuffers for all mapped models
+    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+    _bufferCache.clear();
+
+    for (const auto& [modelName, chInfo] : _modelChannelMap) {
+        if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+
+        FrameBuffer fb;
+        fb.modelName = modelName;
+        fb.width = chInfo.bufferWidth;
+        fb.height = chInfo.bufferHeight;
+        fb.timeMS = timeMS;
+        fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+        // Map each node's channel data to the pixel buffer
+        for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+            uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+            if (nodeChannel + 2 >= static_cast<uint32_t>(_currentFrameData.size())) continue;
+
+            uint8_t r = _currentFrameData[nodeChannel];
+            uint8_t g = _currentFrameData[nodeChannel + 1];
+            uint8_t b = _currentFrameData[nodeChannel + 2];
+
+            int bx = chInfo.nodeBufCoords[i].first;
+            int by = chInfo.nodeBufCoords[i].second;
+            if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+            size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+            fb.pixels[idx]     = r;
+            fb.pixels[idx + 1] = g;
+            fb.pixels[idx + 2] = b;
+            fb.pixels[idx + 3] = 255;
+        }
+
+        _bufferCache[modelName] = std::move(fb);
+    }
+
+    notifyFrameRendered(timeMS);
+}
+
+void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
+{
+    // For FSEQ playback, just render the full frame (it's fast)
+    renderFrame(timeMS);
+}
+
+void RenderEngine::renderAll(RenderCompleteCallback callback)
+{
+    // No-op for FSEQ playback (data is already pre-rendered in the file)
+    if (callback) callback(false);
+}
+
+void RenderEngine::renderRange(int startMS, int endMS, bool clear, RenderCompleteCallback callback)
+{
+    if (callback) callback(false);
+}
+
 void RenderEngine::renderModelRange(const std::string& modelName, int startMS, int endMS, bool clear) {}
 bool RenderEngine::abortRender(int timeoutMS) { return true; }
-FrameBuffer RenderEngine::getFrameBuffer(const std::string& modelName) const { return {}; }
-std::vector<NodeChannelData> RenderEngine::getNodeData(const std::string& modelName) const { return {}; }
+
+FrameBuffer RenderEngine::getFrameBuffer(const std::string& modelName) const
+{
+    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+    auto it = _bufferCache.find(modelName);
+    if (it != _bufferCache.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+std::vector<NodeChannelData> RenderEngine::getNodeData(const std::string& modelName) const
+{
+    if (!_fseqLoaded) return {};
+
+    auto mapIt = _modelChannelMap.find(modelName);
+    if (mapIt == _modelChannelMap.end()) return {};
+
+    const auto& chInfo = mapIt->second;
+    std::vector<NodeChannelData> result;
+    result.reserve(chInfo.nodeCount);
+
+    for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+        NodeChannelData ncd;
+        ncd.startChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+        ncd.channelCount = chInfo.chansPerNode;
+        ncd.data.resize(chInfo.chansPerNode, 0);
+
+        if (_currentFrameIndex >= 0 && ncd.startChannel + chInfo.chansPerNode <= _currentFrameData.size()) {
+            for (uint32_t c = 0; c < chInfo.chansPerNode; c++) {
+                ncd.data[c] = _currentFrameData[ncd.startChannel + c];
+            }
+        }
+        result.push_back(std::move(ncd));
+    }
+    return result;
+}
+
 int RenderEngine::getLayerCount(const std::string& modelName) const { return 0; }
 void RenderEngine::setMixMode(const std::string& modelName, int layer, MixMode mode) {}
 MixMode RenderEngine::getMixMode(const std::string& modelName, int layer) const { return MixMode::Normal; }
 std::vector<std::string> RenderEngine::getMixModeNames() { return {}; }
-ModelRenderInfo RenderEngine::getModelRenderInfo(const std::string& modelName) const { return {}; }
-std::vector<ModelRenderInfo> RenderEngine::getAllModelRenderInfo() const { return {}; }
-void RenderEngine::invalidateCache(const std::string& modelName) {}
-void RenderEngine::invalidateAllCaches() {}
+
+ModelRenderInfo RenderEngine::getModelRenderInfo(const std::string& modelName) const
+{
+    ModelRenderInfo info;
+    auto it = _modelChannelMap.find(modelName);
+    if (it != _modelChannelMap.end()) {
+        info.modelName = modelName;
+        info.bufferWidth = it->second.bufferWidth;
+        info.bufferHeight = it->second.bufferHeight;
+        info.nodeCount = it->second.nodeCount;
+        info.channelCount = it->second.nodeCount * it->second.chansPerNode;
+    }
+    return info;
+}
+
+std::vector<ModelRenderInfo> RenderEngine::getAllModelRenderInfo() const
+{
+    std::vector<ModelRenderInfo> result;
+    for (const auto& [name, _] : _modelChannelMap) {
+        result.push_back(getModelRenderInfo(name));
+    }
+    return result;
+}
+
+void RenderEngine::invalidateCache(const std::string& modelName)
+{
+    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+    _bufferCache.erase(modelName);
+    _currentFrameIndex = -1; // Force re-read on next renderFrame
+}
+
+void RenderEngine::invalidateAllCaches()
+{
+    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+    _bufferCache.clear();
+    _currentFrameIndex = -1;
+}
+
 bool RenderEngine::getGPUAvailable() const { return false; }
 bool RenderEngine::getGPUEnabled() const { return false; }
 void RenderEngine::setGPUEnabled(bool enabled) {}
@@ -82,14 +446,62 @@ void RenderEngine::setRenderMode(RenderMode mode) { _renderMode.store(mode); }
 RenderMode RenderEngine::getRenderMode() const { return _renderMode.load(); }
 bool RenderEngine::isRendering() const { return false; }
 RenderStatus RenderEngine::getRenderStatus() const { return {}; }
-int RenderEngine::getFrameTimeMS() const { return 50; }
-int RenderEngine::getNumFrames() const { return 0; }
 
-void RenderEngine::notifyModelFrameRendered(const std::string& modelName, int timeMS) {}
-void RenderEngine::notifyFrameRendered(int timeMS) {}
-void RenderEngine::notifyRenderComplete(bool wasCancelled) {}
-void RenderEngine::notifyRenderProgress(const RenderStatus& status) {}
-void RenderEngine::notifyRenderError(const std::string& modelName, const std::string& message) {}
+int RenderEngine::getFrameTimeMS() const
+{
+    if (_fseqLoaded && _fseqFile) {
+        return _fseqFile->getStepTime();
+    }
+    return 50;
+}
+
+int RenderEngine::getNumFrames() const
+{
+    if (_fseqLoaded && _fseqFile) {
+        return static_cast<int>(_fseqFile->getNumFrames());
+    }
+    return 0;
+}
+
+void RenderEngine::notifyModelFrameRendered(const std::string& modelName, int timeMS)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    for (auto* l : _listeners) {
+        l->onModelFrameRendered(modelName, timeMS);
+    }
+}
+
+void RenderEngine::notifyFrameRendered(int timeMS)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    for (auto* l : _listeners) {
+        l->onFrameRendered(timeMS);
+    }
+}
+
+void RenderEngine::notifyRenderComplete(bool wasCancelled)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    for (auto* l : _listeners) {
+        l->onRenderComplete(wasCancelled);
+    }
+}
+
+void RenderEngine::notifyRenderProgress(const RenderStatus& status)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    for (auto* l : _listeners) {
+        l->onRenderProgress(status);
+    }
+}
+
+void RenderEngine::notifyRenderError(const std::string& modelName, const std::string& message)
+{
+    std::lock_guard<std::mutex> lock(_listenerMutex);
+    for (auto* l : _listeners) {
+        l->onRenderError(modelName, message);
+    }
+}
 
 #else
 // Legacy build: full implementation using xLightsFrame and render pipeline

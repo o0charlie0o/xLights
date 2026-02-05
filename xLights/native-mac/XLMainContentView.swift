@@ -220,32 +220,37 @@ struct XLMainContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            // Sidebar: Tab selection (could add more sidebar items later)
-            sidebarContent
-        } detail: {
-            // Detail: Main content area with inspector
-            // Using HStack with explicit frame control instead of HSplitView
-            // to avoid SwiftUI split view bugs when toggling panels
-            HStack(spacing: 0) {
-                // Main content + top panel (at top, like regular xLights)
-                mainContentWithTopPanel
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        ZStack {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                // Sidebar: Tab selection (could add more sidebar items later)
+                sidebarContent
+            } detail: {
+                // Detail: Main content area with inspector
+                // Using HStack with explicit frame control instead of HSplitView
+                // to avoid SwiftUI split view bugs when toggling panels
+                HStack(spacing: 0) {
+                    // Main content + top panel (at top, like regular xLights)
+                    mainContentWithTopPanel
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Inspector (right side) - always in hierarchy but zero-width when hidden
-                if appState.inspectorVisible {
-                    Divider()
-                    inspectorPanel
-                        .frame(width: appState.inspectorWidth)
+                    // Inspector (right side) - always in hierarchy but zero-width when hidden
+                    if appState.inspectorVisible {
+                        Divider()
+                        inspectorPanel
+                            .frame(width: appState.inspectorWidth)
+                    }
                 }
             }
-        }
-        .navigationSplitViewStyle(.balanced)
-        .toolbar {
-            toolbarContent
-        }
-        .onDisappear {
-            appState.saveState()
+            .navigationSplitViewStyle(.balanced)
+            .toolbar {
+                toolbarContent
+            }
+            .onDisappear {
+                appState.saveState()
+            }
+
+            // Command palette overlay
+            XLCommandPaletteOverlay()
         }
     }
 
@@ -446,6 +451,13 @@ struct XLMainContentView: View {
         // Panel toggles on the right
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
+                XLCommandPaletteState.shared.toggle()
+            } label: {
+                Label("Command Palette", systemImage: "command")
+            }
+            .help("Command Palette (⇧⌘K)")
+
+            Button {
                 // Toggle all panels on/off
                 if appState.visibleTopPanels.isEmpty {
                     appState.visibleTopPanels = [.effects, .colors, .layerBlending, .layerSettings]
@@ -455,6 +467,13 @@ struct XLMainContentView: View {
             } label: {
                 Label("Palettes", systemImage: "rectangle.split.1x2")
             }
+
+            Button {
+                XLSwiftUIWindowHelper.shared.toggleHousePreview()
+            } label: {
+                Label("Preview", systemImage: "eye.fill")
+            }
+            .help("House Preview (⇧⌘P)")
 
             Button {
                 appState.inspectorVisible.toggle()

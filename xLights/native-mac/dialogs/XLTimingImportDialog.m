@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLTimingImportDialog.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat kLabelWidth = 130.0;
 

@@ -32,6 +32,7 @@
 // - wxWidgets provider wraps existing ModelManager for legacy UI support
 
 #include <cstddef>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -104,6 +105,14 @@ public:
     /// @return true if the model exists, false otherwise.
     virtual bool hasModel(const std::string& name) const {
         return getModel(name) != nullptr;
+    }
+
+    /// Returns stored XML attributes for a model (from parsed rgbeffects.xml).
+    /// Default returns empty — override in providers that parse model XML directly.
+    /// @param name Model name.
+    /// @return Map of attribute name → value, or empty map if not available.
+    virtual std::map<std::string, std::string> getModelAttributes(const std::string& name) const {
+        return {};
     }
 };
 

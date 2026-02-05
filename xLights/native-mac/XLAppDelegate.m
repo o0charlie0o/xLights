@@ -18,6 +18,13 @@
 // SwiftUI window launcher (defined in XLSwiftWindowLauncher.swift)
 extern int XLLaunchSwiftUIWindow(void);
 
+// Shared flag for command palette visibility, set from Swift via notification
+static BOOL sCommandPaletteVisible = NO;
+
+void XLSetCommandPaletteVisible(bool visible) {
+    sCommandPaletteVisible = visible;
+}
+
 @interface XLAppDelegate ()
 
 @property (nonatomic, strong) XLDocumentController *documentController;
@@ -43,6 +50,70 @@ extern int XLLaunchSwiftUIWindow(void);
     // This window handles Auto Layout correctly and supports resize
     XLLaunchSwiftUIWindow();
 
+    // Install local event monitor for Command Palette
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
+        NSEventModifierFlags flags = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+        BOOL isCmd = (flags & NSEventModifierFlagCommand) != 0;
+        BOOL isShift = (flags & NSEventModifierFlagShift) != 0;
+        NSString *chars = event.charactersIgnoringModifiers;
+
+        // Cmd+Shift+K toggles the command palette
+        if (isCmd && isShift && [chars caseInsensitiveCompare:@"k"] == NSOrderedSame) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"XLToggleCommandPalette"
+                                                                object:nil];
+            return nil;
+        }
+
+        // When command palette is visible, intercept all keys
+        if (sCommandPaletteVisible) {
+            NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+            NSLog(@"CommandPalette monitor: keyCode=%hu chars='%@' isCmd=%d isShift=%d",
+                  event.keyCode, event.characters, isCmd, isShift);
+
+            if (event.keyCode == 53) {
+                // Escape
+                [nc postNotificationName:@"XLDismissCommandPalette" object:nil];
+            } else if (event.keyCode == 126) {
+                // Up arrow
+                [nc postNotificationName:@"XLCommandPaletteInput"
+                                  object:nil
+                                userInfo:@{@"action": @"up"}];
+            } else if (event.keyCode == 125) {
+                // Down arrow
+                [nc postNotificationName:@"XLCommandPaletteInput"
+                                  object:nil
+                                userInfo:@{@"action": @"down"}];
+            } else if (event.keyCode == 36 || event.keyCode == 76) {
+                // Return / Enter
+                [nc postNotificationName:@"XLCommandPaletteInput"
+                                  object:nil
+                                userInfo:@{@"action": @"execute"}];
+            } else if (event.keyCode == 51) {
+                // Backspace
+                [nc postNotificationName:@"XLCommandPaletteInput"
+                                  object:nil
+                                userInfo:@{@"action": @"backspace"}];
+            } else if (isCmd && [chars caseInsensitiveCompare:@"a"] == NSOrderedSame) {
+                // Cmd+A: select all / clear text
+                [nc postNotificationName:@"XLCommandPaletteInput"
+                                  object:nil
+                                userInfo:@{@"action": @"clearAll"}];
+            } else if (!isCmd) {
+                // Regular character input
+                NSString *typed = event.characters;
+                if (typed.length > 0) {
+                    [nc postNotificationName:@"XLCommandPaletteInput"
+                                      object:nil
+                                    userInfo:@{@"action": @"type", @"text": typed}];
+                }
+            }
+            // Consume ALL events when palette is open (nothing passes to AppKit views)
+            return nil;
+        }
+
+        return event;
+    }];
+
     // Activate the app to bring it to the foreground
     [NSApp activateIgnoringOtherApps:YES];
 
@@ -52,13 +123,12 @@ extern int XLLaunchSwiftUIWindow(void);
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *lastShowFolder = [defaults stringForKey:@"LastShowFolder"];
 
-    if (lastShowFolder) {
-        NSURL *url = [NSURL fileURLWithPath:lastShowFolder];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:lastShowFolder]) {
-            // Optionally restore last show folder
-            // (Commented out to avoid auto-opening on launch)
-            // [self openShowFolderAtURL:url];
-        }
+    if (lastShowFolder && [[NSFileManager defaultManager] fileExistsAtPath:lastShowFolder isDirectory:NULL]) {
+        // Restore last show folder
+        [self loadShowFolderPath:lastShowFolder];
+    } else {
+        // No saved show folder - prompt user to select one
+        [self promptForShowFolder];
     }
 }
 
@@ -115,6 +185,65 @@ extern int XLLaunchSwiftUIWindow(void);
 }
 
 #pragma mark - Private Helpers
+
+- (void)loadShowFolderPath:(NSString *)path {
+    NSLog(@"XLAppDelegate: Loading show folder: %@", path);
+
+    // Load the show folder into the engine bridge
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (engineBridge) {
+        BOOL success = [engineBridge loadShowFolder:path];
+        if (success) {
+            NSLog(@"XLAppDelegate: Show folder loaded successfully");
+            // Save as last show folder
+            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+            [defaults setObject:path forKey:@"LastShowFolder"];
+            // Notify SwiftUI to refresh
+            [swiftHelper notifySequenceDataChanged];
+            // Notify observers that the show folder changed (for key bindings, etc.)
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"XLShowFolderDidChangeNotification"
+                                                                object:self
+                                                              userInfo:@{@"path": path}];
+        } else {
+            NSLog(@"XLAppDelegate: Failed to load show folder");
+            // Prompt for a different folder
+            [self promptForShowFolder];
+        }
+    } else {
+        NSLog(@"XLAppDelegate: Engine bridge not available, deferring show folder load");
+        // Store path and try again after a short delay
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self loadShowFolderPath:path];
+        });
+    }
+}
+
+- (void)promptForShowFolder {
+    NSLog(@"XLAppDelegate: Prompting user to select show folder");
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    panel.message = @"Select your xLights show folder";
+    panel.prompt = @"Select Show Folder";
+
+    [panel beginWithCompletionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URL) {
+            [self loadShowFolderPath:panel.URL.path];
+        } else {
+            // User cancelled - show an alert explaining the requirement
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Show Folder Required";
+            alert.informativeText = @"xLights requires a show folder to function properly. Many features will be unavailable until you select a show folder.\n\nYou can select a show folder later from File > Open Show Folder.";
+            alert.alertStyle = NSAlertStyleInformational;
+            [alert addButtonWithTitle:@"OK"];
+            [alert runModal];
+        }
+    }];
+}
 
 - (void)openShowFolderAtURL:(NSURL *)url {
     [_documentController openDocumentWithContentsOfURL:url
@@ -232,16 +361,53 @@ extern int XLLaunchSwiftUIWindow(void);
 }
 
 - (IBAction)openSequence:(id)sender {
-    // Use the document controller to present an open panel
-    [_documentController presentOpenPanelWithCompletionHandler:^(NSArray<NSURL *> *urls) {
-        if (urls.count > 0) {
-            [self->_documentController openDocumentWithContentsOfURL:urls.firstObject
-                                                             display:YES
-                                                   completionHandler:^(NSDocument *document, BOOL documentWasAlreadyOpen, NSError *error) {
-                if (error) {
-                    [NSApp presentError:error];
-                }
-            }];
+    NSLog(@"XLAppDelegate: openSequence called");
+
+    // Get the engine bridge from SwiftUI window
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (!engineBridge) {
+        NSLog(@"XLAppDelegate: Engine bridge not available for opening sequence");
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Cannot Open Sequence";
+        alert.informativeText = @"The engine is not initialized. Please select a show folder first.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    // Show open panel for sequence files
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.title = @"Open Sequence";
+    panel.message = @"Select a sequence file to open";
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.allowedFileTypes = @[@"xlights", @"xsq", @"xml"];
+
+    [panel beginWithCompletionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URL) {
+            NSString *sequencePath = panel.URL.path;
+            NSLog(@"XLAppDelegate: Opening sequence: %@", sequencePath);
+
+            // Load the sequence through the engine bridge
+            BOOL success = [engineBridge loadSequence:sequencePath];
+
+            if (success) {
+                NSLog(@"XLAppDelegate: Sequence loaded successfully");
+                // Notify SwiftUI to refresh
+                [swiftHelper notifySequenceDataChanged];
+            } else {
+                NSLog(@"XLAppDelegate: Failed to load sequence");
+                NSAlert *alert = [[NSAlert alloc] init];
+                alert.messageText = @"Failed to Open Sequence";
+                alert.informativeText = [NSString stringWithFormat:@"Could not load the sequence file:\n%@", sequencePath];
+                alert.alertStyle = NSAlertStyleWarning;
+                [alert addButtonWithTitle:@"OK"];
+                [alert runModal];
+            }
         }
     }];
 }

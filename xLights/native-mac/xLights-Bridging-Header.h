@@ -23,4 +23,13 @@
 // Input handling
 #import "input/XLKeyboardHandler.h"
 
+// Command palette visibility flag (used by local event monitor)
+#ifdef __cplusplus
+extern "C" {
+#endif
+void XLSetCommandPaletteVisible(bool visible);
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* xLights_Bridging_Header_h */

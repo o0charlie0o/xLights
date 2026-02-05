@@ -22,9 +22,17 @@
 #import "sequencer/XLAudioPlayer.h"
 #import "XLEngineBridge.h"
 #import "XLPlaybackController.h"
+#import "XLHousePreviewWindowController.h"
 #import "XLEffectPropertiesViewController.h"
 #import "dialogs/XLNewTimingDialog.h"
 #import "dialogs/XLTimingImportDialog.h"
+
+// Import Swift generated header for XLSwiftUIWindowHelper
+#if __has_include("xLights_Native-Swift.h")
+#import "xLights_Native-Swift.h"
+#elif __has_include("xLights-Swift.h")
+#import "xLights-Swift.h"
+#endif
 
 static const CGFloat kRowHeaderWidth = 180.0;
 static const CGFloat kTimelineRulerHeight = 28.0;
@@ -280,6 +288,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Cached sequence properties
     CGFloat _sequenceDurationMS;
     NSInteger _frameRate;
+
+    // Empty state overlay (shown when no sequence is loaded)
+    NSView *_emptyStateView;
+
+    // House preview floating window
+    XLHousePreviewWindowController *_housePreviewController;
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -522,6 +536,90 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Effect palette moved to bottom panel in SwiftUI - no longer in sequencer view
 
+    // Empty state overlay (shown when no sequence is loaded)
+    _emptyStateView = [[NSView alloc] initWithFrame:NSZeroRect];
+    _emptyStateView.translatesAutoresizingMaskIntoConstraints = NO;
+    _emptyStateView.wantsLayer = YES;
+    _emptyStateView.layer.backgroundColor = [[NSColor colorWithWhite:0.12 alpha:1.0] CGColor];
+    _emptyStateView.hidden = YES;
+
+    // Icon
+    NSImageView *emptyIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    emptyIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    if (@available(macOS 11.0, *)) {
+        NSImage *img = [NSImage imageWithSystemSymbolName:@"music.note.list"
+                                 accessibilityDescription:@"No sequence"];
+        NSImageSymbolConfiguration *config =
+            [NSImageSymbolConfiguration configurationWithPointSize:48 weight:NSFontWeightLight];
+        emptyIcon.image = [img imageWithSymbolConfiguration:config];
+    }
+    emptyIcon.contentTintColor = [NSColor tertiaryLabelColor];
+    [_emptyStateView addSubview:emptyIcon];
+
+    // Title label
+    NSTextField *emptyTitle = [NSTextField labelWithString:@"No Sequence Open"];
+    emptyTitle.translatesAutoresizingMaskIntoConstraints = NO;
+    emptyTitle.font = [NSFont systemFontOfSize:20 weight:NSFontWeightMedium];
+    emptyTitle.textColor = [NSColor secondaryLabelColor];
+    emptyTitle.alignment = NSTextAlignmentCenter;
+    [_emptyStateView addSubview:emptyTitle];
+
+    // Subtitle label
+    NSTextField *emptySubtitle = [NSTextField labelWithString:@"Create a new sequence or open an existing one to get started."];
+    emptySubtitle.translatesAutoresizingMaskIntoConstraints = NO;
+    emptySubtitle.font = [NSFont systemFontOfSize:13];
+    emptySubtitle.textColor = [NSColor tertiaryLabelColor];
+    emptySubtitle.alignment = NSTextAlignmentCenter;
+    [_emptyStateView addSubview:emptySubtitle];
+
+    // New Sequence button
+    NSButton *newSeqButton = [NSButton buttonWithTitle:@"New Sequence"
+                                                target:self
+                                                action:@selector(emptyStateNewSequence:)];
+    newSeqButton.translatesAutoresizingMaskIntoConstraints = NO;
+    newSeqButton.bezelStyle = NSBezelStyleRounded;
+    newSeqButton.controlSize = NSControlSizeLarge;
+    if (@available(macOS 11.0, *)) {
+        newSeqButton.hasDestructiveAction = NO;
+    }
+    newSeqButton.keyEquivalent = @"";
+    [_emptyStateView addSubview:newSeqButton];
+
+    // Open Sequence button
+    NSButton *openSeqButton = [NSButton buttonWithTitle:@"Open Sequence\u2026"
+                                                 target:self
+                                                 action:@selector(emptyStateOpenSequence:)];
+    openSeqButton.translatesAutoresizingMaskIntoConstraints = NO;
+    openSeqButton.bezelStyle = NSBezelStyleRounded;
+    openSeqButton.controlSize = NSControlSizeLarge;
+    openSeqButton.keyEquivalent = @"";
+    [_emptyStateView addSubview:openSeqButton];
+
+    // Stack the empty state content vertically, centered
+    [NSLayoutConstraint activateConstraints:@[
+        [emptyIcon.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
+        [emptyIcon.bottomAnchor constraintEqualToAnchor:emptyTitle.topAnchor constant:-12],
+        [emptyIcon.widthAnchor constraintEqualToConstant:56],
+        [emptyIcon.heightAnchor constraintEqualToConstant:56],
+
+        [emptyTitle.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
+        [emptyTitle.centerYAnchor constraintEqualToAnchor:_emptyStateView.centerYAnchor constant:-20],
+
+        [emptySubtitle.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
+        [emptySubtitle.topAnchor constraintEqualToAnchor:emptyTitle.bottomAnchor constant:6],
+        [emptySubtitle.widthAnchor constraintLessThanOrEqualToConstant:400],
+
+        [newSeqButton.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor constant:-70],
+        [newSeqButton.topAnchor constraintEqualToAnchor:emptySubtitle.bottomAnchor constant:20],
+        [newSeqButton.widthAnchor constraintEqualToConstant:130],
+
+        [openSeqButton.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor constant:70],
+        [openSeqButton.topAnchor constraintEqualToAnchor:emptySubtitle.bottomAnchor constant:20],
+        [openSeqButton.widthAnchor constraintEqualToConstant:140],
+    ]];
+
+    [view addSubview:_emptyStateView];
+
     // Set up scroll coordinator for synchronized scrolling
     _scrollCoordinator = [[XLScrollCoordinator alloc] init];
     _scrollCoordinator.timelineRulerView = _timelineRuler;
@@ -589,6 +687,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [_transportBar.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         [_transportBar.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
         [_transportBar.heightAnchor constraintEqualToConstant:kTransportBarHeight],
+
+        // Empty state overlay: covers the row headings + effects grid area
+        [_emptyStateView.topAnchor constraintEqualToAnchor:_waveformView.bottomAnchor],
+        [_emptyStateView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_emptyStateView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_emptyStateView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
     ]];
 
     self.view = view;
@@ -603,8 +707,30 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [self loadAudioForSequence];
 
     // Initialize keyboard handler for processing key bindings
-    self.keyboardHandler = [[XLKeyboardHandler alloc] init];
+    // Use the show folder path so custom key_bindings.xml is loaded
+    NSString *showFolder = [self.engineBridge getShowFolderPath];
+    NSLog(@"XLSequencerViewController viewDidLoad: showFolder from engineBridge = '%@'", showFolder);
+    // Fallback to UserDefaults if engine bridge doesn't have a show folder yet
+    if (!showFolder || showFolder.length == 0) {
+        showFolder = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+        NSLog(@"XLSequencerViewController: Fallback to UserDefaults showFolder = '%@'", showFolder);
+    }
+    self.keyboardHandler = [[XLKeyboardHandler alloc] initWithShowFolderPath:showFolder];
     self.keyboardHandler.delegate = self;
+    NSLog(@"XLSequencerViewController: keyboardHandler initialized = %@, bindingCount = %lu",
+          self.keyboardHandler, (unsigned long)[self.keyboardHandler bindingCount]);
+
+    // Listen for show folder changes to reload key bindings
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(showFolderDidChange:)
+                                                 name:@"XLShowFolderDidChangeNotification"
+                                               object:nil];
+
+    // Listen for command palette actions
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleZoomToSelection:)
+                                                 name:@"XLZoomToSelection"
+                                               object:nil];
 }
 
 #pragma mark - Audio Loading
@@ -663,6 +789,69 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [_waveformView clearWaveform];
 }
 
+#pragma mark - Empty State
+
+- (void)showEmptyState {
+    _emptyStateView.hidden = NO;
+}
+
+- (void)hideEmptyState {
+    _emptyStateView.hidden = YES;
+}
+
+- (void)clearSequenceData {
+    if (_rowData) {
+        free(_rowData);
+        _rowData = NULL;
+    }
+    if (_effectData) {
+        free(_effectData);
+        _effectData = NULL;
+    }
+    if (_effectOffsetPerRow) {
+        free(_effectOffsetPerRow);
+        _effectOffsetPerRow = NULL;
+    }
+    _rowCount = 0;
+    _rowCapacity = 0;
+    _effectCount = 0;
+    _effectCapacity = 0;
+    _usingRealData = NO;
+    _sequenceDurationMS = 60000.0;
+    _frameRate = 20;
+}
+
+- (void)emptyStateNewSequence:(id)sender {
+    [NSApp sendAction:@selector(newSequence:) to:nil from:self];
+}
+
+- (void)emptyStateOpenSequence:(id)sender {
+    [NSApp sendAction:@selector(openSequence:) to:nil from:self];
+}
+
+#pragma mark - House Preview
+
+- (void)toggleHousePreview {
+    if (!_housePreviewController) {
+        _housePreviewController = [[XLHousePreviewWindowController alloc]
+            initWithEngineBridge:self.engineBridge];
+        _playbackController.previewView = _housePreviewController.previewView;
+    }
+
+    NSWindow *previewWindow = _housePreviewController.window;
+    if (previewWindow.isVisible) {
+        [previewWindow orderOut:nil];
+    } else {
+        [previewWindow makeKeyAndOrderFront:nil];
+        [_housePreviewController reloadModels];
+    }
+}
+
+/// Responder chain action for the View > Show Preview menu item and toolbar button.
+- (IBAction)togglePreview:(id)sender {
+    [self toggleHousePreview];
+}
+
 #pragma mark - Data Loading
 
 - (void)reloadSequenceData {
@@ -671,9 +860,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // First try to load real data from the engine
     if (self.engineBridge && [self.engineBridge isSequenceLoaded]) {
+        [self hideEmptyState];
         [self loadRealSequenceData];
     } else {
-        [self buildDemoData];
+        [self clearSequenceData];
+        [self showEmptyState];
     }
 
     // Update all views with new sequence properties
@@ -777,8 +968,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSInteger elementCount = elements.count;
 
     if (elementCount == 0) {
-        // Fall back to demo data if no elements
-        [self buildDemoData];
+        [self clearSequenceData];
+        [self showEmptyState];
         return;
     }
 
@@ -786,9 +977,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSUInteger totalEffects = 0;
     for (NSUInteger i = 0; i < (NSUInteger)elementCount; i++) {
         NSDictionary *elem = elements[i];
+        NSInteger originalIndex = [elem[@"index"] integerValue];  // Use original element index
         NSInteger layerCount = [elem[@"effectLayerCount"] integerValue];
         for (NSInteger layer = 0; layer < layerCount; layer++) {
-            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:(NSInteger)i layer:layer];
+            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:originalIndex layer:layer];
             totalEffects += effects.count;
         }
     }
@@ -840,7 +1032,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
 
         row->effectLayerCount = [elem[@"effectLayerCount"] integerValue];
-        row->elementIndex = (NSInteger)i;
+        NSInteger originalIndex = [elem[@"index"] integerValue];  // Use original element index
+        row->elementIndex = originalIndex;  // Store original index for effect lookups
         row->indent = 0;
         row->layerIndex = -1;  // -1 means this is the main element row (not a layer sub-row)
         row->isLayerRow = NO;
@@ -858,8 +1051,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         _effectOffsetPerRow[i] = _effectCount;
 
         // Load effects from ALL layers for this element
+        NSLog(@"Loading effects for row %lu: name='%s' originalIndex=%ld layers=%ld",
+              (unsigned long)i, row->name, (long)originalIndex, (long)row->effectLayerCount);
         for (NSInteger layer = 0; layer < row->effectLayerCount; layer++) {
-            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:(NSInteger)i layer:layer];
+            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:originalIndex layer:layer];
+            NSLog(@"  Layer %ld: %lu effects", (long)layer, (unsigned long)effects.count);
             for (NSDictionary *eff in effects) {
                 if (_effectCount >= _effectCapacity) {
                     // Grow the array
@@ -868,7 +1064,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                 }
 
                 XLEffectEntry *entry = &_effectData[_effectCount];
-                entry->elementIndex = (NSInteger)i;
+                entry->elementIndex = originalIndex;  // Use original sequence element index to match row->elementIndex
                 entry->layerIndex = layer;  // Store the actual layer index
                 entry->effectIndex = [eff[@"id"] integerValue];
                 entry->startTimeMS = [eff[@"startTimeMS"] doubleValue];
@@ -912,7 +1108,50 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // This is the standard xLights behavior - timing tracks are always first
     [self sortRowsWithTimingFirst];
 
-    NSLog(@"XLSequencerViewController: Loaded %lu elements with %lu effects from real sequence (duration: %.0f ms)",
+    // Expand all rows with multiple layers by default
+    // Iterate backwards so inserted rows don't shift indices of rows we haven't processed yet
+    for (NSInteger r = (NSInteger)_rowCount - 1; r >= 0; r--) {
+        XLRowEntry *mainRow = &_rowData[r];
+        if (!mainRow->expandable || mainRow->effectLayerCount <= 1) continue;
+
+        mainRow->expanded = YES;
+
+        NSInteger layersToInsert = mainRow->effectLayerCount - 1;  // Layer 0 shown on main row
+        NSUInteger newRowCount = _rowCount + (NSUInteger)layersToInsert;
+
+        // Ensure capacity
+        if (newRowCount > _rowCapacity) {
+            _rowCapacity = newRowCount + 32;
+            _rowData = (XLRowEntry *)realloc(_rowData, _rowCapacity * sizeof(XLRowEntry));
+            mainRow = &_rowData[r];  // Pointer may have moved
+        }
+
+        // Shift rows down to make room
+        NSInteger insertPos = r + 1;
+        if (insertPos < (NSInteger)_rowCount) {
+            memmove(&_rowData[insertPos + layersToInsert], &_rowData[insertPos],
+                    (_rowCount - (NSUInteger)insertPos) * sizeof(XLRowEntry));
+        }
+
+        // Insert layer rows
+        for (NSInteger li = 0; li < layersToInsert; li++) {
+            XLRowEntry *layerRow = &_rowData[insertPos + li];
+            memset(layerRow, 0, sizeof(XLRowEntry));
+            snprintf(layerRow->name, sizeof(layerRow->name), "   [Layer %ld]", (long)(li + 2));
+            layerRow->type = mainRow->type;
+            layerRow->elementIndex = mainRow->elementIndex;
+            layerRow->effectLayerCount = mainRow->effectLayerCount;
+            layerRow->layerIndex = li + 1;
+            layerRow->isLayerRow = YES;
+            layerRow->indent = 1;
+            layerRow->expandable = NO;
+            layerRow->expanded = NO;
+        }
+
+        _rowCount = newRowCount;
+    }
+
+    NSLog(@"XLSequencerViewController: Loaded %lu rows with %lu effects from real sequence (duration: %.0f ms)",
           (unsigned long)_rowCount, (unsigned long)_effectCount, _sequenceDurationMS);
 }
 
@@ -1084,6 +1323,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+
     if (_rowData) {
         free(_rowData);
         _rowData = NULL;
@@ -1351,6 +1592,29 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 }
 
 #pragma mark - XLEffectsGridDelegate
+
+- (BOOL)effectsGrid:(XLEffectsGridView *)gridView shouldHandleKeyEvent:(NSEvent *)event {
+    // Forward key events to the keyboard handler for custom key bindings
+    // (e.g., 't' for zoom in, 'r' for zoom out, etc.)
+    NSLog(@"XLSequencerViewController effectsGrid:shouldHandleKeyEvent: keyCode=%hu, chars='%@'",
+          event.keyCode, event.charactersIgnoringModifiers);
+    NSLog(@"  _keyboardHandler = %@", _keyboardHandler);
+
+    BOOL handled = [_keyboardHandler handleKeyEvent:event inScope:XLKeyScopeSequence];
+    NSLog(@"  keyboardHandler returned: %@", handled ? @"YES" : @"NO");
+    return handled;
+}
+
+#pragma mark - XLWaveformViewDelegate (key events)
+
+- (BOOL)waveformView:(XLWaveformView *)view shouldHandleKeyEvent:(NSEvent *)event {
+    // Escape clears the loop region
+    if (event.keyCode == 53 && view.hasLoopRegion) {
+        [view clearLoopRegion];
+        return YES;
+    }
+    return [_keyboardHandler handleKeyEvent:event inScope:XLKeyScopeSequence];
+}
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didSelectEffectAtRow:(NSInteger)row
@@ -1758,6 +2022,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 #pragma mark - Track Height Slider
 
 - (void)trackHeightSliderChanged:(NSSlider *)sender {
+    // Cmd+click resets to default row height
+    NSEvent *currentEvent = [NSApp currentEvent];
+    if (currentEvent && (currentEvent.modifierFlags & NSEventModifierFlagCommand)) {
+        CGFloat defaultHeight = 22.0;
+        sender.doubleValue = defaultHeight;
+    }
+
     CGFloat rowHeight = sender.doubleValue;
 
     // Sync row height to both views
@@ -1952,7 +2223,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     dialog.existingTrackNames = existingTrackNames;
 
     // Show the dialog
-    [dialog showSheetOnWindow:self.view.window completionHandler:^(NSModalResponse response) {
+    [dialog presentAsSheetForWindow:self.view.window completion:^(NSModalResponse response) {
         if (response == NSModalResponseOK) {
             NSString *trackName = dialog.trackName;
             XLTimingInterval interval = dialog.selectedInterval;
@@ -1992,7 +2263,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     XLTimingImportDialog *dialog = [[XLTimingImportDialog alloc] init];
 
     // Show the dialog
-    [dialog showSheetOnWindow:self.view.window completionHandler:^(NSModalResponse response) {
+    [dialog presentAsSheetForWindow:self.view.window completion:^(NSModalResponse response) {
         if (response == NSModalResponseOK) {
             XLTimingSource source = dialog.source;
             NSString *trackName = dialog.trackName;
@@ -2085,13 +2356,20 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (void)loadZoomLevelForCurrentSequence {
     NSString *key = [self zoomLevelKeyForCurrentSequence];
-    if (!key) return;
+    if (!key) {
+        // No sequence loaded, zoom to fit as default
+        [self zoomToFit:nil];
+        return;
+    }
 
     CGFloat savedZoom = [[NSUserDefaults standardUserDefaults] doubleForKey:key];
     if (savedZoom > 0) {
         // Apply the saved zoom level
         [_scrollCoordinator setZoomLevel:savedZoom];
         _transportBar.zoomLevel = savedZoom;
+    } else {
+        // No saved zoom for this sequence - default to zoom-to-fit
+        [self zoomToFit:nil];
     }
 }
 
@@ -2122,6 +2400,20 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)waveformView:(XLWaveformView *)view didChangeZoomLevel:(CGFloat)zoomLevel centeredOnPointX:(CGFloat)pointX {
     // Use scroll coordinator for synchronized zoom
     [_scrollCoordinator viewDidChangeZoomLevel:zoomLevel centeredOnPointX:pointX fromView:view];
+}
+
+- (void)waveformView:(XLWaveformView *)view didSelectLoopRegionFromTimeMS:(CGFloat)startMS toTimeMS:(CGFloat)endMS {
+    if (_playbackController) {
+        _playbackController.loopRegionStartMS = (NSInteger)startMS;
+        _playbackController.loopRegionEndMS = (NSInteger)endMS;
+        _playbackController.loopEnabled = YES;
+    }
+}
+
+- (void)waveformViewDidClearLoopRegion:(XLWaveformView *)view {
+    if (_playbackController) {
+        [_playbackController clearLoopRegion];
+    }
 }
 
 #pragma mark - XLTransportBarDelegate
@@ -2157,14 +2449,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (void)transportBarDidStop:(XLTransportBarView *)bar {
     // Stop playback controller (handles audio and preview)
+    // The controller returns to the play origin and notifies via delegate,
+    // so we don't need to manually reset positions here.
     if (_playbackController) {
         [_playbackController stop];
     }
 
     _timelineRuler.playing = NO;
-    [_effectsGridView setPlaybackPositionMS:0 animated:NO];
-    _timelineRuler.playbackPosition = 0;
-    _waveformView.playbackPositionMS = 0;
 }
 
 - (void)transportBar:(XLTransportBarView *)bar didChangePlaybackRate:(CGFloat)rate {
@@ -2262,10 +2553,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)playbackControllerDidStopPlayback:(XLPlaybackController *)controller {
     _transportBar.isPlaying = NO;
     _timelineRuler.playing = NO;
-    _transportBar.currentPositionMS = 0;
-    _timelineRuler.playbackPosition = 0;
-    _waveformView.playbackPositionMS = 0;
-    [_effectsGridView setPlaybackPositionMS:0 animated:NO];
+    // Position is updated via didUpdatePositionMS: callback from the controller
 }
 
 - (void)playbackController:(XLPlaybackController *)controller didUpdatePositionMS:(NSInteger)positionMS {
@@ -2327,12 +2615,31 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     }
 }
 
+- (void)showFolderDidChange:(NSNotification *)notification {
+    // Reload key bindings from the new show folder
+    NSString *newPath = notification.userInfo[@"path"];
+    if (newPath) {
+        [_keyboardHandler setShowFolderPath:newPath];
+    } else {
+        // Try to get from engine bridge
+        NSString *showFolder = [self.engineBridge getShowFolderPath];
+        [_keyboardHandler setShowFolderPath:showFolder];
+    }
+}
+
+- (void)handleZoomToSelection:(NSNotification *)notification {
+    [_effectsGridView zoomToSelection];
+}
+
 #pragma mark - XLKeyboardActionDelegate
 
 - (BOOL)performKeyAction:(NSString *)actionType
               effectName:(NSString *)effectName
           effectSettings:(NSString *)effectSettings
                  inScope:(XLKeyScope)scope {
+
+    NSLog(@"XLSequencerViewController performKeyAction: actionType='%@', effectName='%@'",
+          actionType, effectName);
 
     // Space bar - play/pause
     if ([actionType isEqualToString:@"TOGGLE_PLAY"]) {
@@ -2342,7 +2649,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Toggle effect settings inspector (Cmd+I)
     if ([actionType isEqualToString:@"EFFECT_SETTINGS_TOGGLE"]) {
-        self.effectPaletteVisible = !self.effectPaletteVisible;
+        NSLog(@"XLSequencerViewController: EFFECT_SETTINGS_TOGGLE - calling SwiftUI toggleInspector");
+        [[XLSwiftUIWindowHelper shared] toggleInspector];
         return YES;
     }
 

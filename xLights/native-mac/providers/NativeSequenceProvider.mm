@@ -291,6 +291,11 @@ void NativeSequenceProvider::closeAndReleaseSequence()
         _metadata = NativeSequenceMetadata();
     }
 
+    {
+        std::lock_guard<std::mutex> lock(_elementsMutex);
+        _elements.clear();
+    }
+
     _showFolderPath.clear();
     _sequenceLoaded.store(false);
     _currentPosition.store(0.0);
@@ -418,72 +423,66 @@ bool NativeSequenceProvider::parseSequenceXML(const std::string& filePath)
     _metadata.sequenceName = [[path lastPathComponent] stringByDeletingPathExtension].UTF8String;
 
     // Look for head element with sequence settings
+    // NOTE: xLights XML format uses CHILD ELEMENTS inside <head>, not attributes
     NSArray<NSXMLElement*>* headElements = [root elementsForName:@"head"];
     if (headElements.count > 0) {
         NSXMLElement* head = headElements[0];
 
-        // Duration - try multiple attribute names
-        NSString* duration = [[head attributeForName:@"duration"] stringValue];
-        if (!duration) {
-            // Try 'sequenceDuration' attribute
-            duration = [[head attributeForName:@"sequenceDuration"] stringValue];
-        }
-        if (duration) {
+        // Helper to get child element text content
+        auto getChildValue = ^NSString*(NSString* name) {
+            NSArray<NSXMLElement*>* elements = [head elementsForName:name];
+            if (elements.count > 0) {
+                return [elements[0] stringValue];
+            }
+            return nil;
+        };
+
+        // Duration - stored as child element <sequenceDuration>value</sequenceDuration>
+        NSString* duration = getChildValue(@"sequenceDuration");
+        if (duration && duration.length > 0) {
             _metadata.durationSeconds = duration.doubleValue;
         }
 
-        // Frame timing
-        NSString* timing = [[head attributeForName:@"sequenceTiming"] stringValue];
-        if (!timing) {
-            timing = [[head attributeForName:@"frameMS"] stringValue];
-        }
-        if (timing) {
-            _metadata.frameMS = timing.intValue;
+        // Frame timing - stored as "<sequenceTiming>25 ms</sequenceTiming>"
+        // Need to parse "25 ms" to extract the number
+        NSString* timing = getChildValue(@"sequenceTiming");
+        if (timing && timing.length > 0) {
+            // Extract numeric portion from strings like "25 ms" or "50ms"
+            NSScanner* scanner = [NSScanner scannerWithString:timing];
+            int frameMS = 0;
+            if ([scanner scanInt:&frameMS]) {
+                _metadata.frameMS = frameMS;
+            }
         }
 
         // Sequence type
-        NSString* type = [[head attributeForName:@"sequenceType"] stringValue];
-        if (type) {
+        NSString* type = getChildValue(@"sequenceType");
+        if (type && type.length > 0) {
             _metadata.sequenceType = type.UTF8String;
         }
 
         // Media file
-        NSString* mediaFile = [[head attributeForName:@"mediaFile"] stringValue];
+        NSString* mediaFile = getChildValue(@"mediaFile");
         if (mediaFile && mediaFile.length > 0) {
             _metadata.mediaPath = resolveMediaPath(mediaFile.UTF8String);
         }
 
         // Author metadata
-        NSString* author = [[head attributeForName:@"author"] stringValue];
-        if (author) {
+        NSString* author = getChildValue(@"author");
+        if (author && author.length > 0) {
             _metadata.author = author.UTF8String;
         }
 
         // Song metadata
-        NSString* song = [[head attributeForName:@"song"] stringValue];
-        if (song) {
+        NSString* song = getChildValue(@"song");
+        if (song && song.length > 0) {
             _metadata.song = song.UTF8String;
         }
 
         // Artist metadata
-        NSString* artist = [[head attributeForName:@"artist"] stringValue];
-        if (artist) {
+        NSString* artist = getChildValue(@"artist");
+        if (artist && artist.length > 0) {
             _metadata.artist = artist.UTF8String;
-        }
-    }
-
-    // Try to get attributes from root if not found in head
-    if (_metadata.durationSeconds <= 0) {
-        NSString* duration = [[root attributeForName:@"duration"] stringValue];
-        if (duration) {
-            _metadata.durationSeconds = duration.doubleValue;
-        }
-    }
-
-    if (_metadata.frameMS <= 0) {
-        NSString* timing = [[root attributeForName:@"sequenceTiming"] stringValue];
-        if (timing) {
-            _metadata.frameMS = timing.intValue;
         }
     }
 
@@ -505,7 +504,105 @@ bool NativeSequenceProvider::parseSequenceXML(const std::string& filePath)
           _metadata.durationSeconds, _metadata.frameMS,
           _metadata.mediaPath.empty() ? "(none)" : _metadata.mediaPath.c_str());
 
+    // Parse ElementEffects section for models and effects
+    parseElementEffects(root);
+
     return true;
+}
+
+void NativeSequenceProvider::parseElementEffects(NSXMLElement* root)
+{
+    std::lock_guard<std::mutex> lock(_elementsMutex);
+    _elements.clear();
+
+    // Find ElementEffects section
+    NSArray<NSXMLElement*>* elementEffectsNodes = [root elementsForName:@"ElementEffects"];
+    if (elementEffectsNodes.count == 0) {
+        NSLog(@"NativeSequenceProvider: No ElementEffects section found");
+        return;
+    }
+
+    NSXMLElement* elementEffects = elementEffectsNodes[0];
+
+    // Parse each Element
+    NSArray<NSXMLElement*>* elementNodes = [elementEffects elementsForName:@"Element"];
+    for (NSXMLElement* elementNode in elementNodes) {
+        NativeSequenceElement element;
+
+        // Get element attributes
+        NSString* name = [[elementNode attributeForName:@"name"] stringValue];
+        NSString* type = [[elementNode attributeForName:@"type"] stringValue];
+
+        if (name) {
+            element.name = name.UTF8String;
+        }
+        if (type) {
+            element.type = type.UTF8String;
+        }
+
+        // Parse EffectLayer children
+        NSArray<NSXMLElement*>* layerNodes = [elementNode elementsForName:@"EffectLayer"];
+        for (NSXMLElement* layerNode in layerNodes) {
+            NativeSequenceLayer layer;
+
+            // Parse Effect children
+            NSArray<NSXMLElement*>* effectNodes = [layerNode elementsForName:@"Effect"];
+            for (NSXMLElement* effectNode in effectNodes) {
+                NativeSequenceEffect effect;
+
+                NSString* effectName = [[effectNode attributeForName:@"name"] stringValue];
+                NSString* startTime = [[effectNode attributeForName:@"startTime"] stringValue];
+                NSString* endTime = [[effectNode attributeForName:@"endTime"] stringValue];
+                NSString* palette = [[effectNode attributeForName:@"palette"] stringValue];
+                NSString* ref = [[effectNode attributeForName:@"ref"] stringValue];
+
+                if (effectName) {
+                    effect.name = effectName.UTF8String;
+                }
+                if (startTime) {
+                    effect.startTimeMS = startTime.intValue;
+                }
+                if (endTime) {
+                    effect.endTimeMS = endTime.intValue;
+                }
+                if (palette) {
+                    effect.paletteIndex = palette.intValue;
+                }
+                if (ref) {
+                    effect.effectIndex = ref.intValue;
+                }
+
+                layer.effects.push_back(effect);
+            }
+
+            element.layers.push_back(layer);
+        }
+
+        _elements.push_back(element);
+    }
+
+    // Count total effects
+    size_t totalEffects = 0;
+    for (const auto& elem : _elements) {
+        for (const auto& layer : elem.layers) {
+            totalEffects += layer.effects.size();
+        }
+    }
+
+    NSLog(@"NativeSequenceProvider: Parsed %lu elements with %lu total effects",
+          (unsigned long)_elements.size(), (unsigned long)totalEffects);
+}
+
+const std::vector<NativeSequenceElement>& NativeSequenceProvider::getElements() const
+{
+    std::lock_guard<std::mutex> lock(_elementsMutex);
+    return _elements;
+}
+
+size_t NativeSequenceProvider::getElementCount() const
+{
+    std::lock_guard<std::mutex> lock(_elementsMutex);
+    return _elements.size();
 }
 
 std::string NativeSequenceProvider::resolveMediaPath(const std::string& mediaFile)

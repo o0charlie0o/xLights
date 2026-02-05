@@ -70,9 +70,11 @@ typedef struct {
    timingMarkValues:(const CGFloat *)timingMarkValues
     timingMarkCount:(NSUInteger)timingMarkCount
       dropIndicator:(BOOL)showDropIndicator
-        dropRow:(NSInteger)dropRow
-    dropStartMS:(CGFloat)dropStartMS
-      dropEndMS:(CGFloat)dropEndMS;
+            dropRow:(NSInteger)dropRow
+        dropStartMS:(CGFloat)dropStartMS
+          dropEndMS:(CGFloat)dropEndMS
+   rubberBandActive:(BOOL)rubberBandActive
+     rubberBandRect:(NSRect)rubberBandRect;
 
 /// Map from effect type index to display color.
 + (NSColor *)colorForEffectIndex:(NSInteger)effectIndex;

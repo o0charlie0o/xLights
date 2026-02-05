@@ -17,6 +17,7 @@
     CFAbsoluteTime _lastFrameTime;
     CFAbsoluteTime _playbackStartTime;
     NSInteger _playbackStartPositionMS;
+    NSInteger _playOriginMS;  // Position where play was pressed; stop returns here
     BOOL _useNativeAudio;
     dispatch_source_t _fallbackTimer;
 }
@@ -48,6 +49,9 @@
         _frameTimeMS = 50; // Default 20fps
         _volume = 1.0;
         _useNativeAudio = NO;
+        _playOriginMS = 0;
+        _loopRegionStartMS = -1;
+        _loopRegionEndMS = -1;
 
         _playbackQueue = dispatch_queue_create("com.xlights.playback", DISPATCH_QUEUE_SERIAL);
 
@@ -124,8 +128,13 @@
     // Clamp to valid range
     if (precisePositionMS < 0) precisePositionMS = 0;
 
-    // Check for end of sequence
-    if (precisePositionMS >= _durationMS) {
+    // Check for loop region or end of sequence
+    if (self.hasLoopRegion && precisePositionMS >= _loopRegionEndMS) {
+        // Loop back to region start
+        precisePositionMS = _loopRegionStartMS;
+        _playbackStartTime = now;
+        _playbackStartPositionMS = _loopRegionStartMS;
+    } else if (precisePositionMS >= _durationMS) {
         if (_loopEnabled) {
             // Loop back to start
             precisePositionMS = 0;
@@ -150,15 +159,10 @@
         snappedPositionMS = (precisePositionMS / _frameTimeMS) * _frameTimeMS;
     }
 
-    // Update position but do NOT call heavy renderFrame during playback
-    // Heavy re-rendering should only happen when effects change, not during playback
+    // Render the current frame and send pixel data to the preview view
     if (snappedPositionMS != _positionMS) {
         _positionMS = snappedPositionMS;
-
-        // Update preview position for display (lightweight)
-        if (_previewView) {
-            _previewView.playbackPositionMS = snappedPositionMS;
-        }
+        [self renderFrameAtTime:snappedPositionMS];
     }
 }
 
@@ -229,6 +233,15 @@
     _audioPlayer.volume = _volume;
 }
 
+- (BOOL)hasLoopRegion {
+    return _loopRegionStartMS >= 0 && _loopRegionEndMS >= 0 && _loopRegionEndMS > _loopRegionStartMS;
+}
+
+- (void)clearLoopRegion {
+    _loopRegionStartMS = -1;
+    _loopRegionEndMS = -1;
+}
+
 #pragma mark - Playback Control
 
 - (void)play {
@@ -249,8 +262,16 @@
     if (_positionMS < 0) _positionMS = 0;
     if (_positionMS >= _durationMS) _positionMS = 0;
 
+    // If loop region is set, ensure we start within it
+    if (self.hasLoopRegion) {
+        if (_positionMS < _loopRegionStartMS || _positionMS >= _loopRegionEndMS) {
+            _positionMS = _loopRegionStartMS;
+        }
+    }
+
     _isPlaying = YES;
     _isPaused = NO;
+    _playOriginMS = _positionMS;  // Remember where play was pressed
     _playbackStartTime = CFAbsoluteTimeGetCurrent();
     _playbackStartPositionMS = _positionMS;
     _lastFrameTime = _playbackStartTime;
@@ -317,13 +338,14 @@
 
     [self stopPlaybackTimer];
 
-    // Reset position
-    _positionMS = 0;
+    // Return to where play was originally pressed
+    NSInteger returnPosition = wasPlaying ? _playOriginMS : 0;
+    _positionMS = returnPosition;
 
     // Disable preview rendering
     if (_previewView) {
         _previewView.previewRenderingActive = NO;
-        _previewView.playbackPositionMS = 0;
+        _previewView.playbackPositionMS = returnPosition;
     }
 
     // Stop both audio systems to ensure no double playback
@@ -339,12 +361,12 @@
         }
     }
 
-    // Notify of position reset
+    // Notify of position reset to play origin
     if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
-        [_delegate playbackController:self didUpdatePositionMS:0];
+        [_delegate playbackController:self didUpdatePositionMS:returnPosition];
     }
 
-    NSLog(@"XLPlaybackController: Playback stopped");
+    NSLog(@"XLPlaybackController: Playback stopped, returning to %ldms", (long)returnPosition);
 }
 
 - (void)togglePlayPause {
@@ -493,8 +515,16 @@
     if (_useNativeAudio && _isPlaying && !_isPaused) {
         NSInteger audioPositionMS = (NSInteger)positionMS;
 
+        // Check loop region boundary
+        if (self.hasLoopRegion && audioPositionMS >= _loopRegionEndMS) {
+            // Seek audio back to region start
+            [_audioPlayer seekToPosition:(CGFloat)_loopRegionStartMS];
+            _playbackStartTime = CFAbsoluteTimeGetCurrent();
+            _playbackStartPositionMS = _loopRegionStartMS;
+            audioPositionMS = _loopRegionStartMS;
+        }
+
         // Notify delegate with the audio-driven position for smooth UI updates
-        // This is lightweight - just updates playhead positions in views
         if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
             [_delegate playbackController:self didUpdatePositionMS:audioPositionMS];
         }
@@ -505,23 +535,22 @@
             snappedPositionMS = (audioPositionMS / _frameTimeMS) * _frameTimeMS;
         }
 
-        // Update position but do NOT call heavy renderFrame during playback
-        // The sequence data is already pre-rendered - preview can read from _seqData
-        // Heavy re-rendering should only happen when effects change, not during playback
         if (snappedPositionMS != _positionMS) {
             _positionMS = snappedPositionMS;
-
-            // Update preview position for display (lightweight)
-            if (_previewView) {
-                _previewView.playbackPositionMS = snappedPositionMS;
-            }
+            [self renderFrameAtTime:snappedPositionMS];
         }
     }
 }
 
 - (void)audioPlayerDidReachEnd:(XLAudioPlayer *)player {
-    // Audio reached end - handle looping or stop
-    if (_loopEnabled) {
+    // Audio reached end - handle loop region, looping, or stop
+    if (self.hasLoopRegion) {
+        // Seek back to region start
+        [_audioPlayer seekToPosition:(CGFloat)_loopRegionStartMS];
+        [_audioPlayer playFromPosition:(CGFloat)_loopRegionStartMS];
+        _playbackStartTime = CFAbsoluteTimeGetCurrent();
+        _playbackStartPositionMS = _loopRegionStartMS;
+    } else if (_loopEnabled) {
         // Audio player handles its own looping
         _playbackStartTime = CFAbsoluteTimeGetCurrent();
         _playbackStartPositionMS = 0;

@@ -25,6 +25,15 @@ static const CGFloat kCursorR = 1.0, kCursorG = 1.0, kCursorB = 1.0;  // White c
 static const CGFloat kCursorAlpha = 0.6;
 static const CGFloat kCenterLineGray = 0.25;
 
+// Loop region selection overlay colors
+static const CGFloat kLoopR = 0.2, kLoopG = 0.5, kLoopB = 1.0, kLoopAlpha = 0.2;
+static const CGFloat kLoopEdgeR = 0.3, kLoopEdgeG = 0.6, kLoopEdgeB = 1.0, kLoopEdgeAlpha = 0.8;
+
+// Drag detection threshold in points
+static const CGFloat kDragThreshold = 3.0;
+// Minimum region size in milliseconds to count as a selection
+static const CGFloat kMinRegionMS = 50.0;
+
 // Maximum number of waveform overview buckets to pre-compute.
 // This provides sub-pixel resolution at reasonable zoom levels.
 static const NSUInteger kMaxOverviewBuckets = 65536;
@@ -37,6 +46,11 @@ static const NSUInteger kMaxOverviewBuckets = 65536;
 @property (nonatomic, strong) NSArray<NSValue *> *overviewBuckets;
 @property (nonatomic, assign) BOOL needsRedraw;
 @property (nonatomic, assign) BOOL dragging;
+
+// Drag-to-select state
+@property (nonatomic, assign) NSPoint mouseDownPoint;
+@property (nonatomic, assign) CGFloat dragStartMS;
+@property (nonatomic, assign) BOOL isDragSelecting;
 
 // Cached waveform path for efficient redraw
 @property (nonatomic, assign) CGMutablePathRef cachedWaveformPath;
@@ -97,6 +111,10 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _waveformColor = nil;
     _needsRedraw = YES;
     _dragging = NO;
+    _isDragSelecting = NO;
+    _dragStartMS = -1;
+    _loopRegionStartMS = -1;
+    _loopRegionEndMS = -1;
 
     // Waveform path cache
     _cachedWaveformPath = NULL;
@@ -290,6 +308,22 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     [self.layer setNeedsDisplay];
 }
 
+- (BOOL)hasLoopRegion {
+    return _loopRegionStartMS >= 0 && _loopRegionEndMS >= 0 && _loopRegionEndMS > _loopRegionStartMS;
+}
+
+- (void)clearLoopRegion {
+    if (!self.hasLoopRegion) return;
+    _loopRegionStartMS = -1;
+    _loopRegionEndMS = -1;
+    _needsRedraw = YES;
+    [self.layer setNeedsDisplay];
+
+    if ([_delegate respondsToSelector:@selector(waveformViewDidClearLoopRegion:)]) {
+        [_delegate waveformViewDidClearLoopRegion:self];
+    }
+}
+
 #pragma mark - Coordinate Conversion
 
 - (CGFloat)timeMSForPointX:(CGFloat)x {
@@ -333,6 +367,38 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     // Draw waveform data if available
     if (_overviewBuckets.count > 0 && _sequenceLengthMS > 0) {
         [self drawWaveformInContext:ctx bounds:bounds];
+    }
+
+    // Draw loop region selection overlay
+    if (self.hasLoopRegion) {
+        CGFloat regionStartX = [self pointXForTimeMS:_loopRegionStartMS];
+        CGFloat regionEndX = [self pointXForTimeMS:_loopRegionEndMS];
+
+        // Clamp to visible area
+        CGFloat visStartX = fmax(0, regionStartX);
+        CGFloat visEndX = fmin(width, regionEndX);
+
+        if (visEndX > visStartX) {
+            // Semi-transparent fill
+            CGContextSetRGBFillColor(ctx, kLoopR, kLoopG, kLoopB, kLoopAlpha);
+            CGContextFillRect(ctx, CGRectMake(visStartX, 0, visEndX - visStartX, height));
+
+            // Edge lines
+            CGContextSetRGBStrokeColor(ctx, kLoopEdgeR, kLoopEdgeG, kLoopEdgeB, kLoopEdgeAlpha);
+            CGContextSetLineWidth(ctx, 1.0);
+            if (regionStartX >= 0 && regionStartX <= width) {
+                CGContextBeginPath(ctx);
+                CGContextMoveToPoint(ctx, regionStartX, 0);
+                CGContextAddLineToPoint(ctx, regionStartX, height);
+                CGContextStrokePath(ctx);
+            }
+            if (regionEndX >= 0 && regionEndX <= width) {
+                CGContextBeginPath(ctx);
+                CGContextMoveToPoint(ctx, regionEndX, 0);
+                CGContextAddLineToPoint(ctx, regionEndX, height);
+                CGContextStrokePath(ctx);
+            }
+        }
     }
 
     // Draw playback position indicator
@@ -576,6 +642,21 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     CGContextStrokePath(ctx);
 }
 
+#pragma mark - Keyboard Events
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)keyDown:(NSEvent *)event {
+    if ([_delegate respondsToSelector:@selector(waveformView:shouldHandleKeyEvent:)]) {
+        if ([_delegate waveformView:self shouldHandleKeyEvent:event]) {
+            return;
+        }
+    }
+    [super keyDown:event];
+}
+
 #pragma mark - Mouse Events
 
 - (void)mouseDown:(NSEvent *)event {
@@ -584,9 +665,25 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     timeMS = fmax(0, fmin(timeMS, _sequenceLengthMS));
 
     _dragging = YES;
+    _isDragSelecting = NO;
+    _mouseDownPoint = loc;
+    _dragStartMS = timeMS;
+
+    // Clear any existing loop region on click
+    if (self.hasLoopRegion) {
+        _loopRegionStartMS = -1;
+        _loopRegionEndMS = -1;
+        _needsRedraw = YES;
+        [self.layer setNeedsDisplay];
+
+        if ([_delegate respondsToSelector:@selector(waveformViewDidClearLoopRegion:)]) {
+            [_delegate waveformViewDidClearLoopRegion:self];
+        }
+    }
+
+    // Immediate seek
     _playbackPositionMS = timeMS;
     _needsRedraw = YES;
-    // Force immediate synchronous redraw before delegate call (which may block)
     [self.layer setNeedsDisplay];
     [self.layer displayIfNeeded];
 
@@ -602,19 +699,52 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     CGFloat timeMS = [self timeMSForPointX:loc.x];
     timeMS = fmax(0, fmin(timeMS, _sequenceLengthMS));
 
-    _playbackPositionMS = timeMS;
-    _needsRedraw = YES;
-    // Force immediate synchronous redraw before delegate call (which may block)
-    [self.layer setNeedsDisplay];
-    [self.layer displayIfNeeded];
+    // Check if we've exceeded the drag threshold to start selecting
+    if (!_isDragSelecting) {
+        CGFloat dx = loc.x - _mouseDownPoint.x;
+        CGFloat dy = loc.y - _mouseDownPoint.y;
+        if (sqrt(dx * dx + dy * dy) >= kDragThreshold) {
+            _isDragSelecting = YES;
+        }
+    }
 
-    if ([_delegate respondsToSelector:@selector(waveformView:didSeekToTimeMS:)]) {
-        [_delegate waveformView:self didSeekToTimeMS:timeMS];
+    if (_isDragSelecting) {
+        // Update loop region (always keep start < end)
+        _loopRegionStartMS = fmin(_dragStartMS, timeMS);
+        _loopRegionEndMS = fmax(_dragStartMS, timeMS);
+        _needsRedraw = YES;
+        [self.layer setNeedsDisplay];
+    } else {
+        // Still under threshold — continue seeking
+        _playbackPositionMS = timeMS;
+        _needsRedraw = YES;
+        [self.layer setNeedsDisplay];
+        [self.layer displayIfNeeded];
+
+        if ([_delegate respondsToSelector:@selector(waveformView:didSeekToTimeMS:)]) {
+            [_delegate waveformView:self didSeekToTimeMS:timeMS];
+        }
     }
 }
 
 - (void)mouseUp:(NSEvent *)event {
+    if (_isDragSelecting && self.hasLoopRegion) {
+        // If region is too small, treat as a click
+        if ((_loopRegionEndMS - _loopRegionStartMS) < kMinRegionMS) {
+            _loopRegionStartMS = -1;
+            _loopRegionEndMS = -1;
+            _needsRedraw = YES;
+            [self.layer setNeedsDisplay];
+        } else {
+            // Notify delegate of the completed selection
+            if ([_delegate respondsToSelector:@selector(waveformView:didSelectLoopRegionFromTimeMS:toTimeMS:)]) {
+                [_delegate waveformView:self didSelectLoopRegionFromTimeMS:_loopRegionStartMS toTimeMS:_loopRegionEndMS];
+            }
+        }
+    }
+
     _dragging = NO;
+    _isDragSelecting = NO;
 }
 
 - (void)mouseMoved:(NSEvent *)event {

@@ -91,6 +91,18 @@
 /// Whether to loop playback when reaching the end.
 @property (nonatomic, assign) BOOL loopEnabled;
 
+/// Loop region start in milliseconds (-1 = no region, use full sequence).
+@property (nonatomic, assign) NSInteger loopRegionStartMS;
+
+/// Loop region end in milliseconds (-1 = no region, use full sequence).
+@property (nonatomic, assign) NSInteger loopRegionEndMS;
+
+/// Whether a valid loop region is set.
+@property (nonatomic, readonly) BOOL hasLoopRegion;
+
+/// Clear the loop region, reverting to full-sequence looping.
+- (void)clearLoopRegion;
+
 /// Whether to render to the preview view during playback.
 @property (nonatomic, assign) BOOL renderToPreview;
 

@@ -54,7 +54,21 @@ void EffectEngine::removeListener(EffectEngineListener* listener)
         _listeners.end());
 }
 
-std::vector<EffectTypeInfo> EffectEngine::getEffectTypes() const { return {}; }
+std::vector<EffectTypeInfo> EffectEngine::getEffectTypes() const {
+    if (_provider) {
+        std::vector<std::string> names = _provider->getEffectTypes();
+        std::vector<EffectTypeInfo> result;
+        result.reserve(names.size());
+        for (size_t i = 0; i < names.size(); ++i) {
+            EffectTypeInfo info;
+            info.name = names[i];
+            info.id = static_cast<int>(i);
+            result.push_back(info);
+        }
+        return result;
+    }
+    return {};
+}
 bool EffectEngine::getEffectTypeInfo(const std::string& effectType, EffectTypeInfo& outInfo) const { return false; }
 std::vector<ParameterDefinition> EffectEngine::getEffectParameters(const std::string& effectType) const { return {}; }
 int EffectEngine::createEffect(const std::string& modelName, int layer, const std::string& effectType, int startTimeMS, int endTimeMS) { return -1; }

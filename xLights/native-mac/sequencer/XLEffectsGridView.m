@@ -567,6 +567,17 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     CGFloat scaledRowHeight = _rowHeight * scale;
     CGFloat scaledZoom = _zoomLevel * scale;
 
+    // Calculate rubber band rect in scaled coordinates
+    NSRect rubberBandRect = NSZeroRect;
+    if (_isRubberBanding) {
+        CGFloat x1 = _rubberBandOrigin.x * scale;
+        CGFloat y1 = _rubberBandOrigin.y * scale;
+        CGFloat x2 = _rubberBandCurrent.x * scale;
+        CGFloat y2 = _rubberBandCurrent.y * scale;
+        rubberBandRect = NSMakeRect(MIN(x1, x2), MIN(y1, y2),
+                                    fabs(x2 - x1), fabs(y2 - y1));
+    }
+
     // Pass only plain C arrays to the renderer — no ObjC collections.
     // The wxWidgets/C++ heap corruption overwrites ObjC object pointers
     // stored as ivars, so we must never touch NSArray during rendering.
@@ -586,7 +597,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             dropIndicator:_isReceivingDrop
                   dropRow:_dropTargetRow
               dropStartMS:_dropTargetStartMS
-                dropEndMS:_dropTargetEndMS];
+                dropEndMS:_dropTargetEndMS
+         rubberBandActive:_isRubberBanding
+           rubberBandRect:rubberBandRect];
 
     // Draw effect icons on the overlay layer (can be disabled for performance testing)
     if (!_disableIconDrawing) {
@@ -827,6 +840,56 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     [self updateSelectionState];
     [self notifySelectionChanged];
     _needsRedraw = YES;
+}
+
+- (void)zoomToSelection {
+    if (_renderEffectCount == 0) return;
+
+    // Find the time range of all selected effects
+    CGFloat minTime = CGFLOAT_MAX;
+    CGFloat maxTime = -CGFLOAT_MAX;
+    NSUInteger selectedCount = 0;
+
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        BOOL isSelected = (i < _selectedEffectsCapacity && _selectedEffects[i]);
+        if (!isSelected && (NSInteger)i == _selectedEffectID) {
+            isSelected = YES;
+        }
+        if (isSelected) {
+            XLEffectRenderInfo info = _renderEffects[i];
+            if (info.startTimeMS < minTime) minTime = info.startTimeMS;
+            if (info.endTimeMS > maxTime) maxTime = info.endTimeMS;
+            selectedCount++;
+        }
+    }
+
+    if (selectedCount == 0 || minTime >= maxTime) return;
+
+    // Add 10% padding on each side
+    CGFloat range = maxTime - minTime;
+    CGFloat padding = range * 0.1;
+    minTime -= padding;
+    maxTime += padding;
+    if (minTime < 0) minTime = 0;
+
+    // Calculate zoom level to fit the selection in the visible width
+    CGFloat visibleWidth = self.bounds.size.width;
+    if (visibleWidth <= 0) return;
+
+    CGFloat newZoom = visibleWidth / (maxTime - minTime);
+    newZoom = MAX(self.minZoomLevel, MIN(self.maxZoomLevel, newZoom));
+
+    self.zoomLevel = newZoom;
+    self.scrollOffset = CGPointMake(minTime * newZoom, self.scrollOffset.y);
+
+    _needsRedraw = YES;
+
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didChangeZoomLevel:)]) {
+        [_delegate effectsGrid:self didChangeZoomLevel:newZoom];
+    }
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didChangeScrollOffset:)]) {
+        [_delegate effectsGrid:self didChangeScrollOffset:self.scrollOffset];
+    }
 }
 
 - (NSInteger)rowForEffectIndex:(NSInteger)effectIndex {
@@ -1495,6 +1558,21 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 #pragma mark - Keyboard Events
 
 - (void)keyDown:(NSEvent *)event {
+    NSLog(@"XLEffectsGridView keyDown: keyCode=%hu, chars='%@', modifiers=0x%lx",
+          event.keyCode, event.charactersIgnoringModifiers, (unsigned long)event.modifierFlags);
+
+    // First, let the delegate handle via keyboard bindings (custom shortcuts like 't' for zoom)
+    if ([_delegate respondsToSelector:@selector(effectsGrid:shouldHandleKeyEvent:)]) {
+        NSLog(@"XLEffectsGridView: Delegate responds to shouldHandleKeyEvent:, calling it...");
+        BOOL handled = [_delegate effectsGrid:self shouldHandleKeyEvent:event];
+        NSLog(@"XLEffectsGridView: Delegate returned %@", handled ? @"YES (handled)" : @"NO (not handled)");
+        if (handled) {
+            return; // Delegate handled it
+        }
+    } else {
+        NSLog(@"XLEffectsGridView: Delegate does NOT respond to shouldHandleKeyEvent: (delegate=%@)", _delegate);
+    }
+
     BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
     BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
 

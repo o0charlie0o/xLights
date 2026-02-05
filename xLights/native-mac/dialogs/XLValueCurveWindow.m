@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLValueCurveWindow.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 // Curve type definitions - C array for heap safety
 static const XLCurveTypeDef kCurveTypes[] = {

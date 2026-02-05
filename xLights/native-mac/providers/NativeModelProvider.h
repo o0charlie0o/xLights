@@ -45,6 +45,12 @@ class ModelManager;
 
 namespace xlEngine {
 
+/// A sequencer view definition.
+struct SequenceViewInfo {
+    std::string name;                    // View name (e.g., "Groups", "Outline")
+    std::vector<std::string> models;     // Model names in this view
+};
+
 /// Native macOS implementation of IModelProvider.
 ///
 /// This class provides model management without wxWidgets runtime dependencies.
@@ -100,6 +106,26 @@ public:
     /// @return Show folder path, or empty string if no folder loaded.
     std::string getShowFolderPath() const;
 
+    // --- View Management ---
+
+    /// Get all view names.
+    /// @return Vector of view names.
+    std::vector<std::string> getViewNames() const;
+
+    /// Get a view by name.
+    /// @param name View name.
+    /// @return View info, or empty view if not found.
+    SequenceViewInfo getView(const std::string& name) const;
+
+    /// Get view count.
+    /// @return Number of views.
+    size_t getViewCount() const;
+
+    /// Get view by index.
+    /// @param index View index (0-based).
+    /// @return View info, or empty view if index out of range.
+    SequenceViewInfo getViewAtIndex(size_t index) const;
+
     // --- Model Management (for future native implementation) ---
 
     /// Adds a model to the collection. The provider takes ownership.
@@ -120,6 +146,16 @@ public:
     bool isUsingExternalManager() const { return false; }
 #endif
 
+    // Override hasModel to check names list (default impl calls getModel which
+    // returns nullptr in native standalone mode)
+    bool hasModel(const std::string& name) const override;
+
+    /// Get all stored XML attributes for a model.
+    /// Available in both native and non-native builds when models are loaded from XML.
+    /// @param name Model name.
+    /// @return Map of attribute name → value, or empty map if not found.
+    std::map<std::string, std::string> getModelAttributes(const std::string& name) const override;
+
 private:
 #ifndef XLIGHTS_NATIVE
     // Internal model storage for standalone operation (uses Model class)
@@ -129,6 +165,9 @@ private:
     // Model names in order (for indexed access)
     std::vector<std::string> _modelNames;
 
+    // Parsed XML attributes per model (name → {attr → value})
+    std::map<std::string, std::map<std::string, std::string>> _modelAttributes;
+
 #ifndef XLIGHTS_NATIVE
     // External ModelManager for transition period (not owned)
     ModelManager* _externalManager;
@@ -136,6 +175,9 @@ private:
 
     // Show folder path
     std::string _showFolderPath;
+
+    // Views
+    std::vector<SequenceViewInfo> _views;
 
     // Thread safety
     mutable std::mutex _mutex;
@@ -145,6 +187,9 @@ private:
 
     // Parse models from XML data
     bool parseModelsFromXML(const std::string& xmlContent);
+
+    // Parse views from XML data
+    void parseViewsFromXML(const std::string& xmlContent);
 };
 
 } // namespace xlEngine

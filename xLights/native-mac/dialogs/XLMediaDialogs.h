@@ -102,8 +102,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// The current name
 @property (nonatomic, copy) NSString *currentName;
 
-/// The new name (after OK)
-@property (nonatomic, copy, readonly) NSString *newName;
+/// The entered name (after OK)
+@property (nonatomic, copy, readonly) NSString *enteredName;
 
 /// Prompt text (e.g., "Effect Name:", "Model Name:")
 @property (nonatomic, copy) NSString *promptText;

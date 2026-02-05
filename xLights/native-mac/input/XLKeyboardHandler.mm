@@ -342,7 +342,10 @@ static NSString *KeyCodeToString(unsigned short keyCode) {
 #pragma mark - Event Handling
 
 - (BOOL)handleKeyEvent:(NSEvent *)event inScope:(XLKeyScope)scope {
+    NSLog(@"XLKeyboardHandler handleKeyEvent: bindingsLoaded=%d, delegate=%@", _bindingsLoaded, _delegate);
+
     if (!_bindingsLoaded || !_delegate) {
+        NSLog(@"XLKeyboardHandler: Returning NO (bindings not loaded or no delegate)");
         return NO;
     }
 
@@ -361,8 +364,13 @@ static NSString *KeyCodeToString(unsigned short keyCode) {
     NSString *characters = event.charactersIgnoringModifiers;
     int xlKeyCode = NSEventKeyCodeToXLCoreKeyCode(event.keyCode, characters);
 
+    NSLog(@"XLKeyboardHandler: keyCode=%hu -> xlKeyCode=%d ('%c'), cmd=%d, opt=%d, ctrl=%d, shift=%d",
+          event.keyCode, xlKeyCode, (xlKeyCode > 31 && xlKeyCode < 127) ? (char)xlKeyCode : '?',
+          cmd, option, control, shift);
+
     if (xlKeyCode == 0) {
         // Unknown key
+        NSLog(@"XLKeyboardHandler: Unknown key code, returning NO");
         if ([_delegate respondsToSelector:@selector(keyPressedWithNoBinding:inScope:)]) {
             [_delegate keyPressedWithNoBinding:event inScope:scope];
         }
@@ -382,6 +390,8 @@ static NSString *KeyCodeToString(unsigned short keyCode) {
         default:                 xlScope = xlCore::KeyScope::Invalid; break;
     }
 
+    NSLog(@"XLKeyboardHandler: Looking up binding for key=%d in scope=%d", xlKeyCode, (int)xlScope);
+
     // Look up the binding
     // macOS Cmd key maps to "control" in key bindings (standard macOS behavior)
     // macOS Control key maps to "rawControl"
@@ -389,11 +399,14 @@ static NSString *KeyCodeToString(unsigned short keyCode) {
 
     if (!binding) {
         // No binding found
+        NSLog(@"XLKeyboardHandler: No binding found for this key combination");
         if ([_delegate respondsToSelector:@selector(keyPressedWithNoBinding:inScope:)]) {
             [_delegate keyPressedWithNoBinding:event inScope:scope];
         }
         return NO;
     }
+
+    NSLog(@"XLKeyboardHandler: Found binding! type='%s'", binding->getType().c_str());
 
     // Found a binding - call delegate
     NSString *actionType = [NSString stringWithUTF8String:binding->getType().c_str()];

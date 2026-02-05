@@ -8,6 +8,7 @@
  **************************************************************/
 
 #import "XLNativeDialogs.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #pragma mark - XLProgressController Private
 

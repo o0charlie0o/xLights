@@ -152,6 +152,11 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didChangeSelection:(NSIndexSet *)selectedIndices;
 
+/// Forward a key event to the delegate for handling via key bindings.
+/// Return YES if the delegate handled the event, NO if the grid view should handle it locally.
+/// This is called FIRST, before the grid view's own key handling.
+- (BOOL)effectsGrid:(XLEffectsGridView *)gridView shouldHandleKeyEvent:(NSEvent *)event;
+
 @end
 
 /// Metal-backed NSView that renders the sequencer effects timeline.
@@ -227,5 +232,8 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 
 /// Clear all selections.
 - (void)clearSelection;
+
+/// Zoom and scroll to fit the currently selected effects in view.
+- (void)zoomToSelection;
 
 @end
