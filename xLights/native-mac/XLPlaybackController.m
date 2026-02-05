@@ -87,8 +87,8 @@
     // Use GCD dispatch_source for reliable timing (same approach as XLAudioPlayer)
     _fallbackTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
 
-    // 50ms interval (20Hz) like original xLights
-    uint64_t interval = 50 * NSEC_PER_MSEC;
+    // Match the sequence frame rate (e.g. 50ms for 20fps, 25ms for 40fps)
+    uint64_t interval = (uint64_t)(_frameTimeMS > 0 ? _frameTimeMS : 50) * NSEC_PER_MSEC;
     uint64_t leeway = 1 * NSEC_PER_MSEC;  // 1ms leeway
 
     dispatch_source_set_timer(_fallbackTimer,
