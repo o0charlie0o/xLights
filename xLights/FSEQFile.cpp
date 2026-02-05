@@ -100,8 +100,8 @@ inline void AddSlowStorageWarning() {
     spdlog::warn("If you are using a USB drive, please consider using a faster drive.");
 }
 
-#elif __has_include(<log4cpp/Category.hh>)
-// compiling within xLights, use log4cpp
+#elif __has_include(<log4cpp/Category.hh>) && !defined(XLIGHTS_NATIVE)
+// compiling within xLights, use log4cpp (skip for native build to avoid static init crash)
 #define PLATFORM_UNKNOWN
 #include <log4cpp/Category.hh>
 template<typename... Args>
