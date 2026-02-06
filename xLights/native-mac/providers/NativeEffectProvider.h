@@ -186,6 +186,12 @@ public:
     EffectOperationResult deleteEffect(int64_t effectId) override;
     EffectOperationResult deleteEffects(const std::vector<int64_t>& effectIds) override;
 
+    // --- IEffectProvider Implementation: Effect Property Modification ---
+
+    EffectOperationResult setEffectLocked(int64_t effectId, bool locked) override;
+    EffectOperationResult setEffectRenderDisabled(int64_t effectId, bool disabled) override;
+    EffectOperationResult resetEffectToDefaults(int64_t effectId) override;
+
     // --- IEffectProvider Implementation: Effect Modification - Update ---
 
     EffectOperationResult updateEffectTiming(

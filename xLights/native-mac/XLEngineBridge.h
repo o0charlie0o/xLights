@@ -89,6 +89,22 @@
 ///                  numChannels, numFrames, author, song, artist, album, comment
 - (NSDictionary *)getSequenceInfo;
 
+/// Update sequence metadata (author, song info, comments, etc.).
+/// Only modifies fields present in the dictionary; omitted keys are left unchanged.
+/// Supported keys: author, song, artist, album, comment
+/// @param info Dictionary of metadata fields to update
+/// @return YES if the update was applied successfully
+- (BOOL)setSequenceInfo:(NSDictionary *)info;
+
+/// Render a sequence file to FSEQ output.
+/// Loads the sequence, renders all effects, writes FSEQ, then closes.
+/// @param sequencePath Full path to the .xsq/.xml sequence file
+/// @param outputPath Full path for .fseq output (nil = same directory as sequence)
+/// @param completion Called on main thread with success status and message
+- (void)renderSequenceToFSEQ:(NSString *)sequencePath
+                  outputPath:(NSString * _Nullable)outputPath
+                  completion:(void (^)(BOOL success, NSString *message))completion;
+
 #pragma mark - Playback Control
 
 - (void)play;
@@ -490,6 +506,15 @@
 /// Convert an effect to a different type
 - (BOOL)convertEffectType:(NSInteger)effectId newType:(NSString *)newType;
 
+/// Set whether an effect is locked (prevents editing)
+- (BOOL)setEffectLocked:(NSInteger)effectId locked:(BOOL)locked;
+
+/// Set whether an effect's rendering is disabled
+- (BOOL)setEffectRenderDisabled:(NSInteger)effectId disabled:(BOOL)disabled;
+
+/// Reset an effect to its default settings
+- (BOOL)resetEffectToDefaults:(NSInteger)effectId;
+
 #pragma mark - Timing Track Operations
 
 /// Get list of timing tracks in the sequence
@@ -589,6 +614,12 @@
 
 /// Get current audio playback volume
 - (NSInteger)getAudioVolume;
+
+/// Set playback speed as a multiplier (e.g. 0.25 = 1/4x, 1.0 = normal, 4.0 = 4x)
+- (void)setPlaybackSpeed:(double)speed;
+
+/// Get current playback speed multiplier
+- (double)getPlaybackSpeed;
 
 #pragma mark - Pixel Test Operations
 

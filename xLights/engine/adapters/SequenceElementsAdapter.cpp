@@ -611,6 +611,61 @@ EffectOperationResult SequenceElementsAdapter::deleteEffects(const std::vector<i
     return result;
 }
 
+// --- IEffectProvider Implementation: Effect Property Modification ---
+
+EffectOperationResult SequenceElementsAdapter::setEffectLocked(int64_t effectId, bool locked)
+{
+    EffectOperationResult result;
+    size_t elementIndex = 0;
+    size_t layerIndex = 0;
+    ::Effect* eff = findEffectById(effectId, elementIndex, layerIndex);
+    if (!eff) {
+        result.success = false;
+        result.errorMessage = "Effect not found";
+        return result;
+    }
+    eff->SetLocked(locked);
+    result.success = true;
+    result.effectId = effectId;
+    return result;
+}
+
+EffectOperationResult SequenceElementsAdapter::setEffectRenderDisabled(int64_t effectId, bool disabled)
+{
+    EffectOperationResult result;
+    size_t elementIndex = 0;
+    size_t layerIndex = 0;
+    ::Effect* eff = findEffectById(effectId, elementIndex, layerIndex);
+    if (!eff) {
+        result.success = false;
+        result.errorMessage = "Effect not found";
+        return result;
+    }
+    eff->SetEffectRenderDisabled(disabled);
+    result.success = true;
+    result.effectId = effectId;
+    return result;
+}
+
+EffectOperationResult SequenceElementsAdapter::resetEffectToDefaults(int64_t effectId)
+{
+    EffectOperationResult result;
+    size_t elementIndex = 0;
+    size_t layerIndex = 0;
+    ::Effect* eff = findEffectById(effectId, elementIndex, layerIndex);
+    if (!eff) {
+        result.success = false;
+        result.errorMessage = "Effect not found";
+        return result;
+    }
+    eff->SetSettings("", false);
+    eff->SetPalette("");
+    eff->IncrementChangeCount();
+    result.success = true;
+    result.effectId = effectId;
+    return result;
+}
+
 // --- IEffectProvider Implementation: Effect Modification - Update ---
 
 EffectOperationResult SequenceElementsAdapter::updateEffectTiming(

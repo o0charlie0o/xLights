@@ -1062,6 +1062,74 @@ EffectOperationResult NativeEffectProvider::deleteEffects(const std::vector<int6
     return result;
 }
 
+// --- IEffectProvider Implementation: Effect Property Modification ---
+
+EffectOperationResult NativeEffectProvider::setEffectLocked(int64_t effectId, bool locked)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    EffectOperationResult result;
+    NativeEffect* effect = findEffectById(effectId);
+    if (!effect) {
+        result.success = false;
+        result.errorMessage = "Effect not found";
+        return result;
+    }
+
+    effect->locked = locked;
+    incrementChangeCount();
+
+    result.success = true;
+    result.effectId = effectId;
+    return result;
+}
+
+EffectOperationResult NativeEffectProvider::setEffectRenderDisabled(int64_t effectId, bool disabled)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    EffectOperationResult result;
+    NativeEffect* effect = findEffectById(effectId);
+    if (!effect) {
+        result.success = false;
+        result.errorMessage = "Effect not found";
+        return result;
+    }
+
+    effect->renderDisabled = disabled;
+    incrementChangeCount();
+
+    result.success = true;
+    result.effectId = effectId;
+    return result;
+}
+
+EffectOperationResult NativeEffectProvider::resetEffectToDefaults(int64_t effectId)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    EffectOperationResult result;
+    NativeEffect* effect = findEffectById(effectId);
+    if (!effect) {
+        result.success = false;
+        result.errorMessage = "Effect not found";
+        return result;
+    }
+
+    // Record undo action before clearing
+    beginUndoGroup("Reset Effect to Defaults");
+
+    effect->settings.clear();
+    effect->palette.clear();
+    incrementChangeCount();
+
+    endUndoGroup();
+
+    result.success = true;
+    result.effectId = effectId;
+    return result;
+}
+
 // --- IEffectProvider Implementation: Effect Modification - Update ---
 
 EffectOperationResult NativeEffectProvider::updateEffectTiming(

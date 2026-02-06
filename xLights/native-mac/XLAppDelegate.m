@@ -3,9 +3,16 @@
 #import "XLToolbarExtensions.h"
 #import "preferences/XLPreferencesWindowController.h"
 #import "dialogs/XLSequenceDialogs.h"
+#import "dialogs/XLBatchRenderDialog.h"
+#import "dialogs/XLRenderProgressDialog.h"
+#import "dialogs/XLToolsDialogs.h"
+#import "dialogs/XLConvertDialogs.h"
 #import "XLMainWindowController.h"
 #import "XLEngineBridge.h"
 #import "XLSequencerViewController.h"
+#import "XLKeyBindingsWindowController.h"
+#import "XLFPPConnectWindowController.h"
+#import "XLScriptRunnerWindowController.h"
 
 // Import Swift generated header for XLSwiftUIWindowHelper
 // The header name depends on the target product name
@@ -28,6 +35,13 @@ void XLSetCommandPaletteVisible(bool visible) {
 @interface XLAppDelegate ()
 
 @property (nonatomic, strong) XLDocumentController *documentController;
+@property (nonatomic, strong) XLFPPConnectWindowController *fppConnectWindow;
+@property (nonatomic, strong) XLScriptRunnerWindowController *scriptRunnerWindow;
+@property (nonatomic, strong) XLCleanupFileLocationsDialog *cleanupDialog;
+@property (nonatomic, strong) XLPackageSequenceDialog *packageDialog;
+@property (nonatomic, strong) XLDownloadSequencesDialog *downloadDialog;
+@property (nonatomic, strong) XLPrepareAudioDialog *prepareAudioDialog;
+@property (nonatomic, strong) XLConvertDialog *convertDialog;
 
 @end
 
@@ -428,21 +442,63 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)showSequenceSettings:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Sequence Settings";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (!engineBridge) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Engine";
+        alert.informativeText = @"The engine is not initialized. Please open a show folder first.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    if (![engineBridge isSequenceLoaded]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Sequence Loaded";
+        alert.informativeText = @"Please open a sequence before editing its settings.";
+        alert.alertStyle = NSAlertStyleInformational;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSDictionary *seqInfo = [engineBridge getSequenceInfo];
+
+    XLSequenceSettingsDialog *dialog = [[XLSequenceSettingsDialog alloc] init];
+    dialog.sequenceName = seqInfo[@"name"] ?: @"";
+    dialog.author = seqInfo[@"author"] ?: @"";
+    dialog.authorEmail = @"";
+    dialog.authorWebsite = @"";
+    dialog.songName = seqInfo[@"song"] ?: @"";
+    dialog.artistName = seqInfo[@"artist"] ?: @"";
+    dialog.albumName = seqInfo[@"album"] ?: @"";
+    dialog.comments = seqInfo[@"comment"] ?: @"";
+    dialog.durationMs = [seqInfo[@"durationMS"] integerValue];
+    dialog.frameIntervalMs = [seqInfo[@"frameTimeMS"] integerValue];
+
+    NSWindow *parentWindow = [NSApp keyWindow] ?: [NSApp mainWindow];
+
+    [dialog presentAsSheetForWindow:parentWindow completion:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            NSMutableDictionary *updates = [NSMutableDictionary dictionary];
+            updates[@"author"] = dialog.author ?: @"";
+            updates[@"song"] = dialog.songName ?: @"";
+            updates[@"artist"] = dialog.artistName ?: @"";
+            updates[@"album"] = dialog.albumName ?: @"";
+            updates[@"comment"] = dialog.comments ?: @"";
+
+            [engineBridge setSequenceInfo:updates];
+
+            NSLog(@"XLAppDelegate: Sequence settings updated");
+        }
+    }];
 }
 
 - (IBAction)showKeyBindings:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Key Bindings";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    [[XLKeyBindingsWindowController sharedController] showWindow:sender];
 }
 
 - (IBAction)exportHousePreviewVideo:(id)sender {
@@ -471,7 +527,10 @@ void XLSetCommandPaletteVisible(bool visible) {
     double speed = speedPercent / 100.0;
     NSLog(@"XLAppDelegate: Playback speed set to %.2fx", speed);
 
-    // TODO: Wire to engine playback speed
+    XLEngineBridge *engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+    if (engineBridge) {
+        [engineBridge setPlaybackSpeed:speed];
+    }
 }
 
 - (IBAction)setVolume:(id)sender {
@@ -488,7 +547,10 @@ void XLSetCommandPaletteVisible(bool visible) {
     NSInteger volumePercent = selectedItem.tag;
     NSLog(@"XLAppDelegate: Volume set to %ld%%", (long)volumePercent);
 
-    // TODO: Wire to engine volume control
+    XLEngineBridge *engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+    if (engineBridge) {
+        [engineBridge setAudioVolume:volumePercent];
+    }
 }
 
 #pragma mark - Tools Menu Actions
@@ -512,48 +574,127 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)cleanupFileLocations:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Cleanup File Locations";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    if (!_cleanupDialog) {
+        _cleanupDialog = [[XLCleanupFileLocationsDialog alloc] init];
+        _cleanupDialog.engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+    }
+    [_cleanupDialog showWithCompletion:^{}];
 }
 
 - (IBAction)packageSequence:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Package Sequence";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    if (!_packageDialog) {
+        _packageDialog = [[XLPackageSequenceDialog alloc] init];
+        _packageDialog.engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+    }
+    [_packageDialog showWithCompletion:^{}];
 }
 
 - (IBAction)downloadSequences:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Download Sequences/Lyrics";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    if (!_downloadDialog) {
+        _downloadDialog = [[XLDownloadSequencesDialog alloc] init];
+    }
+    [_downloadDialog showWithCompletion:^{}];
 }
 
 - (IBAction)batchRender:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Batch Render";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (!engineBridge) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Engine";
+        alert.informativeText = @"The engine is not initialized. Please open a show folder first.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSString *showDirectory = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+    if (!showDirectory) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Show Folder";
+        alert.informativeText = @"Please select a show folder first.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    XLBatchRenderDialog *dialog = [[XLBatchRenderDialog alloc] init];
+    dialog.engineBridge = engineBridge;
+    dialog.showDirectory = showDirectory;
+
+    NSWindow *parentWindow = [NSApp keyWindow] ?: [NSApp mainWindow];
+
+    [dialog presentAsSheetForWindow:parentWindow completion:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            NSArray<NSString *> *selectedSequences = dialog.selectedSequences;
+            BOOL forceHD = dialog.forceHighDefinition;
+
+            NSLog(@"XLAppDelegate: Batch render requested - %lu sequences, forceHD=%d",
+                  (unsigned long)selectedSequences.count, forceHD);
+
+            if (selectedSequences.count == 0) return;
+
+            XLRenderProgressDialog *progressDialog = [[XLRenderProgressDialog alloc] init];
+            for (NSString *seqName in selectedSequences) {
+                [progressDialog addProgressItemForModel:seqName];
+            }
+            [progressDialog showForWindow:parentWindow];
+
+            __block NSInteger completedCount = 0;
+            __block NSInteger failedCount = 0;
+            NSInteger totalCount = selectedSequences.count;
+
+            for (NSInteger i = 0; i < (NSInteger)selectedSequences.count; i++) {
+                NSString *seqName = selectedSequences[i];
+                NSString *seqPath = [showDirectory stringByAppendingPathComponent:seqName];
+
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.1 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    [progressDialog updateStatusForModel:seqName status:@"Rendering..."];
+
+                    [engineBridge renderSequenceToFSEQ:seqPath outputPath:nil completion:^(BOOL success, NSString *message) {
+                        completedCount++;
+
+                        if (success) {
+                            [progressDialog markCompleted:seqName];
+                            [progressDialog updateStatusForModel:seqName status:@"Complete"];
+                        } else {
+                            failedCount++;
+                            [progressDialog updateStatusForModel:seqName status:message ?: @"Failed"];
+                            [progressDialog updateProgressForModel:seqName progress:1.0];
+                        }
+
+                        if (completedCount == totalCount) {
+                            [progressDialog markAllCompleted];
+
+                            NSString *summary;
+                            if (failedCount == 0) {
+                                summary = [NSString stringWithFormat:@"All %ld sequences rendered successfully.", (long)totalCount];
+                            } else {
+                                summary = [NSString stringWithFormat:@"%ld of %ld sequences rendered. %ld failed.",
+                                           (long)(totalCount - failedCount), (long)totalCount, (long)failedCount];
+                            }
+                            NSLog(@"XLAppDelegate: Batch render complete - %@", summary);
+                        }
+                    }];
+                });
+            }
+        }
+    }];
 }
 
 - (IBAction)fppConnect:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"FPP Connect";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (!_fppConnectWindow || !_fppConnectWindow.window.isVisible) {
+        _fppConnectWindow = [[XLFPPConnectWindowController alloc] initWithEngineBridge:engineBridge];
+    }
+
+    [_fppConnectWindow showWindow:sender];
 }
 
 - (IBAction)bulkControllerUpload:(id)sender {
@@ -566,12 +707,11 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)runScripts:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Run Scripts";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    if (!_scriptRunnerWindow) {
+        _scriptRunnerWindow = [[XLScriptRunnerWindowController alloc] init];
+        _scriptRunnerWindow.engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+    }
+    [_scriptRunnerWindow showWindow:sender];
 }
 
 - (IBAction)exportModelsFromTools:(id)sender {
@@ -663,57 +803,78 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)generate2DPath:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Generate 2D Path";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLGeneratorPlaceholderDialog *dialog = [[XLGeneratorPlaceholderDialog alloc] init];
+    dialog.featureName = @"Generate 2D Path";
+    dialog.featureDescription = @"Generates a 2D motion path for effects like Marquee, Servo, and "
+        @"other position-based effects. Draw or import a path that effects can follow over time.";
+    dialog.plannedCapabilities = @[
+        @"Interactive path drawing canvas",
+        @"Import paths from SVG files",
+        @"Preview path with timing visualization",
+        @"Export path data for use in effects",
+        @"Bezier curve and linear segment support"
+    ];
+    [dialog presentAsModalWithCompletion:nil];
 }
 
 - (IBAction)generateCustomModel:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Generate Custom Model";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLGeneratorPlaceholderDialog *dialog = [[XLGeneratorPlaceholderDialog alloc] init];
+    dialog.featureName = @"Generate Custom Model";
+    dialog.featureDescription = @"Creates a custom model definition from an image of your physical display. "
+        @"Upload a photo of your lights and click each pixel to map them into a custom model layout.";
+    dialog.plannedCapabilities = @[
+        @"Image-based pixel mapping",
+        @"Automatic pixel detection from photos",
+        @"Manual click-to-place pixel assignment",
+        @"Multi-string support for complex layouts",
+        @"Export as .xmodel file for sharing"
+    ];
+    [dialog presentAsModalWithCompletion:nil];
 }
 
 - (IBAction)remapCustomModel:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Remap Custom Model";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLGeneratorPlaceholderDialog *dialog = [[XLGeneratorPlaceholderDialog alloc] init];
+    dialog.featureName = @"Remap Custom Model";
+    dialog.featureDescription = @"Remaps pixel numbering in an existing custom model. Useful when you need to "
+        @"change wiring order, reverse strings, or reorganize pixel assignments without recreating the model.";
+    dialog.plannedCapabilities = @[
+        @"Visual pixel renumbering interface",
+        @"Bulk renumber with offset/reverse",
+        @"String reordering tools",
+        @"Preview before and after mapping",
+        @"Undo/redo support for remapping changes"
+    ];
+    [dialog presentAsModalWithCompletion:nil];
 }
 
 - (IBAction)generateLyricsFromData:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Generate Lyrics From Data";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLGeneratorPlaceholderDialog *dialog = [[XLGeneratorPlaceholderDialog alloc] init];
+    dialog.featureName = @"Generate Lyrics From Data";
+    dialog.featureDescription = @"Extracts lyric timing data from an existing sequence and generates "
+        @"a lyrics timing track. Analyzes phoneme and word timing information from face effects.";
+    dialog.plannedCapabilities = @[
+        @"Extract lyrics from face effect data",
+        @"Generate word-level timing marks",
+        @"Generate phoneme-level timing marks",
+        @"Export as lyrics text file",
+        @"Import timing from LRC/SRT subtitle files"
+    ];
+    [dialog presentAsModalWithCompletion:nil];
 }
 
 - (IBAction)convertSequence:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Convert";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    if (!_convertDialog) {
+        _convertDialog = [[XLConvertDialog alloc] init];
+        _convertDialog.engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+    }
+    [_convertDialog showWithCompletion:^{}];
 }
 
 - (IBAction)prepareAudio:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Prepare Audio";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    if (!_prepareAudioDialog) {
+        _prepareAudioDialog = [[XLPrepareAudioDialog alloc] init];
+    }
+    [_prepareAudioDialog showWithCompletion:^{}];
 }
 
 #pragma mark - Help Menu Actions

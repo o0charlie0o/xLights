@@ -23,6 +23,8 @@
 #import "XLEngineBridge.h"
 #import "XLPlaybackController.h"
 #import "XLHousePreviewWindowController.h"
+#import "XLEffectPresetsWindowController.h"
+#import "XLSymbolLibraryManager.h"
 #import "XLEffectPropertiesViewController.h"
 #import "dialogs/XLNewTimingDialog.h"
 #import "dialogs/XLTimingImportDialog.h"
@@ -457,6 +459,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // House preview floating window
     XLHousePreviewWindowController *_housePreviewController;
+
+    // Effect presets window
+    XLEffectPresetsWindowController *_presetsWindowController;
+
+    // Symbol library manager
+    XLSymbolLibraryManager *_symbolLibraryManager;
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -1150,6 +1158,15 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Sync active timing track color with grid view
     [self updateActiveTimingColorIndex];
+
+    // Update symbol names for context menu
+    [self updateAvailableSymbolNames];
+}
+
+- (void)updateAvailableSymbolNames {
+    [self ensureSymbolLibraryManager];
+    [_symbolLibraryManager reloadSymbols];
+    _effectsGridView.availableSymbolNames = [_symbolLibraryManager symbolNames];
 }
 
 - (void)updateViewsForSequenceChange {
@@ -2294,9 +2311,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
         NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
         if (effectId < 0) return;
-        // TODO: Engine bridge does not yet expose setEffectLocked: method.
-        // When available, call: [self->_engineBridge setEffectLocked:effectId locked:locked];
-        NSLog(@"Set effect %ld locked=%d (bridge method pending)", (long)effectId, locked);
+        [self->_engineBridge setEffectLocked:effectId locked:locked];
     }];
 
     [self reloadSequenceData];
@@ -2312,9 +2327,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
         NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
         if (effectId < 0) return;
-        // TODO: Engine bridge does not yet expose setEffectRenderDisabled: method.
-        // When available, call: [self->_engineBridge setEffectRenderDisabled:effectId disabled:disabled];
-        NSLog(@"Set effect %ld renderDisabled=%d (bridge method pending)", (long)effectId, disabled);
+        [self->_engineBridge setEffectRenderDisabled:effectId disabled:disabled];
     }];
 
     [self reloadSequenceData];
@@ -2355,9 +2368,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
 
-    // TODO: Engine bridge does not yet expose a resetEffectToDefaults: method.
-    // When available, call: [self->_engineBridge resetEffectToDefaults:effectId];
-    NSLog(@"Reset effect %ld to defaults (bridge method pending)", (long)effectId);
+    [_engineBridge resetEffectToDefaults:effectId];
 
     [self reloadSequenceData];
     [gridView reloadData];
@@ -2365,8 +2376,25 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (void)effectsGridDidRequestEffectPresets:(XLEffectsGridView *)gridView
 {
-    // TODO: Open the effect presets panel/dialog when implemented.
-    NSLog(@"Effect Presets panel requested (not yet implemented)");
+    if (!_presetsWindowController) {
+        _presetsWindowController = [[XLEffectPresetsWindowController alloc]
+            initWithEngineBridge:_engineBridge];
+    }
+
+    // Set the current effect so Save/Load buttons know what to operate on
+    NSInteger selectedIdx = gridView.selectedEffectID;
+    if (selectedIdx >= 0) {
+        NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)selectedIdx];
+        [_presetsWindowController setCurrentEffectId:effectId];
+    }
+
+    NSWindow *presetsWindow = _presetsWindowController.window;
+    if (presetsWindow.isVisible) {
+        [presetsWindow makeKeyAndOrderFront:nil];
+    } else {
+        [_presetsWindowController reloadPresets];
+        [presetsWindow makeKeyAndOrderFront:nil];
+    }
 }
 
 - (void)effectsGridDidRequestCreateRandomEffects:(XLEffectsGridView *)gridView
@@ -2554,6 +2582,14 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSLog(@"%@ for %lu effects (not yet implemented)", typeName, (unsigned long)effectIndices.count);
 }
 
+#pragma mark - Symbol Library / Presets Helpers
+
+- (void)ensureSymbolLibraryManager {
+    if (!_symbolLibraryManager) {
+        _symbolLibraryManager = [[XLSymbolLibraryManager alloc] initWithEngineBridge:_engineBridge];
+    }
+}
+
 #pragma mark - XLEffectsGridDelegate (Symbol Library Operations)
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2561,17 +2597,62 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
-    // TODO: Create a symbol from the effect via engine bridge
-    NSLog(@"Create Symbol from Effect %ld (not yet implemented)", (long)effectId);
+
+    [self ensureSymbolLibraryManager];
+
+    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+    NSString *effectType = effectInfo[@"effectType"] ?: @"Effect";
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Create Symbol";
+    alert.informativeText = [NSString stringWithFormat:
+        @"Save the current %@ effect as a reusable symbol.\nLinked effects will update when the symbol changes.", effectType];
+    [alert addButtonWithTitle:@"Create"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *nameField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+    nameField.stringValue = [NSString stringWithFormat:@"My %@ Symbol", effectType];
+    nameField.placeholderString = @"Symbol name";
+    alert.accessoryView = nameField;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+
+        NSString *name = nameField.stringValue;
+        if (name.length == 0) return;
+
+        NSString *symbolId = [self->_symbolLibraryManager createSymbolFromEffect:effectId withName:name];
+        if (symbolId) {
+            NSLog(@"Created symbol '%@' (ID: %@) from effect %ld", name, symbolId, (long)effectId);
+            [self updateAvailableSymbolNames];
+            [self reloadSequenceData];
+            [gridView reloadData];
+        }
+    }];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didRequestUnlinkFromSymbol:(NSIndexSet *)effectIndices
 {
     if (!_engineBridge || effectIndices.count == 0) return;
-    // TODO: Unlink selected effects from their symbols via engine bridge
-    NSLog(@"Unlink from Symbol for %lu effects (not yet implemented)",
-          (unsigned long)effectIndices.count);
+
+    [self ensureSymbolLibraryManager];
+
+    __block NSInteger unlinkedCount = 0;
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
+        if (effectId >= 0 && [self->_symbolLibraryManager unlinkEffect:effectId]) {
+            unlinkedCount++;
+        }
+    }];
+
+    NSLog(@"Unlinked %ld of %lu effects from their symbols",
+          (long)unlinkedCount, (unsigned long)effectIndices.count);
+
+    if (unlinkedCount > 0) {
+        [self reloadSequenceData];
+        [gridView reloadData];
+    }
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2579,9 +2660,33 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
            toSymbolIndex:(NSInteger)symbolIndex
 {
     if (!_engineBridge || effectIndices.count == 0) return;
-    // TODO: Link selected effects to the specified symbol via engine bridge
-    NSLog(@"Link %lu effects to Symbol index %ld (not yet implemented)",
-          (unsigned long)effectIndices.count, (long)symbolIndex);
+
+    [self ensureSymbolLibraryManager];
+
+    NSDictionary *symbol = [_symbolLibraryManager symbolAtIndex:symbolIndex];
+    if (!symbol) {
+        NSLog(@"Cannot link effects: symbol at index %ld not found", (long)symbolIndex);
+        return;
+    }
+
+    NSString *symbolId = symbol[@"symbolId"];
+    if (!symbolId) return;
+
+    __block NSInteger linkedCount = 0;
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
+        if (effectId >= 0 && [self->_symbolLibraryManager linkEffect:effectId toSymbol:symbolId]) {
+            linkedCount++;
+        }
+    }];
+
+    NSLog(@"Linked %ld of %lu effects to symbol '%@'",
+          (long)linkedCount, (unsigned long)effectIndices.count, symbol[@"name"]);
+
+    if (linkedCount > 0) {
+        [self reloadSequenceData];
+        [gridView reloadData];
+    }
 }
 
 #pragma mark - XLRowHeadingsDataSource

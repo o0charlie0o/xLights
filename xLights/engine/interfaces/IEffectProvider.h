@@ -233,6 +233,19 @@ public:
     virtual EffectOperationResult deleteEffects(const std::vector<int64_t>& effectIds) = 0;
 
     // =========================================================================
+    // Effect Property Modification
+    // =========================================================================
+
+    // Set whether an effect is locked (prevents editing)
+    virtual EffectOperationResult setEffectLocked(int64_t effectId, bool locked) = 0;
+
+    // Set whether an effect's rendering is disabled
+    virtual EffectOperationResult setEffectRenderDisabled(int64_t effectId, bool disabled) = 0;
+
+    // Reset an effect to its default settings (clears all settings and palette)
+    virtual EffectOperationResult resetEffectToDefaults(int64_t effectId) = 0;
+
+    // =========================================================================
     // Effect Modification - Update
     // =========================================================================
 
