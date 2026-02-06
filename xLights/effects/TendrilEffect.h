@@ -11,13 +11,25 @@
  **************************************************************/
 
 #include "RenderableEffect.h"
-#include "../RenderBuffer.h"
 #include <string>
 #include <list>
+
+#ifndef XLIGHTS_NATIVE
+#include "../RenderBuffer.h"
 #include <wx/gdicmn.h>
 #include <wx/colour.h>
 #include <wx/dcmemory.h>
 class wxString;
+class PathDrawingContext;
+#else
+// Forward declare a simple Point struct for the native build
+struct TendrilPoint {
+    int x;
+    int y;
+    TendrilPoint(int x_ = 0, int y_ = 0) : x(x_), y(y_) {}
+};
+class NativePathDrawingContext;
+#endif
 
 #define TENDRIL_MOVEMENT_MIN 0
 #define TENDRIL_MOVEMENT_MAX 20
@@ -46,7 +58,11 @@ class TendrilNode
     float vy;
 
     TendrilNode(float x_, float y_);
+#ifndef XLIGHTS_NATIVE
     wxPoint* Point();
+#else
+    TendrilPoint* Point();
+#endif
 };
 
 class ATendril
@@ -65,10 +81,17 @@ class ATendril
 	public:
 
 	~ATendril();
+#ifndef XLIGHTS_NATIVE
 	ATendril(float friction, int size, float dampening, float tension, float spring, const wxPoint& start);
     void Update(wxPoint* target, int tunemovement, int width, int height);
 	void Draw(PathDrawingContext* gc, xlColor colour, int thickness);
 	wxPoint* LastLocation();
+#else
+	ATendril(float friction, int size, float dampening, float tension, float spring, const TendrilPoint& start);
+    void Update(TendrilPoint* target, int tunemovement, int width, int height);
+	void Draw(NativePathDrawingContext* gc, xlColor colour, int thickness);
+	TendrilPoint* LastLocation();
+#endif
 };
 
 class Tendril
@@ -78,11 +101,19 @@ class Tendril
 	public:
 
 	~Tendril();
+#ifndef XLIGHTS_NATIVE
 	Tendril(float friction, int trails, int size, float dampening, float tension, float springbase, float springincr, const wxPoint& start);
 	void UpdateRandomMove(int tunemovement, int width, int height);
     void Update(wxPoint* target, int tunemovement, size_t width, size_t height);
     void Update(int x, int y, int tunemovement, size_t width, size_t height);
     void Draw(PathDrawingContext* gc, xlColor colour, int thickness);
+#else
+	Tendril(float friction, int trails, int size, float dampening, float tension, float springbase, float springincr, const TendrilPoint& start);
+	void UpdateRandomMove(int tunemovement, int width, int height);
+    void Update(TendrilPoint* target, int tunemovement, size_t width, size_t height);
+    void Update(int x, int y, int tunemovement, size_t width, size_t height);
+    void Draw(NativePathDrawingContext* gc, xlColor colour, int thickness);
+#endif
 };
 
 class TendrilEffect : public RenderableEffect
@@ -90,8 +121,10 @@ class TendrilEffect : public RenderableEffect
 public:
     TendrilEffect(int id);
     virtual ~TendrilEffect();
-    virtual void SetDefaultParameters() override;
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#ifndef XLIGHTS_NATIVE
+    virtual void SetDefaultParameters() override;
+#endif
 #ifdef LINUX
     virtual bool CanRenderOnBackgroundThread(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override
     {
@@ -142,7 +175,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
     int EncodeMovement(std::string movement);

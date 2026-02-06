@@ -9,18 +9,20 @@
  **************************************************************/
 
 #include "TendrilEffect.h"
+
+#ifndef XLIGHTS_NATIVE
 #include "TendrilPanel.h"
-
-#include "../sequencer/Effect.h"
-#include "../RenderBuffer.h"
-#include "../UtilClasses.h"
-#include "../AudioManager.h"
-
 #include <wx/graphics.h>
 #if wxUSE_GRAPHICS_CONTEXT == 0
   #error Please refer to README.windows to make necessary changes to wxWidgets setup.h file.
   #error You will also need to rebuild wxWidgets once the change is made.
 #endif
+#endif
+
+#include "../sequencer/Effect.h"
+#include "../RenderBuffer.h"
+#include "../UtilClasses.h"
+#include "../AudioManager.h"
 
 #include "../../include/tendril-16.xpm"
 #include "../../include/tendril-24.xpm"
@@ -87,11 +89,18 @@ TendrilNode::TendrilNode(float x_, float y_)
     vy = 0;
 }
 
+#ifdef XLIGHTS_NATIVE
+TendrilPoint* TendrilNode::Point()
+{
+    return new TendrilPoint(rint(x), rint(y));
+}
+#else
 // Note callers of this function have to delete the returned wxPoint
 wxPoint* TendrilNode::Point()
 {
     return new wxPoint(rint(x) ,rint(y));
 }
+#endif
 
 ATendril::~ATendril()
 {
@@ -104,7 +113,11 @@ ATendril::~ATendril()
     }
 }
 
+#ifdef XLIGHTS_NATIVE
+ATendril::ATendril(float friction, int size, float dampening, float tension, float spring, const TendrilPoint& start)
+#else
 ATendril::ATendril(float friction, int size, float dampening, float tension, float spring, const wxPoint& start)
+#endif
 {
     _size = 60;
     if (size > 0) {
@@ -138,7 +151,11 @@ ATendril::ATendril(float friction, int size, float dampening, float tension, flo
     }
 }
 
+#ifdef XLIGHTS_NATIVE
+void ATendril::Update(TendrilPoint* target, int tunemovement, int width, int height)
+#else
 void ATendril::Update(wxPoint* target, int tunemovement, int width, int height)
+#endif
 {
     if (_lastWidth == -1)
         _lastWidth = width;
@@ -203,6 +220,17 @@ void ATendril::Update(wxPoint* target, int tunemovement, int width, int height)
     _lastHeight = height;
 }
 
+#ifdef XLIGHTS_NATIVE
+void ATendril::Draw(NativePathDrawingContext* gc, xlColor colour, int thickness)
+{
+    // TODO: Implement tendril drawing with NativePathDrawingContext (CoreGraphics)
+    // For now, this is a stub. The full implementation would use:
+    // gc->SetPen(colour, thickness);
+    // auto path = gc->CreatePath();
+    // path operations with AddQuadCurveToPoint
+    // gc->StrokePath(path);
+}
+#else
 void ATendril::Draw(PathDrawingContext* gc, xlColor colour, int thickness)
 {
     wxColor c(colour);
@@ -234,8 +262,13 @@ void ATendril::Draw(PathDrawingContext* gc, xlColor colour, int thickness)
     path.AddQuadCurveToPoint(a->x, a->y, b->x, b->y);
     gc->StrokePath(path);
 }
+#endif
 
+#ifdef XLIGHTS_NATIVE
+TendrilPoint* ATendril::LastLocation()
+#else
 wxPoint* ATendril::LastLocation()
+#endif
 {
     TendrilNode* last = _nodes.back();
     if (last != nullptr) {
@@ -256,7 +289,11 @@ Tendril::~Tendril()
     }
 }
 
+#ifdef XLIGHTS_NATIVE
+Tendril::Tendril(float friction, int trails, int size, float dampening, float tension, float springbase, float springincr, const TendrilPoint& start)
+#else
 Tendril::Tendril(float friction, int trails, int size, float dampening, float tension, float springbase, float springincr, const wxPoint& start)
+#endif
 {
     float sb = 0.45f;
     if (springbase >= 0) {
@@ -298,7 +335,11 @@ void Tendril::UpdateRandomMove(int tunemovement, int width, int height)
 
     ATendril* t = _tendrils.front();
     if (t != nullptr) {
+#ifdef XLIGHTS_NATIVE
+        TendrilPoint* current = t->LastLocation();
+#else
         wxPoint* current = t->LastLocation();
+#endif
 
         if (current != nullptr) {
             int realminmovex = minmovex;
@@ -347,19 +388,30 @@ void Tendril::UpdateRandomMove(int tunemovement, int width, int height)
             Update(current, tunemovement, width, height);
             delete current;
         }
-#ifdef _DEBUG
-        else {
-            int a = 0;
-        }
-#endif
     }
-#ifdef _DEBUG
-    else {
-        int a = 0;
-    }
-#endif
 }
 
+#ifdef XLIGHTS_NATIVE
+void Tendril::Update(TendrilPoint* target, int tunemovement, size_t width, size_t height)
+{
+    for (const auto& ci : _tendrils) {
+        ci->Update(target, tunemovement, width, height);
+    }
+}
+
+void Tendril::Update(int x, int y, int tunemovement, size_t width, size_t height)
+{
+    TendrilPoint pt(x, y);
+    Update(&pt, tunemovement, width, height);
+}
+
+void Tendril::Draw(NativePathDrawingContext* gc, xlColor colour, int thickness)
+{
+    for (const auto& ci : _tendrils) {
+        ci->Draw(gc, colour, thickness);
+    }
+}
+#else
 void Tendril::Update(wxPoint* target, int tunemovement, size_t width, size_t height)
 {
     for (const auto& ci : _tendrils) {
@@ -379,6 +431,7 @@ void Tendril::Draw(PathDrawingContext* gc, xlColor colour, int thickness)
         ci->Draw(gc, colour, thickness);
     }
 }
+#endif
 
 TendrilEffect::TendrilEffect(int id) : RenderableEffect(id, "Tendril", tendril_16, tendril_24, tendril_32, tendril_48, tendril_64)
 {
@@ -388,6 +441,7 @@ TendrilEffect::~TendrilEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *TendrilEffect::CreatePanel(wxWindow *parent) {
     return new TendrilPanel(parent);
 }
@@ -420,6 +474,7 @@ void TendrilEffect::SetDefaultParameters()
     SetSliderValue(tp->Slider_Tendril_ManualX, 0);
     SetSliderValue(tp->Slider_Tendril_ManualY, 0);
 }
+#endif // !XLIGHTS_NATIVE
 
 void TendrilEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
@@ -489,6 +544,18 @@ int TendrilEffect::EncodeMovement(std::string movement)
     return 1;
 }
 
+#ifdef XLIGHTS_NATIVE
+void TendrilEffect::Render(RenderBuffer& buffer, const std::string& movement,
+                           int tunemovement, int movementSpeed, int thickness,
+                           float friction, float dampening,
+                           float tension, int trails, int length, int xoffset, int yoffset, int manualx, int manualy)
+{
+    // TODO: Port tendril rendering to NativePathDrawingContext (CoreGraphics)
+    // The tendril physics simulation works without wx, but the drawing
+    // requires NativePathDrawingContext implementation of quad curves.
+    // For now, stub out the render.
+}
+#else // !XLIGHTS_NATIVE
 void TendrilEffect::Render(RenderBuffer& buffer, const std::string& movement,
                            int tunemovement, int movementSpeed, int thickness,
                            float friction, float dampening,
@@ -841,3 +908,4 @@ void TendrilEffect::Render(RenderBuffer& buffer, const std::string& movement,
         }
     }
 }
+#endif // !XLIGHTS_NATIVE

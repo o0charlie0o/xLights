@@ -14,9 +14,9 @@
 #include <array>
 #include <unordered_map>
 
+#ifndef XLIGHTS_NATIVE
 #include "TextPanel.h"
 #include <wx/checkbox.h>
-
 #include "../sequencer/Effect.h"
 #include "../sequencer/Element.h"
 #include "../sequencer/EffectsGrid.h"
@@ -28,17 +28,25 @@
 #include "../xLightsMain.h"
 #include "../ExternalHooks.h"
 #include "../xLightsXmlFile.h"
+#include <log4cpp/Category.hh>
+#else
+#include "../sequencer/Effect.h"
+#include "../UtilClasses.h"
+#endif
 
 #include "../../include/text-16.xpm"
 #include "../../include/text-24.xpm"
 #include "../../include/text-32.xpm"
 #include "../../include/text-48.xpm"
 #include "../../include/text-64.xpm"
-#include <log4cpp/Category.hh>
 
 #define MAXTEXTLINES 100
 
+#ifndef XLIGHTS_NATIVE
 TextEffect::TextEffect(int id) : RenderableEffect(id, "Text", text_16, text_24, text_32, text_48, text_64), font_mgr(FontManager::instance())
+#else
+TextEffect::TextEffect(int id) : RenderableEffect(id, "Text", text_16, text_24, text_32, text_48, text_64)
+#endif
 {
     //ctor
 }
@@ -48,6 +56,7 @@ TextEffect::~TextEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> TextEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -109,6 +118,35 @@ static inline void SetCheckboxValue(wxWindow *w, int id, bool b) {
     evt.SetInt(b);
     c->ProcessWindowEvent(evt);
 }
+#endif // !XLIGHTS_NATIVE (panel/UI methods)
+
+#ifdef XLIGHTS_NATIVE
+bool TextEffect::SupportsRenderCache(const SettingsMap& settings) const
+{
+    // Native build: simple check without wx dependencies
+    if (settings["TEXTCTRL_Text"].empty() && !settings["FILEPICKERCTRL_Text_File"].empty())
+        return false;
+    if (settings["TEXTCTRL_Text"].empty() && !settings["CHOICE_Text_LyricTrack"].empty())
+        return false;
+    return true;
+}
+
+void TextEffect::adjustSettings(const std::string& version, Effect* effect, bool removeDefaults)
+{
+    // Native build: only handle base class adjustments.
+    // The old multi-line text migration (pre-2016.46) is not needed for native builds
+    // since sequences will have already been migrated by the legacy editor.
+    SettingsMap &settings = effect->GetSettings();
+    if (RenderableEffect::needToAdjustSettings(version)) {
+        RenderableEffect::adjustSettings(version, effect, removeDefaults);
+    }
+
+    std::string file = settings["E_FILEPICKERCTRL_Text_File"];
+    if (!file.empty()) {
+        // TODO: native file existence check
+    }
+}
+#else // !XLIGHTS_NATIVE
 
 bool TextEffect::SupportsRenderCache(const SettingsMap& settings) const
 {
@@ -373,6 +411,19 @@ void TextEffect::SetPanelStatus(Model* cls)
     // Validate the window (includes enabling and disabling controls)
     tp->ValidateWindow();
 }
+#endif // !XLIGHTS_NATIVE
+
+#ifdef XLIGHTS_NATIVE
+// Native macOS build: Text rendering via NativeTextDrawingContext
+// TODO: Port full text rendering with all positioning modes to CoreText
+void TextEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
+    // For now, the native build does not render text effects.
+    // Full text rendering requires porting the OS font path (TextDrawingContext)
+    // to NativeTextDrawingContext with CoreText. The XL Font path also needs
+    // wxBitmap/wxImage porting.
+    // Stub: clear buffer (effect produces no output)
+}
+#else // !XLIGHTS_NATIVE
 
 //formatting notes:
 //countdown == seconds: put a non-0 value in text line 1 to count down
@@ -1859,3 +1910,4 @@ void TextEffect::AddMotions(int& OffsetLeft, int& OffsetTop, const SettingsMap& 
         break;
     }
 }
+#endif // !XLIGHTS_NATIVE

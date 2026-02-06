@@ -10,8 +10,8 @@
 
 #include "SketchEffect.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "BulkEditControls.h"
-#include "RenderBuffer.h"
 #include "SketchEffectDrawing.h"
 #include "SketchPanel.h"
 #include "../UtilFunctions.h"
@@ -19,14 +19,18 @@
 #include "assist/AssistPanel.h"
 #include "assist/SketchAssistPanel.h"
 #include "../ExternalHooks.h"
+#include <wx/image.h>
+#else
+#include "../UtilFunctions.h"
+#endif
+
+#include "RenderBuffer.h"
 
 #include "../../include/sketch-16.xpm"
 #include "../../include/sketch-24.xpm"
 #include "../../include/sketch-32.xpm"
 #include "../../include/sketch-48.xpm"
 #include "../../include/sketch-64.xpm"
-
-#include <wx/image.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -63,6 +67,15 @@ SketchEffect::~SketchEffect()
 {
 }
 
+#ifdef XLIGHTS_NATIVE
+void SketchEffect::Render(Effect* /*effect*/, const SettingsMap& settings, RenderBuffer& buffer)
+{
+    // TODO: Port sketch rendering to NativePathDrawingContext (CoreGraphics)
+    // Sketch rendering requires wxGraphicsContext path operations (moveTo, lineTo,
+    // quadCurveTo, curveTo) and wxImage integration. This needs NativePathDrawingContext
+    // to support the full path API.
+}
+#else // !XLIGHTS_NATIVE
 void SketchEffect::Render(Effect* /*effect*/, const SettingsMap& settings, RenderBuffer& buffer)
 {
     double progress = buffer.GetEffectTimeIntervalPosition(1.f);
@@ -125,7 +138,9 @@ void SketchEffect::Render(Effect* /*effect*/, const SettingsMap& settings, Rende
         }
     }
 }
+#endif // !XLIGHTS_NATIVE
 
+#ifndef XLIGHTS_NATIVE
 void SketchEffect::SetDefaultParameters()
 {
     SketchPanel* p = (SketchPanel*)panel;
@@ -249,10 +264,6 @@ double SketchEffect::GetSettingVCMax(const std::string& name) const
     return RenderableEffect::GetSettingVCMax(name);
 }
 
-void SketchEffect::RemoveDefaults(const std::string& version, Effect* effect)
-{
-}
-
 xlEffectPanel* SketchEffect::CreatePanel(wxWindow* parent)
 {
     m_panel = new SketchPanel(parent);
@@ -328,4 +339,26 @@ void SketchEffect::updateSketchAssistBackground() const
     int opacity = m_panel->Slider_SketchBackgroundOpacity->GetValue();
 
     m_sketchAssistPanel->UpdateSketchBackground(path, opacity);
+}
+#else // XLIGHTS_NATIVE
+// Native build: provide GetSettingVCMin/Max with hardcoded values (matching SketchPanel constants)
+double SketchEffect::GetSettingVCMin(const std::string& name) const
+{
+    if (name == "E_VALUECURVE_DrawPercentage") return 0;
+    if (name == "E_VALUECURVE_Thickness") return 1;
+    if (name == "E_VALUECURVE_MotionPercentage") return 1;
+    return RenderableEffect::GetSettingVCMin(name);
+}
+
+double SketchEffect::GetSettingVCMax(const std::string& name) const
+{
+    if (name == "E_VALUECURVE_DrawPercentage") return 100;
+    if (name == "E_VALUECURVE_Thickness") return 25;
+    if (name == "E_VALUECURVE_MotionPercentage") return 100;
+    return RenderableEffect::GetSettingVCMax(name);
+}
+#endif // XLIGHTS_NATIVE
+
+void SketchEffect::RemoveDefaults(const std::string& version, Effect* effect)
+{
 }

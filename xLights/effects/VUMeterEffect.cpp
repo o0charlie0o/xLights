@@ -9,27 +9,34 @@
  **************************************************************/
 
 #include "VUMeterEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "VUMeterPanel.h"
+#include "../xLightsMain.h"
+#include "../models/Model.h"
+#include "../ExternalHooks.h"
+#endif
 #include "../AudioManager.h"
 #include "../sequencer/SequenceElements.h"
-#include "../xLightsMain.h"
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
-#include "../models/Model.h"
 #include "../UtilFunctions.h"
-#include "../ExternalHooks.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/vumeter-16.xpm"
 #include "../../include/vumeter-24.xpm"
 #include "../../include/vumeter-32.xpm"
 #include "../../include/vumeter-48.xpm"
 #include "../../include/vumeter-64.xpm"
+#endif
 
 #include "nanosvg/src/nanosvg.h"
 
 #include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <regex>
 
 namespace RenderType
 {
@@ -111,7 +118,13 @@ namespace ShapeType
 	};
 }
 
-VUMeterEffect::VUMeterEffect(int id) : RenderableEffect(id, "VU Meter", vumeter_16, vumeter_24, vumeter_32, vumeter_48, vumeter_64)
+VUMeterEffect::VUMeterEffect(int id) : RenderableEffect(id, "VU Meter",
+#ifndef XLIGHTS_NATIVE
+    vumeter_16, vumeter_24, vumeter_32, vumeter_48, vumeter_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
 }
 
@@ -119,6 +132,7 @@ VUMeterEffect::~VUMeterEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> VUMeterEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -204,6 +218,7 @@ bool VUMeterEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap& Setti
 
     return rc;
 }
+#endif
 
 bool VUMeterEffect::needToAdjustSettings(const std::string& version)
 {
@@ -226,6 +241,7 @@ void VUMeterEffect::adjustSettings(const std::string& version, Effect* effect, b
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *VUMeterEffect::CreatePanel(wxWindow *parent) {
 	return new VUMeterPanel(parent);
 }
@@ -287,14 +303,15 @@ void VUMeterEffect::SetDefaultParameters()
     SetCheckBoxValue(vp->CheckBox_Regex, false);
     vp->FilePickerCtrl_SVGFile->SetFileName(wxFileName());
 }
+#endif
 
 void VUMeterEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
 {
-    wxString timing = effect->GetSettings().Get("E_CHOICE_VUMeter_TimingTrack", "");
+    std::string timing = effect->GetSettings().Get("E_CHOICE_VUMeter_TimingTrack", "");
 
-    if (timing.ToStdString() == oldname)
+    if (timing == oldname)
     {
-        effect->GetSettings()["E_CHOICE_VUMeter_TimingTrack"] = wxString(newname);
+        effect->GetSettings()["E_CHOICE_VUMeter_TimingTrack"] = newname;
     }
 }
 
@@ -363,7 +380,9 @@ public:
 	std::vector<float> _lastvalues;
 	std::vector<float> _lastpeaks;
     std::list<int> _pausepeakfall;
+#ifndef XLIGHTS_NATIVE
     std::list<std::vector<wxPoint>> _lineHistory;
+#endif
 	float _lastsize = 0.0f;
     int _colourindex = 0;
     int _nCount = 0;
@@ -542,13 +561,17 @@ void VUMeterEffect::Render(RenderBuffer &buffer, SequenceElements *elements, int
     int& _nCount = cache->_nCount;
 	float& _lastsize = cache->_lastsize;
     int & _colourindex = cache->_colourindex;
+#ifndef XLIGHTS_NATIVE
     std::list<std::vector<wxPoint>>& _lineHistory = cache->_lineHistory;
+#endif
     int& _lastDirection = cache->_lastDirection;
 	// Check for config changes which require us to reset
 	if (buffer.needToInit)
 	{
         buffer.needToInit = false;
+#ifndef XLIGHTS_NATIVE
         _lineHistory.clear();
+#endif
         _nCount = 0;
         _colourindex = -1;
 		_timingmarks.clear();
@@ -587,6 +610,7 @@ void VUMeterEffect::Render(RenderBuffer &buffer, SequenceElements *elements, int
 	{
 		switch (nType)
 		{
+#ifndef XLIGHTS_NATIVE
 		case RenderType::SPECTROGRAM:
 			RenderSpectrogramFrame(buffer, bars, _lastvalues, _lastpeaks, _pausepeakfall, slowdownfalls, startnote, endnote, xoffset, yoffset, false, 0, false, logarithmicX, false, 1, sensitivity, _lineHistory);
 			break;
@@ -599,6 +623,7 @@ void VUMeterEffect::Render(RenderBuffer &buffer, SequenceElements *elements, int
 		case RenderType::SPECTROGRAM_CIRCLELINE:
             RenderSpectrogramFrame(buffer, bars, _lastvalues, _lastpeaks, _pausepeakfall, slowdownfalls, startnote, endnote, xoffset, yoffset, true, sensitivity, true, logarithmicX, true, gain, sensitivity, _lineHistory);
 			break;
+#endif
 		case RenderType::VOLUME_BARS:
 			RenderVolumeBarsFrame(buffer, usebars, gain);
 			break;
@@ -711,7 +736,7 @@ void VUMeterEffect::Render(RenderBuffer &buffer, SequenceElements *elements, int
             RenderLevelColourFrame(buffer, _colourindex, sensitivity, _lasttimingmark, gain);
             break;
         default:
-            wxASSERT(false);
+            assert(false);
             break;
         }
 	}
@@ -722,6 +747,7 @@ void VUMeterEffect::Render(RenderBuffer &buffer, SequenceElements *elements, int
 	}
 }
 
+#ifndef XLIGHTS_NATIVE
 void VUMeterEffect::RenderSpectrogramFrame(RenderBuffer &buffer, int usebars, std::vector<float>& lastvalues, std::vector<float>& lastpeaks, std::list<int>& pauseuntilpeakfall, bool slowdownfalls, int startNote, int endNote, int xoffset, int yoffset, bool peak, int peakhold, bool line, bool logarithmicX, bool circle, int gain, int sensitivity, std::list<std::vector<wxPoint>>& lineHistory) const
 {
     if (buffer.GetMedia() == nullptr) return;
@@ -1017,6 +1043,7 @@ void VUMeterEffect::RenderSpectrogramFrame(RenderBuffer &buffer, int usebars, st
         }
 	}
 }
+#endif
 
 void VUMeterEffect::RenderVolumeBarsFrame(RenderBuffer &buffer, int usebars, int gain)
 {
@@ -1737,7 +1764,7 @@ void VUMeterEffect::DrawStar(RenderBuffer& buffer, int centerx, int centery, flo
         offsetangle = 90.0 - 360.0 / 7;
         break;
     default:
-        wxASSERT(false);
+        assert(false);
         break;
     }
 
@@ -1888,32 +1915,33 @@ void VUMeterEffect::DrawHeart(RenderBuffer &buffer, int xc, int yc, double radiu
 
 void VUMeterEffect::DrawTree(RenderBuffer &buffer, int xc, int yc, double radius, xlColor color, int thickness)
 {
+	struct pt { int x; int y; };
 	struct line
 	{
-		wxPoint start;
-		wxPoint end;
+		pt start;
+		pt end;
 
-		line(const wxPoint s, const wxPoint e)
+		line(const pt s, const pt e)
 		{
 			start = s;
 			end = e;
 		}
 	};
 
-	const line points[] = { line(wxPoint(3,0), wxPoint(5,0)),
-		line(wxPoint(5,0), wxPoint(5,3)),
-		line(wxPoint(3,0), wxPoint(3,3)),
-		line(wxPoint(0,3), wxPoint(8,3)),
-		line(wxPoint(0,3), wxPoint(2,6)),
-		line(wxPoint(8,3), wxPoint(6,6)),
-		line(wxPoint(1,6), wxPoint(2,6)),
-		line(wxPoint(6,6), wxPoint(7,6)),
-		line(wxPoint(1,6), wxPoint(3,9)),
-		line(wxPoint(7,6), wxPoint(5,9)),
-		line(wxPoint(2,9), wxPoint(3,9)),
-		line(wxPoint(5,9), wxPoint(6,9)),
-		line(wxPoint(6,9), wxPoint(4,11)),
-		line(wxPoint(2,9), wxPoint(4,11))
+	const line points[] = { line(pt{3,0}, pt{5,0}),
+		line(pt{5,0}, pt{5,3}),
+		line(pt{3,0}, pt{3,3}),
+		line(pt{0,3}, pt{8,3}),
+		line(pt{0,3}, pt{2,6}),
+		line(pt{8,3}, pt{6,6}),
+		line(pt{1,6}, pt{2,6}),
+		line(pt{6,6}, pt{7,6}),
+		line(pt{1,6}, pt{3,9}),
+		line(pt{7,6}, pt{5,9}),
+		line(pt{2,9}, pt{3,9}),
+		line(pt{5,9}, pt{6,9}),
+		line(pt{6,9}, pt{4,11}),
+		line(pt{2,9}, pt{4,11})
 	};
 	int count = sizeof(points) / sizeof(line);
 
@@ -1941,6 +1969,7 @@ void VUMeterEffect::DrawTree(RenderBuffer &buffer, int xc, int yc, double radius
 	}
 }
 
+#ifndef XLIGHTS_NATIVE
 static inline wxPoint2DDouble ScaleMovePoint(const wxPoint2DDouble pt, const wxPoint2DDouble imageCentre, const wxPoint2DDouble centre, float factor, float scaleTo)
 {
     return centre + ((pt - imageCentre) * factor * scaleTo * 10);
@@ -2094,33 +2123,35 @@ void VUMeterEffect::DrawSVG(RenderBuffer& buffer, int xc, int yc, double radius,
         }
     }
 }
+#endif
 
 void VUMeterEffect::DrawCrucifix(RenderBuffer &buffer, int xc, int yc, double radius, xlColor color, int thickness)
 {
+	struct pt { int x; int y; };
 	struct line
 	{
-		wxPoint start;
-		wxPoint end;
+		pt start;
+		pt end;
 
-		line(const wxPoint s, const wxPoint e)
+		line(const pt s, const pt e)
 		{
 			start = s;
 			end = e;
 		}
 	};
 
-	const line points[] = { line(wxPoint(2,0), wxPoint(2,6)),
-		line(wxPoint(2,6), wxPoint(0,6)),
-		line(wxPoint(0,6), wxPoint(0,7)),
-		line(wxPoint(0,7), wxPoint(2,7)),
-		line(wxPoint(2,7), wxPoint(2,10)),
-		line(wxPoint(2,10), wxPoint(3,10)),
-		line(wxPoint(3,10), wxPoint(3,7)),
-		line(wxPoint(3,7), wxPoint(5,7)),
-		line(wxPoint(5,7), wxPoint(5,6)),
-		line(wxPoint(5,6), wxPoint(3,6)),
-		line(wxPoint(3,6), wxPoint(3,0)),
-		line(wxPoint(3,0), wxPoint(2,0))
+	const line points[] = { line(pt{2,0}, pt{2,6}),
+		line(pt{2,6}, pt{0,6}),
+		line(pt{0,6}, pt{0,7}),
+		line(pt{0,7}, pt{2,7}),
+		line(pt{2,7}, pt{2,10}),
+		line(pt{2,10}, pt{3,10}),
+		line(pt{3,10}, pt{3,7}),
+		line(pt{3,7}, pt{5,7}),
+		line(pt{5,7}, pt{5,6}),
+		line(pt{5,6}, pt{3,6}),
+		line(pt{3,6}, pt{3,0}),
+		line(pt{3,0}, pt{2,0})
 	};
 	int count = sizeof(points) / sizeof(line);
 
@@ -2150,27 +2181,28 @@ void VUMeterEffect::DrawCrucifix(RenderBuffer &buffer, int xc, int yc, double ra
 
 void VUMeterEffect::DrawPresent(RenderBuffer &buffer, int xc, int yc, double radius, xlColor color, int thickness)
 {
+	struct pt { int x; int y; };
 	struct line
 	{
-		wxPoint start;
-		wxPoint end;
+		pt start;
+		pt end;
 
-		line(const wxPoint s, const wxPoint e)
+		line(const pt s, const pt e)
 		{
 			start = s;
 			end = e;
 		}
 	};
 
-	const line points[] = { line(wxPoint(0,0), wxPoint(0,9)),
-		line(wxPoint(0,9), wxPoint(10,9)),
-		line(wxPoint(10,9), wxPoint(10,0)),
-		line(wxPoint(10,0), wxPoint(0,0)),
-		line(wxPoint(5,0), wxPoint(5,9)),
-		line(wxPoint(5,9), wxPoint(2,11)),
-		line(wxPoint(2,11), wxPoint(2,9)),
-		line(wxPoint(5,9), wxPoint(8,11)),
-		line(wxPoint(8,11), wxPoint(8,9))
+	const line points[] = { line(pt{0,0}, pt{0,9}),
+		line(pt{0,9}, pt{10,9}),
+		line(pt{10,9}, pt{10,0}),
+		line(pt{10,0}, pt{0,0}),
+		line(pt{5,0}, pt{5,9}),
+		line(pt{5,9}, pt{2,11}),
+		line(pt{2,11}, pt{2,9}),
+		line(pt{5,9}, pt{8,11}),
+		line(pt{8,11}, pt{8,9})
 	};
 	int count = sizeof(points) / sizeof(line);
 
@@ -2359,6 +2391,7 @@ void VUMeterEffect::RenderLevelShapeFrame(RenderBuffer& buffer, const std::strin
 			DrawDiamond(buffer, centerx, centery, xx, color1);
 		}
     }
+#ifndef XLIGHTS_NATIVE
     else if (nShape == ShapeType::SVG)
     {
         if (svgFile != nullptr) {
@@ -2369,6 +2402,7 @@ void VUMeterEffect::RenderLevelShapeFrame(RenderBuffer& buffer, const std::strin
             }
         }
     }
+#endif
     else if (nShape == ShapeType::STAR)
     {
         xlColor color1;

@@ -13,7 +13,13 @@
 #include "RenderableEffect.h"
 
 #include <string>
+#include <map>
+#include <list>
+
 class SequenceElements;
+#ifndef XLIGHTS_NATIVE
+class wxString;
+#endif
 
 class FacesEffect : public RenderableEffect
 {
@@ -24,21 +30,26 @@ public:
     {
         return false;
     }
-    virtual void SetPanelStatus(Model* cls) override;
-    virtual void SetDefaultParameters() override;
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual void RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) override;
-    virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
     virtual bool AppropriateOnNodes() const override
     {
         return false;
     }
     virtual std::list<std::string> GetFacesUsed(const SettingsMap& SettingsMap) const override;
+
+#ifndef XLIGHTS_NATIVE
+    virtual void SetPanelStatus(Model* cls) override;
+    virtual void SetDefaultParameters() override;
+    virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
     virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap& SettingsMap) const override;
     virtual wxString GetEffectString() override;
+#endif
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 
 private:
     const std::map<std::string, int> eyeBlinkMap;

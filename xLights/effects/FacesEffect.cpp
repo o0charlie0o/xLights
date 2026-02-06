@@ -11,24 +11,28 @@
 #include <list>
 
 #include "FacesEffect.h"
+
+#ifndef XLIGHTS_NATIVE
 #include "FacesPanel.h"
 #include "../models/Model.h"
 #include "../models/SubModel.h"
 #include "../models/ModelGroup.h"
+#include "../UtilFunctions.h"
+#include "../xLightsMain.h"
+#include "PicturesEffect.h"
+#include "../ExternalHooks.h"
+#include <wx/tokenzr.h>
+#include <log4cpp/Category.hh>
+#else
+#include "../UtilFunctions.h"
+#endif
+
 #include "../sequencer/SequenceElements.h"
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
-#include "../UtilFunctions.h"
-#include "../xLightsMain.h" 
-#include "PicturesEffect.h"
-#include "../ExternalHooks.h"
-
-#include <wx/tokenzr.h>
 
 #include "../../include/corofaces.xpm"
-
-#include <log4cpp/Category.hh>
 
 class FacesRenderCache : public EffectRenderCache {
     std::map<std::string, RenderBuffer*> _imageCache;
@@ -70,6 +74,34 @@ FacesEffect::FacesEffect(int id) :
 FacesEffect::~FacesEffect() {
     //dtor
 }
+
+#ifdef XLIGHTS_NATIVE
+void FacesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
+{
+    // TODO: Port Faces effect rendering for native build
+    // Faces rendering is primarily pixel-based (not path-based) but depends heavily
+    // on wxString tokenization, wxImage for "Rendered" face type, and PicturesEffect.
+    // Basic coro faces and node-based faces could be ported with string utilities.
+}
+
+void FacesEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
+{
+    std::string timing = effect->GetSettings().Get("E_CHOICE_Faces_TimingTrack", "");
+    if (timing == oldname) {
+        effect->GetSettings()["E_CHOICE_Faces_TimingTrack"] = newname;
+    }
+}
+
+std::list<std::string> FacesEffect::GetFacesUsed(const SettingsMap& SettingsMap) const
+{
+    std::list<std::string> res;
+    auto start = SettingsMap.Get("E_CHOICE_Faces_FaceDefinition", "Default");
+    if (!start.empty() && start != "Default") {
+        res.push_back(start);
+    }
+    return res;
+}
+#else // !XLIGHTS_NATIVE
 
 wxString FacesEffect::GetEffectString() {
     FacesPanel* p = (FacesPanel*)panel;
@@ -1478,3 +1510,4 @@ void FacesEffect::RenderFaces(RenderBuffer& buffer,
         }
     }
 }
+#endif // !XLIGHTS_NATIVE

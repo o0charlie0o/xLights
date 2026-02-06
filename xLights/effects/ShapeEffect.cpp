@@ -9,23 +9,28 @@
  **************************************************************/
 
 #include "ShapeEffect.h"
+
+#ifndef XLIGHTS_NATIVE
 #include "ShapePanel.h"
 #include "TextEffect.h" // FontMapLock
-
-#include "../sequencer/Effect.h"
-#include "../RenderBuffer.h"
-#include "../UtilClasses.h"
 #include "../models/Model.h"
 #include "../sequencer/SequenceElements.h"
 #include "UtilFunctions.h"
 #include "AudioManager.h"
 #include "../ExternalHooks.h"
-#include "../xLightsMain.h" 
+#include "../xLightsMain.h"
+#include <log4cpp/Category.hh>
+#else
+#include "../UtilFunctions.h"
+#endif
+
+#include "../sequencer/Effect.h"
+#include "../RenderBuffer.h"
+#include "../UtilClasses.h"
 
 #include "nanosvg/src/nanosvg.h"
 
 #include <regex>
-#include <log4cpp/Category.hh>
 
 #include "../../include/shape-16.xpm"
 #include "../../include/shape-24.xpm"
@@ -45,6 +50,7 @@ ShapeEffect::~ShapeEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> ShapeEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -92,6 +98,15 @@ bool ShapeEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap& Setting
     return rc;
 }
 
+#ifdef XLIGHTS_NATIVE
+void ShapeEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
+{
+    std::string timing = effect->GetSettings().Get("E_CHOICE_Shape_FireTimingTrack", "");
+    if (timing == oldname) {
+        effect->GetSettings()["E_CHOICE_Shape_FireTimingTrack"] = newname;
+    }
+}
+#else
 void ShapeEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
 {
     wxString timing = effect->GetSettings().Get("E_CHOICE_Shape_FireTimingTrack", "");
@@ -103,6 +118,7 @@ void ShapeEffect::RenameTimingTrack(std::string oldname, std::string newname, Ef
 
     SetPanelTimingTracks();
 }
+#endif
 
 void ShapeEffect::SetPanelStatus(Model *cls)
 {
@@ -142,6 +158,7 @@ void ShapeEffect::SetPanelTimingTracks() const
 xlEffectPanel *ShapeEffect::CreatePanel(wxWindow *parent) {
     return new ShapePanel(parent);
 }
+#endif // !XLIGHTS_NATIVE (panel/UI methods)
 
 #define RENDER_SHAPE_CIRCLE     0
 #define RENDER_SHAPE_SQUARE     1
@@ -160,6 +177,7 @@ xlEffectPanel *ShapeEffect::CreatePanel(wxWindow *parent) {
 #define RENDER_SHAPE_EMOJI 14
 #define RENDER_SHAPE_SVG 15
 
+#ifndef XLIGHTS_NATIVE
 void ShapeEffect::SetDefaultParameters() {
     ShapePanel *sp = (ShapePanel*)panel;
     if (sp == nullptr) {
@@ -204,14 +222,20 @@ void ShapeEffect::SetDefaultParameters() {
 
     sp->FilePickerCtrl_SVG->SetFileName(wxFileName(""));
 }
+#endif // !XLIGHTS_NATIVE (SetDefaultParameters)
 
 struct ShapeData
 {
 private:
     xlColor _color;
 public:
+#ifdef XLIGHTS_NATIVE
+    struct { int x; int y; } _centre;
+    struct { int x; int y; } _movement;
+#else
     wxPoint _centre;
     wxSize _movement;
+#endif
     float _size;
     int _oset;
     int _shape;
@@ -220,6 +244,23 @@ public:
     int _colourIndex;
     bool _holdColour;
 
+#ifdef XLIGHTS_NATIVE
+    ShapeData(int centreX, int centreY, float size, int oset, xlColor color, int shape, int angle, int speed, bool holdColour, int colourIndex)
+    {
+        _holdColour = holdColour;
+        _colourIndex = colourIndex;
+        _centre.x = centreX;
+        _centre.y = centreY;
+        _movement.x = 0;
+        _movement.y = 0;
+        _size = size;
+        _oset = oset;
+        _color = color;
+        _shape = shape;
+        _angle = toRadians(angle);
+        _speed = speed;
+    }
+#else
     ShapeData(wxPoint centre, float size, int oset, xlColor color, int shape, int angle, int speed, bool holdColour, int colourIndex)
     {
         _holdColour = holdColour;
@@ -234,6 +275,7 @@ public:
         _angle = toRadians(angle);
         _speed = speed;
     }
+#endif
 
     xlColor GetColour(const PaletteClass& palette)
     {
@@ -257,12 +299,20 @@ public:
         _centre.y += y;
     }
 
+#ifdef XLIGHTS_NATIVE
+    void SetCentre(int centreX, int centreY)
+    {
+        _centre.x = centreX + _movement.x;
+        _centre.y = centreY + _movement.y;
+    }
+#else
     void SetCentre(wxPoint centre)
     {
         _centre = centre;
         _centre.x += _movement.x;
         _centre.y += _movement.y;
     }
+#endif
 };
 
 bool compare_shapes(const ShapeData* first, const ShapeData* second)
@@ -286,7 +336,9 @@ public:
     std::list<ShapeData*> _shapes;
     int _lastColorIdx = 0;
     int _sinceLastTriggered = 0;
+#ifndef XLIGHTS_NATIVE
     wxFontInfo _font;
+#endif
     NSVGimage* _svgImage = nullptr;
     std::string _svgFilename;
     float _svgScaleBase = 1.0f;
@@ -344,6 +396,16 @@ public:
         }
     }
 
+#ifdef XLIGHTS_NATIVE
+    void AddShape(int centreX, int centreY, float size, xlColor color, int oset, int shape, int angle, int speed, bool randomMovement, bool holdColour, int colourIndex)
+    {
+        if (randomMovement) {
+            speed = rand01() * (SHAPE_VELOCITY_MAX - SHAPE_VELOCITY_MIN) - SHAPE_VELOCITY_MIN;
+            angle = rand01() * (SHAPE_DIRECTION_MAX - SHAPE_DIRECTION_MIN) - SHAPE_VELOCITY_MIN;
+        }
+        _shapes.push_back(new ShapeData(centreX, centreY, size, oset, color, shape, angle, speed, holdColour, colourIndex));
+    }
+#else
     void AddShape(wxPoint centre, float size, xlColor color, int oset, int shape, int angle, int speed, bool randomMovement, bool holdColour, int colourIndex)
     {
         if (randomMovement)
@@ -353,6 +415,7 @@ public:
         }
         _shapes.push_back(new ShapeData(centre, size, oset, color, shape, angle, speed, holdColour, colourIndex));
     }
+#endif
 
     NSVGimage* GetImage()
     {
@@ -440,6 +503,189 @@ static int mapSkinTone(const std::string &v) {
     return 0;
 }
 
+#ifdef XLIGHTS_NATIVE
+void ShapeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
+    // TODO: Port Shape effect rendering for native build
+    // Most geometric drawing (circle, star, polygon, etc.) uses RenderBuffer directly
+    // and can be ported. Emoji and SVG drawing require wx drawing contexts.
+    // For now, render basic shapes without emoji/SVG support.
+    float oset = buffer.GetEffectTimeIntervalPosition();
+
+    std::string Object_To_DrawStr = SettingsMap["CHOICE_Shape_ObjectToDraw"];
+    int thickness = GetValueCurveInt("Shape_Thickness", 1, SettingsMap, oset, SHAPE_THICKNESS_MIN, SHAPE_THICKNESS_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+    int points = SettingsMap.GetInt("SLIDER_Shape_Points", 5);
+    bool randomLocation = SettingsMap.GetBool("CHECKBOX_Shape_RandomLocation", true);
+    bool fadeAway = SettingsMap.GetBool("CHECKBOX_Shape_FadeAway", true);
+    bool startRandomly = SettingsMap.GetBool("CHECKBOX_Shape_RandomInitial", true);
+    bool holdColour = SettingsMap.GetBool("CHECKBOX_Shape_HoldColour", true);
+    int xc = GetValueCurveInt("Shape_CentreX", 50, SettingsMap, oset, SHAPE_CENTREX_MIN, SHAPE_CENTREX_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS()) * buffer.BufferWi / 100;
+    int yc = GetValueCurveInt("Shape_CentreY", 50, SettingsMap, oset, SHAPE_CENTREY_MIN, SHAPE_CENTREY_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS()) * buffer.BufferHt / 100;
+    int lifetime = GetValueCurveInt("Shape_Lifetime", 5, SettingsMap, oset, SHAPE_LIFETIME_MIN, SHAPE_LIFETIME_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+    int growth = GetValueCurveInt("Shape_Growth", 10, SettingsMap, oset, SHAPE_GROWTH_MIN, SHAPE_GROWTH_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+    int count = GetValueCurveInt("Shape_Count", 5, SettingsMap, oset, SHAPE_COUNT_MIN, SHAPE_COUNT_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+    int startSize = GetValueCurveInt("Shape_StartSize", 5, SettingsMap, oset, SHAPE_STARTSIZE_MIN, SHAPE_STARTSIZE_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+    int direction = GetValueCurveInt("Shapes_Direction", 90, SettingsMap, oset, SHAPE_DIRECTION_MIN, SHAPE_DIRECTION_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+    int velocity = GetValueCurveInt("Shapes_Velocity", 0, SettingsMap, oset, SHAPE_VELOCITY_MIN, SHAPE_VELOCITY_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+    bool randomMovement = SettingsMap.GetBool("CHECKBOX_Shapes_RandomMovement", false);
+    int rotation = GetValueCurveInt("Shape_Rotation", 0, SettingsMap, oset, SHAPE_ROTATION_MIN, SHAPE_ROTATION_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
+
+    int Object_To_Draw = DecodeShape(Object_To_DrawStr);
+    // Skip emoji and SVG in native build
+    if (Object_To_Draw == RENDER_SHAPE_EMOJI || Object_To_Draw == RENDER_SHAPE_SVG) {
+        return;
+    }
+
+    float f = 0.0;
+    bool useMusic = SettingsMap.GetBool("CHECKBOX_Shape_UseMusic", false);
+    float sensitivity = (float)SettingsMap.GetInt("SLIDER_Shape_Sensitivity", 50) / 100.0;
+    bool useTiming = SettingsMap.GetBool("CHECKBOX_Shape_FireTiming", false);
+    std::string timing = SettingsMap.Get("CHOICE_Shape_FireTimingTrack", "");
+    if (timing.empty()) useTiming = false;
+    if (useMusic) {
+        if (buffer.GetMedia() != nullptr) {
+            auto pf = buffer.GetMedia()->GetFrameData(buffer.curPeriod, "");
+            if (pf != nullptr) {
+                f = pf->max;
+            }
+        }
+    }
+
+    ShapeRenderCache *cache = (ShapeRenderCache*)buffer.infoCache[id];
+    if (cache == nullptr) {
+        cache = new ShapeRenderCache();
+        buffer.infoCache[id] = cache;
+    }
+
+    std::list<ShapeData*>& _shapes = cache->_shapes;
+    int& _lastColorIdx = cache->_lastColorIdx;
+    int& _sinceLastTriggered = cache->_sinceLastTriggered;
+
+    float lifetimeFrames = (float)(buffer.curEffEndPer - buffer.curEffStartPer) * lifetime / 100.0;
+    if (lifetimeFrames < 1) lifetimeFrames = 1;
+    float growthPerFrame = (float)growth / lifetimeFrames;
+
+    if (buffer.needToInit) {
+        buffer.needToInit = false;
+        cache->DeleteShapes();
+        _lastColorIdx = -1;
+
+        if (!useTiming && !useMusic) {
+            for (int i = _shapes.size(); i < count; ++i) {
+                int ptx, pty;
+                if (randomLocation) {
+                    ptx = rand01() * buffer.BufferWi;
+                    pty = rand01() * buffer.BufferHt;
+                } else {
+                    ptx = xc;
+                    pty = yc;
+                }
+
+                size_t colorcnt = buffer.GetColorCount();
+                _lastColorIdx++;
+                if (_lastColorIdx >= (int)colorcnt) _lastColorIdx = 0;
+
+                int os = 0;
+                if (startRandomly) os = rand01() * lifetimeFrames;
+
+                cache->AddShape(ptx, pty, startSize + os * growthPerFrame, buffer.palette.GetColor(_lastColorIdx), os, Object_To_Draw, direction, velocity, randomMovement, holdColour, _lastColorIdx);
+            }
+            cache->SortShapes();
+        }
+    }
+
+    // create missing shapes (non-timing, non-music path only in native for now)
+    if (!useTiming && !useMusic) {
+        for (int i = _shapes.size(); i < count; ++i) {
+            int ptx, pty;
+            if (randomLocation) {
+                ptx = rand01() * buffer.BufferWi;
+                pty = rand01() * buffer.BufferHt;
+            } else {
+                ptx = xc;
+                pty = yc;
+            }
+
+            size_t colorcnt = buffer.GetColorCount();
+            _lastColorIdx++;
+            if (_lastColorIdx >= (int)colorcnt) _lastColorIdx = 0;
+
+            cache->AddShape(ptx, pty, startSize, buffer.palette.GetColor(_lastColorIdx), 0, Object_To_Draw, direction, velocity, randomMovement, holdColour, _lastColorIdx);
+        }
+    }
+
+    for (const auto& it : _shapes) {
+        if (!randomLocation) {
+            it->SetCentre(xc, yc);
+        }
+
+        xlColor color = it->GetColour(buffer.palette);
+        if (fadeAway) {
+            float brightness = (float)(lifetimeFrames - it->_oset) / lifetimeFrames;
+            if (buffer.allowAlpha) {
+                color.alpha = 255.0 * brightness;
+            } else {
+                color.red = color.red * brightness;
+                color.green = color.green * brightness;
+                color.blue = color.blue * brightness;
+            }
+        }
+
+        switch (it->_shape) {
+        case RENDER_SHAPE_SQUARE:
+            Drawpolygon(buffer, it->_centre.x, it->_centre.y, it->_size, 4, color, thickness, rotation + 45.0);
+            break;
+        case RENDER_SHAPE_CIRCLE:
+            Drawcircle(buffer, it->_centre.x, it->_centre.y, it->_size, color, thickness);
+            break;
+        case RENDER_SHAPE_STAR:
+            Drawstar(buffer, it->_centre.x, it->_centre.y, it->_size, points, color, thickness, rotation);
+            break;
+        case RENDER_SHAPE_TRIANGLE:
+            Drawpolygon(buffer, it->_centre.x, it->_centre.y, it->_size, 3, color, thickness, rotation + 90.0);
+            break;
+        case RENDER_SHAPE_PENTAGON:
+            Drawpolygon(buffer, it->_centre.x, it->_centre.y, it->_size, 5, color, thickness, rotation + 90.0);
+            break;
+        case RENDER_SHAPE_HEXAGON:
+            Drawpolygon(buffer, it->_centre.x, it->_centre.y, it->_size, 6, color, thickness, rotation);
+            break;
+        case RENDER_SHAPE_OCTAGON:
+            Drawpolygon(buffer, it->_centre.x, it->_centre.y, it->_size, 8, color, thickness, rotation + 22.5);
+            break;
+        case RENDER_SHAPE_TREE:
+            Drawtree(buffer, it->_centre.x, it->_centre.y, it->_size, color, thickness, rotation);
+            break;
+        case RENDER_SHAPE_CRUCIFIX:
+            Drawcrucifix(buffer, it->_centre.x, it->_centre.y, it->_size, color, thickness, rotation);
+            break;
+        case RENDER_SHAPE_PRESENT:
+            Drawpresent(buffer, it->_centre.x, it->_centre.y, it->_size, color, thickness, rotation);
+            break;
+        case RENDER_SHAPE_CANDYCANE:
+            Drawcandycane(buffer, it->_centre.x, it->_centre.y, it->_size, color, thickness);
+            break;
+        case RENDER_SHAPE_SNOWFLAKE:
+            Drawsnowflake(buffer, it->_centre.x, it->_centre.y, it->_size, 3, color, rotation + 30);
+            break;
+        case RENDER_SHAPE_HEART:
+            Drawheart(buffer, it->_centre.x, it->_centre.y, it->_size, color, thickness, rotation);
+            break;
+        case RENDER_SHAPE_ELLIPSE:
+            Drawellipse(buffer, it->_centre.x, it->_centre.y, it->_size, points, color, thickness, rotation);
+            break;
+        default:
+            break;
+        }
+
+        it->Move();
+        it->_oset++;
+        it->_size += growthPerFrame;
+        if (it->_size < 0) it->_size = 0;
+    }
+
+    cache->RemoveOld(lifetimeFrames);
+}
+#else // !XLIGHTS_NATIVE
 void ShapeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 	float oset = buffer.GetEffectTimeIntervalPosition();
 
@@ -797,6 +1043,7 @@ void ShapeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderB
 
     cache->RemoveOld(lifetimeFrames);
 }
+#endif // !XLIGHTS_NATIVE (legacy Render)
 
 void ShapeEffect::Drawcircle(RenderBuffer &buffer, int xc, int yc, double radius, xlColor color, int thickness) const
 {
@@ -822,6 +1069,7 @@ void ShapeEffect::Drawcircle(RenderBuffer &buffer, int xc, int yc, double radius
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 bool ShapeEffect::areSame(double a, double b, float eps) const
 {
     return std::fabs(a - b) < eps;
@@ -837,6 +1085,7 @@ bool ShapeEffect::areCollinear(const wxPoint2DDouble& a, const wxPoint2DDouble& 
     auto test = (b_x - a_x) * (c_y - a_y) - (c_x - a_x) * (b_y - a_y);
     return std::abs(test) < eps;
 }
+#endif // !XLIGHTS_NATIVE
 
 void ShapeEffect::Drawellipse(RenderBuffer& buffer, int xc, int yc, double radius, int multipler, xlColor color, int thickness, double rotation) const
 {
@@ -1220,6 +1469,23 @@ bool ShapeEffect::needToAdjustSettings(const std::string& version)
     return IsVersionOlder("2024.02", version);
 }
 
+#ifdef XLIGHTS_NATIVE
+void ShapeEffect::adjustSettings(const std::string& version, Effect* effect, bool removeDefaults)
+{
+    if (RenderableEffect::needToAdjustSettings(version)) {
+        RenderableEffect::adjustSettings(version, effect, removeDefaults);
+    }
+    SettingsMap& settings = effect->GetSettings();
+    if (settings.Contains("E_CHOICE_Shape_ObjectToDraw")) {
+        if (settings["E_CHOICE_Shape_ObjectToDraw"] == "Emoji") {
+            std::string val = settings.Get("E_SLIDER_Shape_CentreY", "");
+            if (!val.empty()) {
+                settings["E_SLIDER_Shape_CentreY"] = std::to_string(100 - std::stoi(val));
+            }
+        }
+    }
+}
+#else
 void ShapeEffect::adjustSettings(const std::string& version, Effect* effect, bool removeDefaults)
 {
     // give the base class a chance to adjust any settings
@@ -1237,7 +1503,9 @@ void ShapeEffect::adjustSettings(const std::string& version, Effect* effect, boo
         }
     }
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void ShapeEffect::Drawemoji(RenderBuffer& buffer, int xc, int yc, double radius, xlColor color, int emoji, int emojiTone, wxFontInfo& font) const
 {
     if (radius < 1)
@@ -1408,6 +1676,7 @@ void ShapeEffect::DrawSVG(ShapeRenderCache* cache, RenderBuffer& buffer, int xc,
         }
     }
 }
+#endif // !XLIGHTS_NATIVE (Drawemoji, DrawSVG)
 
 void ShapeEffect::Drawcandycane(RenderBuffer& buffer, int xc, int yc, double radius, xlColor color, int thickness) const
 {
