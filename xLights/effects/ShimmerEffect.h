@@ -23,7 +23,9 @@ class ShimmerEffect : public RenderableEffect
 public:
     ShimmerEffect(int id);
     virtual ~ShimmerEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual bool SupportsLinearColorCurves(const SettingsMap& SettingsMap) const override
     {
@@ -53,7 +55,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
 };

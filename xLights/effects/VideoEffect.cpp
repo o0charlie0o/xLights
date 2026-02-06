@@ -8,20 +8,27 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/video-16.xpm"
 #include "../../include/video-24.xpm"
 #include "../../include/video-32.xpm"
 #include "../../include/video-48.xpm"
 #include "../../include/video-64.xpm"
+#endif
 
 #include "VideoEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "VideoPanel.h"
+#endif
 #include "../VideoReader.h"
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
+#ifndef XLIGHTS_NATIVE
 #include "../xLightsXmlFile.h"
-#include "../xLightsMain.h" 
+#include "../xLightsMain.h"
+#endif
+#include "../AudioManager.h"
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
 #include "../ExternalHooks.h"
@@ -31,7 +38,13 @@
 
 #include <log4cpp/Category.hh>
 
-VideoEffect::VideoEffect(int id) : RenderableEffect(id, "Video", video_16, video_24, video_32, video_48, video_64)
+VideoEffect::VideoEffect(int id) : RenderableEffect(id, "Video",
+#ifndef XLIGHTS_NATIVE
+    video_16, video_24, video_32, video_48, video_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
 }
 
@@ -39,6 +52,7 @@ VideoEffect::~VideoEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> VideoEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -115,15 +129,18 @@ std::list<std::string> VideoEffect::CheckEffectSettings(const SettingsMap& setti
 
     return res;
 }
+#endif
 
 bool VideoEffect::IsVideoFile(std::string filename)
 {
     return VideoReader::IsVideoFile(filename);
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *VideoEffect::CreatePanel(wxWindow *parent) {
     return new VideoPanel(parent);
 }
+#endif
 
 void VideoEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults)
 {
@@ -158,6 +175,7 @@ void VideoEffect::adjustSettings(const std::string &version, Effect *effect, boo
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void VideoEffect::SetDefaultParameters()
 {
     VideoPanel *vp = (VideoPanel*)panel;
@@ -182,6 +200,7 @@ void VideoEffect::SetDefaultParameters()
     SetCheckBoxValue(vp->CheckBox_TransparentBlack, false);
     SetSliderValue(vp->Slider1, 0);
 }
+#endif
 
 std::list<std::string> VideoEffect::GetFileReferences(Model* model, const SettingsMap &SettingsMap) const
 {
@@ -192,6 +211,7 @@ std::list<std::string> VideoEffect::GetFileReferences(Model* model, const Settin
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 bool VideoEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap)
 {
     bool rc = false;
@@ -207,6 +227,7 @@ bool VideoEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &Setting
 
     return rc;
 }
+#endif
 
 void VideoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
@@ -363,6 +384,7 @@ void VideoEffect::Render(RenderBuffer &buffer, std::string filename,
                 // read the first frame ... if i dont it thinks the first frame i read is the first frame
                 _videoreader->GetNextFrame(0);
 
+#ifndef XLIGHTS_NATIVE
                 VideoPanel *fp = static_cast<VideoPanel*>(panel);
                 if (fp != nullptr)
                 {
@@ -372,6 +394,7 @@ void VideoEffect::Render(RenderBuffer &buffer, std::string filename,
                     wxPostEvent(fp, event);
                     //fp->addVideoTime(filename, videolen);
                 }
+#endif
 
                 if (starttime != 0)
                 {

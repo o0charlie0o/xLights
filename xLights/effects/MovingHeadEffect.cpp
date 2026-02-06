@@ -8,14 +8,18 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/moving-head-16.xpm"
 #include "../../include/moving-head-24.xpm"
 #include "../../include/moving-head-32.xpm"
 #include "../../include/moving-head-48.xpm"
 #include "../../include/moving-head-64.xpm"
+#endif
 
 #include "MovingHeadEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "MovingHeadPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../sequencer/Element.h"
 #include "../sequencer/SequenceElements.h"
@@ -29,7 +33,13 @@
 #include "../models/ModelGroup.h"
 #include "../models/DMX/DmxColorAbilityWheel.h"
 
-MovingHeadEffect::MovingHeadEffect(int id) : RenderableEffect(id, "Moving Head", moving_head_16, moving_head_24, moving_head_32, moving_head_48, moving_head_64)
+MovingHeadEffect::MovingHeadEffect(int id) : RenderableEffect(id, "Moving Head",
+#ifndef XLIGHTS_NATIVE
+    moving_head_16, moving_head_24, moving_head_32, moving_head_48, moving_head_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -39,9 +49,11 @@ MovingHeadEffect::~MovingHeadEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *MovingHeadEffect::CreatePanel(wxWindow *parent) {
     return new MovingHeadPanel(parent);
 }
+#endif
 
 std::list<std::string> MovingHeadEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
@@ -50,6 +62,7 @@ std::list<std::string> MovingHeadEffect::CheckEffectSettings(const SettingsMap& 
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
 {
     wxString timing = effect->GetSettings().Get("E_CHOICE_Servo_TimingTrack", "");
@@ -59,7 +72,9 @@ void MovingHeadEffect::RenameTimingTrack(std::string oldname, std::string newnam
         effect->GetSettings()["E_CHOICE_Servo_TimingTrack"] = wxString(newname);
     }
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::SetDefaultParameters() {
     MovingHeadPanel *dp = (MovingHeadPanel*)panel;
     if (dp == nullptr) {
@@ -90,6 +105,7 @@ void MovingHeadEffect::SetDefaultParameters() {
     dp->CheckAllFixtures();
     dp->UpdateStatusPanel();
 }
+#endif
 
 void MovingHeadEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     if (buffer.cur_model == "") {
@@ -105,15 +121,18 @@ void MovingHeadEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Re
     if (StartsWith(string_type, "Single Color")) {
         if( model_info->GetDisplayAs() == "DmxMovingHeadAdv" ||
             model_info->GetDisplayAs() == "DmxMovingHead") {
+#ifndef XLIGHTS_NATIVE
             MovingHeadPanel *p = (MovingHeadPanel*)panel;
             if (p == nullptr) {
                 return;
             }
             RenderMovingHeads(p, model_info, SettingsMap, buffer);
+#endif
         }
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::RenderMovingHeads(MovingHeadPanel *p, const Model* model_info, const SettingsMap &SettingsMap, RenderBuffer &buffer)
 {
     auto models = GetModels(model_info);
@@ -125,7 +144,9 @@ void MovingHeadEffect::RenderMovingHeads(MovingHeadPanel *p, const Model* model_
         }
     }
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::RenderMovingHead(std::string mh_settings, int loc, const Model* model_info, RenderBuffer &buffer)
 {
     // parse all the commands
@@ -541,6 +562,7 @@ void MovingHeadEffect::CalculateColorWheelShutter(DmxColorAbility* mh_color, dou
 
     //vc.SaveXVC(xLightsFrame::CurrentDir.ToStdString() + "//test.xvc");//this changes the point locations for some reason, do after
 }
+#endif
 
 void MovingHeadEffect::WriteCmdToPixel(DmxMotorBase* motor, int value, RenderBuffer &buffer)
 {
@@ -591,6 +613,7 @@ std::list<const Model*> MovingHeadEffect::GetModels(const Model* model)
     return model_list;
 }
 
+#ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::SetPanelStatus(Model *cls) {
     MovingHeadPanel *p = (MovingHeadPanel*)panel;
     if (p == nullptr) {
@@ -695,3 +718,4 @@ void MovingHeadEffect::SetEffectTimeRange(int startTimeMs, int endTimeMs) {
     }
     p->SetEffectTimeRange(startTimeMs, endTimeMs);
 }
+#endif

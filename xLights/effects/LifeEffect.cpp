@@ -9,20 +9,30 @@
  **************************************************************/
 
 #include "LifeEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "LifePanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/life-16.xpm"
 #include "../../include/life-24.xpm"
 #include "../../include/life-32.xpm"
 #include "../../include/life-48.xpm"
 #include "../../include/life-64.xpm"
+#endif
 #include "../UtilFunctions.h"
 
-LifeEffect::LifeEffect(int id) : RenderableEffect(id, "Life", life_16, life_24, life_32, life_48, life_48)
+LifeEffect::LifeEffect(int id) : RenderableEffect(id, "Life",
+#ifndef XLIGHTS_NATIVE
+    life_16, life_24, life_32, life_48, life_48
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -32,10 +42,12 @@ LifeEffect::~LifeEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel* LifeEffect::CreatePanel(wxWindow* parent)
 {
     return new LifePanel(parent);
 }
+#endif
 
 static size_t Life_CountNeighbors(RenderBuffer& buffer, int x0, int y0)
 {
@@ -67,6 +79,7 @@ public:
     int LastLifeState;
 };
 
+#ifndef XLIGHTS_NATIVE
 void LifeEffect::SetDefaultParameters() {
     LifePanel *lp = (LifePanel*)panel;
     if (lp == nullptr) {
@@ -77,6 +90,7 @@ void LifeEffect::SetDefaultParameters() {
     SetSliderValue(lp->Slider_Life_Seed, 0);
     SetSliderValue(lp->Slider_Life_Speed, 10);
 }
+#endif
 
 void LifeEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {

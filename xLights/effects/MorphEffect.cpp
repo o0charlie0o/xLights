@@ -9,21 +9,33 @@
  **************************************************************/
 
 #include "MorphEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "MorphPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
+#ifndef XLIGHTS_NATIVE
 #include "assist/AssistPanel.h"
 #include "assist/xlGridCanvasMorph.h"
+#endif
 #include "../models/Model.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/morph-16.xpm"
 #include "../../include/morph-64.xpm"
+#endif
 #include "../UtilFunctions.h"
 
 
-MorphEffect::MorphEffect(int id) : RenderableEffect(id, "Morph", morph_16, morph_64, morph_64, morph_64, morph_64)
+MorphEffect::MorphEffect(int id) : RenderableEffect(id, "Morph",
+#ifndef XLIGHTS_NATIVE
+    morph_16, morph_64, morph_64, morph_64, morph_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -58,6 +70,7 @@ bool MorphEffect::PressButton(const std::string& id, SettingsMap& paletteMap, Se
     return false;
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *MorphEffect::CreatePanel(wxWindow *parent) {
     return new MorphPanel(parent);
 }
@@ -102,7 +115,9 @@ std::list<std::string> MorphEffect::CheckEffectSettings(const SettingsMap& setti
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void MorphEffect::SetDefaultParameters() {
     MorphPanel *mp = (MorphPanel*)panel;
     if (mp == nullptr) {
@@ -146,7 +161,9 @@ void MorphEffect::SetDefaultParameters() {
     SetCheckBoxValue(mp->CheckBox_ShowHeadAtStart, false);
     SetCheckBoxValue(mp->CheckBox_Morph_AutoRepeat, false);
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void GetMorphEffectColors(const Effect *e, xlColor &start_h, xlColor &end_h, xlColor &start_t, xlColor &end_t) {
     int useHeadStart = e->GetSettings().GetInt("E_CHECKBOX_MorphUseHeadStartColor", 0);
     int useTailStart = e->GetSettings().GetInt("E_CHECKBOX_MorphUseHeadEndColor", 0);
@@ -204,6 +221,7 @@ int MorphEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, i
     return 0;
 
 }
+#endif
 
 static void StoreLine( const int x0_, const int y0_, const int x1_, const int y1_, std::vector<int> *vx,  std::vector<int> *vy)
 {

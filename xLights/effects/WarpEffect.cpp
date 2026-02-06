@@ -8,25 +8,35 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/checkbox.h>
+#endif
 
 #include <sstream>
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/warp-64.xpm"
 #include "../../include/warp-48.xpm"
 #include "../../include/warp-32.xpm"
 #include "../../include/warp-24.xpm"
 #include "../../include/warp-16.xpm"
+#endif
 
 #include "WarpEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "WarpPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
+#ifndef XLIGHTS_NATIVE
 #include "../xLightsMain.h"
+#endif
 #include "../DissolveTransitionPattern.h"
+#ifndef XLIGHTS_NATIVE
 #include "../xLightsApp.h"
 #include "../TimingPanel.h"
+#endif
 #include "UtilFunctions.h"
 
 #include "../Parallel.h"
@@ -498,7 +508,13 @@ namespace
     }
 }
 
-WarpEffect::WarpEffect(int i) : RenderableEffect(i, "Warp", warp_16_xpm, warp_24_xpm, warp_32_xpm, warp_48_xpm, warp_64_xpm)
+WarpEffect::WarpEffect(int i) : RenderableEffect(i, "Warp",
+#ifndef XLIGHTS_NATIVE
+    warp_16_xpm, warp_24_xpm, warp_32_xpm, warp_48_xpm, warp_64_xpm
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
 }
 
@@ -506,10 +522,12 @@ WarpEffect::~WarpEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *WarpEffect::CreatePanel(wxWindow *parent)
 {
     return new WarpPanel(parent);
 }
+#endif
 
 bool WarpEffect::needToAdjustSettings(const std::string &version)
 {
@@ -534,6 +552,7 @@ void WarpEffect::adjustSettings(const std::string &version, Effect *effect, bool
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> WarpEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -545,7 +564,9 @@ std::list<std::string> WarpEffect::CheckEffectSettings(const SettingsMap& settin
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void WarpEffect::SetDefaultParameters()
 {
     WarpPanel *p = (WarpPanel *)panel;
@@ -576,6 +597,7 @@ void WarpEffect::SetDefaultParameters()
     TimingPanel* layerBlendingPanel = frame->GetLayerBlendingPanel();
     layerBlendingPanel->CheckBox_Canvas->SetValue(true);
 }
+#endif
 
 void WarpEffect::RemoveDefaults(const std::string &version, Effect *effect)
 {

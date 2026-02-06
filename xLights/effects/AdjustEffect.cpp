@@ -9,25 +9,35 @@
  **************************************************************/
 
 #include "AdjustEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "AdjustPanel.h"
+#include "../xLightsApp.h"
+#include "../xLightsMain.h"
+#include "../TimingPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../models/Model.h"
 #include "../models/ModelGroup.h"
-#include "../xLightsApp.h"
-#include "../xLightsMain.h"
-#include "../TimingPanel.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/adjust16.xpm"
 #include "../../include/adjust24.xpm"
 #include "../../include/adjust32.xpm"
 #include "../../include/adjust48.xpm"
 #include "../../include/adjust64.xpm"
+#endif
 #include "UtilFunctions.h"
 
 AdjustEffect::AdjustEffect(int id) :
-    RenderableEffect(id, "Adjust", adjust16_xpm, adjust24_xpm, adjust32_xpm, adjust48_xpm, adjust64_xpm)
+    RenderableEffect(id, "Adjust",
+#ifndef XLIGHTS_NATIVE
+    adjust16_xpm, adjust24_xpm, adjust32_xpm, adjust48_xpm, adjust64_xpm
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -37,10 +47,13 @@ AdjustEffect::~AdjustEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *AdjustEffect::CreatePanel(wxWindow *parent) {
     return new AdjustPanel(parent);
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> AdjustEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -51,7 +64,9 @@ std::list<std::string> AdjustEffect::CheckEffectSettings(const SettingsMap& sett
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void AdjustEffect::SetDefaultParameters() {
     AdjustPanel *ap = (AdjustPanel*)panel;
     if (ap == nullptr) {
@@ -69,6 +84,7 @@ void AdjustEffect::SetDefaultParameters() {
     TimingPanel* layerBlendingPanel = frame->GetLayerBlendingPanel();
     layerBlendingPanel->CheckBox_Canvas->SetValue(true);
 }
+#endif
 
 void AdjustEffect::AdjustChannels(bool singleColour, int numChannels, RenderBuffer& buffer, const std::string& action, int value1, int value2, int nth, int starting, int count)
 {

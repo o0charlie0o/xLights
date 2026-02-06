@@ -20,7 +20,9 @@ class PlasmaEffect : public RenderableEffect
 public:
     PlasmaEffect(int id);
     virtual ~PlasmaEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual bool CanRenderPartialTimeInterval() const override
     {
@@ -47,5 +49,7 @@ public:
     static int GetPlasmaColorScheme(const std::string &ColorSchemeStr);
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 };

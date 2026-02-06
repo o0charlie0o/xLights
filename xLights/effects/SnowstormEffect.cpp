@@ -9,28 +9,41 @@
  **************************************************************/
 
 #include "SnowstormEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "SnowstormPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/snowstorm-16.xpm"
 #include "../../include/snowstorm-24.xpm"
 #include "../../include/snowstorm-32.xpm"
 #include "../../include/snowstorm-48.xpm"
 #include "../../include/snowstorm-64.xpm"
+#endif
 
-SnowstormEffect::SnowstormEffect(int id) : RenderableEffect(id, "Snowstorm", snowstorm_16, snowstorm_24, snowstorm_32, snowstorm_48, snowstorm_64)
+
+SnowstormEffect::SnowstormEffect(int id) : RenderableEffect(id, "Snowstorm",
+#ifndef XLIGHTS_NATIVE
+    snowstorm_16, snowstorm_24, snowstorm_32, snowstorm_48, snowstorm_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     tooltip = "Snow Storm";
 }
 
 SnowstormEffect::~SnowstormEffect() {}
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *SnowstormEffect::CreatePanel(wxWindow *parent) {
     return new SnowstormPanel(parent);
 }
+#endif
 
 class SnowstormClass
 {
@@ -124,6 +137,7 @@ public:
     std::list<SnowstormClass> SnowstormItems;
 };
 
+#ifndef XLIGHTS_NATIVE
 void SnowstormEffect::SetDefaultParameters()
 {
     SnowstormPanel *sp = (SnowstormPanel*)panel;
@@ -135,6 +149,7 @@ void SnowstormEffect::SetDefaultParameters()
     SetSliderValue(sp->Slider_Snowstorm_Length, 50);
     SetSliderValue(sp->Slider_Snowstorm_Speed, 10);
 }
+#endif
 
 void SnowstormEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
 

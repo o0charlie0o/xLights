@@ -17,10 +17,16 @@ class StrobeEffect : public RenderableEffect
     public:
         StrobeEffect(int id);
         virtual ~StrobeEffect();
+#ifndef XLIGHTS_NATIVE
         virtual void SetDefaultParameters() override;
+#endif
         virtual void Render(Effect *effect, const SettingsMap &settings, RenderBuffer &buffer) override;
+#ifndef XLIGHTS_NATIVE
         virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
 protected:
+#ifndef XLIGHTS_NATIVE
         virtual xlEffectPanel *CreatePanel(wxWindow *parent) override;
+#endif
     private:
 };

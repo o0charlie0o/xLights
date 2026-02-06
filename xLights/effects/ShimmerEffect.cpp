@@ -9,15 +9,25 @@
  **************************************************************/
 
 #include "ShimmerEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "ShimmerPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/shimmer.xpm"
+#endif
 
-ShimmerEffect::ShimmerEffect(int id) : RenderableEffect(id, "Shimmer", shimmer, shimmer, shimmer, shimmer, shimmer)
+ShimmerEffect::ShimmerEffect(int id) : RenderableEffect(id, "Shimmer",
+#ifndef XLIGHTS_NATIVE
+    shimmer, shimmer, shimmer, shimmer, shimmer
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -27,6 +37,7 @@ ShimmerEffect::~ShimmerEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *ShimmerEffect::CreatePanel(wxWindow *parent) {
     return new ShimmerPanel(parent);
 }
@@ -47,6 +58,7 @@ void ShimmerEffect::SetDefaultParameters()
     SetCheckBoxValue(sp->CheckBox_Shimmer_Use_All_Colors, false);
     SetCheckBoxValue(sp->CheckBox_PRE_2017_7, false);
 }
+#endif
 
 bool ShimmerEffect::needToAdjustSettings(const std::string &version)
 {

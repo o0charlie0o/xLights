@@ -8,7 +8,9 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include "MusicPanel.h"
+#endif
 #include "MusicEffect.h"
 #include "../AudioManager.h"
 #include "../sequencer/SequenceElements.h"
@@ -19,17 +21,25 @@
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/music-16.xpm"
 #include "../../include/music-24.xpm"
 #include "../../include/music-32.xpm"
 #include "../../include/music-48.xpm"
 #include "../../include/music-64.xpm"
+#endif
 
 #include <algorithm>
 
 //#define wrdebug(...)
 
-MusicEffect::MusicEffect(int id) : RenderableEffect(id, "Music Effect", music_16, music_24, music_32, music_48, music_64)
+MusicEffect::MusicEffect(int id) : RenderableEffect(id, "Music Effect",
+#ifndef XLIGHTS_NATIVE
+    music_16, music_24, music_32, music_48, music_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
 }
 
@@ -37,6 +47,7 @@ MusicEffect::~MusicEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> MusicEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -47,10 +58,13 @@ std::list<std::string> MusicEffect::CheckEffectSettings(const SettingsMap& setti
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *MusicEffect::CreatePanel(wxWindow *parent) {
 	return new MusicPanel(parent);
 }
+#endif
 
 bool MusicEffect::needToAdjustSettings(const std::string &version)
 {
@@ -84,6 +98,7 @@ void MusicEffect::adjustSettings(const std::string& version, Effect* effect, boo
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void MusicEffect::SetDefaultParameters() {
     MusicPanel *mp = (MusicPanel*)panel;
     if (mp == nullptr) {
@@ -104,6 +119,7 @@ void MusicEffect::SetDefaultParameters() {
     SetCheckBoxValue(mp->CheckBox_Music_Fade, false);
     SetCheckBoxValue(mp->CheckBox_Music_LogarithmicXAxis, false);
 }
+#endif
 
 void MusicEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();

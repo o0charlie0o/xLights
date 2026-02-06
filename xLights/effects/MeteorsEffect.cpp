@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "MeteorsEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "MeteorsPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
@@ -18,16 +20,24 @@
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/meteors-16.xpm"
 #include "../../include/meteors-24.xpm"
 #include "../../include/meteors-32.xpm"
 #include "../../include/meteors-48.xpm"
 #include "../../include/meteors-64.xpm"
+#endif
 #include "../UtilFunctions.h"
 
 #include "../Parallel.h"
 
-MeteorsEffect::MeteorsEffect(int id) : RenderableEffect(id, "Meteors", meteors_16, meteors_24, meteors_32, meteors_48, meteors_64)
+MeteorsEffect::MeteorsEffect(int id) : RenderableEffect(id, "Meteors",
+#ifndef XLIGHTS_NATIVE
+    meteors_16, meteors_24, meteors_32, meteors_48, meteors_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -37,6 +47,7 @@ MeteorsEffect::~MeteorsEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> MeteorsEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -51,6 +62,7 @@ std::list<std::string> MeteorsEffect::CheckEffectSettings(const SettingsMap& set
 xlEffectPanel *MeteorsEffect::CreatePanel(wxWindow *parent) {
     return new MeteorsPanel(parent);
 }
+#endif
 
 //these must match list indexes in xLightsMain.h: -DJ
 #define METEORS_DOWN  0
@@ -135,6 +147,7 @@ static MeteorsRenderCache* GetCache(RenderBuffer &buffer, int id) {
     return cache;
 }
 
+#ifndef XLIGHTS_NATIVE
 void MeteorsEffect::SetDefaultParameters() {
     MeteorsPanel *mp = (MeteorsPanel*)panel;
     if (mp == nullptr) {
@@ -161,6 +174,7 @@ void MeteorsEffect::SetDefaultParameters() {
     SetCheckBoxValue(mp->CheckBox_Meteors_UseMusic, false);
     SetCheckBoxValue(mp->CheckBox_FadeWithDistance, false);
 }
+#endif
 
 float MeteorsEffect::calcEffectStateOffset(int mSpeed, RenderBuffer& buffer) {
     if (mSpeed == 0) {

@@ -9,19 +9,29 @@
  **************************************************************/
 
 #include "SnowflakesEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "SnowflakesPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/snowflakes-16.xpm"
 #include "../../include/snowflakes-24.xpm"
 #include "../../include/snowflakes-32.xpm"
 #include "../../include/snowflakes-48.xpm"
 #include "../../include/snowflakes-64.xpm"
+#endif
 
-SnowflakesEffect::SnowflakesEffect(int id) : RenderableEffect(id, "Snowflakes", snowflakes_16, snowflakes_24, snowflakes_32, snowflakes_48, snowflakes_64)
+SnowflakesEffect::SnowflakesEffect(int id) : RenderableEffect(id, "Snowflakes",
+#ifndef XLIGHTS_NATIVE
+    snowflakes_16, snowflakes_24, snowflakes_32, snowflakes_48, snowflakes_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     tooltip = "Snow Flakes";
 }
@@ -31,9 +41,11 @@ SnowflakesEffect::~SnowflakesEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *SnowflakesEffect::CreatePanel(wxWindow *parent) {
     return new SnowflakesPanel(parent);
 }
+#endif
 
 bool SnowflakesEffect::needToAdjustSettings(const std::string &version)
 {
@@ -144,6 +156,7 @@ public:
     int effectState;
 };
 
+#ifndef XLIGHTS_NATIVE
 void SnowflakesEffect::SetDefaultParameters()
 {
     SnowflakesPanel *sp = (SnowflakesPanel*)panel;
@@ -159,6 +172,7 @@ void SnowflakesEffect::SetDefaultParameters()
     SetSliderValue(sp->Slider_Snowflakes_Speed, 10);
     SetChoiceValue(sp->Choice_Falling, "Driving");
 }
+#endif
 
 void SnowflakesEffect::MoveFlakes(RenderBuffer& buffer, int snowflakeType, const std::string& falling, int count, const xlColor& color1, int& effectState)
 {

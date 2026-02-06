@@ -38,11 +38,15 @@ class FireworksEffect : public RenderableEffect
 public:
     FireworksEffect(int id);
     virtual ~FireworksEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) override;
     virtual void SetDefaultParameters() override;
     virtual void SetPanelStatus(Model* cls) override;
+#endif
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#ifndef XLIGHTS_NATIVE
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
     virtual bool AppropriateOnNodes() const override
     {
         return false;
@@ -87,8 +91,12 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
+#ifndef XLIGHTS_NATIVE
     void SetPanelTimingTracks() const;
+#endif
     static std::pair<int, int> GetFireworkLocation(int width, int height, int overridex = -1, int overridey = -1);
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;

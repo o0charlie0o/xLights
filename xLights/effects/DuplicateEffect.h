@@ -19,16 +19,22 @@ class DuplicateEffect : public RenderableEffect
         virtual ~DuplicateEffect();
         virtual bool CanBeRandom() override {return false;}
         virtual void Render(Effect *effect, const SettingsMap &settings, RenderBuffer &buffer) override;
+#ifndef XLIGHTS_NATIVE
         virtual void SetDefaultParameters() override;
         virtual void SetPanelStatus(Model* cls) override;
+#endif
         virtual bool CanRenderPartialTimeInterval() const override
         {
             return true;
         }
+#ifndef XLIGHTS_NATIVE
         virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
         static int GetLayersForModel(const wxString& model);
+#endif
 
     protected:
+#ifndef XLIGHTS_NATIVE
         virtual xlEffectPanel *CreatePanel(wxWindow *parent) override;
+#endif
     private:
 };

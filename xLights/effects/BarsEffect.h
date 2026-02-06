@@ -28,7 +28,9 @@ class BarsEffect : public RenderableEffect
 public:
     BarsEffect(int id);
     virtual ~BarsEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual bool SupportsLinearColorCurves(const SettingsMap& SettingsMap) const override
     {
@@ -61,6 +63,8 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     void GetSpatialColor(xlColor& color, size_t colorIndex, float x, float y, RenderBuffer& buffer, bool gradient, const xlColor& highlightColor, bool highlight, bool show3d, int BarHt, int n, float pct, int color2Index);
 };

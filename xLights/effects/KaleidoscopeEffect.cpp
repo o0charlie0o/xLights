@@ -10,26 +10,38 @@
 
 #include <sstream>
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/kaleidoscope-64.xpm"
 #include "../../include/kaleidoscope-48.xpm"
 #include "../../include/kaleidoscope-32.xpm"
 #include "../../include/kaleidoscope-24.xpm"
 #include "../../include/kaleidoscope-16.xpm"
+#endif
 
 #include "KaleidoscopeEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "KaleidoscopePanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
+#ifndef XLIGHTS_NATIVE
 #include "../xLightsMain.h"
 #include "../xLightsApp.h"
 #include "../TimingPanel.h"
+#endif
 #include "UtilFunctions.h"
 
 #include "../Parallel.h"
 #include <log4cpp/Category.hh>
 
-KaleidoscopeEffect::KaleidoscopeEffect(int i) : RenderableEffect(i, "Kaleidoscope", kaleidoscope_16, kaleidoscope_24, kaleidoscope_32, kaleidoscope_48, kaleidoscope_64)
+KaleidoscopeEffect::KaleidoscopeEffect(int i) : RenderableEffect(i, "Kaleidoscope",
+#ifndef XLIGHTS_NATIVE
+    kaleidoscope_16, kaleidoscope_24, kaleidoscope_32, kaleidoscope_48, kaleidoscope_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
 }
 
@@ -37,6 +49,7 @@ KaleidoscopeEffect::~KaleidoscopeEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *KaleidoscopeEffect::CreatePanel(wxWindow *parent)
 {
     return new KaleidoscopePanel(parent);
@@ -420,3 +433,4 @@ void KaleidoscopeEffect::Render(Effect *eff, const SettingsMap &SettingsMap, Ren
         }
     }
 }
+#endif

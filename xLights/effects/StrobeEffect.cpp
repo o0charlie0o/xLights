@@ -9,17 +9,27 @@
  **************************************************************/
 
 #include "StrobeEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "StrobePanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../AudioManager.h"
 #include "../models/Model.h"
+#ifndef XLIGHTS_NATIVE
 #include "../../include/strobe.xpm"
+#endif
 #include "../UtilFunctions.h"
 
-StrobeEffect::StrobeEffect(int id) : RenderableEffect(id, "Strobe", strobe, strobe, strobe, strobe, strobe)
+StrobeEffect::StrobeEffect(int id) : RenderableEffect(id, "Strobe",
+#ifndef XLIGHTS_NATIVE
+    strobe, strobe, strobe, strobe, strobe
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -29,6 +39,7 @@ StrobeEffect::~StrobeEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> StrobeEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -37,10 +48,13 @@ std::list<std::string> StrobeEffect::CheckEffectSettings(const SettingsMap& sett
     }
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *StrobeEffect::CreatePanel(wxWindow *parent) {
     return new StrobePanel(parent);
 }
+#endif
 
 
 class StrobeClass
@@ -74,6 +88,7 @@ public:
     std::list<StrobeClass> strobe;
 };
 
+#ifndef XLIGHTS_NATIVE
 void StrobeEffect::SetDefaultParameters()
 {
     StrobePanel *sp = (StrobePanel*)panel;
@@ -86,6 +101,7 @@ void StrobeEffect::SetDefaultParameters()
     SetSliderValue(sp->Slider_Strobe_Type, 1);
     SetCheckBoxValue(sp->CheckBox_Strobe_Music, false);
 }
+#endif
 
 void StrobeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     int Number_Strobes = SettingsMap.GetInt("SLIDER_Number_Strobes", 3);

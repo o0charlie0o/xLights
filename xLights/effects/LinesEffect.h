@@ -27,7 +27,9 @@ public:
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     void Render(RenderBuffer& buffer,
                 int objects, int segments, int thickness, int speed, int trails, bool fadeTrails);
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
 
     virtual double GetSettingVCMin(const std::string& name) const override
     {
@@ -48,5 +50,7 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 };

@@ -31,8 +31,10 @@ public:
         return false;
     }
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
     virtual wxString GetEffectString() override;
+#endif
     virtual bool CanRenderPartialTimeInterval() const override
     {
         return true;
@@ -61,7 +63,9 @@ public:
 
 protected:
     virtual void RemoveDefaults(const std::string& version, Effect* effect) override;
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
     virtual void SetPanelStatus(Model* cls) override;
     void SetPanelTimingTracks() const;
+#endif
 };

@@ -8,6 +8,7 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/regex.h>
 #include <wx/tokenzr.h>
 #include <wx/gifdecod.h>
@@ -18,20 +19,27 @@
 #include "../../include/pictures-32.xpm"
 #include "../../include/pictures-48.xpm"
 #include "../../include/pictures-64.xpm"
+#endif
 
 #include "PicturesEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "PicturesPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
+#ifndef XLIGHTS_NATIVE
 #include "assist/xlGridCanvasPictures.h"
 #include "assist/PicturesAssistPanel.h"
 #include "../xLightsXmlFile.h"
+#endif
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
 #include "../ExternalHooks.h"
+#ifndef XLIGHTS_NATIVE
 #include "GIFImage.h"
-#include "../xLightsMain.h" 
+#include "../xLightsMain.h"
+#endif
 
 #include <log4cpp/Category.hh>
 
@@ -39,7 +47,13 @@
 
 static int PicturesEffectId = 0;
 
-PicturesEffect::PicturesEffect(int id) : RenderableEffect(id, "Pictures", pictures_16, pictures_24, pictures_32, pictures_48, pictures_64)
+PicturesEffect::PicturesEffect(int id) : RenderableEffect(id, "Pictures",
+#ifndef XLIGHTS_NATIVE
+    pictures_16, pictures_24, pictures_32, pictures_48, pictures_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
     PicturesEffectId = id;
@@ -50,6 +64,7 @@ PicturesEffect::~PicturesEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> PicturesEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     wxLogNull logNo;  // suppress popups from png images. See http://trac.wxwidgets.org/ticket/15331
@@ -86,7 +101,9 @@ std::list<std::string> PicturesEffect::CheckEffectSettings(const SettingsMap& se
     }
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *PicturesEffect::CreatePanel(wxWindow *parent) {
     return new PicturesPanel(parent);
 }
@@ -102,6 +119,7 @@ AssistPanel *PicturesEffect::GetAssistPanel(wxWindow *parent, xLightsFrame* xl_f
     grid->SetMessageParent(picture_panel);
     return assist_panel;
 }
+#endif
 
 bool PicturesEffect::needToAdjustSettings(const std::string &version)
 {
@@ -236,6 +254,7 @@ static inline int GetPicturesDirection(const std::string &dir) {
     return RENDER_PICTURE_NONE;
 }
 
+#ifndef XLIGHTS_NATIVE
 typedef std::vector< std::pair<wxPoint, xlColor> > PixelVector;
 
 class PicturesRenderCache : public EffectRenderCache {
@@ -355,6 +374,7 @@ void PicturesEffect::LoadPixelsFromTextFile(RenderBuffer &buffer, wxFile& debug,
     }
     cache->PictureName = filename;
 }
+#endif
 
 void PicturesEffect::SetTransparentBlackPixel(RenderBuffer& buffer, int x, int y, xlColor c, bool transparentBlack, int transparentBlackLevel)
 {
@@ -388,6 +408,7 @@ void PicturesEffect::SetTransparentBlackPixel(RenderBuffer& buffer, int x, int y
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void PicturesEffect::SetDefaultParameters() {
     PicturesPanel *pp = (PicturesPanel*)panel;
     if (pp == nullptr) {
@@ -421,6 +442,7 @@ void PicturesEffect::SetDefaultParameters() {
 
     pp->ValidateWindow();
 }
+#endif
 
 std::list<std::string> PicturesEffect::GetFileReferences(Model* model, const SettingsMap &SettingsMap) const
 {
@@ -431,6 +453,7 @@ std::list<std::string> PicturesEffect::GetFileReferences(Model* model, const Set
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 bool PicturesEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap)
 {
     bool rc = false;
@@ -446,7 +469,9 @@ bool PicturesEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &Sett
 
     return rc;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 bool PicturesEffect::IsPictureFile(std::string filename)
 {
     wxFileName fn(filename);
@@ -465,7 +490,9 @@ bool PicturesEffect::IsPictureFile(std::string filename)
 
     return false;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void PicturesEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();
     auto dirstr = SettingsMap["CHOICE_Pictures_Direction"];
@@ -962,3 +989,4 @@ void PicturesEffect::Render(RenderBuffer& buffer,
         }
     }
 }
+#endif

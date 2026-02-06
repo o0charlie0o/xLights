@@ -12,11 +12,15 @@
 
 #include <vector>
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/guitar-16.xpm"
 #include "../../include/guitar-64.xpm"
+#endif
 
 #include "GuitarEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "GuitarPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
@@ -26,6 +30,7 @@
 
 #include <string>
 #include <list>
+#include <cstdlib>
 
 #include <log4cpp/Category.hh>
 
@@ -596,7 +601,13 @@ public:
 };
 
 GuitarEffect::GuitarEffect(int id) :
-    RenderableEffect(id, "Guitar", Guitar_16_xpm, Guitar_64_xpm, Guitar_64_xpm, Guitar_64_xpm, Guitar_64_xpm) 
+    RenderableEffect(id, "Guitar",
+#ifndef XLIGHTS_NATIVE
+    Guitar_16_xpm, Guitar_64_xpm, Guitar_64_xpm, Guitar_64_xpm, Guitar_64_xpm
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 	_panel = nullptr;
@@ -607,6 +618,7 @@ GuitarEffect::~GuitarEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> GuitarEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -632,7 +644,9 @@ std::list<std::string> GuitarEffect::CheckEffectSettings(const SettingsMap& sett
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void GuitarEffect::SetPanelStatus(Model *cls)
 {
     SetPanelTimingTracks();
@@ -692,6 +706,7 @@ void GuitarEffect::RenameTimingTrack(std::string oldname, std::string newname, E
 
     SetPanelTimingTracks();
 }
+#endif
 
 void GuitarEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     RenderGuitar(buffer,
@@ -811,7 +826,9 @@ void GuitarEffect::RenderGuitar(RenderBuffer& buffer, SequenceElements* elements
 
     if (buffer.needToInit) {
         // just in case the timing tracks have changed
+#ifndef XLIGHTS_NATIVE
         SetPanelTimingTracks();
+#endif
 
         buffer.needToInit = false;
         if (_MIDITrack != MIDITrack) {
@@ -977,6 +994,7 @@ void GuitarEffect::DrawGuitar(RenderBuffer& buffer, GuitarTiming* pdata, const s
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 std::vector<float> GuitarEffect::Parse(wxString& l)
 {
 	std::vector<float> res;
@@ -998,6 +1016,7 @@ std::vector<float> GuitarEffect::Parse(wxString& l)
 
 	return res;
 }
+#endif
 
 std::list<std::string> GuitarEffect::ExtractNotes(const std::string& label)
 {
@@ -1107,7 +1126,7 @@ int GuitarEffect::ConvertNote(const std::string& note)
         break;
     default:
         {
-            int number = wxAtoi(n);
+            int number = std::atoi(n.c_str());
             if (number < 0) number = 0;
             if (number > 127) number = 127;
             return number;
@@ -1141,7 +1160,7 @@ int GuitarEffect::ConvertNote(const std::string& note)
 
     if (n != "")
     {
-        octave = wxAtoi(n);
+        octave = std::atoi(n.c_str());
     }
 
     int number = 12 + (octave * 12) + nletter + sharp;

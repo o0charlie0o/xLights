@@ -12,6 +12,10 @@
 
 #include "RenderableEffect.h"
 
+#ifdef XLIGHTS_NATIVE
+typedef unsigned char wxByte;
+#endif
+
 #define CANDLE_AGILITY_MIN 1
 #define CANDLE_AGILITY_MAX 10
 
@@ -29,9 +33,13 @@ class CandleEffect : public RenderableEffect
 public:
     CandleEffect(int id);
     virtual ~CandleEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#ifndef XLIGHTS_NATIVE
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
 
     virtual double GetSettingVCMin(const std::string& name) const override
     {
@@ -59,6 +67,8 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     void Update(wxByte& flameprime, wxByte& flame, wxByte& wind, size_t windVariability, size_t flameAgility, size_t windCalmness, size_t windBaseline);
 };

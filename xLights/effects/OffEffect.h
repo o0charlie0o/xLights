@@ -19,15 +19,19 @@ class OffEffect : public RenderableEffect
         virtual ~OffEffect();
         virtual bool CanBeRandom() override {return false;}
         virtual void Render(Effect *effect, const SettingsMap &settings, RenderBuffer &buffer) override;
+#ifndef XLIGHTS_NATIVE
         virtual wxString GetEffectString() override;
         virtual void SetDefaultParameters() override;
-        virtual bool CanRenderPartialTimeInterval() const override { return true; }
         virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
+        virtual bool CanRenderPartialTimeInterval() const override { return true; }
 
         virtual bool needToAdjustSettings(const std::string& version) override;
         virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
 
     protected:
+#ifndef XLIGHTS_NATIVE
         virtual xlEffectPanel *CreatePanel(wxWindow *parent) override;
+#endif
     private:
 };

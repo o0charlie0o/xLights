@@ -11,22 +11,36 @@
 #include <sstream>
 
 #include "DuplicateEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "DuplicatePanel.h"
+#include "../xLightsMain.h"
+#include "../xLightsApp.h"
+#endif
 #include "../RenderBuffer.h"
 #include "UtilFunctions.h"
 #include "../models/Model.h"
 #include "../models/ModelManager.h"
-#include "../xLightsMain.h"
 #include "../sequencer/SequenceElements.h"
-#include "../xLightsApp.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/Duplicate_64.xpm"
 #include "../../include/Duplicate_48.xpm"
 #include "../../include/Duplicate_32.xpm"
 #include "../../include/Duplicate_24.xpm"
 #include "../../include/Duplicate_16.xpm"
+#endif
 
-DuplicateEffect::DuplicateEffect(int i) : RenderableEffect(i, "Duplicate", Duplicate_16, Duplicate_24, Duplicate_32, Duplicate_48, Duplicate_64)
+#ifdef XLIGHTS_NATIVE
+#include <cassert>
+#endif
+
+DuplicateEffect::DuplicateEffect(int i) : RenderableEffect(i, "Duplicate",
+#ifndef XLIGHTS_NATIVE
+    Duplicate_16, Duplicate_24, Duplicate_32, Duplicate_48, Duplicate_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -36,6 +50,7 @@ DuplicateEffect::~DuplicateEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> DuplicateEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -124,10 +139,11 @@ void DuplicateEffect::SetPanelStatus(Model* cls)
         if (it != cls->GetFullName()) dp->Choice_Model->AppendString(it);
     }
 }
+#endif
 
 void DuplicateEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
 {
     // This should never ever be called as the Render::ProcessFrame should have converted this effect into the effects being duplicated
-    wxASSERT(false);
+    assert(false);
 }
 

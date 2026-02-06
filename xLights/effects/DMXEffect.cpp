@@ -9,21 +9,31 @@
  **************************************************************/
 
 #include "DMXEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "DMXPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../models/Model.h"
 #include "../models/ModelGroup.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/dmx-16.xpm"
 #include "../../include/dmx-24.xpm"
 #include "../../include/dmx-32.xpm"
 #include "../../include/dmx-48.xpm"
 #include "../../include/dmx-64.xpm"
+#endif
 #include "UtilFunctions.h"
 
-DMXEffect::DMXEffect(int id) : RenderableEffect(id, "DMX", dmx_16, dmx_24, dmx_32, dmx_48, dmx_64)
+DMXEffect::DMXEffect(int id) : RenderableEffect(id, "DMX",
+#ifndef XLIGHTS_NATIVE
+    dmx_16, dmx_24, dmx_32, dmx_48, dmx_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -33,6 +43,7 @@ DMXEffect::~DMXEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 void DMXEffect::RemapSelectedDMXEffectValues(Effect* effect, const std::vector<std::tuple<int, int, float, int, wxString>>& dmxmappings) const {
     SettingsMap &settings = effect->GetSettings();
     SettingsMap const oldSettings = settings;
@@ -79,12 +90,15 @@ xlEffectPanel *DMXEffect::CreatePanel(wxWindow *parent) {
     return new DMXPanel(parent);
 }
 
-static int GetPct(wxString const& val)
+#endif
+
+static int GetPct(std::string const& val)
 {
-    int value = wxAtoi(val);
+    int value = std::stoi(val);
     return (value * 100) / 255;
 }
 
+#ifndef XLIGHTS_NATIVE
 void DMXEffect::SetDefaultParameters() {
     DMXPanel *dp = (DMXPanel*)panel;
     if (dp == nullptr) {
@@ -238,6 +252,7 @@ void DMXEffect::SetDefaultParameters() {
     SetCheckBoxValue(dp->CheckBox_INVDMX47, false);
     SetCheckBoxValue(dp->CheckBox_INVDMX48, false);
 }
+#endif
 
 void DMXEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults)
 {
@@ -252,21 +267,16 @@ void DMXEffect::adjustSettings(const std::string &version, Effect *effect, bool 
     if (IsVersionOlder("2016.39", version))
     {
         if (settings.GetBool("E_CHECKBOX_Use_Dmx_Ramps")) {
-            settings["E_VALUECURVE_DMX1"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX1|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX1"]), GetPct(settings["E_SLIDER_DMX1_Ramp"]));
-            settings["E_VALUECURVE_DMX2"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX2|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX2"]), GetPct(settings["E_SLIDER_DMX2_Ramp"]));
-            settings["E_VALUECURVE_DMX3"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX3|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX3"]), GetPct(settings["E_SLIDER_DMX3_Ramp"]));
-            settings["E_VALUECURVE_DMX4"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX4|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX4"]), GetPct(settings["E_SLIDER_DMX4_Ramp"]));
-            settings["E_VALUECURVE_DMX5"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX5|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX5"]), GetPct(settings["E_SLIDER_DMX5_Ramp"]));
-            settings["E_VALUECURVE_DMX6"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX6|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX6"]), GetPct(settings["E_SLIDER_DMX6_Ramp"]));
-            settings["E_VALUECURVE_DMX7"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX7|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX7"]), GetPct(settings["E_SLIDER_DMX7_Ramp"]));
-            settings["E_VALUECURVE_DMX8"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX8|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX8"]), GetPct(settings["E_SLIDER_DMX8_Ramp"]));
-            settings["E_VALUECURVE_DMX9"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX9|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX9"]), GetPct(settings["E_SLIDER_DMX9_Ramp"]));
-            settings["E_VALUECURVE_DMX10"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX10|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX10"]), GetPct(settings["E_SLIDER_DMX10_Ramp"]));
-            settings["E_VALUECURVE_DMX11"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX11|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX11"]), GetPct(settings["E_SLIDER_DMX11_Ramp"]));
-            settings["E_VALUECURVE_DMX12"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX12|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX12"]), GetPct(settings["E_SLIDER_DMX12_Ramp"]));
-            settings["E_VALUECURVE_DMX13"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX13|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX13"]), GetPct(settings["E_SLIDER_DMX13_Ramp"]));
-            settings["E_VALUECURVE_DMX14"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX14|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX14"]), GetPct(settings["E_SLIDER_DMX14_Ramp"]));
-            settings["E_VALUECURVE_DMX15"] = wxString::Format("Active=TRUE|Id=ID_VALUECURVE_DMX15|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|", GetPct(settings["E_SLIDER_DMX15"]), GetPct(settings["E_SLIDER_DMX15_Ramp"]));
+            for (int ch = 1; ch <= 15; ch++) {
+                std::string chStr = std::to_string(ch);
+                int p1 = GetPct(settings["E_SLIDER_DMX" + chStr]);
+                int p2 = GetPct(settings["E_SLIDER_DMX" + chStr + "_Ramp"]);
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "Active=TRUE|Id=ID_VALUECURVE_DMX%d|Type=Ramp|Min=0.00|Max=255.00|P1=%d|P2=%d|RV=TRUE|",
+                    ch, p1, p2);
+                settings["E_VALUECURVE_DMX" + chStr] = buf;
+            }
             settings["E_VALUECURVE_DMX16"] = "Active=TRUE|Id=ID_VALUECURVE_DMX16|Type=Ramp|Min=0.00|Max=255.00|P1=0|P2=0|RV=TRUE|";
             settings["E_VALUECURVE_DMX17"] = "Active=TRUE|Id=ID_VALUECURVE_DMX17|Type=Ramp|Min=0.00|Max=255.00|P1=0|P2=0|RV=TRUE|";
             settings["E_VALUECURVE_DMX18"] = "Active=TRUE|Id=ID_VALUECURVE_DMX18|Type=Ramp|Min=0.00|Max=255.00|P1=0|P2=0|RV=TRUE|";
@@ -313,7 +323,7 @@ void DMXEffect::adjustSettings(const std::string &version, Effect *effect, bool 
 bool DMXEffect::SetDMXSinglColorPixel(int chan, int num_channels, const SettingsMap &SettingsMap, double eff_pos, xlColor& color, RenderBuffer &buffer)
 {
     if( num_channels >= chan ) {
-        std::string const name = wxString::Format("DMX%d", chan).ToStdString();
+        std::string const name = "DMX" + std::to_string(chan);
         int value = GetValueCurveInt(name, 0, SettingsMap, eff_pos, DMX_MIN, DMX_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
 
         if (SettingsMap.GetBool("CHECKBOX_INV" + name, false))
@@ -348,7 +358,7 @@ bool DMXEffect::SetDMXRGBNode(int node, int num_channels, const SettingsMap &Set
     color = xlBLACK;
     int const base_chan = ((node - 1) * 3 + 1);
     if( num_channels >= base_chan || buffer.BufferWi < node) {
-        std::string name = wxString::Format("DMX%d", base_chan).ToStdString();
+        std::string name = "DMX" + std::to_string(base_chan);
         int value = GetValueCurveInt(name, 0, SettingsMap, eff_pos, DMX_MIN, DMX_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
 
         if (SettingsMap.GetBool("CHECKBOX_INV" + name, false)) {
@@ -357,7 +367,7 @@ bool DMXEffect::SetDMXRGBNode(int node, int num_channels, const SettingsMap &Set
 
         SetColorBasedOnStringType(value, 1, color, string_type);
         if( num_channels >= base_chan + 1 ) {
-            name = wxString::Format("DMX%d", base_chan+1);
+            name = "DMX" + std::to_string(base_chan+1);
             value = GetValueCurveInt(name, 0, SettingsMap, eff_pos, DMX_MIN, DMX_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
 
             if (SettingsMap.GetBool("CHECKBOX_INV" + name, false)) {
@@ -366,7 +376,7 @@ bool DMXEffect::SetDMXRGBNode(int node, int num_channels, const SettingsMap &Set
 
             SetColorBasedOnStringType(value, 2, color, string_type);
             if( num_channels >= base_chan + 2 ) {
-                name = wxString::Format("DMX%d", base_chan + 2);
+                name = "DMX" + std::to_string(base_chan + 2);
                 value = GetValueCurveInt(name, 0, SettingsMap, eff_pos, DMX_MIN, DMX_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
 
                 if (SettingsMap.GetBool("CHECKBOX_INV" + name, false)) {
@@ -419,6 +429,7 @@ void DMXEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuf
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void DMXEffect::SetPanelStatus(Model *cls) {
     DMXPanel *p = (DMXPanel*)panel;
     if (p == nullptr) {
@@ -478,3 +489,4 @@ void DMXEffect::SetPanelStatus(Model *cls) {
     p->FlexGridSizer_Main->Layout();
     p->Refresh();
 }
+#endif

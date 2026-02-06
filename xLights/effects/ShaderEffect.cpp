@@ -8,6 +8,8 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
+
 #include "../../include/shader_64.xpm"
 #include "../../include/shader_48.xpm"
 #include "../../include/shader_32.xpm"
@@ -1961,3 +1963,30 @@ bool ShaderConfig::UsesEvents() const
 #ifdef __WXOSX__
 #pragma clang diagnostic push
 #endif
+
+#else // XLIGHTS_NATIVE
+
+#include "ShaderEffect.h"
+#include "../RenderBuffer.h"
+
+bool ShaderEffect::useBackgroundRender = false;
+
+ShaderEffect::ShaderEffect(int id) : RenderableEffect(id, "Shader",
+    nullptr, nullptr, nullptr, nullptr, nullptr)
+{
+}
+
+ShaderEffect::~ShaderEffect()
+{
+}
+
+void ShaderEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
+{
+}
+
+bool ShaderEffect::CanRenderOnBackgroundThread(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
+{
+    return false;
+}
+
+#endif // XLIGHTS_NATIVE

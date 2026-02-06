@@ -9,17 +9,21 @@
  **************************************************************/
 
 #include "TwinkleEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "TwinklePanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/twinkle-16.xpm"
 #include "../../include/twinkle-24.xpm"
 #include "../../include/twinkle-32.xpm"
 #include "../../include/twinkle-48.xpm"
 #include "../../include/twinkle-64.xpm"
+#endif
 #include "ValueCurve.h"
 
 #include "../Parallel.h"
@@ -31,7 +35,13 @@ static std::random_device rd;
 static std::default_random_engine eng{ rd() };
 static std::uniform_int_distribution<> dist(0, INT_MAX);
 
-TwinkleEffect::TwinkleEffect(int id) : RenderableEffect(id, "Twinkle", twinkle_16, twinkle_24, twinkle_32, twinkle_48, twinkle_64)
+TwinkleEffect::TwinkleEffect(int id) : RenderableEffect(id, "Twinkle",
+#ifndef XLIGHTS_NATIVE
+    twinkle_16, twinkle_24, twinkle_32, twinkle_48, twinkle_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -40,9 +50,11 @@ TwinkleEffect::~TwinkleEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *TwinkleEffect::CreatePanel(wxWindow *parent) {
     return new TwinklePanel(parent);
 }
+#endif
 
 class StrobeClass
 {
@@ -66,6 +78,7 @@ public:
     std::atomic_int lights_to_renew = 0;
 };
 
+#ifndef XLIGHTS_NATIVE
 void TwinkleEffect::SetDefaultParameters()
 {
     TwinklePanel *tp = (TwinklePanel*)panel;
@@ -82,6 +95,7 @@ void TwinkleEffect::SetDefaultParameters()
     SetCheckBoxValue(tp->CheckBox_Twinkle_ReRandom, false);
     SetChoiceValue(tp->Choice_Twinkle_Style, "New Render Method");
 }
+#endif
 
 bool TwinkleEffect::needToAdjustSettings(const std::string& version) {
     // give the base class a chance to adjust any settings
@@ -100,6 +114,7 @@ void TwinkleEffect::adjustSettings(const std::string& version, Effect* effect, b
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 static inline void addLineAsTriangles(xlVertexColorAccumulator &bg,
                                       float x1, float y1,
                                       float x2, float y2,
@@ -184,6 +199,7 @@ int TwinkleEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2,
 
     return 1;
 }
+#endif
 
 static void place_twinkles(int lights_to_place, int &curIndex, std::vector<StrobeClass>& strobe, RenderBuffer& buffer,
                            int max_modulo, size_t colorcnt) {

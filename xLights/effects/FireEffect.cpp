@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "FireEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "FirePanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
@@ -17,14 +19,23 @@
 #include "../AudioManager.h"
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
+#include "../ValueCurve.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/fire-16.xpm"
 #include "../../include/fire-24.xpm"
 #include "../../include/fire-32.xpm"
 #include "../../include/fire-48.xpm"
 #include "../../include/fire-64.xpm"
+#endif
 
-FireEffect::FireEffect(int id) : RenderableEffect(id, "Fire", fire_16, fire_24, fire_32, fire_48, fire_64)
+FireEffect::FireEffect(int id) : RenderableEffect(id, "Fire",
+#ifndef XLIGHTS_NATIVE
+    fire_16, fire_24, fire_32, fire_48, fire_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -34,6 +45,7 @@ FireEffect::~FireEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> FireEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -48,6 +60,7 @@ std::list<std::string> FireEffect::CheckEffectSettings(const SettingsMap& settin
 xlEffectPanel *FireEffect::CreatePanel(wxWindow *parent) {
     return new FirePanel(parent);
 }
+#endif
 
 bool FireEffect::needToAdjustSettings(const std::string &version)
 {
@@ -58,9 +71,9 @@ void FireEffect::adjustSettings(const std::string& version, Effect* effect, bool
 {
     SettingsMap& settings = effect->GetSettings();
 
-    wxString growthcycles = settings.Get("E_VALUECURVE_Fire_GrowthCycles", "");
+    std::string growthcycles = settings.Get("E_VALUECURVE_Fire_GrowthCycles", "");
 
-    if (growthcycles.Contains("Active=TRUE")) {
+    if (growthcycles.find("Active=TRUE") != std::string::npos) {
         ValueCurve vc(growthcycles);
         vc.SetLimits(FIRE_GROWTHCYCLES_MIN, FIRE_GROWTHCYCLES_MAX);
         vc.SetDivisor(FIRE_GROWTHCYCLES_DIVISOR);
@@ -170,6 +183,7 @@ static FireRenderCache* GetCache(RenderBuffer &buffer, int id) {
     return cache;
 }
 
+#ifndef XLIGHTS_NATIVE
 void FireEffect::SetDefaultParameters()
 {
     FirePanel* fp = (FirePanel*)panel;
@@ -187,6 +201,7 @@ void FireEffect::SetDefaultParameters()
 
     SetCheckBoxValue(fp->CheckBox_Fire_GrowWithMusic, false);
 }
+#endif
 
 // 10 <= HeightPct <= 100
 void FireEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)

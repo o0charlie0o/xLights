@@ -9,21 +9,31 @@
  **************************************************************/
 
 #include "SpiralsEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "SpiralsPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/spirals-16.xpm"
 #include "../../include/spirals-24.xpm"
 #include "../../include/spirals-32.xpm"
 #include "../../include/spirals-48.xpm"
 #include "../../include/spirals-64.xpm"
+#endif
 
 
 #include "../Parallel.h"
 
-SpiralsEffect::SpiralsEffect(int id) : RenderableEffect(id, "Spirals", spirals_16, spirals_24, spirals_32, spirals_48, spirals_64)
+SpiralsEffect::SpiralsEffect(int id) : RenderableEffect(id, "Spirals",
+#ifndef XLIGHTS_NATIVE
+    spirals_16, spirals_24, spirals_32, spirals_48, spirals_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -32,10 +42,13 @@ SpiralsEffect::~SpiralsEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *SpiralsEffect::CreatePanel(wxWindow *parent) {
     return new SpiralsPanel(parent);
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void SpiralsEffect::SetDefaultParameters()
 {
     SpiralsPanel *sp = (SpiralsPanel*)panel;
@@ -58,6 +71,7 @@ void SpiralsEffect::SetDefaultParameters()
     SetCheckBoxValue(sp->CheckBox_Spirals_Grow, false);
     SetCheckBoxValue(sp->CheckBox_Spirlas_Shrink, false);
 }
+#endif
 
 bool SpiralsEffect::SupportsLinearColorCurves(const SettingsMap &SettingsMap) const
 {
@@ -71,7 +85,7 @@ void SpiralsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Rende
     float Movement = GetValueCurveDouble("Spirals_Movement", 1.0, SettingsMap, offset, SPIRALS_MOVEMENT_MIN, SPIRALS_MOVEMENT_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS(), SPIRALS_MOVEMENT_DIVISOR);
     float Rotation = GetValueCurveDouble("Spirals_Rotation", 0.0, SettingsMap, offset, SPIRALS_ROTATION_MIN, SPIRALS_ROTATION_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS(), SPIRALS_ROTATION_DIVISOR);
     // This is because spirals uses the slider while most others use the TextCtrl
-    if (SettingsMap.Contains("VALUECURVE_Spirals_Rotation") && wxString(SettingsMap["VALUECURVE_Spirals_Rotation"]).Contains("Active=TRUE")) {
+    if (SettingsMap.Contains("VALUECURVE_Spirals_Rotation") && std::string(SettingsMap["VALUECURVE_Spirals_Rotation"]).find("Active=TRUE") != std::string::npos) {
         Rotation *= 10;
     }
     int Thickness = GetValueCurveInt("Spirals_Thickness", 0, SettingsMap, offset, SPIRALS_THICKNESS_MIN, SPIRALS_THICKNESS_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());

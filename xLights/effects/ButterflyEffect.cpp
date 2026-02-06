@@ -10,23 +10,33 @@
 
 #include "ButterflyEffect.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "ButterflyPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/butterfly-16.xpm"
 #include "../../include/butterfly-24.xpm"
 #include "../../include/butterfly_32.xpm"
 #include "../../include/butterfly-48.xpm"
 #include "../../include/butterfly-64.xpm"
+#endif
 
 #include "../Parallel.h"
 
 #include "ispc/ButterflyFunctions.ispc.h"
 
-ButterflyEffect::ButterflyEffect(int i) : RenderableEffect(i, "Butterfly", butterfly_16, butterfly_24, butterfly_32, butterfly_48, butterfly_64)
+ButterflyEffect::ButterflyEffect(int i) : RenderableEffect(i, "Butterfly",
+#ifndef XLIGHTS_NATIVE
+    butterfly_16, butterfly_24, butterfly_32, butterfly_48, butterfly_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -37,9 +47,11 @@ ButterflyEffect::~ButterflyEffect()
 }
 
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *ButterflyEffect::CreatePanel(wxWindow *parent) {
     return new ButterflyPanel(parent);
 }
+#endif
 
 /*
  01) x*y^3-y*x^3
@@ -59,6 +71,7 @@ static inline int GetButterflyColorScheme(const std::string &color) {
     return 0;
 }
 
+#ifndef XLIGHTS_NATIVE
 void ButterflyEffect::SetDefaultParameters() {
     ButterflyPanel *bp = (ButterflyPanel*)panel;
     if (bp == nullptr) {
@@ -77,6 +90,7 @@ void ButterflyEffect::SetDefaultParameters() {
     SetSliderValue(bp->Slider_Butterfly_Skip, 2);
     SetSliderValue(bp->Slider_Butterfly_Speed, 10);
 }
+#endif
 
 
 void ButterflyEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer)

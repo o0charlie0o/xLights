@@ -32,10 +32,14 @@ public:
     {
         return false;
     }
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
     virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap& SettingsMap) const override;
+#ifndef XLIGHTS_NATIVE
     virtual bool CleanupFileLocations(xLightsFrame* frame, SettingsMap& SettingsMap) override;
+#endif
     virtual bool AppropriateOnNodes() const override
     {
         return false;
@@ -74,7 +78,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override
     {
         return true;

@@ -33,7 +33,9 @@ class WaveEffect : public RenderableEffect
 public:
     WaveEffect(int id);
     virtual ~WaveEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual bool AppropriateOnNodes() const override
     {
@@ -82,7 +84,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
 };

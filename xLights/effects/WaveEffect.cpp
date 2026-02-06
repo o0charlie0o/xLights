@@ -9,20 +9,33 @@
  **************************************************************/
 
 #include "WaveEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "WavePanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
+#include "../ValueCurve.h"
+#include <cassert>
+#include <string>
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/wave-16.xpm"
 #include "../../include/wave-24.xpm"
 #include "../../include/wave-32.xpm"
 #include "../../include/wave-48.xpm"
 #include "../../include/wave-64.xpm"
+#endif
 
-WaveEffect::WaveEffect(int id) : RenderableEffect(id, "Wave", wave_16, wave_24, wave_32, wave_48, wave_64)
+WaveEffect::WaveEffect(int id) : RenderableEffect(id, "Wave",
+#ifndef XLIGHTS_NATIVE
+    wave_16, wave_24, wave_32, wave_48, wave_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -31,9 +44,11 @@ WaveEffect::~WaveEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *WaveEffect::CreatePanel(wxWindow *parent) {
     return new WavePanel(parent);
 }
+#endif
 
 bool WaveEffect::needToAdjustSettings(const std::string& version)
 {
@@ -49,7 +64,7 @@ void WaveEffect::adjustSettings(const std::string& version, Effect* effect, bool
         std::string speed = settings.Get("E_SLIDER_Wave_Speed", "");
         if (speed != "") {
             settings.erase("E_SLIDER_Wave_Speed");
-            settings["E_TEXTCTRL_Wave_Speed"] = wxString::Format("%d", wxAtoi(speed));
+            settings["E_TEXTCTRL_Wave_Speed"] = std::to_string(std::atoi(speed.c_str()));
         } else {
             speed = settings.Get("E_VALUECURVE_Wave_Speed", "");
             if (Contains(speed, "Active=TRUE")) {
@@ -101,6 +116,7 @@ static inline int GetWaveFillColor(const std::string &color) {
     return 0; //None
 }
 
+#ifndef XLIGHTS_NATIVE
 void WaveEffect::SetDefaultParameters() {
     WavePanel *wp = (WavePanel*)panel;
     if (wp == nullptr) {
@@ -122,6 +138,7 @@ void WaveEffect::SetDefaultParameters() {
     wp->BitmapButton_Wave_SpeedVC->SetActive(false);
     wp->BitmapButton_Wave_YOffsetVC->SetActive(false);
 }
+#endif
 
 void WaveEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
@@ -313,7 +330,7 @@ void WaveEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBu
             int y1mirror = yc + (yc - y1);
             int y2mirror = yc + (yc - y2);
             deltay = y2 - y1;
-            wxASSERT(deltay > 0);
+            assert(deltay > 0);
 
             for (y = y1; y <= y2; y++) {
                 int adjustedY = y + roundedWaveYOffset;

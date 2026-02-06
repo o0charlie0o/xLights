@@ -9,20 +9,30 @@
  **************************************************************/
 
 #include "BarsEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "BarsPanel.h"
+#endif
 
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../sequencer/Effect.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/bars-16.xpm"
 #include "../../include/bars-24.xpm"
 #include "../../include/bars-32.xpm"
 #include "../../include/bars-48.xpm"
 #include "../../include/bars-64.xpm"
+#endif
 
 BarsEffect::BarsEffect(int i) :
-    RenderableEffect(i, "Bars", bars_16, bars_24, bars_32, bars_48, bars_64)
+    RenderableEffect(i, "Bars",
+#ifndef XLIGHTS_NATIVE
+    bars_16, bars_24, bars_32, bars_48, bars_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     // ctor
 }
@@ -32,10 +42,12 @@ BarsEffect::~BarsEffect()
     // dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel* BarsEffect::CreatePanel(wxWindow* parent)
 {
     return new BarsPanel(parent);
 }
+#endif
 
 static inline int GetDirection(const std::string& DirectionString)
 {
@@ -71,6 +83,7 @@ static inline int GetDirection(const std::string& DirectionString)
     return 0;
 }
 
+#ifndef XLIGHTS_NATIVE
 void BarsEffect::SetDefaultParameters()
 {
     BarsPanel* bp = (BarsPanel*)panel;
@@ -93,6 +106,7 @@ void BarsEffect::SetDefaultParameters()
     SetCheckBoxValue(bp->CheckBox_Bars_3D, false);
     SetCheckBoxValue(bp->CheckBox_Bars_Gradient, false);
 }
+#endif
 
 void BarsEffect::GetSpatialColor(xlColor& color, size_t colorIndex, float x, float y, RenderBuffer& buffer, bool gradient, const xlColor& highlightColour, bool highlight, bool show3d, int BarHt, int n, float pct, int color2Index) {
     if (buffer.palette.IsSpatial(colorIndex)) {

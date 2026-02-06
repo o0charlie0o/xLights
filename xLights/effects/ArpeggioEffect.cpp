@@ -14,10 +14,14 @@
 #include <algorithm>
 #include <vector>
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/Arpeggio.xpm"
+#endif
 
 #include "ArpeggioEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "ArpeggioPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../sequencer/EffectLayer.h"
 #include "../RenderBuffer.h"
@@ -42,7 +46,13 @@ static const std::string TEXTCTRL_Arpeggio_FadeOut("TEXTCTRL_Arpeggio_FadeOut");
 static const std::string CHECKBOX_Arpeggio_ManualMode("CHECKBOX_Arpeggio_ManualMode");
 static const std::string TEXTCTRL_Arpeggio_SequencerData("TEXTCTRL_Arpeggio_SequencerData");
 
-ArpeggioEffect::ArpeggioEffect(int i) : RenderableEffect(i, "Arpeggio", Arpeggio, Arpeggio, Arpeggio, Arpeggio, Arpeggio)
+ArpeggioEffect::ArpeggioEffect(int i) : RenderableEffect(i, "Arpeggio",
+#ifndef XLIGHTS_NATIVE
+    Arpeggio, Arpeggio, Arpeggio, Arpeggio, Arpeggio
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -52,6 +62,7 @@ ArpeggioEffect::~ArpeggioEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *ArpeggioEffect::CreatePanel(wxWindow *parent) {
     return new ArpeggioPanel(parent);
 }
@@ -187,6 +198,7 @@ wxString ArpeggioEffect::GetEffectString() {
 
     return ret.str();
 }
+#endif
 
 void ArpeggioEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     SettingsMap &settingsMap = effect->GetSettings();
@@ -229,6 +241,7 @@ void ArpeggioEffect::RemoveDefaults(const std::string &version, Effect *effect) 
     RenderableEffect::RemoveDefaults(version, effect);
 }
 
+#ifndef XLIGHTS_NATIVE
 void ArpeggioEffect::SetPanelStatus(Model* cls) {
     SetPanelTimingTracks();
 }
@@ -249,6 +262,7 @@ void ArpeggioEffect::SetPanelTimingTracks() const {
     event.SetString(timingtracks);
     wxPostEvent(ap, event);
 }
+#endif
 
 void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     // Get parameters

@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "ShockwaveEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "ShockwavePanel.h"
+#endif
 #include <cmath>
 
 #include "../RenderBuffer.h"
@@ -17,14 +19,22 @@
 #include "../UtilFunctions.h"
 #include "../sequencer/Effect.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/shockwave-16.xpm"
 #include "../../include/shockwave-24.xpm"
 #include "../../include/shockwave-32.xpm"
 #include "../../include/shockwave-48.xpm"
 #include "../../include/shockwave-64.xpm"
+#endif
 
 ShockwaveEffect::ShockwaveEffect(int id) :
-    RenderableEffect(id, "Shockwave", shockwave_16, shockwave_24, shockwave_32, shockwave_48, shockwave_64)
+    RenderableEffect(id, "Shockwave",
+#ifndef XLIGHTS_NATIVE
+    shockwave_16, shockwave_24, shockwave_32, shockwave_48, shockwave_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     // ctor
 }
@@ -34,11 +44,14 @@ ShockwaveEffect::~ShockwaveEffect()
     // dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel* ShockwaveEffect::CreatePanel(wxWindow* parent)
 {
     return new ShockwavePanel(parent);
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 int ShockwaveEffect::DrawEffectBackground(const Effect* e, int x1, int y1, int x2, int y2,
                                           xlVertexColorAccumulator& backgrounds, xlColor* colorMask, bool ramps)
 {
@@ -52,7 +65,9 @@ int ShockwaveEffect::DrawEffectBackground(const Effect* e, int x1, int y1, int x
 
     return 2;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void ShockwaveEffect::SetDefaultParameters()
 {
     ShockwavePanel* sp = (ShockwavePanel*)panel;
@@ -79,6 +94,7 @@ void ShockwaveEffect::SetDefaultParameters()
     SetCheckBoxValue(sp->CheckBox_Shockwave_Blend_Edges, true);
     SetCheckBoxValue(sp->CheckBox_Shockwave_Scale, true);
 }
+#endif
 
 bool ShockwaveEffect::needToAdjustSettings(const std::string& version) {
     return IsVersionOlder("2025.04", version);

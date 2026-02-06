@@ -9,8 +9,12 @@
  **************************************************************/
 
 #include "SingleStrandEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "SingleStrandPanel.h"
+#endif
 #include "../sequencer/Effect.h"
+#include "../ValueCurve.h"
+#include <cassert>
 #include "../sequencer/EffectLayer.h"
 #include "../sequencer/Element.h"
 #include "../RenderBuffer.h"
@@ -19,11 +23,19 @@
 #define XLIGHTS_FX 
 #include "FX.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/singleStrand-16.xpm"
 #include "../../include/singleStrand-64.xpm"
+#endif
 
 SingleStrandEffect::SingleStrandEffect(int id)
-    : RenderableEffect(id, "SingleStrand", singleStrand_16, singleStrand_64, singleStrand_64, singleStrand_64, singleStrand_64)
+    : RenderableEffect(id, "SingleStrand",
+#ifndef XLIGHTS_NATIVE
+    singleStrand_16, singleStrand_64, singleStrand_64, singleStrand_64, singleStrand_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
     tooltip = "Single Strand";
@@ -34,9 +46,11 @@ SingleStrandEffect::~SingleStrandEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *SingleStrandEffect::CreatePanel(wxWindow *parent) {
     return new SingleStrandPanel(parent);
 }
+#endif
 
 int mapX(int x, int max, int direction, int &second) {
     second = -1;
@@ -57,7 +71,7 @@ int mapX(int x, int max, int direction, int &second) {
     return -1;
 }
 
-int mapDirection(const wxString & d) {
+int mapDirection(const std::string & d) {
     if ("Left" == d) {
         return 1;
     }
@@ -74,6 +88,7 @@ int mapDirection(const wxString & d) {
     return 0;
 }
 
+#ifndef XLIGHTS_NATIVE
 void SingleStrandEffect::SetDefaultParameters()
 {
     SingleStrandPanel *sp = (SingleStrandPanel*)panel;
@@ -108,6 +123,7 @@ void SingleStrandEffect::SetDefaultParameters()
     SetChoiceValue(sp->Choice_Fade_Type, "None");
     SetCheckBoxValue(sp->CheckBox_Chase_Group_All, false);
 }
+#endif
 
 bool SingleStrandEffect::needToAdjustSettings(const std::string& version) {
     // give the base class a chance to adjust any settings
@@ -162,13 +178,13 @@ void SingleStrandEffect::adjustSettings(const std::string& version, Effect* effe
     }
     if (IsVersionOlder("2021.40", version)) {
         SettingsMap& sm = effect->GetSettings();
-        wxString rzRotations = sm.Get("E_VALUECURVE_Chase_Rotations", "");
-        if (rzRotations.Contains("VALUECURVE") && !rzRotations.Contains("RV=TRUE")) {
+        std::string rzRotations = sm.Get("E_VALUECURVE_Chase_Rotations", "");
+        if (rzRotations.find("VALUECURVE") != std::string::npos && rzRotations.find("RV=TRUE") == std::string::npos) {
             ValueCurve vc;
             vc.SetLimits(1, 500);
             vc.Deserialise(rzRotations);
             sm["E_VALUECURVE_Chase_Rotations"] = vc.Serialise();
-            wxASSERT(vc.IsRealValue());
+            assert(vc.IsRealValue());
         }
     }
 }
@@ -327,7 +343,7 @@ void SingleStrandEffect::RenderSingleStrandFX(RenderBuffer& buffer, Effect* eff,
     }
 
     auto pfx = cache->_fx;
-    wxASSERT(pfx != nullptr);
+    assert(pfx != nullptr);
 
     pfx->SetBuffer(&buffer);
 
@@ -572,7 +588,7 @@ void SingleStrandEffect::draw_chase(RenderBuffer& buffer,
     int middle_chase_index = 0; 
     if (max_chase_width < 1) max_chase_width = 1;
 
-    wxASSERT(Number_Chases != 0);
+    assert(Number_Chases != 0);
 
     int pixels_per_chase = width / Number_Chases;
     if (pixels_per_chase < 1) {

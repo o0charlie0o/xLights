@@ -9,19 +9,30 @@
  **************************************************************/
 
 #include "SpirographEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "SpirographPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
+#include <cassert>
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/spirograph-16.xpm"
 #include "../../include/spirograph-24.xpm"
 #include "../../include/spirograph-32.xpm"
 #include "../../include/spirograph-48.xpm"
 #include "../../include/spirograph-64.xpm"
+#endif
 
-SpirographEffect::SpirographEffect(int id) : RenderableEffect(id, "Spirograph", spirograph_16, spirograph_24, spirograph_32, spirograph_48, spirograph_64)
+SpirographEffect::SpirographEffect(int id) : RenderableEffect(id, "Spirograph",
+#ifndef XLIGHTS_NATIVE
+    spirograph_16, spirograph_24, spirograph_32, spirograph_48, spirograph_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -30,10 +41,13 @@ SpirographEffect::~SpirographEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *SpirographEffect::CreatePanel(wxWindow *parent) {
     return new SpirographPanel(parent);
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void SpirographEffect::SetDefaultParameters()
 {
     SpirographPanel *sp = (SpirographPanel*)panel;
@@ -57,6 +71,7 @@ void SpirographEffect::SetDefaultParameters()
     SetSliderValue(sp->Slider_Spirograph_Length, 20);
     SetSliderValue(sp->Slider_Spirograph_Width, 1);
 }
+#endif
 
 void SpirographEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
 
@@ -105,8 +120,8 @@ void SpirographEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Re
     if (Animate) d = d_orig + animateState * d_orig; // should we modify the distance variable each pass through?
     float step = 1.0 / width;
     float stepw = 1.0 / (log10(width) + 1);
-    wxASSERT(step != 0);
-    wxASSERT(stepw != 0);
+    assert(step != 0);
+    assert(stepw != 0);
     for (float i = 1.0; i <= length; i += step)
     {
         float t = (i + mod1440) * M_PI / 180.0;

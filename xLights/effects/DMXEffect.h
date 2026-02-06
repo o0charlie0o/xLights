@@ -28,13 +28,17 @@ public:
         return false;
     }
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#ifndef XLIGHTS_NATIVE
     virtual void SetPanelStatus(Model* cls) override;
     virtual void SetDefaultParameters() override;
+#endif
     virtual bool CanRenderPartialTimeInterval() const override
     {
         return true;
     }
+#ifndef XLIGHTS_NATIVE
     void RemapSelectedDMXEffectValues(Effect* effect, const std::vector<std::tuple<int, int, float, int, wxString>>& dmxmappings) const;
+#endif
 
     virtual double GetSettingVCMin(const std::string& name) const override
     {
@@ -50,7 +54,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override
     {
         return true;

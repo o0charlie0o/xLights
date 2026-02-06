@@ -11,14 +11,25 @@
 #include <sstream>
 
 #include "OffEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "OffPanel.h"
+#endif
+#include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "UtilFunctions.h"
 #include "models/Model.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/Off.xpm"
+#endif
 
-OffEffect::OffEffect(int i) : RenderableEffect(i, "Off", Off, Off, Off, Off, Off)
+OffEffect::OffEffect(int i) : RenderableEffect(i, "Off",
+#ifndef XLIGHTS_NATIVE
+    Off, Off, Off, Off, Off
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -28,6 +39,7 @@ OffEffect::~OffEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> OffEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -45,7 +57,9 @@ std::list<std::string> OffEffect::CheckEffectSettings(const SettingsMap& setting
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *OffEffect::CreatePanel(wxWindow *parent) {
     return new OffPanel(parent);
 }
@@ -54,6 +68,7 @@ void OffEffect::SetDefaultParameters() {
     OffPanel *p = (OffPanel*)panel;
     p->OffStyleChoice->SetSelection(0);
 }
+#endif
 
 bool OffEffect::needToAdjustSettings(const std::string& version) {
     if (IsVersionOlder("2024.11", version)) {
@@ -105,6 +120,7 @@ void OffEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer
 
 }
 
+#ifndef XLIGHTS_NATIVE
 wxString OffEffect::GetEffectString()
 {
     OffPanel* p = (OffPanel*)panel;
@@ -114,3 +130,4 @@ wxString OffEffect::GetEffectString()
     }
     return "";
 }
+#endif

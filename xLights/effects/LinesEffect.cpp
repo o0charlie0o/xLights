@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "LinesEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "LinesPanel.h"
+#endif
 #include "../AudioManager.h"
 #include "../sequencer/SequenceElements.h"
 
@@ -19,13 +21,21 @@
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/lines-16.xpm"
 #include "../../include/lines-24.xpm"
 #include "../../include/lines-32.xpm"
 #include "../../include/lines-48.xpm"
 #include "../../include/lines-64.xpm"
+#endif
 
-LinesEffect::LinesEffect(int id) : RenderableEffect(id, "Lines", lines_16, lines_24, lines_32, lines_48, lines_64)
+LinesEffect::LinesEffect(int id) : RenderableEffect(id, "Lines",
+#ifndef XLIGHTS_NATIVE
+    lines_16, lines_24, lines_32, lines_48, lines_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
 }
 
@@ -33,11 +43,12 @@ LinesEffect::~LinesEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *LinesEffect::CreatePanel(wxWindow *parent) {
 	return new LinesPanel(parent);
 }
 
-void LinesEffect::SetDefaultParameters() 
+void LinesEffect::SetDefaultParameters()
 {
     LinesPanel *lp = static_cast<LinesPanel*>(panel);
     if (lp == nullptr) {
@@ -55,6 +66,7 @@ void LinesEffect::SetDefaultParameters()
     SetCheckBoxValue(lp->CheckBox_FadeTrails, true);
     lp->ValidateWindow();
 }
+#endif
 
 void LinesEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();

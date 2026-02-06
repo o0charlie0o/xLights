@@ -37,7 +37,9 @@ class SingleStrandEffect : public RenderableEffect
 public:
     SingleStrandEffect(int id);
     virtual ~SingleStrandEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
@@ -94,7 +96,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 
 private:
     void RenderSingleStrandChase(RenderBuffer& buffer, Effect* eff,

@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "GalaxyEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "GalaxyPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
@@ -17,13 +19,21 @@
 #include "../UtilFunctions.h"
 #include "../Parallel.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/galaxy-16.xpm"
 #include "../../include/galaxy-24.xpm"
 #include "../../include/galaxy-32.xpm"
 #include "../../include/galaxy-48.xpm"
 #include "../../include/galaxy-64.xpm"
+#endif
 
-GalaxyEffect::GalaxyEffect(int id) : RenderableEffect(id, "Galaxy", galaxy_16, galaxy_24, galaxy_32, galaxy_48, galaxy_64)
+GalaxyEffect::GalaxyEffect(int id) : RenderableEffect(id, "Galaxy",
+#ifndef XLIGHTS_NATIVE
+    galaxy_16, galaxy_24, galaxy_32, galaxy_48, galaxy_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -33,10 +43,13 @@ GalaxyEffect::~GalaxyEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *GalaxyEffect::CreatePanel(wxWindow *parent) {
     return new GalaxyPanel(parent);
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 int GalaxyEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, int y2,
                                        xlVertexColorAccumulator &backgrounds, xlColor* colorMask, bool ramps) {
     int head_duration = e->GetSettings().GetInt("E_SLIDER_Galaxy_Duration", 20);
@@ -71,7 +84,9 @@ int GalaxyEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, 
     }
     return 2; // draw small icon
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void GalaxyEffect::SetDefaultParameters() {
     GalaxyPanel *gp = (GalaxyPanel*)panel;
     if (gp == nullptr) {
@@ -106,6 +121,7 @@ void GalaxyEffect::SetDefaultParameters() {
 
     SetCheckBoxValue(gp->CheckBox_Galaxy_Scale, true);
 }
+#endif
 
 bool GalaxyEffect::needToAdjustSettings(const std::string& version) {
     return IsVersionOlder("2025.04", version);

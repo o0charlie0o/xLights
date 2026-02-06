@@ -9,21 +9,30 @@
  **************************************************************/
 
 #include "FanEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "FanPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../UtilFunctions.h"
 
-
+#ifndef XLIGHTS_NATIVE
 #include "../../include/fan-16.xpm"
 #include "../../include/fan-24.xpm"
 #include "../../include/fan-32.xpm"
 #include "../../include/fan-48.xpm"
 #include "../../include/fan-64.xpm"
+#endif
 
-FanEffect::FanEffect(int id) : RenderableEffect(id, "Fan", fan_16, fan_24, fan_32, fan_48, fan_64)
+FanEffect::FanEffect(int id) : RenderableEffect(id, "Fan",
+#ifndef XLIGHTS_NATIVE
+    fan_16, fan_24, fan_32, fan_48, fan_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -33,11 +42,14 @@ FanEffect::~FanEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *FanEffect::CreatePanel(wxWindow *parent) {
     return new FanPanel(parent);
 }
+#endif
 
 
+#ifndef XLIGHTS_NATIVE
 int FanEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, int y2,
                                     xlVertexColorAccumulator &backgrounds, xlColor* colorMask, bool ramps) {
     int head_duration = e->GetSettings().GetInt("E_SLIDER_Fan_Duration", 50);
@@ -71,7 +83,9 @@ int FanEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, int
     }
     return 2;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void FanEffect::SetDefaultParameters() {
     FanPanel *fp = (FanPanel*)panel;
     if (fp == nullptr) {
@@ -110,6 +124,7 @@ void FanEffect::SetDefaultParameters() {
     SetCheckBoxValue(fp->CheckBox_Fan_Reverse, false);
     SetCheckBoxValue(fp->CheckBox_Fan_Scale, true);
 }
+#endif
 
 bool FanEffect::needToAdjustSettings(const std::string& version) {
     return IsVersionOlder("2025.04", version);

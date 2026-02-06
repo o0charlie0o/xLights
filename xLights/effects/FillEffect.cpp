@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "FillEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "FillPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
@@ -17,10 +19,18 @@
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/fill-16.xpm"
 #include "../../include/fill-64.xpm"
+#endif
 
-FillEffect::FillEffect(int i) : RenderableEffect(i, "Fill", fill_16, fill_64, fill_64, fill_64, fill_64)
+FillEffect::FillEffect(int i) : RenderableEffect(i, "Fill",
+#ifndef XLIGHTS_NATIVE
+    fill_16, fill_64, fill_64, fill_64, fill_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -30,6 +40,7 @@ FillEffect::~FillEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 void FillEffect::SetDefaultParameters() {
     FillPanel *fp = static_cast<FillPanel*>(panel);
     if (fp == nullptr) {
@@ -52,7 +63,9 @@ void FillEffect::SetDefaultParameters() {
     SetCheckBoxValue(fp->CheckBox_Fill_Offset_In_Pixels, true);
     SetCheckBoxValue(fp->CheckBox_Fill_Wrap, true);
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> FillEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -67,6 +80,7 @@ std::list<std::string> FillEffect::CheckEffectSettings(const SettingsMap& settin
 xlEffectPanel *FillEffect::CreatePanel(wxWindow *parent) {
     return new FillPanel(parent);
 }
+#endif
 
 bool FillEffect::needToAdjustSettings(const std::string &version)
 {

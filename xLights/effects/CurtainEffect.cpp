@@ -9,19 +9,29 @@
  **************************************************************/
 
 #include "CurtainEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "CurtainPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/curtain-16.xpm"
 #include "../../include/curtain-24.xpm"
 #include "../../include/curtain-32.xpm"
 #include "../../include/curtain-48.xpm"
 #include "../../include/curtain-64.xpm"
+#endif
 
-CurtainEffect::CurtainEffect(int i) : RenderableEffect(i, "Curtain", curtain_16, curtain_24, curtain_32, curtain_48, curtain_64)
+CurtainEffect::CurtainEffect(int i) : RenderableEffect(i, "Curtain",
+#ifndef XLIGHTS_NATIVE
+    curtain_16, curtain_24, curtain_32, curtain_48, curtain_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -30,9 +40,11 @@ CurtainEffect::~CurtainEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *CurtainEffect::CreatePanel(wxWindow *parent) {
     return new CurtainPanel(parent);
 }
+#endif
 
 static inline int GetCurtainEdge(const std::string &edge) {
     if ("left" == edge) {
@@ -81,6 +93,7 @@ public:
     int LastCurtainLimit;
 };
 
+#ifndef XLIGHTS_NATIVE
 void CurtainEffect::SetDefaultParameters() {
     CurtainPanel *cp = (CurtainPanel*)panel;
     if (cp == nullptr) {
@@ -98,6 +111,7 @@ void CurtainEffect::SetDefaultParameters() {
 
     SetCheckBoxValue(cp->CheckBox_Curtain_Repeat, false);
 }
+#endif
 
 void CurtainEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 

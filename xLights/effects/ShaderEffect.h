@@ -11,7 +11,11 @@
  **************************************************************/
 
 #include "RenderableEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "../UtilFunctions.h"
+#else
+#include "../utils/string_utils.h"
+#endif
 
 class SequenceElements;
 
@@ -53,6 +57,7 @@ enum class ShaderCtrlType
     SHADER_CTRL_TIMING
 };
 
+#ifndef XLIGHTS_NATIVE
 struct ShaderPass
 {
     wxString _target;
@@ -190,6 +195,7 @@ public:
     bool UsesEvents() const;
 };
 class ShaderRenderCache;
+#endif // XLIGHTS_NATIVE
 
 class ShaderEffect : public RenderableEffect
 {
@@ -201,16 +207,21 @@ public:
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual bool SupportsLinearColorCurves(const SettingsMap& SettingsMap) const override { return false; }
     virtual bool SupportsRenderCache(const SettingsMap& settings) const override { return true; }
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
+    virtual bool CanRenderOnBackgroundThread(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+
+#ifndef XLIGHTS_NATIVE
     virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap& SettingsMap) const override;
     virtual bool CleanupFileLocations(xLightsFrame* frame, SettingsMap& SettingsMap) override;
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
-    virtual bool CanRenderOnBackgroundThread(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
 
     static ShaderConfig* ParseShader(const std::string& filename, SequenceElements* sequenceElements);
     static bool IsShaderFile(std::string filename);
+#endif
 
     static void SetBackgroundRender(bool b) { useBackgroundRender = b; }
     static bool IsBackgroundRender() { return useBackgroundRender; }
@@ -250,9 +261,12 @@ public:
             return 0xFFFF;
         return RenderableEffect::GetSettingVCDivisor(name);
     }
+#ifndef XLIGHTS_NATIVE
     static unsigned programIdForShaderCode(ShaderConfig* cfg, ShaderRenderCache *cache);
+#endif
 
 protected:
+#ifndef XLIGHTS_NATIVE
     bool SetGLContext(ShaderRenderCache*);
     void UnsetGLContext(ShaderRenderCache*);
 
@@ -269,6 +283,7 @@ protected:
         float v[2];
         float t[2];
     };
+#endif
 
     static bool useBackgroundRender;
 };

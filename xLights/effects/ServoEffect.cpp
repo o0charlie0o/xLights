@@ -8,14 +8,19 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/servo-16.xpm"
 #include "../../include/servo-24.xpm"
 #include "../../include/servo-32.xpm"
 #include "../../include/servo-48.xpm"
 #include "../../include/servo-64.xpm"
+#endif
 
 #include "ServoEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "ServoPanel.h"
+#endif
+#include "../ValueCurve.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../UtilFunctions.h"
@@ -33,7 +38,13 @@
 #include "../sequencer/SequenceElements.h"
 
 ServoEffect::ServoEffect(int id) :
-    RenderableEffect(id, "Servo", servo_16, servo_24, servo_32, servo_48, servo_64) {
+    RenderableEffect(id, "Servo",
+#ifndef XLIGHTS_NATIVE
+    servo_16, servo_24, servo_32, servo_48, servo_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    ) {
     // ctor
 }
 
@@ -41,9 +52,11 @@ ServoEffect::~ServoEffect() {
     // dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel* ServoEffect::CreatePanel(wxWindow* parent) {
     return new ServoPanel(parent);
 }
+#endif
 bool ServoEffect::needToAdjustSettings(const std::string& version) {
     if (IsVersionOlder("2024.11", version)) {
         return true;
@@ -106,6 +119,7 @@ void ServoEffect::AdjustSettingsAfterSplit(Effect *first, Effect *second) {
 }
 
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> ServoEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
 
@@ -120,7 +134,9 @@ std::list<std::string> ServoEffect::CheckEffectSettings(const SettingsMap& setti
     }
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void ServoEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) {
     wxString timing = effect->GetSettings().Get("E_CHOICE_Servo_TimingTrack", "");
 
@@ -128,7 +144,9 @@ void ServoEffect::RenameTimingTrack(std::string oldname, std::string newname, Ef
         effect->GetSettings()["E_CHOICE_Servo_TimingTrack"] = wxString(newname);
     }
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void ServoEffect::SetDefaultParameters() {
     ServoPanel* dp = (ServoPanel*)panel;
     if (dp == nullptr) {
@@ -145,6 +163,7 @@ void ServoEffect::SetDefaultParameters() {
     dp->Choice_Servo_TimingTrack->SetSelection(-1);
     dp->SyncCheckBox->SetValue(false);
 }
+#endif
 
 void ServoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
     double eff_pos = buffer.GetEffectTimeIntervalPosition();
@@ -352,6 +371,7 @@ void ServoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderB
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void ServoEffect::SetPanelStatus(Model* cls) {
     ServoPanel* p = (ServoPanel*)panel;
     if (p == nullptr) {
@@ -391,9 +411,10 @@ void ServoEffect::SetPanelStatus(Model* cls) {
     p->FlexGridSizer_Main->Layout();
     p->Refresh();
 }
+#endif
 
 int ServoEffect::GetPhonemeValue(RenderBuffer& buffer, SequenceElements* elements, const std::string& trackName) {
-    static const std::map<wxString, int> phonemeMap = {
+    static const std::map<std::string, int> phonemeMap = {
         { "AI", 90 },
         { "E", 70 },
         { "FV", 20 },
@@ -429,11 +450,13 @@ int ServoEffect::GetPhonemeValue(RenderBuffer& buffer, SequenceElements* element
         }
     }
 
-    wxString pp = phoneme;
-    std::string p = pp.BeforeFirst('-');
-    // bool shimmer = pp.Lower().EndsWith("-shimmer");
+    std::string p = phoneme;
+    auto dashPos = p.find('-');
+    if (dashPos != std::string::npos) {
+        p = p.substr(0, dashPos);
+    }
 
-    std::map<wxString, int>::const_iterator it = phonemeMap.find(p);
+    auto it = phonemeMap.find(p);
     int PhonemeInt = 0;
     if (it != phonemeMap.end()) {
         PhonemeInt = it->second;

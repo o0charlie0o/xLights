@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "FireworksEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "FireworksPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
@@ -19,13 +21,21 @@
 #include "../UtilFunctions.h"
 #include "../sequencer/SequenceElements.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/fireworks-16.xpm"
 #include "../../include/fireworks-24.xpm"
 #include "../../include/fireworks-32.xpm"
 #include "../../include/fireworks-48.xpm"
 #include "../../include/fireworks-64.xpm"
+#endif
 
-FireworksEffect::FireworksEffect(int id) : RenderableEffect(id, "Fireworks", fireworks_16, fireworks_24, fireworks_32, fireworks_48, fireworks_64)
+FireworksEffect::FireworksEffect(int id) : RenderableEffect(id, "Fireworks",
+#ifndef XLIGHTS_NATIVE
+    fireworks_16, fireworks_24, fireworks_32, fireworks_48, fireworks_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -35,6 +45,7 @@ FireworksEffect::~FireworksEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> FireworksEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -48,10 +59,13 @@ std::list<std::string> FireworksEffect::CheckEffectSettings(const SettingsMap& s
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *FireworksEffect::CreatePanel(wxWindow *parent) {
     return new FireworksPanel(parent);
 }
+#endif
 
 class FireworkParticle
 {
@@ -215,6 +229,7 @@ public:
 
 #define REPEATTRIGGER 20
 
+#ifndef XLIGHTS_NATIVE
 void FireworksEffect::SetDefaultParameters() {
     FireworksPanel *fp = static_cast<FireworksPanel*>(panel);
     if (fp == nullptr) {
@@ -246,11 +261,14 @@ void FireworksEffect::SetDefaultParameters() {
 
     SetPanelTimingTracks();
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void FireworksEffect::SetPanelStatus(Model *cls)
 {
     SetPanelTimingTracks();
 }
+#endif
 
 bool FireworksEffect::needToAdjustSettings(const std::string &version)
 {
@@ -270,6 +288,7 @@ void FireworksEffect::adjustSettings(const std::string &version, Effect *effect,
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void FireworksEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
 {
     wxString timing = effect->GetSettings().Get("E_CHOICE_FIRETIMINGTRACK", "");
@@ -301,6 +320,7 @@ void FireworksEffect::SetPanelTimingTracks() const
     event.SetString(timingtracks);
     wxPostEvent(fp, event);
 }
+#endif
 
 std::pair<int,int> FireworksEffect::GetFireworkLocation(int width, int height, int overridex, int overridey)
 {
@@ -348,7 +368,7 @@ void FireworksEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
     bool useMusic = SettingsMap.GetBool("CHECKBOX_Fireworks_UseMusic", false);
     float sensitivity = static_cast<float>(SettingsMap.GetInt("SLIDER_Fireworks_Sensitivity", 50)) / 100.0;
     bool useTiming = SettingsMap.GetBool("CHECKBOX_FIRETIMING", false);
-    wxString timing = SettingsMap.Get("CHOICE_FIRETIMINGTRACK", "");
+    std::string timing = SettingsMap.Get("CHOICE_FIRETIMINGTRACK", "");
     if (timing == "")
     {
         useTiming = false;
@@ -377,7 +397,9 @@ void FireworksEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
 
     if (buffer.needToInit) {
         buffer.needToInit = false;
+#ifndef XLIGHTS_NATIVE
         SetPanelTimingTracks();
+#endif
         sinceLastTriggered = 0;
         if (!useMusic && !useTiming)
         {
@@ -388,7 +410,7 @@ void FireworksEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
 
         if (timing != "")
         {
-            effect->GetParentEffectLayer()->GetParentElement()->GetSequenceElements()->AddRenderDependency(timing.ToStdString(), buffer.cur_model);
+            effect->GetParentEffectLayer()->GetParentElement()->GetSequenceElements()->AddRenderDependency(timing, buffer.cur_model);
         }
     }
 

@@ -9,9 +9,15 @@
  **************************************************************/
 
 #include "CandleEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "CandlePanel.h"
+#endif
 
 #include <map>
+#ifdef XLIGHTS_NATIVE
+#include <cassert>
+typedef unsigned char wxByte;
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
@@ -21,13 +27,21 @@
 #include "../UtilFunctions.h"
 #include "../Parallel.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/candle-16.xpm"
 #include "../../include/candle-24.xpm"
 #include "../../include/candle-32.xpm"
 #include "../../include/candle-48.xpm"
 #include "../../include/candle-64.xpm"
+#endif
 
-CandleEffect::CandleEffect(int id) : RenderableEffect(id, "Candle", candle_16, candle_24, candle_32, candle_48, candle_64)
+CandleEffect::CandleEffect(int id) : RenderableEffect(id, "Candle",
+#ifndef XLIGHTS_NATIVE
+    candle_16, candle_24, candle_32, candle_48, candle_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -37,6 +51,7 @@ CandleEffect::~CandleEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> CandleEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -51,6 +66,7 @@ std::list<std::string> CandleEffect::CheckEffectSettings(const SettingsMap& sett
 xlEffectPanel *CandleEffect::CreatePanel(wxWindow *parent) {
     return new CandlePanel(parent);
 }
+#endif
 
 class CandleState {
 public:
@@ -92,6 +108,7 @@ static CandleRenderCache* GetCache(RenderBuffer& buffer, int id)
     return cache;
 }
 
+#ifndef XLIGHTS_NATIVE
 void CandleEffect::SetDefaultParameters()
 {
     CandlePanel* fp = (CandlePanel*)panel;
@@ -112,6 +129,7 @@ void CandleEffect::SetDefaultParameters()
     SetCheckBoxValue(fp->CheckBox_PerNode, false);
     SetCheckBoxValue(fp->CheckBox_UsePalette, false);
 }
+#endif
 
 void CandleEffect::Update(wxByte& flameprime, wxByte& flame, wxByte& wind, size_t windVariability, size_t flameAgility, size_t windCalmness, size_t windBaseline)
 {
@@ -206,7 +224,7 @@ void CandleEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
                 size_t index = y * maxW + x;
                 if (index >= states.size()) {
                     // this should never happen
-                    wxASSERT(false);
+                    assert(false);
                 } else {
                     CandleState* state = &states[index];
 

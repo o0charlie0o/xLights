@@ -11,6 +11,7 @@
  **************************************************************/
 
 #include "RenderableEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include <wx/file.h>
 #include <wx/textfile.h>
 
@@ -49,6 +50,7 @@ public:
     void GetFrame(size_t frame, char* buffer, size_t size);
     size_t GetFrameCount() const;
 };
+#endif
 
 class GlediatorEffect : public RenderableEffect
 {
@@ -56,20 +58,30 @@ class GlediatorEffect : public RenderableEffect
         GlediatorEffect(int id);
         virtual ~GlediatorEffect();
         virtual bool CanBeRandom() override {return false;}
+#ifndef XLIGHTS_NATIVE
         virtual void SetSequenceElements(SequenceElements *els) override;
         virtual void SetDefaultParameters() override;
         virtual void Render(Effect *effect, const SettingsMap &settings, RenderBuffer &buffer) override;
         virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
         virtual void adjustSettings(const std::string &version, Effect *effect, bool removeDefaults = true) override;
         virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap &SettingsMap) const override;
+#ifndef XLIGHTS_NATIVE
         virtual bool CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap) override;
+#endif
         virtual bool needToAdjustSettings(const std::string &version) override { return true; }
         virtual bool AppropriateOnNodes() const override { return false; }
+#ifndef XLIGHTS_NATIVE
         static bool IsGlediatorFile(std::string filename);
+#endif
     
         // Currently not possible but I think changes could be made to make it support partial
         //virtual bool CanRenderPartialTimeInterval() const override { return true; }
 protected:
+#ifndef XLIGHTS_NATIVE
         virtual xlEffectPanel *CreatePanel(wxWindow *parent) override;
+#endif
+#ifndef XLIGHTS_NATIVE
         bool IsCSVFile(std::string filename) const;
+#endif
 };

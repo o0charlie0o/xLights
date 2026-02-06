@@ -9,7 +9,9 @@
  **************************************************************/
 
 #include "LiquidEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "LiquidPanel.h"
+#endif
 
 #include <Box2D/Box2D.h>
 #include "../sequencer/Effect.h"
@@ -20,18 +22,27 @@
 #include "../models/Model.h"
 #include "../Parallel.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/liquid-16.xpm"
 #include "../../include/liquid-24.xpm"
 #include "../../include/liquid-32.xpm"
 #include "../../include/liquid-48.xpm"
 #include "../../include/liquid-64.xpm"
+#endif
 
+#include <cassert>
 #include <log4cpp/Category.hh>
 
 //#define LE_INTERPOLATE
 #define MAX_PARTICLES 100000
 
-LiquidEffect::LiquidEffect(int id) : RenderableEffect(id, "Liquid", liquid_16, liquid_24, liquid_32, liquid_48, liquid_64)
+LiquidEffect::LiquidEffect(int id) : RenderableEffect(id, "Liquid",
+#ifndef XLIGHTS_NATIVE
+    liquid_16, liquid_24, liquid_32, liquid_48, liquid_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
 }
 
@@ -39,6 +50,7 @@ LiquidEffect::~LiquidEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *LiquidEffect::CreatePanel(wxWindow *parent) {
     return new LiquidPanel(parent);
 }
@@ -78,7 +90,9 @@ std::list<std::string> LiquidEffect::CheckEffectSettings(const SettingsMap& sett
 
     return res;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void LiquidEffect::SetDefaultParameters()
 {
     LiquidPanel* tp = (LiquidPanel*)panel;
@@ -169,6 +183,7 @@ void LiquidEffect::SetDefaultParameters()
     tp->BitmapButton_Flow4->SetActive(false);
     tp->BitmapButton_Liquid_SourceSize4->SetActive(false);
 }
+#endif
 
 void LiquidEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
@@ -727,7 +742,7 @@ void LiquidEffect::Render(RenderBuffer &buffer,
         delete _world;
         _world = nullptr;
 
-        wxASSERT(false);
+        assert(false);
         return;
     }
 

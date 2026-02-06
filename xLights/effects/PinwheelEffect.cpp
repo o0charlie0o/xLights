@@ -9,24 +9,34 @@
  **************************************************************/
 
 #include "PinwheelEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "PinwheelPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/pinwheel-16.xpm"
 #include "../../include/pinwheel-24.xpm"
 #include "../../include/pinwheel-32.xpm"
 #include "../../include/pinwheel-48.xpm"
 #include "../../include/pinwheel-64.xpm"
+#endif
 #include <log4cpp/Category.hh>
 
 #include "../Parallel.h"
 
 #include "ispc/PinwheelFunctions.ispc.h"
 
-PinwheelEffect::PinwheelEffect(int id) : RenderableEffect(id, "Pinwheel", pinwheel_16, pinwheel_24, pinwheel_32, pinwheel_48, pinwheel_64)
+PinwheelEffect::PinwheelEffect(int id) : RenderableEffect(id, "Pinwheel",
+#ifndef XLIGHTS_NATIVE
+    pinwheel_16, pinwheel_24, pinwheel_32, pinwheel_48, pinwheel_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -35,6 +45,7 @@ PinwheelEffect::~PinwheelEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *PinwheelEffect::CreatePanel(wxWindow *parent) {
     return new PinwheelPanel(parent);
 }
@@ -67,6 +78,7 @@ void PinwheelEffect::SetDefaultParameters() {
 
     SetCheckBoxValue(pp->CheckBox_Pinwheel_Rotation, true);
 }
+#endif
 
 bool PinwheelEffect::needToAdjustSettings(const std::string &version) {
     // give the base class a chance to adjust any settings

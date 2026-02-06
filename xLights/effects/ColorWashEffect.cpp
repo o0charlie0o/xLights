@@ -9,13 +9,17 @@
  **************************************************************/
 
 #include "ColorWashEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "ColorWashPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../sequencer/EffectLayer.h"
 #include "../sequencer/Element.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
+#ifndef XLIGHTS_NATIVE
 #include "../../include/ColorWash.xpm"
+#endif
 
 #include <sstream>
 
@@ -27,7 +31,13 @@ static const std::string CHECKBOX_ColorWash_Shimmer("CHECKBOX_ColorWash_Shimmer"
 static const std::string CHECKBOX_ColorWash_CircularPalette("CHECKBOX_ColorWash_CircularPalette");
 
 
-ColorWashEffect::ColorWashEffect(int i) : RenderableEffect(i, "Color Wash", ColorWash, ColorWash, ColorWash, ColorWash, ColorWash)
+ColorWashEffect::ColorWashEffect(int i) : RenderableEffect(i, "Color Wash",
+#ifndef XLIGHTS_NATIVE
+    ColorWash, ColorWash, ColorWash, ColorWash, ColorWash
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -37,6 +47,7 @@ ColorWashEffect::~ColorWashEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 int ColorWashEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, int y2,
                                           xlVertexColorAccumulator &bg, xlColor* colorMask, bool ramps) {
     if (e->HasBackgroundDisplayList()) {
@@ -52,7 +63,9 @@ int ColorWashEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x
     }
     return 2;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void ColorWashEffect::SetDefaultParameters() {
     ColorWashPanel *p = (ColorWashPanel*)panel;
     if (p == nullptr) {
@@ -104,6 +117,7 @@ wxString ColorWashEffect::GetEffectString() {
 xlEffectPanel *ColorWashEffect::CreatePanel(wxWindow *parent) {
     return new ColorWashPanel(parent);
 }
+#endif
 
 bool ColorWashEffect::needToAdjustSettings(const std::string &version) {
     return IsVersionOlder("2016.34", version) || RenderableEffect::needToAdjustSettings(version);
@@ -121,7 +135,9 @@ void ColorWashEffect::adjustSettings(const std::string &version, Effect *effect,
             || std::abs(y1) > 0.001f
             || std::abs(100.0f - x2) > 0.001f
             || std::abs(100.0f - y2) > 0.001f) {
-            std::string val = wxString::Format("%.2fx%.2fx%.2fx%.2f", x1, y1, x2, y2).ToStdString();
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%.2fx%.2fx%.2fx%.2f", x1, y1, x2, y2);
+            std::string val = buf;
             effect->GetSettings()["B_CUSTOM_SubBuffer"] = val;
         }
     }

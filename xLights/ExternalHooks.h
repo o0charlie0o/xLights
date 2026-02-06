@@ -10,6 +10,7 @@
  **************************************************************/
 
 
+#ifndef XLIGHTS_NATIVE
 #if defined(__WXOSX__)
 #if __has_include("ExternalHooksMacOS.h")
 #include "osxUtils/ExternalHooksMacOS.h"
@@ -23,13 +24,43 @@
 #include "linuxUtils/ExternalHooksLinux.h"
 #endif
 #endif
+#endif // !XLIGHTS_NATIVE
 
 #ifndef __XL_EXTERNAL_HOOKS__
 
 #include <string>
 #include <list>
-
 #include <functional>
+
+#ifdef XLIGHTS_NATIVE
+#include <sys/stat.h>
+
+#define EnableSleepModes()
+#define DisableSleepModes()
+#define AddAudioDeviceChangeListener(a)
+#define RemoveAudioDeviceChangeListener()
+#define AdjustModalDialogParent(par)
+#define DoInAppPurchases(w)
+#define WXGLUnsetCurrentContext()
+#define GetOSFormattedClipboardData() ""
+#define SetThreadQOS(a)
+
+inline double xlOSGetMainScreenContentScaleFactor() { return 1.0; }
+inline bool ObtainAccessToURL(const std::string &path, bool enforceWritable = false) { return true; }
+inline bool IsFromAppStore() { return false; }
+inline bool IsMouseEventFromTouchpad() { return false; }
+inline void RunInAutoReleasePool(std::function<void()> &&f) { f(); }
+
+inline bool FileExists(const std::string &s, bool waitForDownload = true) {
+    struct stat buffer;
+    return (stat(s.c_str(), &buffer) == 0);
+}
+inline void MarkNewFileRevision(const std::string &path, int retainMax = 15) {}
+inline std::list<std::string> GetFileRevisions(const std::string &path) { return std::list<std::string>(); }
+inline std::string GetURLForRevision(const std::string &path, const std::string &rev) { return path; }
+
+#else // !XLIGHTS_NATIVE
+
 #include <wx/file.h>
 #include <wx/filename.h>
 #include <wx/dir.h>
@@ -74,5 +105,7 @@ inline void SetButtonBackground(wxButton* b, const wxColour& c, int bgType)
 inline void MarkNewFileRevision(const std::string &path, int retainMax = 15) {}
 inline std::list<std::string> GetFileRevisions(const std::string &path) { return std::list<std::string>(); }
 inline std::string GetURLForRevision(const std::string &path, const std::string &rev) { return path; }
+
+#endif // XLIGHTS_NATIVE
 
 #endif

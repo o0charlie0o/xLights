@@ -9,24 +9,34 @@
  **************************************************************/
 
 #include "PlasmaEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "PlasmaPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/plasma-16.xpm"
 #include "../../include/plasma-24.xpm"
 #include "../../include/plasma-32.xpm"
 #include "../../include/plasma-48.xpm"
 #include "../../include/plasma-64.xpm"
+#endif
 
 #include "../Parallel.h"
 
 #include "ispc/PlasmaFunctions.ispc.h"
 
 
-PlasmaEffect::PlasmaEffect(int id) : RenderableEffect(id, "Plasma", plasma_16, plasma_24, plasma_32, plasma_48, plasma_64)
+PlasmaEffect::PlasmaEffect(int id) : RenderableEffect(id, "Plasma",
+#ifndef XLIGHTS_NATIVE
+    plasma_16, plasma_24, plasma_32, plasma_48, plasma_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -35,9 +45,11 @@ PlasmaEffect::~PlasmaEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *PlasmaEffect::CreatePanel(wxWindow *parent) {
     return new PlasmaPanel(parent);
 }
+#endif
 
 #define PLASMA_NORMAL_COLORS    0
 #define PLASMA_PRESET1          1
@@ -58,6 +70,7 @@ int PlasmaEffect::GetPlasmaColorScheme(const std::string &ColorSchemeStr) {
     return PLASMA_NORMAL_COLORS;
 }
 
+#ifndef XLIGHTS_NATIVE
 void PlasmaEffect::SetDefaultParameters() {
     PlasmaPanel *pp = (PlasmaPanel*)panel;
     if (pp == nullptr) {
@@ -72,6 +85,7 @@ void PlasmaEffect::SetDefaultParameters() {
 
     SetChoiceValue(pp->Choice_Plasma_Color, "Normal");
 }
+#endif
 
 void PlasmaEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 

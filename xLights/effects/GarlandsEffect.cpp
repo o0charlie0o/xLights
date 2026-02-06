@@ -9,19 +9,29 @@
  **************************************************************/
 
 #include "GarlandsEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "GarlandsPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/garlands-16.xpm"
 #include "../../include/garlands-24.xpm"
 #include "../../include/garlands-32.xpm"
 #include "../../include/garlands-48.xpm"
 #include "../../include/garlands-64.xpm"
+#endif
 
-GarlandsEffect::GarlandsEffect(int id) : RenderableEffect(id, "Garlands", garlands_16, garlands_24, garlands_32, garlands_48, garlands_64)
+GarlandsEffect::GarlandsEffect(int id) : RenderableEffect(id, "Garlands",
+#ifndef XLIGHTS_NATIVE
+    garlands_16, garlands_24, garlands_32, garlands_48, garlands_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -31,9 +41,11 @@ GarlandsEffect::~GarlandsEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *GarlandsEffect::CreatePanel(wxWindow *parent) {
     return new GarlandsPanel(parent);
 }
+#endif
 
 int GetDirection(const std::string &direction) {
     if ("Up" == direction) {
@@ -56,6 +68,7 @@ int GetDirection(const std::string &direction) {
     return 0;
 }
 
+#ifndef XLIGHTS_NATIVE
 void GarlandsEffect::SetDefaultParameters() {
     GarlandsPanel *fp = (GarlandsPanel*)panel;
     if (fp == nullptr) {
@@ -71,6 +84,7 @@ void GarlandsEffect::SetDefaultParameters() {
 
     SetChoiceValue(fp->Choice_Garlands_Direction, "Up");
 }
+#endif
 
 void GarlandsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();

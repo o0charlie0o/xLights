@@ -9,27 +9,35 @@
  **************************************************************/
 
 #include "GlediatorEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "GlediatorPanel.h"
+#endif
 
+#ifndef XLIGHTS_NATIVE
 #include "../sequencer/SequenceElements.h"
-
 #include <wx/filename.h>
 #include <wx/filepicker.h>
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../models/Model.h"
+#ifndef XLIGHTS_NATIVE
 #include "../xLightsXmlFile.h"
-#include "../xLightsMain.h" 
+#include "../xLightsMain.h"
+#endif
 #include "../UtilFunctions.h"
 #include "../ExternalHooks.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/glediator-16.xpm"
 #include "../../include/glediator-64.xpm"
+#endif
 #include <log4cpp/Category.hh>
 #include "../UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 GlediatorReader::GlediatorReader(const std::string& filename, const wxSize& size)
 {
     static log4cpp::Category &logger_base = log4cpp::Category::getInstance(std::string("log_base"));
@@ -134,8 +142,15 @@ size_t CSVReader::GetFrameCount() const
 {
     return _f.GetLineCount();
 }
+#endif
 
-GlediatorEffect::GlediatorEffect(int id) : RenderableEffect(id, "Glediator", glediator_16, glediator_64, glediator_64, glediator_64, glediator_64)
+GlediatorEffect::GlediatorEffect(int id) : RenderableEffect(id, "Glediator",
+#ifndef XLIGHTS_NATIVE
+    glediator_16, glediator_64, glediator_64, glediator_64, glediator_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -145,6 +160,7 @@ GlediatorEffect::~GlediatorEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> GlediatorEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -212,6 +228,7 @@ void GlediatorEffect::SetDefaultParameters() {
     gp->FilePickerCtrl_Glediator_Filename->SetFileName(wxFileName());
     SetChoiceValue(gp->Choice_Glediator_DurationTreatment, "Normal");
 }
+#endif
 
 void GlediatorEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults)
 {
@@ -249,6 +266,7 @@ std::list<std::string> GlediatorEffect::GetFileReferences(Model* model, const Se
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 bool GlediatorEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap)
 {
     bool rc = false;
@@ -264,7 +282,9 @@ bool GlediatorEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &Set
 
     return rc;
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 class GlediatorRenderCache : public EffectRenderCache {
 public:
     GlediatorRenderCache()
@@ -495,4 +515,5 @@ void GlediatorEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
         }
     }
 }
+#endif
 

@@ -10,10 +10,14 @@
 
 #include <sstream>
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/On.xpm"
+#endif
 
 #include "OnEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "OnPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
@@ -26,7 +30,13 @@ static const std::string TEXTCTRL_Eff_On_End("TEXTCTRL_Eff_On_End");
 static const std::string CHECKBOX_On_Shimmer("CHECKBOX_On_Shimmer");
 static const std::string TEXTCTRL_On_Cycles("TEXTCTRL_On_Cycles");
 
-OnEffect::OnEffect(int i) : RenderableEffect(i, "On", On, On, On, On, On)
+OnEffect::OnEffect(int i) : RenderableEffect(i, "On",
+#ifndef XLIGHTS_NATIVE
+    On, On, On, On, On
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -36,6 +46,7 @@ OnEffect::~OnEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *OnEffect::CreatePanel(wxWindow *parent) {
     return new OnPanel(parent);
 }
@@ -82,7 +93,9 @@ wxString OnEffect::GetEffectString() {
     }
     return ret.str();
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void GetOnEffectColors(const Effect *e, xlColor &start, xlColor &end) {
     int starti = e->GetSettings().GetInt("E_TEXTCTRL_Eff_On_Start", 100);
     int endi = e->GetSettings().GetInt("E_TEXTCTRL_Eff_On_End", 100);
@@ -160,6 +173,7 @@ int OnEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, int 
         return 2;
     }
 }
+#endif
 
 void OnEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     SettingsMap &settingsMap = effect->GetSettings();

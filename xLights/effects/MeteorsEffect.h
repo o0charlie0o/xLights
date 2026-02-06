@@ -35,9 +35,11 @@ class MeteorsEffect : public RenderableEffect
 public:
     MeteorsEffect(int id);
     virtual ~MeteorsEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
-    virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
+    virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
     virtual bool AppropriateOnNodes() const override
     {
         return false;
@@ -78,7 +80,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 
 private:
     void RenderMeteorsVertical(RenderBuffer& buffer, int ColorScheme, int Count, int Length, int MeteorsEffect, int SwirlIntensity, int mspeed, int warmupFrames);

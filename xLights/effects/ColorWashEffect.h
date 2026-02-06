@@ -21,10 +21,16 @@ public:
     ColorWashEffect(int id);
     virtual ~ColorWashEffect();
 
+#ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
+#endif
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#ifndef XLIGHTS_NATIVE
     virtual int DrawEffectBackground(const Effect* e, int x1, int y1, int x2, int y2, xlVertexColorAccumulator& bg, xlColor* colorMask, bool ramps) override;
+#endif
+#ifndef XLIGHTS_NATIVE
     virtual wxString GetEffectString() override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
     virtual bool CanRenderPartialTimeInterval() const override
@@ -47,5 +53,7 @@ public:
 
 protected:
     virtual void RemoveDefaults(const std::string& version, Effect* effect) override;
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 };

@@ -9,19 +9,29 @@
  **************************************************************/
 
 #include "MarqueeEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "MarqueePanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/marquee-16.xpm"
 #include "../../include/marquee-24.xpm"
 #include "../../include/marquee-32.xpm"
 #include "../../include/marquee-48.xpm"
 #include "../../include/marquee-64.xpm"
+#endif
 
-MarqueeEffect::MarqueeEffect(int id) : RenderableEffect(id, "Marquee", marquee_16, marquee_24, marquee_32, marquee_48, marquee_64)
+MarqueeEffect::MarqueeEffect(int id) : RenderableEffect(id, "Marquee",
+#ifndef XLIGHTS_NATIVE
+    marquee_16, marquee_24, marquee_32, marquee_48, marquee_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -31,6 +41,7 @@ MarqueeEffect::~MarqueeEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel* MarqueeEffect::CreatePanel(wxWindow* parent)
 {
     return new MarqueePanel(parent);
@@ -68,6 +79,7 @@ void MarqueeEffect::SetDefaultParameters() {
     mp->BitmapButton_Marquee_StartVC->SetActive(false);
     mp->BitmapButton_Marquee_ThicknessVC->SetActive(false);
 }
+#endif
 
 static void UpdateMarqueeColor(int &position, int &band_color, int colorcnt, int color_size, int shift)
 {

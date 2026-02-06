@@ -11,10 +11,14 @@
 #include "RenderableEffect.h"
 #include "../sequencer/Effect.h"
 #include "EffectManager.h"
-#include "assist/xlGridCanvasEmpty.h"
 #include "../UtilFunctions.h"
-#include "../ExternalHooks.h"
 #include "../sequencer/SequenceElements.h"
+#include "../ValueCurve.h"
+#include "../RenderBuffer.h"
+
+#ifndef XLIGHTS_NATIVE
+#include "assist/xlGridCanvasEmpty.h"
+#include "../ExternalHooks.h"
 
 #include <wx/fontpicker.h>
 #include <wx/filepicker.h>
@@ -22,7 +26,6 @@
 #include <wx/spinctrl.h>
 
 #include <sstream>
-#include "../UtilFunctions.h"
 #include "../ValueCurveButton.h"
 #include "PixelBuffer.h"
 #include "FanEffect.h"
@@ -37,6 +40,7 @@
 #include "../xLightsApp.h"
 #include "../xLightsMain.h"
 #include "../models/SubModel.h"
+#endif
 
 RenderableEffect::RenderableEffect(int i, std::string n,
                                    const char **data16,
@@ -44,9 +48,15 @@ RenderableEffect::RenderableEffect(int i, std::string n,
                                    const char **data32,
                                    const char **data48,
                                    const char **data64)
-    : id(i), name(n), tooltip(n), panel(nullptr), mSequenceElements(nullptr)
+    : id(i), name(n), tooltip(n),
+#ifndef XLIGHTS_NATIVE
+      panel(nullptr),
+#endif
+      mSequenceElements(nullptr)
 {
+#ifndef XLIGHTS_NATIVE
     initBitmaps(data16, data24, data32, data48, data64);
+#endif
 }
 
 RenderableEffect::~RenderableEffect()
@@ -54,6 +64,7 @@ RenderableEffect::~RenderableEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 const wxBitmapBundle &RenderableEffect::GetEffectIcon(int sz) const {
     if (sz >= 48) {
         return icon48;
@@ -153,6 +164,7 @@ void RenderableEffect::initBitmaps(const char **data16,
     icon32 = wxBitmapBundle::FromImpl(new xlNamedBitmapBundleImpl(name, 32, bitmaps));
     icon48 = wxBitmapBundle::FromImpl(new xlNamedBitmapBundleImpl(name, 48, bitmaps));
 }
+#endif // !XLIGHTS_NATIVE
 
 // return true if version string is older than compare string
 bool RenderableEffect::IsVersionOlder(const std::string& compare, const std::string& version)
@@ -160,6 +172,7 @@ bool RenderableEffect::IsVersionOlder(const std::string& compare, const std::str
     return ::IsVersionOlder(compare, version);
 }
 
+#ifndef XLIGHTS_NATIVE
 // this is recursive
 static wxString GetEffectStringFromWindow(wxWindow *ParentWin) {
     wxString s;
@@ -246,6 +259,7 @@ static wxString GetEffectStringFromWindow(wxWindow *ParentWin) {
 wxString RenderableEffect::GetEffectString() {
     return GetEffectStringFromWindow(panel);
 }
+#endif // !XLIGHTS_NATIVE
 
 bool RenderableEffect::SupportsRenderCache(const SettingsMap& settings) const
 {
@@ -272,109 +286,110 @@ bool RenderableEffect::needToAdjustSettings(const std::string &version) {
 }
 
 void RenderableEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults) {
-    
+
     if (IsVersionOlder("2019.61", version)) {
         SettingsMap& sm = effect->GetSettings();
 
-        wxString rzRotations = sm.Get("B_VALUECURVE_Rotations", "");
-        if (rzRotations.Contains("VALUECURVE") && !rzRotations.Contains("RV=TRUE"))
+        std::string rzRotations = sm.Get("B_VALUECURVE_Rotations", "");
+        if (Contains(rzRotations, "VALUECURVE") && !Contains(rzRotations, "RV=TRUE"))
         {
             ValueCurve vc;
             vc.SetLimits(0, 200);
             vc.SetDivisor(10);
             vc.Deserialise(rzRotations);
             sm["B_VALUECURVE_Rotations"] = vc.Serialise();
-            wxASSERT(vc.IsRealValue());
+            assert(vc.IsRealValue());
         }
 
-        wxString rzZoom = sm.Get("B_VALUECURVE_Zoom", "");
-        if (rzZoom.Contains("VALUECURVE") && !rzZoom.Contains("RV=TRUE"))
+        std::string rzZoom = sm.Get("B_VALUECURVE_Zoom", "");
+        if (Contains(rzZoom, "VALUECURVE") && !Contains(rzZoom, "RV=TRUE"))
         {
             ValueCurve vc;
             vc.SetLimits(0, 30);
             vc.SetDivisor(10);
             vc.Deserialise(rzZoom);
             sm["B_VALUECURVE_Zoom"] = vc.Serialise();
-            wxASSERT(vc.IsRealValue());
+            assert(vc.IsRealValue());
         }
 
+#ifndef XLIGHTS_NATIVE
         if (IsVersionOlder("2018.50", version))
         {
             // Try to fix value curve issues
             for (auto s : sm)
             {
-                wxString f(s.first);
-                if (f.Contains("VALUECURVE") && !f.Contains("RV=TRUE"))
+                std::string f(s.first);
+                if (Contains(f, "VALUECURVE") && !Contains(f, "RV=TRUE"))
                 {
                     ValueCurve vc(s.second);
                     sm[s.first] = vc.Serialise();
                 }
 
-                wxString v(s.second);
-                if (v.Contains("ID_VALUECURVE_Blur"))
+                std::string v(s.second);
+                if (Contains(v, "ID_VALUECURVE_Blur"))
                 {
                     ValueCurve vc;
                     vc.SetLimits(BLUR_MIN, BLUR_MAX);
                     vc.SetDivisor(1);
                     vc.Deserialise(s.second);
                     sm[s.first] = vc.Serialise();
-                    wxASSERT(vc.IsRealValue());
+                    assert(vc.IsRealValue());
                 }
-                else if (v.Contains("ID_VALUECURVE_Fan_Blade_Angle"))
+                else if (Contains(v, "ID_VALUECURVE_Fan_Blade_Angle"))
                 {
                     ValueCurve vc;
                     vc.SetLimits(FAN_BLADEANGLE_MIN, FAN_BLADEANGLE_MAX);
                     vc.SetDivisor(1);
                     vc.Deserialise(s.second);
                     sm[s.first] = vc.Serialise();
-                    wxASSERT(vc.IsRealValue());
+                    assert(vc.IsRealValue());
                 }
-                else if (v.Contains("ID_VALUECURVE_Spirals_Rotation"))
+                else if (Contains(v, "ID_VALUECURVE_Spirals_Rotation"))
                 {
                     ValueCurve vc;
                     vc.SetLimits(SPIRALS_ROTATION_MIN, SPIRALS_ROTATION_MAX);
                     vc.SetDivisor(SPIRALS_ROTATION_DIVISOR);
                     vc.Deserialise(s.second);
                     sm[s.first] = vc.Serialise();
-                    wxASSERT(vc.IsRealValue());
+                    assert(vc.IsRealValue());
                 }
-                else if (v.Contains("ID_VALUECURVE_Fan_Start_Angle"))
+                else if (Contains(v, "ID_VALUECURVE_Fan_Start_Angle"))
                 {
                     ValueCurve vc;
                     vc.SetLimits(FAN_STARTANGLE_MIN, FAN_STARTANGLE_MAX);
                     vc.Deserialise(s.second);
                     sm[s.first] = vc.Serialise();
-                    wxASSERT(vc.IsRealValue());
+                    assert(vc.IsRealValue());
                 }
-                else if (v.Contains("ID_VALUECURVE_PinwheelXC"))
+                else if (Contains(v, "ID_VALUECURVE_PinwheelXC"))
                 {
                     ValueCurve vc;
                     vc.SetLimits(PINWHEEL_X_MIN, PINWHEEL_X_MAX);
                     vc.Deserialise(s.second);
                     sm[s.first] = vc.Serialise();
-                    wxASSERT(vc.IsRealValue());
+                    assert(vc.IsRealValue());
                 }
-                else if (v.Contains("ID_VALUECURVE_PinwheelYC"))
+                else if (Contains(v, "ID_VALUECURVE_PinwheelYC"))
                 {
                     ValueCurve vc;
                     vc.SetLimits(PINWHEEL_Y_MIN, PINWHEEL_Y_MAX);
                     vc.Deserialise(s.second);
                     sm[s.first] = vc.Serialise();
-                    wxASSERT(vc.IsRealValue());
+                    assert(vc.IsRealValue());
                 }
-                else if (v.Contains("ID_VALUECURVE_Spirals_Count"))
+                else if (Contains(v, "ID_VALUECURVE_Spirals_Count"))
                 {
                     ValueCurve vc;
                     vc.SetLimits(SPIRALS_COUNT_MIN, SPIRALS_COUNT_MAX);
                     vc.Deserialise(s.second);
                     sm[s.first] = vc.Serialise();
-                    wxASSERT(vc.IsRealValue());
+                    assert(vc.IsRealValue());
                 }
             }
 
             if (IsVersionOlder("2018.12", version))
             {
-                wxString layerMethod = sm.Get("T_CHOICE_LayerMethod", "");
+                std::string layerMethod = sm.Get("T_CHOICE_LayerMethod", "");
 
                 if (layerMethod == "Canvas")
                 {
@@ -401,15 +416,19 @@ void RenderableEffect::adjustSettings(const std::string &version, Effect *effect
                     if (IsVersionOlder("2016.36", version) && removeDefaults) {
                         RemoveDefaults(version, effect);
 
+#ifndef XLIGHTS_NATIVE
                         if (IsVersionOlder("4.2.20", version)) {
                             // almost all of the settings from older 4.x series need adjustment for speed things
                             AdjustSettingsToBeFitToTime(effect->GetEffectIndex(), effect->GetSettings(), effect->GetStartTimeMS(), effect->GetEndTimeMS(), effect->GetPalette());
                         }
+#endif
                     }
                 }
             }
         }
+#endif // !XLIGHTS_NATIVE
     }
+#ifndef XLIGHTS_NATIVE
     if (IsVersionOlder("2024.05", version)) {
         std::string mn = effect->GetParentEffectLayer()->GetParentElement()->GetFullName();
         SubModel * m = dynamic_cast<SubModel*>(xLightsApp::GetFrame()->GetModel(mn));
@@ -428,15 +447,18 @@ void RenderableEffect::adjustSettings(const std::string &version, Effect *effect
             }
         }
     }
+#endif
 }
 std::list<std::string> RenderableEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res;
+#ifndef XLIGHTS_NATIVE
     if (settings.Get("B_CHOICE_BufferStyle", "").starts_with("** ")) {
-        res.push_back(wxString::Format("    WARN: Effect using legacy buffer format '%s' which will be removed in the future. Model '%s', Start %s", 
+        res.push_back(wxString::Format("    WARN: Effect using legacy buffer format '%s' which will be removed in the future. Model '%s', Start %s",
                                        settings.Get("B_CHOICE_BufferStyle", ""), model->GetFullName(),
                                        FORMATTIME(eff->GetStartTimeMS())).ToStdString());
     }
+#endif
     return res;
 };
 
@@ -523,6 +545,7 @@ void RenderableEffect::RemoveDefaults(const std::string &version, Effect *effect
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void RenderableEffect::AdjustSettingsToBeFitToTime(int effectIdx, SettingsMap &settings, int startMS, int endMS, xlColorVector &colors)
 {
     if (effectIdx == EffectManager::eff_FACES
@@ -872,7 +895,6 @@ void RenderableEffect::AdjustSettingsToBeFitToTime(int effectIdx, SettingsMap &s
     settings.erase("T_SLIDER_Speed");
 }
 
-
 void RenderableEffect::SetSliderValue(wxSlider *slider, int value) {
     slider->SetValue(value);
     wxScrollEvent event(wxEVT_SLIDER, slider->GetId());
@@ -920,6 +942,7 @@ void RenderableEffect::SetRadioValue(wxRadioButton *r) {
     evt.SetInt(true);
     r->ProcessWindowEvent(evt);
 }
+#endif // !XLIGHTS_NATIVE
 
 double RenderableEffect::GetValueCurveDouble(const std::string &name, double def, const SettingsMap &SettingsMap, float offset, double min, double max, long startMS, long endMS, int divisor)
 {
@@ -1071,6 +1094,7 @@ std::string RenderableEffect::UpgradeValueCurve(EffectManager* effectManager, co
                     div = effect->GetSettingVCDivisor(name);
                     doit = true;
                 }
+#ifndef XLIGHTS_NATIVE
             } else if (StartsWith(name, "C_VALUECURVE")) {
                 if (ColorPanel::GetSettingVCDivisor(name) != 0xFFFF) {
                     min = ColorPanel::GetSettingVCMin(name);
@@ -1092,6 +1116,7 @@ std::string RenderableEffect::UpgradeValueCurve(EffectManager* effectManager, co
                     div = BufferPanel::GetSettingVCDivisor(name);
                     doit = true;
                 }
+#endif
             }
             if (doit) {
                 ValueCurve valc;
