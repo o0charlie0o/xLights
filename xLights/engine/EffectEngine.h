@@ -271,6 +271,9 @@ public:
     // Add a new effect layer to a model element. Returns the new layer index.
     int addLayer(const std::string& modelName);
 
+    // Insert a new effect layer at a specific index. Returns the new layer index.
+    int insertLayer(const std::string& modelName, int atIndex);
+
     // Remove a layer from a model element. Returns true on success.
     bool removeLayer(const std::string& modelName, int layer);
 

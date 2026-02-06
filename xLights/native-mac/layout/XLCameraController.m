@@ -303,6 +303,99 @@ static NSString * const kCameraSaved      = @"XLHousePreviewCamera.saved";
     return YES;
 }
 
+#pragma mark - Named Viewpoints
+
+static NSString * const kViewpointsKey = @"XLHousePreviewCamera.viewpoints";
+static NSString * const kDefaultViewpointKey = @"XLHousePreviewCamera.defaultViewpoint";
+
+- (NSDictionary *)currentStateDictionary {
+    return @{
+        @"azimuth": @(_azimuth),
+        @"elevation": @(_elevation),
+        @"distance": @(_distance),
+        @"targetX": @(_target.x),
+        @"targetY": @(_target.y),
+        @"targetZ": @(_target.z),
+    };
+}
+
+- (void)applyCameraStateDictionary:(NSDictionary *)state animated:(BOOL)animated {
+    float az = [state[@"azimuth"] floatValue];
+    float el = [state[@"elevation"] floatValue];
+    float dist = [state[@"distance"] floatValue];
+    simd_float3 tgt = (simd_float3){
+        [state[@"targetX"] floatValue],
+        [state[@"targetY"] floatValue],
+        [state[@"targetZ"] floatValue],
+    };
+
+    el = fmaxf(_minElevation, fminf(_maxElevation, el));
+    dist = fmaxf(_minDistance, fminf(_maxDistance, dist));
+
+    if (animated) {
+        [self animateToAzimuth:az elevation:el distance:dist target:tgt duration:0.3];
+    } else {
+        _azimuth = az;
+        _elevation = el;
+        _distance = dist;
+        _target = tgt;
+    }
+}
+
+- (void)saveViewpointWithName:(NSString *)name {
+    if (!name || name.length == 0) return;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSMutableDictionary *viewpoints = [([defaults dictionaryForKey:kViewpointsKey] ?: @{}) mutableCopy];
+    viewpoints[name] = [self currentStateDictionary];
+    [defaults setObject:viewpoints forKey:kViewpointsKey];
+}
+
+- (BOOL)loadViewpointWithName:(NSString *)name {
+    if (!name || name.length == 0) return NO;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *viewpoints = [defaults dictionaryForKey:kViewpointsKey];
+    NSDictionary *state = viewpoints[name];
+    if (!state) return NO;
+
+    [self applyCameraStateDictionary:state animated:YES];
+    return YES;
+}
+
+- (BOOL)deleteViewpointWithName:(NSString *)name {
+    if (!name || name.length == 0) return NO;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSMutableDictionary *viewpoints = [([defaults dictionaryForKey:kViewpointsKey] ?: @{}) mutableCopy];
+    if (!viewpoints[name]) return NO;
+
+    [viewpoints removeObjectForKey:name];
+    [defaults setObject:viewpoints forKey:kViewpointsKey];
+    return YES;
+}
+
+- (NSArray<NSString *> *)savedViewpointNames {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *viewpoints = [defaults dictionaryForKey:kViewpointsKey];
+    if (!viewpoints || viewpoints.count == 0) return @[];
+    return [[viewpoints allKeys] sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+}
+
+- (void)saveAsDefaultViewpoint {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:[self currentStateDictionary] forKey:kDefaultViewpointKey];
+}
+
+- (BOOL)restoreDefaultViewpoint {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSDictionary *state = [defaults dictionaryForKey:kDefaultViewpointKey];
+    if (!state) return NO;
+
+    [self applyCameraStateDictionary:state animated:YES];
+    return YES;
+}
+
 #pragma mark - Matrix Utilities
 
 - (simd_float4x4)lookAtEye:(simd_float3)eye

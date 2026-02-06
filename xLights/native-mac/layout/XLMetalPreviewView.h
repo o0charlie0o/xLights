@@ -43,6 +43,24 @@
 /// Called when the preview receives a key event it doesn't handle (e.g. spacebar)
 - (void)previewView:(XLMetalPreviewView *)view didReceiveKeyEvent:(NSEvent *)event;
 
+/// Called when the user requests to lock or unlock a model via context menu
+- (void)previewView:(XLMetalPreviewView *)view didRequestLockModel:(NSString *)modelName lock:(BOOL)lock;
+
+/// Called when the user requests to delete a model via context menu
+- (void)previewView:(XLMetalPreviewView *)view didRequestDeleteModel:(NSString *)modelName;
+
+/// Called when the user requests to flip a model via context menu
+- (void)previewView:(XLMetalPreviewView *)view didRequestFlipModel:(NSString *)modelName horizontal:(BOOL)horizontal;
+
+/// Called when the user requests to align multiple models
+- (void)previewView:(XLMetalPreviewView *)view didRequestAlignModels:(NSString *)alignment;
+
+/// Called when the user requests to distribute multiple models
+- (void)previewView:(XLMetalPreviewView *)view didRequestDistributeModels:(NSString *)direction;
+
+/// Called when the user requests to resize multiple models to match
+- (void)previewView:(XLMetalPreviewView *)view didRequestResizeModels:(NSString *)dimension;
+
 @end
 
 /// Native NSView subclass backed by CAMetalLayer for the 3D model preview.

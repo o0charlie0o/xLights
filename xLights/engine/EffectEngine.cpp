@@ -316,6 +316,15 @@ int EffectEngine::addLayer(const std::string& modelName) {
     return static_cast<int>(newLayer);
 }
 
+int EffectEngine::insertLayer(const std::string& modelName, int atIndex) {
+    if (!_provider) return -1;
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return -1;
+    size_t newLayer = _provider->insertEffectLayer(elemIdx, static_cast<size_t>(atIndex));
+    if (newLayer == SIZE_MAX) return -1;
+    return static_cast<int>(newLayer);
+}
+
 bool EffectEngine::removeLayer(const std::string& modelName, int layer) {
     if (!_provider) return false;
     size_t elemIdx = _provider->getElementIndex(modelName);

@@ -10,10 +10,12 @@
 
 import SwiftUI
 import Combine
+import UniformTypeIdentifiers
 
 // MARK: - Color Palette Constants
 
 private let kPaletteSize = 8
+private let kUserDefaultsPalettesKey = "XLSavedPalettes"
 
 // MARK: - Palette Color Model
 
@@ -58,6 +60,204 @@ struct PaletteColor: Identifiable {
         let b = Double(rgb & 0x0000FF) / 255.0
 
         return Color(red: r, green: g, blue: b)
+    }
+}
+
+// MARK: - Saved Palette Model
+
+/// Represents a saved palette with a name and color data
+struct SavedPalette: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    /// Comma-separated hex color string (e.g. "#FF0000,#00FF00,...,")
+    var colorString: String
+    /// Whether this palette was loaded from a .xpalette file (read-only source)
+    var isFromFile: Bool
+
+    init(name: String, colorString: String, isFromFile: Bool = false) {
+        self.id = UUID()
+        self.name = name
+        self.colorString = colorString
+        self.isFromFile = isFromFile
+    }
+
+    /// Extract the 8 hex color values from the color string
+    var hexColors: [String] {
+        let components = colorString.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        var colors: [String] = []
+        for component in components {
+            let trimmed = component.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            // Only include simple hex colors, skip Active= gradient entries
+            if trimmed.hasPrefix("#") && trimmed.count == 7 {
+                colors.append(trimmed)
+            } else if trimmed.hasPrefix("#") {
+                colors.append(String(trimmed.prefix(7)))
+            }
+        }
+        while colors.count < kPaletteSize {
+            colors.append("#FFFFFF")
+        }
+        return Array(colors.prefix(kPaletteSize))
+    }
+}
+
+// MARK: - Palette Manager
+
+/// Manages saving, loading, and importing palettes
+final class PaletteManager {
+    static let shared = PaletteManager()
+
+    private init() {}
+
+    /// Load all saved palettes from UserDefaults
+    func loadSavedPalettes() -> [SavedPalette] {
+        guard let data = UserDefaults.standard.data(forKey: kUserDefaultsPalettesKey),
+              let palettes = try? JSONDecoder().decode([SavedPalette].self, from: data) else {
+            return []
+        }
+        return palettes
+    }
+
+    /// Save palettes to UserDefaults
+    func savePalettes(_ palettes: [SavedPalette]) {
+        // Only persist user-created palettes, not file-based ones
+        let userPalettes = palettes.filter { !$0.isFromFile }
+        if let data = try? JSONEncoder().encode(userPalettes) {
+            UserDefaults.standard.set(data, forKey: kUserDefaultsPalettesKey)
+        }
+    }
+
+    /// Add or update a palette
+    func savePalette(_ palette: SavedPalette, in palettes: inout [SavedPalette]) {
+        if let index = palettes.firstIndex(where: { $0.id == palette.id }) {
+            palettes[index] = palette
+        } else {
+            palettes.append(palette)
+        }
+        savePalettes(palettes)
+    }
+
+    /// Delete a palette
+    func deletePalette(_ palette: SavedPalette, from palettes: inout [SavedPalette]) {
+        palettes.removeAll { $0.id == palette.id }
+
+        // If it was saved to a .xpalette file in the show folder, also remove the file
+        if palette.isFromFile, let showPath = getShowFolderPath() {
+            let filePath = (showPath as NSString).appendingPathComponent("Palettes/\(palette.name).xpalette")
+            try? FileManager.default.removeItem(atPath: filePath)
+        }
+
+        savePalettes(palettes)
+    }
+
+    /// Load palettes from .xpalette files in the show folder and app resources
+    func loadFilePalettes() -> [SavedPalette] {
+        var palettes: [SavedPalette] = []
+
+        // Load from show folder Palettes directory
+        if let showPath = getShowFolderPath() {
+            let palettesDir = (showPath as NSString).appendingPathComponent("Palettes")
+            loadPalettesFromDirectory(palettesDir, into: &palettes)
+
+            // Also check show folder root for .xpalette files
+            loadPalettesFromDirectory(showPath, into: &palettes)
+        }
+
+        // Load from app bundle resources/palettes
+        if let resourcePath = Bundle.main.resourcePath {
+            let bundlePalettesDir = (resourcePath as NSString).appendingPathComponent("palettes")
+            loadPalettesFromDirectory(bundlePalettesDir, into: &palettes)
+        }
+
+        return palettes
+    }
+
+    /// Load .xpalette files from a directory
+    private func loadPalettesFromDirectory(_ directoryPath: String, into palettes: inout [SavedPalette]) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: directoryPath) else { return }
+
+        guard let contents = try? fm.contentsOfDirectory(atPath: directoryPath) else { return }
+
+        for filename in contents where filename.hasSuffix(".xpalette") {
+            let filePath = (directoryPath as NSString).appendingPathComponent(filename)
+            guard let data = fm.contents(atPath: filePath),
+                  let content = String(data: data, encoding: .utf8) else { continue }
+
+            let colorString = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = (filename as NSString).deletingPathExtension
+
+            // Skip if we already have a palette with the same colors
+            let existingColors = colorString.split(separator: ",").map(String.init).joined(separator: ",")
+            if palettes.contains(where: {
+                $0.colorString.split(separator: ",").map(String.init).joined(separator: ",") == existingColors
+            }) {
+                continue
+            }
+
+            palettes.append(SavedPalette(name: name, colorString: colorString, isFromFile: true))
+        }
+    }
+
+    /// Save a palette as a .xpalette file in the show folder
+    func savePaletteToFile(_ palette: SavedPalette) -> Bool {
+        guard let showPath = getShowFolderPath() else { return false }
+
+        let palettesDir = (showPath as NSString).appendingPathComponent("Palettes")
+        let fm = FileManager.default
+
+        // Create Palettes directory if needed
+        if !fm.fileExists(atPath: palettesDir) {
+            try? fm.createDirectory(atPath: palettesDir, withIntermediateDirectories: true)
+        }
+
+        let filePath = (palettesDir as NSString).appendingPathComponent("\(palette.name).xpalette")
+        return fm.createFile(atPath: filePath, contents: palette.colorString.data(using: .utf8))
+    }
+
+    /// Import a palette from a .xpalette file at a given URL
+    func importPaletteFromFile(at url: URL) -> SavedPalette? {
+        guard let data = try? Data(contentsOf: url),
+              let content = String(data: data, encoding: .utf8) else { return nil }
+
+        let colorString = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = url.deletingPathExtension().lastPathComponent
+
+        return SavedPalette(name: name, colorString: colorString, isFromFile: false)
+    }
+
+    /// Parse a comma-separated hex string (e.g. "#FF0000,#00FF00,#0000FF")
+    func parsePaletteString(_ input: String) -> SavedPalette? {
+        let cleaned = input.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: " ", with: "")
+            .uppercased()
+
+        let components = cleaned.split(separator: ",").map(String.init)
+        let validColors = components.filter { component in
+            let trimmed = component.trimmingCharacters(in: .whitespaces)
+            guard trimmed.count == 7, trimmed.hasPrefix("#") else { return false }
+            let hexPart = trimmed.dropFirst()
+            return hexPart.allSatisfy { $0.isHexDigit }
+        }
+
+        guard !validColors.isEmpty, validColors.count <= 8 else { return nil }
+
+        var colorString = validColors.joined(separator: ",") + ","
+        // Pad to 8 colors
+        var count = validColors.count
+        while count < 8 {
+            colorString += "#FFFFFF,"
+            count += 1
+        }
+
+        return SavedPalette(name: "Imported", colorString: colorString, isFromFile: false)
+    }
+
+    /// Get the show folder path from the engine bridge
+    private func getShowFolderPath() -> String? {
+        // TODO: Pass engine bridge reference to PaletteManager for show folder access
+        return nil
     }
 }
 
@@ -279,6 +479,109 @@ final class ColorPaletteState {
             bridge.setEffectParameter(effectId, key: "C_SLIDER_Color_ValueAdjust", value: "0")
         }
     }
+
+    // MARK: - Palette Management
+
+    /// All available palettes (user-saved + file-based)
+    var savedPalettes: [SavedPalette] = []
+
+    /// The currently loaded palette (if any)
+    var currentPaletteName: String?
+
+    /// Load all available palettes from storage and files
+    func loadAllPalettes() {
+        let manager = PaletteManager.shared
+        var all = manager.loadSavedPalettes()
+        let filePalettes = manager.loadFilePalettes()
+
+        // Merge file palettes, avoiding duplicates by name
+        for fp in filePalettes {
+            if !all.contains(where: { $0.name == fp.name }) {
+                all.append(fp)
+            }
+        }
+
+        savedPalettes = all
+    }
+
+    /// Get the current palette as a color string (matching legacy format)
+    func getCurrentPaletteString() -> String {
+        return colors.map { $0.hexString }.joined(separator: ",") + ","
+    }
+
+    /// Apply a saved palette to the current colors
+    func loadPalette(_ palette: SavedPalette) {
+        let hexColors = palette.hexColors
+        for i in 0..<min(kPaletteSize, hexColors.count) {
+            colors[i].color = PaletteColor.fromHex(hexColors[i])
+
+            if let bridge = engineBridge, let effectId = selectedEffectId {
+                let key = "C_BUTTON_Palette\(i + 1)"
+                bridge.setEffectParameter(effectId, key: key, value: hexColors[i])
+            }
+        }
+        currentPaletteName = palette.name
+    }
+
+    /// Save the current palette with a name
+    func savePalette(name: String) {
+        let colorString = getCurrentPaletteString()
+        let palette = SavedPalette(name: name, colorString: colorString, isFromFile: false)
+        PaletteManager.shared.savePalette(palette, in: &savedPalettes)
+        _ = PaletteManager.shared.savePaletteToFile(palette)
+        currentPaletteName = name
+    }
+
+    /// Update the current palette (re-save with existing name)
+    func updateCurrentPalette() {
+        guard let name = currentPaletteName else { return }
+
+        let colorString = getCurrentPaletteString()
+        if let index = savedPalettes.firstIndex(where: { $0.name == name }) {
+            savedPalettes[index].colorString = colorString
+            PaletteManager.shared.savePalettes(savedPalettes)
+            _ = PaletteManager.shared.savePaletteToFile(savedPalettes[index])
+        } else {
+            savePalette(name: name)
+        }
+    }
+
+    /// Delete a saved palette
+    func deletePalette(_ palette: SavedPalette) {
+        PaletteManager.shared.deletePalette(palette, from: &savedPalettes)
+        if currentPaletteName == palette.name {
+            currentPaletteName = nil
+        }
+    }
+
+    /// Apply colors from a hex string (for import)
+    func applyColorsFromString(_ colorString: String) {
+        let components = colorString.split(separator: ",").map(String.init)
+        for i in 0..<min(kPaletteSize, components.count) {
+            let hex = components[i].trimmingCharacters(in: .whitespaces)
+            guard hex.hasPrefix("#") else { continue }
+            colors[i].color = PaletteColor.fromHex(hex)
+
+            if let bridge = engineBridge, let effectId = selectedEffectId {
+                let key = "C_BUTTON_Palette\(i + 1)"
+                bridge.setEffectParameter(effectId, key: key, value: hex.uppercased())
+            }
+        }
+        currentPaletteName = nil
+    }
+
+    /// Check if the current palette matches a saved palette
+    func currentMatchesSaved(_ palette: SavedPalette) -> Bool {
+        let currentString = getCurrentPaletteString()
+        let currentColors = currentString.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces).uppercased()
+        }.filter { !$0.isEmpty }
+
+        let savedColors = palette.hexColors.map { $0.uppercased() }
+
+        guard currentColors.count == savedColors.count else { return false }
+        return zip(currentColors, savedColors).allSatisfy { $0 == $1 }
+    }
 }
 
 // MARK: - Color Palette View
@@ -287,6 +590,15 @@ final class ColorPaletteState {
 struct ColorPaletteView: View {
     @Bindable var state: ColorPaletteState
     @State private var expandedSections: Set<String> = ["palette", "brightness", "hsv"]
+    @State private var showingSaveAlert = false
+    @State private var showingSaveAsAlert = false
+    @State private var showingImportTextAlert = false
+    @State private var showingDeleteConfirmation = false
+    @State private var paletteNameInput = ""
+    @State private var importTextInput = ""
+    @State private var importErrorMessage: String?
+    @State private var paletteToDelete: SavedPalette?
+    @State private var showingFileImporter = false
 
     /// Initialize with an engine bridge (creates internal state)
     init(engineBridge: XLEngineBridge?) {
@@ -303,6 +615,9 @@ struct ColorPaletteView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
+                // Palette Management Bar
+                paletteManagementBar
+
                 // Palette Colors Section
                 CollapsibleSection(title: "Palette Colors", isExpanded: expandedSections.contains("palette")) {
                     paletteColorsGrid
@@ -340,6 +655,75 @@ struct ColorPaletteView: View {
             .padding(12)
         }
         .background(Color(nsColor: NSColor(white: 0.15, alpha: 1.0)))
+        .onAppear {
+            state.loadAllPalettes()
+        }
+        .alert("Save Palette As", isPresented: $showingSaveAsAlert) {
+            TextField("Palette Name", text: $paletteNameInput)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                let name = paletteNameInput.trimmingCharacters(in: .whitespaces)
+                if !name.isEmpty {
+                    state.savePalette(name: name)
+                }
+            }
+        } message: {
+            Text("Enter a name for this palette.")
+        }
+        .alert("Import Palette", isPresented: $showingImportTextAlert) {
+            TextField("e.g. #FF0000,#00FF00,#0000FF", text: $importTextInput)
+            Button("Cancel", role: .cancel) {
+                importErrorMessage = nil
+            }
+            Button("Import") {
+                if let palette = PaletteManager.shared.parsePaletteString(importTextInput) {
+                    state.applyColorsFromString(palette.colorString)
+                    importErrorMessage = nil
+                } else {
+                    importErrorMessage = "Invalid format. Use comma-separated hex colors (e.g. #FF0000,#00FF00)."
+                }
+            }
+        } message: {
+            if let error = importErrorMessage {
+                Text(error)
+            } else {
+                Text("Enter comma-separated hex colors (e.g. #FF0000,#00FF00,#0000FF).")
+            }
+        }
+        .alert("Delete Palette", isPresented: $showingDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                paletteToDelete = nil
+            }
+            Button("Delete", role: .destructive) {
+                if let palette = paletteToDelete {
+                    state.deletePalette(palette)
+                    paletteToDelete = nil
+                }
+            }
+        } message: {
+            if let palette = paletteToDelete {
+                Text("Are you sure you want to delete the palette \"\(palette.name)\"? This cannot be undone.")
+            }
+        }
+        .fileImporter(
+            isPresented: $showingFileImporter,
+            allowedContentTypes: [UTType(filenameExtension: "xpalette") ?? .data],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                let accessing = url.startAccessingSecurityScopedResource()
+                defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                if let palette = PaletteManager.shared.importPaletteFromFile(at: url) {
+                    state.applyColorsFromString(palette.colorString)
+                    state.savedPalettes.append(palette)
+                    PaletteManager.shared.savePalettes(state.savedPalettes)
+                }
+            case .failure:
+                break
+            }
+        }
     }
 
     private func toggleSection(_ section: String) {
@@ -348,6 +732,139 @@ struct ColorPaletteView: View {
         } else {
             expandedSections.insert(section)
         }
+    }
+
+    // MARK: - Palette Management Bar
+
+    private var paletteManagementBar: some View {
+        HStack(spacing: 6) {
+            // Palette picker menu
+            Menu {
+                if state.savedPalettes.isEmpty {
+                    Text("No Saved Palettes")
+                } else {
+                    ForEach(state.savedPalettes) { palette in
+                        Button {
+                            state.loadPalette(palette)
+                        } label: {
+                            HStack {
+                                PaletteSwatchLabel(palette: palette)
+                                if state.currentPaletteName == palette.name {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "paintpalette")
+                        .font(.system(size: 11))
+                    Text(state.currentPaletteName ?? "Palette")
+                        .font(.system(size: 11))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color(nsColor: NSColor(white: 0.22, alpha: 1.0)))
+                .cornerRadius(4)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Spacer()
+
+            // Palette action menu (hamburger)
+            Menu {
+                Button {
+                    if state.currentPaletteName != nil {
+                        state.updateCurrentPalette()
+                    } else {
+                        paletteNameInput = ""
+                        showingSaveAsAlert = true
+                    }
+                } label: {
+                    Label("Update Palette", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .disabled(state.currentPaletteName == nil)
+
+                Button {
+                    let nextNumber = state.savedPalettes.count + 1
+                    let name = String(format: "PAL%03d", nextNumber)
+                    state.savePalette(name: name)
+                } label: {
+                    Label("Save Palette", systemImage: "square.and.arrow.down")
+                }
+                .disabled(paletteAlreadySaved)
+
+                Button {
+                    paletteNameInput = state.currentPaletteName ?? ""
+                    showingSaveAsAlert = true
+                } label: {
+                    Label("Save Palette As...", systemImage: "square.and.arrow.down.on.square")
+                }
+
+                Divider()
+
+                Menu("Delete Palette") {
+                    if deletablePalettes.isEmpty {
+                        Text("No Palettes to Delete")
+                    } else {
+                        ForEach(deletablePalettes) { palette in
+                            Button(role: .destructive) {
+                                paletteToDelete = palette
+                                showingDeleteConfirmation = true
+                            } label: {
+                                Text(palette.name)
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button {
+                    showingFileImporter = true
+                } label: {
+                    Label("Import from File...", systemImage: "doc.badge.plus")
+                }
+
+                Button {
+                    importTextInput = ""
+                    importErrorMessage = nil
+                    showingImportTextAlert = true
+                } label: {
+                    Label("Import from Text...", systemImage: "text.badge.plus")
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 12))
+                    .frame(width: 24, height: 20)
+                    .background(Color(nsColor: NSColor(white: 0.22, alpha: 1.0)))
+                    .cornerRadius(4)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        .foregroundColor(.primary)
+    }
+
+    /// Check if the current palette colors already exist in saved palettes
+    private var paletteAlreadySaved: Bool {
+        state.savedPalettes.contains { state.currentMatchesSaved($0) }
+    }
+
+    /// Palettes that can be deleted (user-created ones, plus file-based ones from show folder)
+    private var deletablePalettes: [SavedPalette] {
+        state.savedPalettes.filter { !$0.isFromFile || hasFileInShowFolder($0) }
+    }
+
+    /// Check if a palette has a corresponding file in the show folder
+    private func hasFileInShowFolder(_ palette: SavedPalette) -> Bool {
+        // TODO: Implement show folder path access for palette file checking
+        return false
     }
 
     // MARK: - Palette Colors Grid
@@ -571,6 +1088,27 @@ struct PaletteColorCell: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Palette Swatch Label
+
+/// Shows a small preview of palette colors next to the palette name
+struct PaletteSwatchLabel: View {
+    let palette: SavedPalette
+
+    var body: some View {
+        HStack(spacing: 4) {
+            HStack(spacing: 1) {
+                ForEach(Array(palette.hexColors.prefix(4).enumerated()), id: \.offset) { _, hex in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(PaletteColor.fromHex(hex))
+                        .frame(width: 8, height: 12)
+                }
+            }
+            Text(palette.name)
+                .font(.system(size: 12))
+        }
     }
 }
 

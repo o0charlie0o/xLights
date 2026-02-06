@@ -53,6 +53,21 @@
 /// User requested importing a model from file
 - (void)modelTreeDidRequestImportModel:(XLModelTreeViewController *)controller;
 
+/// User requested locking/unlocking a model
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestLockModel:(NSString *)modelName locked:(BOOL)locked;
+
+/// User requested flipping a model
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestFlipModel:(NSString *)modelName horizontal:(BOOL)horizontal;
+
+/// User requested adding models to an existing group
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestAddModels:(NSArray<NSString *> *)modelNames toGroup:(NSString *)groupName;
+
+/// User requested removing a model from a group
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestRemoveModel:(NSString *)modelName fromGroup:(NSString *)groupName;
+
+/// User requested cloning a group
+- (void)modelTree:(XLModelTreeViewController *)controller didRequestCloneGroup:(NSString *)groupName;
+
 @end
 
 /// NSOutlineView-based model hierarchy tree for the Layout tab.
@@ -66,7 +81,7 @@
 ///   - Type (model type string)
 ///   - Channels (channel count, right-aligned)
 ///   - Controller (controller assignment)
-@interface XLModelTreeViewController : NSViewController <NSOutlineViewDataSource, NSOutlineViewDelegate, NSSearchFieldDelegate>
+@interface XLModelTreeViewController : NSViewController <NSOutlineViewDataSource, NSOutlineViewDelegate, NSSearchFieldDelegate, NSMenuDelegate>
 
 /// The outline view displaying the model tree
 @property (nonatomic, strong, readonly) NSOutlineView *outlineView;

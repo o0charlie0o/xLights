@@ -41,6 +41,46 @@ typedef NS_ENUM(NSInteger, XLElementType) {
 - (void)rowHeadings:(XLRowHeadingsView *)view didReorderRow:(NSInteger)fromRow toRow:(NSInteger)toRow;
 - (NSMenu *)rowHeadings:(XLRowHeadingsView *)view contextMenuForRow:(NSInteger)row;
 - (void)rowHeadings:(XLRowHeadingsView *)view didChangeVerticalScrollOffset:(CGFloat)offsetY;
+
+// Layer management
+- (void)rowHeadings:(XLRowHeadingsView *)view insertLayerAboveRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view insertLayerBelowRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view insertMultipleLayersBelowRow:(NSInteger)row count:(NSInteger)count;
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteLayerAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteMultipleLayersAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteUnusedLayersAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view editLayerNameAtRow:(NSInteger)row;
+- (void)rowHeadingsCollapseAllModels:(XLRowHeadingsView *)view;
+- (void)rowHeadingsCollapseAllLayers:(XLRowHeadingsView *)view;
+
+// Model operations
+- (void)rowHeadings:(XLRowHeadingsView *)view toggleStrandsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view showAllEffectsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view toggleRenderDisabledAtRow:(NSInteger)row;
+- (void)rowHeadingsEnableRenderOnAllModels:(XLRowHeadingsView *)view;
+- (void)rowHeadings:(XLRowHeadingsView *)view playModelAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view exportModelAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view selectAllModelEffectsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view copyModelEffectsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view cutModelEffectsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view pasteModelEffectsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteModelEffectsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view copyModelEffectsIncludingSubmodelsAtRow:(NSInteger)row;
+- (BOOL)rowHeadingsIsRenderDisabledAtRow:(XLRowHeadingsView *)view row:(NSInteger)row;
+- (BOOL)rowHeadingsHasAnyRenderDisabled:(XLRowHeadingsView *)view;
+
+// Timing track operations
+- (void)rowHeadingsAddTimingTrack:(XLRowHeadingsView *)view;
+- (void)rowHeadings:(XLRowHeadingsView *)view renameTimingTrackAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteTimingTrackAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view importTimingTrackAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view exportTimingTrackAtRow:(NSInteger)row;
+- (void)rowHeadingsHideAllTimingTracks:(XLRowHeadingsView *)view;
+- (void)rowHeadingsShowAllTimingTracks:(XLRowHeadingsView *)view;
+- (void)rowHeadings:(XLRowHeadingsView *)view importNotesAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view importLyricsAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view breakdownPhrasesAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view breakdownWordsAtRow:(NSInteger)row;
 @end
 
 @interface XLRowHeadingsView : NSView

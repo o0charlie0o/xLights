@@ -34,6 +34,41 @@ static NSString * const kColumnController = @"ControllerColumn";
 
 @end
 
+/// Tag values for context menu items (to identify actions in submenus)
+typedef NS_ENUM(NSInteger, XLContextMenuTag) {
+    XLContextTagNone = 0,
+
+    // Align tags
+    XLContextTagAlignTop = 100,
+    XLContextTagAlignBottom,
+    XLContextTagAlignLeft,
+    XLContextTagAlignRight,
+    XLContextTagAlignHCenter,
+    XLContextTagAlignVCenter,
+
+    // Distribute tags
+    XLContextTagDistributeH = 200,
+    XLContextTagDistributeV,
+
+    // Resize tags
+    XLContextTagResizeWidth = 300,
+    XLContextTagResizeHeight,
+    XLContextTagResizeSize,
+
+    // Bulk edit tags
+    XLContextTagBulkActive = 400,
+    XLContextTagBulkInactive,
+    XLContextTagBulkTagColor,
+    XLContextTagBulkPreview,
+    XLContextTagBulkPixelSize,
+    XLContextTagBulkPixelStyle,
+    XLContextTagBulkTransparency,
+    XLContextTagBulkControllerName,
+    XLContextTagBulkControllerPort,
+    XLContextTagBulkControllerProtocol,
+    XLContextTagBulkDimmingCurves,
+};
+
 @implementation XLModelTreeViewController
 
 #pragma mark - View Lifecycle
@@ -117,9 +152,8 @@ static NSString * const kColumnController = @"ControllerColumn";
     [_outlineView registerForDraggedTypes:@[kXLModelTreeDragType]];
     _outlineView.draggingDestinationFeedbackStyle = NSTableViewDraggingDestinationFeedbackStyleSourceList;
 
-    // Context menu
+    // Context menu (dynamic, rebuilt on each right-click via menuNeedsUpdate:)
     _outlineView.menu = [self buildContextMenu];
-    _outlineView.menu.delegate = (id<NSMenuDelegate>)self;
 
     // Scroll view
     _scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -533,8 +567,64 @@ static NSString * const kColumnController = @"ControllerColumn";
 
 - (NSMenu *)buildContextMenu {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Model Actions"];
+    menu.delegate = self;
+    menu.autoenablesItems = NO;
+    return menu;
+}
 
-    // Add Model submenu
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != _outlineView.menu) return;
+
+    [menu removeAllItems];
+
+    NSIndexSet *selectedRows = _outlineView.selectedRowIndexes;
+    NSInteger selCount = (NSInteger)selectedRows.count;
+
+    // Gather selection info
+    __block XLModelTreeNode *primaryNode = nil;
+    __block BOOL hasGroup = NO;
+    __block BOOL hasModel = NO;
+    __block BOOL hasSubmodel = NO;
+
+    [selectedRows enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        XLModelTreeNode *node = [self.outlineView itemAtRow:(NSInteger)idx];
+        if (!node) return;
+        if (!primaryNode) primaryNode = node;
+        if (node.isGroup) hasGroup = YES;
+        else if (node.isSubmodel) hasSubmodel = YES;
+        else hasModel = YES;
+    }];
+
+    // -- Always available: Add Model / Add Group / Import --
+    [self addModelCreationItemsToMenu:menu];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    if (selCount == 0) {
+        // No selection: only creation items above, plus expand/collapse
+        [self addExpandCollapseItemsToMenu:menu];
+        return;
+    }
+
+    if (selCount == 1 && !hasSubmodel) {
+        // --- Single model or group selection ---
+        [self addSingleSelectionItemsToMenu:menu node:primaryNode];
+    } else if (selCount == 1 && hasSubmodel) {
+        // Submodel: limited options
+        NSMenuItem *renameItem = [[NSMenuItem alloc] initWithTitle:@"Rename"
+                                                           action:@selector(contextRename:)
+                                                    keyEquivalent:@""];
+        renameItem.target = self;
+        [menu addItem:renameItem];
+    } else if (selCount > 1) {
+        // --- Multiple selection ---
+        [self addMultiSelectionItemsToMenu:menu count:selCount hasGroup:hasGroup hasSubmodel:hasSubmodel];
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    [self addExpandCollapseItemsToMenu:menu];
+}
+
+- (void)addModelCreationItemsToMenu:(NSMenu *)menu {
     NSMenuItem *addItem = [[NSMenuItem alloc] initWithTitle:@"Add Model" action:nil keyEquivalent:@""];
     NSMenu *addSubmenu = [[NSMenu alloc] initWithTitle:@"Add Model"];
 
@@ -554,7 +644,6 @@ static NSString * const kColumnController = @"ControllerColumn";
         typeItem.representedObject = type;
         [addSubmenu addItem:typeItem];
     }
-
     addItem.submenu = addSubmenu;
     [menu addItem:addItem];
 
@@ -567,75 +656,393 @@ static NSString * const kColumnController = @"ControllerColumn";
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *importItem = [[NSMenuItem alloc] initWithTitle:@"Import Model..."
-                                                        action:@selector(contextImportModel:)
-                                                 keyEquivalent:@"i"];
+                                                       action:@selector(contextImportModel:)
+                                                keyEquivalent:@"i"];
     importItem.target = self;
     importItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [menu addItem:importItem];
+}
 
-    [menu addItem:[NSMenuItem separatorItem]];
+- (void)addExpandCollapseItemsToMenu:(NSMenu *)menu {
+    NSMenuItem *expandItem = [[NSMenuItem alloc] initWithTitle:@"Expand All"
+                                                       action:@selector(expandAll)
+                                                keyEquivalent:@""];
+    expandItem.target = self;
+    [menu addItem:expandItem];
 
-    NSMenuItem *duplicateItem = [[NSMenuItem alloc] initWithTitle:@"Duplicate Model"
+    NSMenuItem *collapseItem = [[NSMenuItem alloc] initWithTitle:@"Collapse All"
+                                                         action:@selector(collapseAll)
+                                                  keyEquivalent:@""];
+    collapseItem.target = self;
+    [menu addItem:collapseItem];
+
+    // Delete Empty Groups
+    NSMenuItem *deleteEmptyItem = [[NSMenuItem alloc] initWithTitle:@"Delete Empty Groups"
+                                                            action:@selector(contextDeleteEmptyGroups:)
+                                                     keyEquivalent:@""];
+    deleteEmptyItem.target = self;
+    [menu addItem:deleteEmptyItem];
+}
+
+- (void)addSingleSelectionItemsToMenu:(NSMenu *)menu node:(XLModelTreeNode *)node {
+    // Duplicate
+    NSMenuItem *duplicateItem = [[NSMenuItem alloc] initWithTitle:@"Duplicate"
                                                           action:@selector(contextDuplicate:)
                                                    keyEquivalent:@"d"];
     duplicateItem.target = self;
     duplicateItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     [menu addItem:duplicateItem];
 
-    NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete Model"
+    // Delete
+    NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete"
                                                        action:@selector(contextDelete:)
                                                 keyEquivalent:@""];
     deleteItem.target = self;
     [menu addItem:deleteItem];
 
-    [menu addItem:[NSMenuItem separatorItem]];
-
-    NSMenuItem *groupSelectedItem = [[NSMenuItem alloc] initWithTitle:@"Group Selected Models"
-                                                              action:@selector(contextGroupSelected:)
-                                                       keyEquivalent:@""];
-    groupSelectedItem.target = self;
-    [menu addItem:groupSelectedItem];
-
-    NSMenuItem *ungroupItem = [[NSMenuItem alloc] initWithTitle:@"Ungroup"
-                                                        action:@selector(contextUngroup:)
-                                                 keyEquivalent:@""];
-    ungroupItem.target = self;
-    [menu addItem:ungroupItem];
-
-    [menu addItem:[NSMenuItem separatorItem]];
-
+    // Rename
     NSMenuItem *renameItem = [[NSMenuItem alloc] initWithTitle:@"Rename"
                                                        action:@selector(contextRename:)
                                                 keyEquivalent:@""];
     renameItem.target = self;
     [menu addItem:renameItem];
 
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    if (node.isGroup) {
+        // --- Group-specific items ---
+
+        // Ungroup
+        NSMenuItem *ungroupItem = [[NSMenuItem alloc] initWithTitle:@"Ungroup"
+                                                             action:@selector(contextUngroup:)
+                                                      keyEquivalent:@""];
+        ungroupItem.target = self;
+        [menu addItem:ungroupItem];
+
+        // Clone Group
+        NSMenuItem *cloneItem = [[NSMenuItem alloc] initWithTitle:@"Clone Group"
+                                                           action:@selector(contextCloneGroup:)
+                                                    keyEquivalent:@""];
+        cloneItem.target = self;
+        [menu addItem:cloneItem];
+    } else {
+        // --- Single model items ---
+
+        // Lock / Unlock
+        NSMenuItem *lockItem = [[NSMenuItem alloc] initWithTitle:@"Lock"
+                                                          action:@selector(contextLock:)
+                                                   keyEquivalent:@""];
+        lockItem.target = self;
+        [menu addItem:lockItem];
+
+        NSMenuItem *unlockItem = [[NSMenuItem alloc] initWithTitle:@"Unlock"
+                                                            action:@selector(contextUnlock:)
+                                                     keyEquivalent:@""];
+        unlockItem.target = self;
+        [menu addItem:unlockItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Node Layout (placeholder)
+        NSMenuItem *nodeLayoutItem = [[NSMenuItem alloc] initWithTitle:@"Node Layout"
+                                                               action:@selector(contextNodeLayout:)
+                                                        keyEquivalent:@""];
+        nodeLayoutItem.target = self;
+        [menu addItem:nodeLayoutItem];
+
+        // Wiring View (placeholder)
+        NSMenuItem *wiringItem = [[NSMenuItem alloc] initWithTitle:@"Wiring View"
+                                                            action:@selector(contextWiringView:)
+                                                     keyEquivalent:@""];
+        wiringItem.target = self;
+        [menu addItem:wiringItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Export as Custom xLights Model (placeholder)
+        NSMenuItem *exportCustomItem = [[NSMenuItem alloc] initWithTitle:@"Export as Custom xLights Model"
+                                                                 action:@selector(contextExportAsCustom:)
+                                                          keyEquivalent:@""];
+        exportCustomItem.target = self;
+        [menu addItem:exportCustomItem];
+
+        // Export xLights Model (placeholder)
+        NSMenuItem *exportModelItem = [[NSMenuItem alloc] initWithTitle:@"Export xLights Model (.xmodel)"
+                                                                action:@selector(contextExportXModel:)
+                                                         keyEquivalent:@""];
+        exportModelItem.target = self;
+        [menu addItem:exportModelItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Flip Horizontal / Vertical
+        NSMenuItem *flipHItem = [[NSMenuItem alloc] initWithTitle:@"Flip Horizontal"
+                                                           action:@selector(contextFlipHorizontal:)
+                                                    keyEquivalent:@""];
+        flipHItem.target = self;
+        [menu addItem:flipHItem];
+
+        NSMenuItem *flipVItem = [[NSMenuItem alloc] initWithTitle:@"Flip Vertical"
+                                                           action:@selector(contextFlipVertical:)
+                                                    keyEquivalent:@""];
+        flipVItem.target = self;
+        [menu addItem:flipVItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Group Selected Models (available even with single selection for grouping)
+        NSMenuItem *groupItem = [[NSMenuItem alloc] initWithTitle:@"Create Group"
+                                                           action:@selector(contextGroupSelected:)
+                                                    keyEquivalent:@""];
+        groupItem.target = self;
+        [menu addItem:groupItem];
+
+        // Add to Existing Groups submenu
+        [self addGroupMembershipItemsToMenu:menu forModel:node.name];
+    }
+}
+
+- (void)addMultiSelectionItemsToMenu:(NSMenu *)menu count:(NSInteger)count hasGroup:(BOOL)hasGroup hasSubmodel:(BOOL)hasSubmodel {
+
+    if (!hasSubmodel) {
+        // Duplicate / Delete
+        NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Delete %ld Items", (long)count]
+                                                           action:@selector(contextDelete:)
+                                                    keyEquivalent:@""];
+        deleteItem.target = self;
+        [menu addItem:deleteItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Lock / Unlock all selected
+        NSMenuItem *lockItem = [[NSMenuItem alloc] initWithTitle:@"Lock Selected"
+                                                          action:@selector(contextLockAll:)
+                                                   keyEquivalent:@""];
+        lockItem.target = self;
+        [menu addItem:lockItem];
+
+        NSMenuItem *unlockItem = [[NSMenuItem alloc] initWithTitle:@"Unlock Selected"
+                                                            action:@selector(contextUnlockAll:)
+                                                     keyEquivalent:@""];
+        unlockItem.target = self;
+        [menu addItem:unlockItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Group Selected Models
+        NSMenuItem *groupItem = [[NSMenuItem alloc] initWithTitle:@"Group Selected Models"
+                                                           action:@selector(contextGroupSelected:)
+                                                    keyEquivalent:@""];
+        groupItem.target = self;
+        [menu addItem:groupItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Flip all selected
+        NSMenuItem *flipHItem = [[NSMenuItem alloc] initWithTitle:@"Flip Horizontal"
+                                                           action:@selector(contextFlipHorizontal:)
+                                                    keyEquivalent:@""];
+        flipHItem.target = self;
+        [menu addItem:flipHItem];
+
+        NSMenuItem *flipVItem = [[NSMenuItem alloc] initWithTitle:@"Flip Vertical"
+                                                           action:@selector(contextFlipVertical:)
+                                                    keyEquivalent:@""];
+        flipVItem.target = self;
+        [menu addItem:flipVItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Bulk Edit submenu
+        NSMenuItem *bulkEditItem = [[NSMenuItem alloc] initWithTitle:@"Bulk Edit" action:nil keyEquivalent:@""];
+        bulkEditItem.submenu = [self buildBulkEditSubmenu];
+        [menu addItem:bulkEditItem];
+
+        // Align submenu
+        NSMenuItem *alignItem = [[NSMenuItem alloc] initWithTitle:@"Align" action:nil keyEquivalent:@""];
+        alignItem.submenu = [self buildAlignSubmenu];
+        [menu addItem:alignItem];
+
+        // Distribute submenu
+        NSMenuItem *distItem = [[NSMenuItem alloc] initWithTitle:@"Distribute" action:nil keyEquivalent:@""];
+        distItem.submenu = [self buildDistributeSubmenu];
+        [menu addItem:distItem];
+
+        // Resize submenu
+        NSMenuItem *resizeItem = [[NSMenuItem alloc] initWithTitle:@"Resize" action:nil keyEquivalent:@""];
+        resizeItem.submenu = [self buildResizeSubmenu];
+        [menu addItem:resizeItem];
+    }
+}
+
+- (void)addGroupMembershipItemsToMenu:(NSMenu *)menu forModel:(NSString *)modelName {
+    if (!_engineBridge) return;
+
+    NSArray<NSDictionary *> *groups = [_engineBridge getModelGroups];
+    if (groups.count == 0) return;
+
+    // Add to Existing Groups submenu
+    NSMenuItem *addToGroupItem = [[NSMenuItem alloc] initWithTitle:@"Add to Existing Groups" action:nil keyEquivalent:@""];
+    NSMenu *addToGroupSubmenu = [[NSMenu alloc] initWithTitle:@"Add to Groups"];
+    BOOL hasAddOptions = NO;
+
+    for (NSDictionary *group in groups) {
+        NSString *groupName = group[@"name"];
+        NSArray<NSString *> *members = group[@"modelNames"];
+        // Only show groups the model is NOT already in
+        if (![members containsObject:modelName]) {
+            NSMenuItem *gItem = [[NSMenuItem alloc] initWithTitle:groupName
+                                                          action:@selector(contextAddToGroup:)
+                                                   keyEquivalent:@""];
+            gItem.target = self;
+            gItem.representedObject = groupName;
+            [addToGroupSubmenu addItem:gItem];
+            hasAddOptions = YES;
+        }
+    }
+
+    if (hasAddOptions) {
+        addToGroupItem.submenu = addToGroupSubmenu;
+        [menu addItem:addToGroupItem];
+    }
+
+    // Remove from Existing Groups submenu
+    NSMenuItem *removeFromGroupItem = [[NSMenuItem alloc] initWithTitle:@"Remove from Existing Groups" action:nil keyEquivalent:@""];
+    NSMenu *removeFromGroupSubmenu = [[NSMenu alloc] initWithTitle:@"Remove from Groups"];
+    BOOL hasRemoveOptions = NO;
+
+    for (NSDictionary *group in groups) {
+        NSString *groupName = group[@"name"];
+        NSArray<NSString *> *members = group[@"modelNames"];
+        // Only show groups the model IS in
+        if ([members containsObject:modelName]) {
+            NSMenuItem *gItem = [[NSMenuItem alloc] initWithTitle:groupName
+                                                          action:@selector(contextRemoveFromGroup:)
+                                                   keyEquivalent:@""];
+            gItem.target = self;
+            gItem.representedObject = groupName;
+            [removeFromGroupSubmenu addItem:gItem];
+            hasRemoveOptions = YES;
+        }
+    }
+
+    if (hasRemoveOptions) {
+        removeFromGroupItem.submenu = removeFromGroupSubmenu;
+        [menu addItem:removeFromGroupItem];
+    }
+}
+
+#pragma mark - Submenus
+
+- (NSMenu *)buildBulkEditSubmenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Bulk Edit"];
+
+    struct { NSString *title; XLContextMenuTag tag; } items[] = {
+        { @"Active", XLContextTagBulkActive },
+        { @"Inactive", XLContextTagBulkInactive },
+        { @"Tag Color", XLContextTagBulkTagColor },
+        { @"Preview", XLContextTagBulkPreview },
+        { @"Pixel Size", XLContextTagBulkPixelSize },
+        { @"Pixel Style", XLContextTagBulkPixelStyle },
+        { @"Transparency", XLContextTagBulkTransparency },
+        { @"Controller Name", XLContextTagBulkControllerName },
+        { @"Controller Port", XLContextTagBulkControllerPort },
+        { @"Controller Protocol", XLContextTagBulkControllerProtocol },
+        { @"Dimming Curves", XLContextTagBulkDimmingCurves },
+    };
+
+    for (size_t i = 0; i < sizeof(items)/sizeof(items[0]); i++) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:items[i].title
+                                                     action:@selector(contextBulkEdit:)
+                                              keyEquivalent:@""];
+        item.target = self;
+        item.tag = items[i].tag;
+        [menu addItem:item];
+
+        // Separator after Inactive
+        if (items[i].tag == XLContextTagBulkInactive) {
+            [menu addItem:[NSMenuItem separatorItem]];
+        }
+        // Separator after Transparency
+        if (items[i].tag == XLContextTagBulkTransparency) {
+            [menu addItem:[NSMenuItem separatorItem]];
+        }
+    }
+
+    return menu;
+}
+
+- (NSMenu *)buildAlignSubmenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Align"];
+
+    struct { NSString *title; XLContextMenuTag tag; } items[] = {
+        { @"Top", XLContextTagAlignTop },
+        { @"Bottom", XLContextTagAlignBottom },
+        { @"Left", XLContextTagAlignLeft },
+        { @"Right", XLContextTagAlignRight },
+        { @"Horizontal Center", XLContextTagAlignHCenter },
+        { @"Vertical Center", XLContextTagAlignVCenter },
+    };
+
+    for (size_t i = 0; i < sizeof(items)/sizeof(items[0]); i++) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:items[i].title
+                                                     action:@selector(contextAlign:)
+                                              keyEquivalent:@""];
+        item.target = self;
+        item.tag = items[i].tag;
+        [menu addItem:item];
+    }
+
+    return menu;
+}
+
+- (NSMenu *)buildDistributeSubmenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Distribute"];
+
+    NSMenuItem *hItem = [[NSMenuItem alloc] initWithTitle:@"Horizontal"
+                                                  action:@selector(contextDistribute:)
+                                           keyEquivalent:@""];
+    hItem.target = self;
+    hItem.tag = XLContextTagDistributeH;
+    [menu addItem:hItem];
+
+    NSMenuItem *vItem = [[NSMenuItem alloc] initWithTitle:@"Vertical"
+                                                  action:@selector(contextDistribute:)
+                                           keyEquivalent:@""];
+    vItem.target = self;
+    vItem.tag = XLContextTagDistributeV;
+    [menu addItem:vItem];
+
+    return menu;
+}
+
+- (NSMenu *)buildResizeSubmenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Resize"];
+
+    struct { NSString *title; XLContextMenuTag tag; } items[] = {
+        { @"Match Width", XLContextTagResizeWidth },
+        { @"Match Height", XLContextTagResizeHeight },
+        { @"Match Size", XLContextTagResizeSize },
+    };
+
+    for (size_t i = 0; i < sizeof(items)/sizeof(items[0]); i++) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:items[i].title
+                                                     action:@selector(contextResize:)
+                                              keyEquivalent:@""];
+        item.target = self;
+        item.tag = items[i].tag;
+        [menu addItem:item];
+    }
+
     return menu;
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
-    NSInteger selectedRow = _outlineView.selectedRow;
-    XLModelTreeNode *selectedNode = (selectedRow >= 0)
-        ? [_outlineView itemAtRow:selectedRow] : nil;
-
-    if (menuItem.action == @selector(contextDuplicate:) ||
-        menuItem.action == @selector(contextDelete:) ||
-        menuItem.action == @selector(contextRename:)) {
-        return selectedNode != nil && !selectedNode.isSubmodel;
-    }
-
-    if (menuItem.action == @selector(contextGroupSelected:)) {
-        return _outlineView.numberOfSelectedRows >= 2;
-    }
-
-    if (menuItem.action == @selector(contextUngroup:)) {
-        return selectedNode != nil && selectedNode.isGroup;
-    }
-
+    // Dynamic menu is built in menuNeedsUpdate:, items are always valid
     return YES;
 }
 
-#pragma mark - Context Menu Actions
+#pragma mark - Context Menu Actions (Basic)
 
 - (void)contextAddModel:(NSMenuItem *)sender {
     NSString *modelType = sender.representedObject;
@@ -664,11 +1071,18 @@ static NSString * const kColumnController = @"ControllerColumn";
 }
 
 - (void)contextDelete:(id)sender {
-    NSString *name = [self selectedModelName];
-    if (!name) return;
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if (names.count == 0) return;
+
+    NSString *message;
+    if (names.count == 1) {
+        message = [NSString stringWithFormat:@"Delete \"%@\"?", names.firstObject];
+    } else {
+        message = [NSString stringWithFormat:@"Delete %lu selected items?", (unsigned long)names.count];
+    }
 
     NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = [NSString stringWithFormat:@"Delete \"%@\"?", name];
+    alert.messageText = message;
     alert.informativeText = @"This action cannot be undone.";
     [alert addButtonWithTitle:@"Delete"];
     [alert addButtonWithTitle:@"Cancel"];
@@ -678,7 +1092,9 @@ static NSString * const kColumnController = @"ControllerColumn";
     [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
         if (returnCode == NSAlertFirstButtonReturn) {
             if ([self.delegate respondsToSelector:@selector(modelTree:didRequestDeleteModel:)]) {
-                [self.delegate modelTree:self didRequestDeleteModel:name];
+                for (NSString *name in names) {
+                    [self.delegate modelTree:self didRequestDeleteModel:name];
+                }
             }
         }
     }];
@@ -686,7 +1102,7 @@ static NSString * const kColumnController = @"ControllerColumn";
 
 - (void)contextGroupSelected:(id)sender {
     NSArray<NSString *> *names = [self selectedModelNames];
-    if (names.count >= 2 && [_delegate respondsToSelector:@selector(modelTree:didRequestGroupModels:)]) {
+    if (names.count >= 1 && [_delegate respondsToSelector:@selector(modelTree:didRequestGroupModels:)]) {
         [_delegate modelTree:self didRequestGroupModels:names];
     }
 }
@@ -706,6 +1122,337 @@ static NSString * const kColumnController = @"ControllerColumn";
             cellView.textField.editable = YES;
             cellView.textField.delegate = (id<NSTextFieldDelegate>)self;
             [cellView.textField becomeFirstResponder];
+        }
+    }
+}
+
+#pragma mark - Context Menu Actions (Lock / Unlock)
+
+- (void)contextLock:(id)sender {
+    NSString *name = [self selectedModelName];
+    if (name && [_delegate respondsToSelector:@selector(modelTree:didRequestLockModel:locked:)]) {
+        [_delegate modelTree:self didRequestLockModel:name locked:YES];
+    }
+}
+
+- (void)contextUnlock:(id)sender {
+    NSString *name = [self selectedModelName];
+    if (name && [_delegate respondsToSelector:@selector(modelTree:didRequestLockModel:locked:)]) {
+        [_delegate modelTree:self didRequestLockModel:name locked:NO];
+    }
+}
+
+- (void)contextLockAll:(id)sender {
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if ([_delegate respondsToSelector:@selector(modelTree:didRequestLockModel:locked:)]) {
+        for (NSString *name in names) {
+            [_delegate modelTree:self didRequestLockModel:name locked:YES];
+        }
+    }
+}
+
+- (void)contextUnlockAll:(id)sender {
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if ([_delegate respondsToSelector:@selector(modelTree:didRequestLockModel:locked:)]) {
+        for (NSString *name in names) {
+            [_delegate modelTree:self didRequestLockModel:name locked:NO];
+        }
+    }
+}
+
+#pragma mark - Context Menu Actions (Flip)
+
+- (void)contextFlipHorizontal:(id)sender {
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if ([_delegate respondsToSelector:@selector(modelTree:didRequestFlipModel:horizontal:)]) {
+        for (NSString *name in names) {
+            [_delegate modelTree:self didRequestFlipModel:name horizontal:YES];
+        }
+    }
+}
+
+- (void)contextFlipVertical:(id)sender {
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if ([_delegate respondsToSelector:@selector(modelTree:didRequestFlipModel:horizontal:)]) {
+        for (NSString *name in names) {
+            [_delegate modelTree:self didRequestFlipModel:name horizontal:NO];
+        }
+    }
+}
+
+#pragma mark - Context Menu Actions (Placeholder Dialogs)
+
+- (void)contextNodeLayout:(id)sender {
+    [self showNotImplementedAlert:@"Node Layout"
+                          detail:@"The Node Layout dialog will allow visual editing of individual node positions within the model."];
+}
+
+- (void)contextWiringView:(id)sender {
+    [self showNotImplementedAlert:@"Wiring View"
+                          detail:@"The Wiring View dialog will show the physical wiring order and connections for the model."];
+}
+
+- (void)contextExportAsCustom:(id)sender {
+    [self showNotImplementedAlert:@"Export as Custom xLights Model"
+                          detail:@"This will export the current model as a Custom model type that can be imported into other shows."];
+}
+
+- (void)contextExportXModel:(id)sender {
+    [self showNotImplementedAlert:@"Export xLights Model (.xmodel)"
+                          detail:@"This will export the current model as an .xmodel file that can be shared and imported."];
+}
+
+- (void)showNotImplementedAlert:(NSString *)feature detail:(NSString *)detail {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"%@ - Not Yet Implemented", feature];
+    alert.informativeText = detail;
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    if (self.view.window) {
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+    } else {
+        [alert runModal];
+    }
+}
+
+#pragma mark - Context Menu Actions (Group Membership)
+
+- (void)contextAddToGroup:(NSMenuItem *)sender {
+    NSString *groupName = sender.representedObject;
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if (groupName && names.count > 0 && [_delegate respondsToSelector:@selector(modelTree:didRequestAddModels:toGroup:)]) {
+        [_delegate modelTree:self didRequestAddModels:names toGroup:groupName];
+    }
+}
+
+- (void)contextRemoveFromGroup:(NSMenuItem *)sender {
+    NSString *groupName = sender.representedObject;
+    NSString *modelName = [self selectedModelName];
+    if (groupName && modelName && [_delegate respondsToSelector:@selector(modelTree:didRequestRemoveModel:fromGroup:)]) {
+        [_delegate modelTree:self didRequestRemoveModel:modelName fromGroup:groupName];
+    }
+}
+
+- (void)contextCloneGroup:(id)sender {
+    NSString *name = [self selectedModelName];
+    if (name && [_delegate respondsToSelector:@selector(modelTree:didRequestCloneGroup:)]) {
+        [_delegate modelTree:self didRequestCloneGroup:name];
+    }
+}
+
+- (void)contextDeleteEmptyGroups:(id)sender {
+    if (!_engineBridge) return;
+
+    NSArray<NSDictionary *> *groups = [_engineBridge getModelGroups];
+    NSMutableArray<NSString *> *emptyGroups = [[NSMutableArray alloc] init];
+
+    for (NSDictionary *group in groups) {
+        NSArray *members = group[@"modelNames"];
+        if (members.count == 0) {
+            [emptyGroups addObject:group[@"name"]];
+        }
+    }
+
+    if (emptyGroups.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Empty Groups";
+        alert.informativeText = @"All groups contain at least one model.";
+        alert.alertStyle = NSAlertStyleInformational;
+        [alert addButtonWithTitle:@"OK"];
+        if (self.view.window) {
+            [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        } else {
+            [alert runModal];
+        }
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Delete %lu Empty Group%@?",
+                         (unsigned long)emptyGroups.count,
+                         emptyGroups.count == 1 ? @"" : @"s"];
+    alert.informativeText = [NSString stringWithFormat:@"The following empty groups will be deleted:\n%@",
+                             [emptyGroups componentsJoinedByString:@", "]];
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.buttons.firstObject.hasDestructiveAction = YES;
+
+    [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            if ([self.delegate respondsToSelector:@selector(modelTree:didRequestDeleteModel:)]) {
+                for (NSString *groupName in emptyGroups) {
+                    [self.delegate modelTree:self didRequestDeleteModel:groupName];
+                }
+            }
+            [self reloadData];
+        }
+    }];
+}
+
+#pragma mark - Context Menu Actions (Bulk Edit)
+
+- (void)contextBulkEdit:(NSMenuItem *)sender {
+    NSString *editType = sender.title;
+    [self showNotImplementedAlert:[NSString stringWithFormat:@"Bulk Edit: %@", editType]
+                          detail:[NSString stringWithFormat:@"Bulk editing '%@' for %lu selected models will be available in a future update.",
+                                  editType, (unsigned long)[self selectedModelNames].count]];
+}
+
+#pragma mark - Context Menu Actions (Align / Distribute / Resize)
+
+- (void)contextAlign:(NSMenuItem *)sender {
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if (names.count < 2 || !_engineBridge) {
+        return;
+    }
+
+    NSString *alignType;
+    switch (sender.tag) {
+        case XLContextTagAlignTop:     alignType = @"top"; break;
+        case XLContextTagAlignBottom:  alignType = @"bottom"; break;
+        case XLContextTagAlignLeft:    alignType = @"left"; break;
+        case XLContextTagAlignRight:   alignType = @"right"; break;
+        case XLContextTagAlignHCenter: alignType = @"hcenter"; break;
+        case XLContextTagAlignVCenter: alignType = @"vcenter"; break;
+        default: return;
+    }
+
+    // Get the reference model bounds (first selected model)
+    NSDictionary *refBounds = [_engineBridge getModelBounds:names.firstObject];
+    if (!refBounds) return;
+
+    float refMinX = [refBounds[@"minX"] floatValue];
+    float refMaxX = [refBounds[@"maxX"] floatValue];
+    float refMinY = [refBounds[@"minY"] floatValue];
+    float refMaxY = [refBounds[@"maxY"] floatValue];
+    float refCenterX = (refMinX + refMaxX) / 2.0f;
+    float refCenterY = (refMinY + refMaxY) / 2.0f;
+
+    for (NSUInteger i = 1; i < names.count; i++) {
+        NSString *modelName = names[i];
+        NSDictionary *bounds = [_engineBridge getModelBounds:modelName];
+        if (!bounds) continue;
+
+        float curMinX = [bounds[@"minX"] floatValue];
+        float curMaxX = [bounds[@"maxX"] floatValue];
+        float curMinY = [bounds[@"minY"] floatValue];
+        float curMaxY = [bounds[@"maxY"] floatValue];
+
+        float offsetX = 0, offsetY = 0;
+
+        if ([alignType isEqualToString:@"top"]) {
+            offsetY = refMaxY - curMaxY;
+        } else if ([alignType isEqualToString:@"bottom"]) {
+            offsetY = refMinY - curMinY;
+        } else if ([alignType isEqualToString:@"left"]) {
+            offsetX = refMinX - curMinX;
+        } else if ([alignType isEqualToString:@"right"]) {
+            offsetX = refMaxX - curMaxX;
+        } else if ([alignType isEqualToString:@"hcenter"]) {
+            float curCenterX = (curMinX + curMaxX) / 2.0f;
+            offsetX = refCenterX - curCenterX;
+        } else if ([alignType isEqualToString:@"vcenter"]) {
+            float curCenterY = (curMinY + curMaxY) / 2.0f;
+            offsetY = refCenterY - curCenterY;
+        }
+
+        if (offsetX != 0 || offsetY != 0) {
+            // Read current position and apply offset
+            NSString *curWorldX = [_engineBridge getModelProperty:modelName key:@"WorldPosX" defaultValue:@"0"];
+            NSString *curWorldY = [_engineBridge getModelProperty:modelName key:@"WorldPosY" defaultValue:@"0"];
+            float newX = [curWorldX floatValue] + offsetX;
+            float newY = [curWorldY floatValue] + offsetY;
+            [_engineBridge updateModelProperty:modelName key:@"WorldPosX" value:[NSString stringWithFormat:@"%.6f", newX]];
+            [_engineBridge updateModelProperty:modelName key:@"WorldPosY" value:[NSString stringWithFormat:@"%.6f", newY]];
+        }
+    }
+}
+
+- (void)contextDistribute:(NSMenuItem *)sender {
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if (names.count < 3 || !_engineBridge) {
+        if (names.count < 3) {
+            [self showNotImplementedAlert:@"Distribute"
+                                  detail:@"Distribute requires at least 3 selected models."];
+        }
+        return;
+    }
+
+    BOOL horizontal = (sender.tag == XLContextTagDistributeH);
+
+    // Gather centers and sort by position
+    NSMutableArray<NSDictionary *> *modelPositions = [[NSMutableArray alloc] init];
+    for (NSString *name in names) {
+        NSDictionary *bounds = [_engineBridge getModelBounds:name];
+        if (!bounds) continue;
+        float center;
+        if (horizontal) {
+            center = ([bounds[@"minX"] floatValue] + [bounds[@"maxX"] floatValue]) / 2.0f;
+        } else {
+            center = ([bounds[@"minY"] floatValue] + [bounds[@"maxY"] floatValue]) / 2.0f;
+        }
+        [modelPositions addObject:@{ @"name": name, @"center": @(center) }];
+    }
+
+    [modelPositions sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"center"] compare:b[@"center"]];
+    }];
+
+    if (modelPositions.count < 3) return;
+
+    float firstCenter = [modelPositions.firstObject[@"center"] floatValue];
+    float lastCenter = [modelPositions.lastObject[@"center"] floatValue];
+    float step = (lastCenter - firstCenter) / (float)(modelPositions.count - 1);
+
+    for (NSUInteger i = 1; i < modelPositions.count - 1; i++) {
+        NSString *modelName = modelPositions[i][@"name"];
+        float currentCenter = [modelPositions[i][@"center"] floatValue];
+        float targetCenter = firstCenter + step * (float)i;
+        float offset = targetCenter - currentCenter;
+
+        if (offset != 0) {
+            NSString *key = horizontal ? @"WorldPosX" : @"WorldPosY";
+            NSString *curVal = [_engineBridge getModelProperty:modelName key:key defaultValue:@"0"];
+            float newVal = [curVal floatValue] + offset;
+            [_engineBridge updateModelProperty:modelName key:key value:[NSString stringWithFormat:@"%.6f", newVal]];
+        }
+    }
+}
+
+- (void)contextResize:(NSMenuItem *)sender {
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if (names.count < 2 || !_engineBridge) {
+        return;
+    }
+
+    BOOL matchWidth = (sender.tag == XLContextTagResizeWidth || sender.tag == XLContextTagResizeSize);
+    BOOL matchHeight = (sender.tag == XLContextTagResizeHeight || sender.tag == XLContextTagResizeSize);
+
+    // Reference is the first selected model
+    NSDictionary *refBounds = [_engineBridge getModelBounds:names.firstObject];
+    if (!refBounds) return;
+
+    float refWidth = [refBounds[@"maxX"] floatValue] - [refBounds[@"minX"] floatValue];
+    float refHeight = [refBounds[@"maxY"] floatValue] - [refBounds[@"minY"] floatValue];
+
+    for (NSUInteger i = 1; i < names.count; i++) {
+        NSString *modelName = names[i];
+        NSDictionary *bounds = [_engineBridge getModelBounds:modelName];
+        if (!bounds) continue;
+
+        float curWidth = [bounds[@"maxX"] floatValue] - [bounds[@"minX"] floatValue];
+        float curHeight = [bounds[@"maxY"] floatValue] - [bounds[@"minY"] floatValue];
+
+        if (matchWidth && curWidth > 0) {
+            NSString *curScaleX = [_engineBridge getModelProperty:modelName key:@"ScaleX" defaultValue:@"1"];
+            float scaleX = [curScaleX floatValue] * (refWidth / curWidth);
+            [_engineBridge updateModelProperty:modelName key:@"ScaleX" value:[NSString stringWithFormat:@"%.6f", scaleX]];
+        }
+        if (matchHeight && curHeight > 0) {
+            NSString *curScaleY = [_engineBridge getModelProperty:modelName key:@"ScaleY" defaultValue:@"1"];
+            float scaleY = [curScaleY floatValue] * (refHeight / curHeight);
+            [_engineBridge updateModelProperty:modelName key:@"ScaleY" value:[NSString stringWithFormat:@"%.6f", scaleY]];
         }
     }
 }

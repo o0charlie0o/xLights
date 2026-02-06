@@ -15,6 +15,16 @@
 @class XLWaveformView;
 @class XLAudioSampleData;
 
+/// Waveform display type — matches legacy AUDIOSAMPLETYPE enum.
+typedef NS_ENUM(NSInteger, XLWaveformType) {
+    XLWaveformTypeRaw = 0,
+    XLWaveformTypeBass,
+    XLWaveformTypeTreble,
+    XLWaveformTypeAlto,
+    XLWaveformTypeCustom,
+    XLWaveformTypeNonVocals,
+};
+
 /// Delegate protocol for waveform view interaction events.
 @protocol XLWaveformViewDelegate <NSObject>
 @optional
@@ -37,6 +47,15 @@
 /// Forward a key event to the delegate for handling via key bindings.
 /// Return YES if the delegate handled the event, NO to pass it up the responder chain.
 - (BOOL)waveformView:(XLWaveformView *)view shouldHandleKeyEvent:(NSEvent *)event;
+
+/// Called when the user selects "Render Selected Region" from the context menu.
+- (void)waveformViewDidRequestRenderSelectedRegion:(XLWaveformView *)view;
+
+/// Called when the waveform type changes via the context menu.
+- (void)waveformView:(XLWaveformView *)view didChangeWaveformType:(XLWaveformType)type lowNote:(NSInteger)lowNote highNote:(NSInteger)highNote;
+
+/// Called when the double-height toggle changes via the context menu.
+- (void)waveformView:(XLWaveformView *)view didChangeDoubleHeight:(BOOL)doubleHeight;
 
 @end
 
@@ -71,6 +90,18 @@
 
 /// Whether to show separate stereo channels (top=L, bottom=R) or combined mono.
 @property (nonatomic, assign) BOOL showStereo;
+
+/// Current waveform display type (raw, bass, treble, etc.).
+@property (nonatomic, assign) XLWaveformType waveformType;
+
+/// Whether the waveform is displayed at double height.
+@property (nonatomic, assign) BOOL doubleHeight;
+
+/// Low note for custom filtered waveform (0-127, -1 = unset).
+@property (nonatomic, assign) NSInteger customLowNote;
+
+/// High note for custom filtered waveform (0-127, -1 = unset).
+@property (nonatomic, assign) NSInteger customHighNote;
 
 /// Waveform fill color. If nil, defaults to a classic green.
 @property (nonatomic, strong) NSColor *waveformColor;

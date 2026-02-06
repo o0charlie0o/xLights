@@ -153,6 +153,8 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [self addSequenceMenuTo:mainMenu target:target];
     [self addModelMenuTo:mainMenu target:target];
     [self addEffectMenuTo:mainMenu target:target];
+    [self addAudioMenuTo:mainMenu target:target];
+    [self addToolsMenuTo:mainMenu target:target];
     [self addWindowMenuTo:mainMenu app:app];
     [self addHelpMenuTo:mainMenu target:target];
 
@@ -215,6 +217,33 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     exportItem.submenu = exportMenu;
 
     [fileMenu addItem:[NSMenuItem separatorItem]];
+
+    [fileMenu addItemWithTitle:@"Select Show Folder…" action:@selector(selectShowFolder:) keyEquivalent:@""];
+
+    NSMenuItem *recentFoldersItem = [fileMenu addItemWithTitle:@"Recent Show Folders" action:nil keyEquivalent:@""];
+    NSMenu *recentFoldersMenu = [[NSMenu alloc] initWithTitle:@"Recent Show Folders"];
+    [recentFoldersMenu addItemWithTitle:@"(No Recent Folders)" action:nil keyEquivalent:@""].enabled = NO;
+    recentFoldersItem.submenu = recentFoldersMenu;
+
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *backupItem = [fileMenu addItemWithTitle:@"Backup" action:@selector(backupShowFolder:) keyEquivalent:@""];
+    backupItem.keyEquivalent = [NSString stringWithFormat:@"%C", (unichar)NSF10FunctionKey];
+    backupItem.keyEquivalentModifierMask = 0;
+
+    [fileMenu addItemWithTitle:@"Restore Backup…" action:@selector(restoreBackup:) keyEquivalent:@""];
+
+    NSMenuItem *altBackupItem = [fileMenu addItemWithTitle:@"Alternate Backup…" action:@selector(alternateBackup:) keyEquivalent:@""];
+    altBackupItem.keyEquivalent = [NSString stringWithFormat:@"%C", (unichar)NSF11FunctionKey];
+    altBackupItem.keyEquivalentModifierMask = 0;
+
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+
+    [fileMenu addItemWithTitle:@"Sequence Settings…" action:@selector(showSequenceSettings:) keyEquivalent:@""];
+    [fileMenu addItemWithTitle:@"Key Bindings…" action:@selector(showKeyBindings:) keyEquivalent:@""];
+    [fileMenu addItemWithTitle:@"Export House Preview Video…" action:@selector(exportHousePreviewVideo:) keyEquivalent:@""];
+
+    [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Page Setup…" action:@selector(runPageLayout:) keyEquivalent:@"P"];
     [fileMenu addItemWithTitle:@"Print…" action:@selector(printDocument:) keyEquivalent:@"p"];
 
@@ -259,6 +288,86 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [viewMenu addItemWithTitle:@"Zoom In" action:@selector(zoomIn:) keyEquivalent:@"+"];
     [viewMenu addItemWithTitle:@"Zoom Out" action:@selector(zoomOut:) keyEquivalent:@"-"];
     [viewMenu addItemWithTitle:@"Zoom to Fit" action:@selector(zoomToFit:) keyEquivalent:@"0"];
+
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+
+    // --- Windows submenu (panel visibility toggles) ---
+    NSMenuItem *windowsItem = [viewMenu addItemWithTitle:@"Windows" action:nil keyEquivalent:@""];
+    NSMenu *windowsMenu = [[NSMenu alloc] initWithTitle:@"Windows"];
+
+    NSMenuItem *displayElementsItem = [windowsMenu addItemWithTitle:@"Display Elements" action:@selector(toggleDisplayElements:) keyEquivalent:@""];
+    displayElementsItem.state = NSControlStateValueOff;
+
+    NSMenuItem *modelPreviewItem = [windowsMenu addItemWithTitle:@"Model Preview" action:@selector(toggleModelPreview:) keyEquivalent:@""];
+    modelPreviewItem.state = NSControlStateValueOff;
+
+    NSMenuItem *housePreviewItem = [windowsMenu addItemWithTitle:@"House Preview" action:@selector(toggleHousePreview:) keyEquivalent:@""];
+    housePreviewItem.state = NSControlStateValueOff;
+
+    NSMenuItem *effectSettingsItem = [windowsMenu addItemWithTitle:@"Effect Settings" action:@selector(toggleEffectSettings:) keyEquivalent:@""];
+    effectSettingsItem.state = NSControlStateValueOff;
+
+    NSMenuItem *colorsItem = [windowsMenu addItemWithTitle:@"Colors" action:@selector(toggleColors:) keyEquivalent:@""];
+    colorsItem.state = NSControlStateValueOff;
+
+    NSMenuItem *layerBlendingItem = [windowsMenu addItemWithTitle:@"Layer Blending" action:@selector(toggleLayerBlending:) keyEquivalent:@""];
+    layerBlendingItem.state = NSControlStateValueOff;
+
+    NSMenuItem *layerSettingsItem = [windowsMenu addItemWithTitle:@"Layer Settings" action:@selector(toggleLayerSettings:) keyEquivalent:@""];
+    layerSettingsItem.state = NSControlStateValueOff;
+
+    NSMenuItem *effectDropperItem = [windowsMenu addItemWithTitle:@"Effect Dropper" action:@selector(toggleEffectDropper:) keyEquivalent:@""];
+    effectDropperItem.state = NSControlStateValueOff;
+
+    NSMenuItem *valueCurvesItem = [windowsMenu addItemWithTitle:@"Value Curves" action:@selector(toggleValueCurves:) keyEquivalent:@""];
+    valueCurvesItem.state = NSControlStateValueOff;
+
+    NSMenuItem *colorDropperItem = [windowsMenu addItemWithTitle:@"Color Dropper" action:@selector(toggleColorDropper:) keyEquivalent:@""];
+    colorDropperItem.state = NSControlStateValueOff;
+
+    NSMenuItem *effectAssistItem = [windowsMenu addItemWithTitle:@"Effect Assist" action:@selector(toggleEffectAssist:) keyEquivalent:@""];
+    effectAssistItem.state = NSControlStateValueOff;
+
+    NSMenuItem *selectEffectItem = [windowsMenu addItemWithTitle:@"Select Effect" action:@selector(toggleSelectEffect:) keyEquivalent:@""];
+    selectEffectItem.state = NSControlStateValueOff;
+
+    NSMenuItem *searchEffectsItem = [windowsMenu addItemWithTitle:@"Search Effects" action:@selector(toggleSearchEffects:) keyEquivalent:@""];
+    searchEffectsItem.state = NSControlStateValueOff;
+
+    NSMenuItem *videoPreviewItem = [windowsMenu addItemWithTitle:@"Video Preview" action:@selector(toggleVideoPreview:) keyEquivalent:@""];
+    videoPreviewItem.state = NSControlStateValueOff;
+
+    NSMenuItem *jukeboxItem = [windowsMenu addItemWithTitle:@"Jukebox" action:@selector(toggleJukebox:) keyEquivalent:@""];
+    jukeboxItem.state = NSControlStateValueOff;
+
+    NSMenuItem *findEffectDataItem = [windowsMenu addItemWithTitle:@"Find Effect Data" action:@selector(toggleFindEffectData:) keyEquivalent:@""];
+    findEffectDataItem.state = NSControlStateValueOff;
+
+    [windowsMenu addItem:[NSMenuItem separatorItem]];
+    [windowsMenu addItemWithTitle:@"Dock All" action:@selector(dockAllPanels:) keyEquivalent:@""];
+    [windowsMenu addItemWithTitle:@"Reset to Defaults" action:@selector(resetWindowLayout:) keyEquivalent:@""];
+
+    windowsItem.submenu = windowsMenu;
+
+    // --- Perspectives submenu ---
+    NSMenuItem *perspectivesItem = [viewMenu addItemWithTitle:@"Perspectives" action:nil keyEquivalent:@""];
+    NSMenu *perspectivesMenu = [[NSMenu alloc] initWithTitle:@"Perspectives"];
+
+    [perspectivesMenu addItemWithTitle:@"Save Current" action:@selector(savePerspective:) keyEquivalent:@""];
+    [perspectivesMenu addItemWithTitle:@"Save As New" action:@selector(saveAsNewPerspective:) keyEquivalent:@""];
+
+    NSMenuItem *loadPerspectiveItem = [perspectivesMenu addItemWithTitle:@"Load Perspective" action:nil keyEquivalent:@""];
+    NSMenu *loadPerspectiveMenu = [[NSMenu alloc] initWithTitle:@"Load Perspective"];
+    NSMenuItem *noPerspectivesItem = [loadPerspectiveMenu addItemWithTitle:@"(No Saved Perspectives)" action:nil keyEquivalent:@""];
+    noPerspectivesItem.enabled = NO;
+    loadPerspectiveItem.submenu = loadPerspectiveMenu;
+
+    [perspectivesMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *autoSavePerspectiveItem = [perspectivesMenu addItemWithTitle:@"Auto Save" action:@selector(toggleAutoSavePerspective:) keyEquivalent:@""];
+    autoSavePerspectiveItem.state = NSControlStateValueOff;
+
+    perspectivesItem.submenu = perspectivesMenu;
 
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"]
@@ -351,15 +460,134 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     windowMenuItem.submenu = windowMenu;
 }
 
++ (void)addAudioMenuTo:(NSMenu *)mainMenu target:(id)target {
+    NSMenuItem *audioMenuItem = [mainMenu addItemWithTitle:@"Audio" action:nil keyEquivalent:@""];
+    NSMenu *audioMenu = [[NSMenu alloc] initWithTitle:@"Audio"];
+
+    // Playback speed radio group
+    NSMenuItem *fullSpeedItem = [audioMenu addItemWithTitle:@"Play Full Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    fullSpeedItem.tag = 100;
+    fullSpeedItem.state = NSControlStateValueOn;
+
+    NSMenuItem *speed15Item = [audioMenu addItemWithTitle:@"Play 1.5x Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    speed15Item.tag = 150;
+
+    NSMenuItem *speed2Item = [audioMenu addItemWithTitle:@"Play 2x Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    speed2Item.tag = 200;
+
+    NSMenuItem *speed3Item = [audioMenu addItemWithTitle:@"Play 3x Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    speed3Item.tag = 300;
+
+    NSMenuItem *speed4Item = [audioMenu addItemWithTitle:@"Play 4x Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    speed4Item.tag = 400;
+
+    NSMenuItem *speed34Item = [audioMenu addItemWithTitle:@"Play 3/4 Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    speed34Item.tag = 75;
+
+    NSMenuItem *speed12Item = [audioMenu addItemWithTitle:@"Play 1/2 Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    speed12Item.tag = 50;
+
+    NSMenuItem *speed14Item = [audioMenu addItemWithTitle:@"Play 1/4 Speed" action:@selector(setPlaybackSpeed:) keyEquivalent:@""];
+    speed14Item.tag = 25;
+
+    [audioMenu addItem:[NSMenuItem separatorItem]];
+
+    // Volume radio group
+    NSMenuItem *loudItem = [audioMenu addItemWithTitle:@"Loud" action:@selector(setVolume:) keyEquivalent:@""];
+    loudItem.tag = 100;
+    loudItem.state = NSControlStateValueOn;
+
+    NSMenuItem *mediumItem = [audioMenu addItemWithTitle:@"Medium" action:@selector(setVolume:) keyEquivalent:@""];
+    mediumItem.tag = 66;
+
+    NSMenuItem *quietItem = [audioMenu addItemWithTitle:@"Quiet" action:@selector(setVolume:) keyEquivalent:@""];
+    quietItem.tag = 33;
+
+    NSMenuItem *veryQuietItem = [audioMenu addItemWithTitle:@"Very Quiet" action:@selector(setVolume:) keyEquivalent:@""];
+    veryQuietItem.tag = 10;
+
+    NSMenuItem *silentItem = [audioMenu addItemWithTitle:@"Silent" action:@selector(setVolume:) keyEquivalent:@""];
+    silentItem.tag = 0;
+
+    audioMenuItem.submenu = audioMenu;
+}
+
++ (void)addToolsMenuTo:(NSMenu *)mainMenu target:(id)target {
+    NSMenuItem *toolsMenuItem = [mainMenu addItemWithTitle:@"Tools" action:nil keyEquivalent:@""];
+    NSMenu *toolsMenu = [[NSMenu alloc] initWithTitle:@"Tools"];
+
+    [toolsMenu addItemWithTitle:@"Test" action:@selector(showTest:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Check Sequence" action:@selector(checkSequence:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Cleanup File Locations" action:@selector(cleanupFileLocations:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Package Sequence" action:@selector(packageSequence:) keyEquivalent:@""];
+
+    [toolsMenu addItem:[NSMenuItem separatorItem]];
+
+    [toolsMenu addItemWithTitle:@"Download Sequences/Lyrics" action:@selector(downloadSequences:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Batch Render" action:@selector(batchRender:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"FPP Connect" action:@selector(fppConnect:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Bulk Controller Upload" action:@selector(bulkControllerUpload:) keyEquivalent:@""];
+
+    [toolsMenu addItem:[NSMenuItem separatorItem]];
+
+    [toolsMenu addItemWithTitle:@"Run Scripts" action:@selector(runScripts:) keyEquivalent:@""];
+
+    [toolsMenu addItem:[NSMenuItem separatorItem]];
+
+    [toolsMenu addItemWithTitle:@"Export Models" action:@selector(exportModelsFromTools:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Export Effects" action:@selector(exportEffectsFromTools:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Export Controller Connections" action:@selector(exportControllerConnections:) keyEquivalent:@""];
+
+    [toolsMenu addItem:[NSMenuItem separatorItem]];
+
+    [toolsMenu addItemWithTitle:@"View Log" action:@selector(viewLog:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Package Log Files" action:@selector(packageLogFiles:) keyEquivalent:@""];
+
+    [toolsMenu addItem:[NSMenuItem separatorItem]];
+
+    [toolsMenu addItemWithTitle:@"Purge Download Cache" action:@selector(purgeDownloadCache:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Purge Render Cache" action:@selector(purgeRenderCache:) keyEquivalent:@""];
+
+    [toolsMenu addItem:[NSMenuItem separatorItem]];
+
+    [toolsMenu addItemWithTitle:@"Generate 2D Path" action:@selector(generate2DPath:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Generate Custom Model" action:@selector(generateCustomModel:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Remap Custom Model" action:@selector(remapCustomModel:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Generate Lyrics From Data" action:@selector(generateLyricsFromData:) keyEquivalent:@""];
+
+    [toolsMenu addItem:[NSMenuItem separatorItem]];
+
+    [toolsMenu addItemWithTitle:@"Convert" action:@selector(convertSequence:) keyEquivalent:@""];
+    [toolsMenu addItemWithTitle:@"Prepare Audio" action:@selector(prepareAudio:) keyEquivalent:@""];
+
+    toolsMenuItem.submenu = toolsMenu;
+}
+
 + (void)addHelpMenuTo:(NSMenu *)mainMenu target:(id)target {
     NSMenuItem *helpMenuItem = [mainMenu addItemWithTitle:@"Help" action:nil keyEquivalent:@""];
     NSMenu *helpMenu = [[NSMenu alloc] initWithTitle:@"Help"];
 
     [helpMenu addItemWithTitle:@"xLights Help" action:@selector(showHelp:) keyEquivalent:@"?"];
     [helpMenu addItemWithTitle:@"xLights Website" action:@selector(visitWebsite:) keyEquivalent:@""];
+    [helpMenu addItemWithTitle:@"Tip of the Day" action:@selector(showTipOfTheDay:) keyEquivalent:@""];
+    [helpMenu addItemWithTitle:@"User Manual" action:@selector(showUserManual:) keyEquivalent:@""];
+
     [helpMenu addItem:[NSMenuItem separatorItem]];
+
+    [helpMenu addItemWithTitle:@"Key Bindings" action:@selector(showKeyBindings:) keyEquivalent:@""];
+
+    [helpMenu addItem:[NSMenuItem separatorItem]];
+
+    [helpMenu addItemWithTitle:@"Forum" action:@selector(visitForum:) keyEquivalent:@""];
+    [helpMenu addItemWithTitle:@"Video Tutorials" action:@selector(showVideoTutorials:) keyEquivalent:@""];
+    [helpMenu addItemWithTitle:@"Facebook" action:@selector(visitFacebook:) keyEquivalent:@""];
+
+    [helpMenu addItem:[NSMenuItem separatorItem]];
+
     [helpMenu addItemWithTitle:@"Check for Updates…" action:@selector(checkForUpdates:) keyEquivalent:@""];
     [helpMenu addItemWithTitle:@"Release Notes" action:@selector(showReleaseNotes:) keyEquivalent:@""];
+    [helpMenu addItemWithTitle:@"Issue Tracker" action:@selector(visitIssueTracker:) keyEquivalent:@""];
+    [helpMenu addItemWithTitle:@"Donate" action:@selector(showDonate:) keyEquivalent:@""];
 
     [NSApp setHelpMenu:helpMenu];
     helpMenuItem.submenu = helpMenu;

@@ -38,6 +38,60 @@ static const NSInteger kMenuTagCopy = 1002;
 static const NSInteger kMenuTagPaste = 1003;
 static const NSInteger kMenuTagDelete = 1004;
 static const NSInteger kMenuTagEditSettings = 1005;
+static const NSInteger kMenuTagSplit = 1010;
+static const NSInteger kMenuTagDuplicate = 1011;
+static const NSInteger kMenuTagDuplicateRight = 1012;
+static const NSInteger kMenuTagDuplicateLeft = 1013;
+static const NSInteger kMenuTagDuplicateUp = 1014;
+static const NSInteger kMenuTagDuplicateDown = 1015;
+static const NSInteger kMenuTagCreateTiming = 1020;
+static const NSInteger kMenuTagLock = 1021;
+static const NSInteger kMenuTagUnlock = 1022;
+static const NSInteger kMenuTagEnableRender = 1023;
+static const NSInteger kMenuTagDisableRender = 1024;
+static const NSInteger kMenuTagDescription = 1025;
+static const NSInteger kMenuTagResetEffect = 1026;
+static const NSInteger kMenuTagEffectPresets = 1027;
+static const NSInteger kMenuTagRandomEffects = 1028;
+static const NSInteger kMenuTagTiming = 1029;
+
+// Timing track context menu tags
+static const NSInteger kMenuTagBreakdownPhrase = 1040;
+static const NSInteger kMenuTagBreakdownSelectedPhrases = 1041;
+static const NSInteger kMenuTagBreakdownWord = 1042;
+static const NSInteger kMenuTagBreakdownSelectedWords = 1043;
+static const NSInteger kMenuTagDivideTimings = 1044;
+static const NSInteger kMenuTagAutoLabelTimings = 1045;
+static const NSInteger kMenuTagAddShimmer = 1046;
+static const NSInteger kMenuTagRemoveShimmer = 1047;
+static const NSInteger kMenuTagCreateAlternatingPhonemes = 1048;
+static const NSInteger kMenuTagFindTimingLabel = 1049;
+static const NSInteger kMenuTagFindNextTimingLabel = 1050;
+static const NSInteger kMenuTagFindPreviousTimingLabel = 1051;
+static const NSInteger kMenuTagReplaceAllTimingLabels = 1052;
+
+// Alignment submenu tags
+static const NSInteger kMenuTagAlignStartTimes = 1060;
+static const NSInteger kMenuTagAlignEndTimes = 1061;
+static const NSInteger kMenuTagAlignBothTimes = 1062;
+static const NSInteger kMenuTagAlignCenterpoints = 1063;
+static const NSInteger kMenuTagAlignMatchDuration = 1064;
+static const NSInteger kMenuTagAlignShiftStartTimes = 1065;
+static const NSInteger kMenuTagAlignShiftEndTimes = 1066;
+static const NSInteger kMenuTagAlignToTimingMark = 1067;
+static const NSInteger kMenuTagCloseGap = 1068;
+
+// Symbol library tags
+static const NSInteger kMenuTagCreateSymbol = 1070;
+static const NSInteger kMenuTagUnlinkSymbol = 1071;
+static const NSInteger kMenuTagLinkSymbolBase = 1080;  // 1080+ for individual symbols
+
+// Duplicate directions (passed as representedObject on menu items)
+static const NSInteger kDuplicateDirectionNone = 0;
+static const NSInteger kDuplicateDirectionRight = 1;
+static const NSInteger kDuplicateDirectionLeft = 2;
+static const NSInteger kDuplicateDirectionUp = 3;
+static const NSInteger kDuplicateDirectionDown = 4;
 
 // SF Symbol icon mapping for effect types (matching Swift EffectPaletteGridView)
 static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
@@ -68,6 +122,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     // Inline label editor for timing marks
     NSTextField *_labelEditor;
     void (^_labelEditCompletion)(NSString * _Nullable);
+
+    // Context menu state: saved when the menu is built
+    CGFloat _contextMenuTimeMS;
+    NSInteger _contextMenuEffectIndex;
+    NSInteger _contextMenuRow;
 }
 
 @property (nonatomic, strong) CAMetalLayer *metalLayer;
@@ -1456,9 +1515,48 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 - (NSMenu *)buildDefaultContextMenuForRow:(NSInteger)row
                              effectIndex:(NSInteger)effectIndex
                                 atTimeMS:(CGFloat)timeMS {
+    // Save context menu state for action handlers
+    _contextMenuTimeMS = timeMS;
+    _contextMenuEffectIndex = effectIndex;
+    _contextMenuRow = row;
+
+    // Detect if the right-clicked item is a timing mark
+    BOOL isTimingMark = NO;
+    NSInteger timingLayerIndex = -1;
+    NSInteger timingTrackLayerCount = 1;
+    BOOL hasMultipleTimingSelected = NO;
+    if (effectIndex >= 0 && effectIndex < (NSInteger)_renderEffectCount) {
+        XLEffectRenderInfo info = _renderEffects[effectIndex];
+        isTimingMark = info.isTimingMark;
+        if (isTimingMark) {
+            timingTrackLayerCount = info.timingTrackLayerCount;
+            // Determine which layer of the timing track this mark is on
+            // Layer is stored in the render info
+            timingLayerIndex = info.layer;
+            // Check if multiple timing marks are selected
+            NSUInteger selectedTimingCount = 0;
+            for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+                if ([self isEffectSelected:idx] && _renderEffects[idx].isTimingMark) {
+                    selectedTimingCount++;
+                }
+            }
+            hasMultipleTimingSelected = (selectedTimingCount > 1);
+        }
+    }
+
+    if (isTimingMark) {
+        return [self buildTimingContextMenuWithLayerIndex:timingLayerIndex
+                                       layerCount:timingTrackLayerCount
+                                  multipleSelected:hasMultipleTimingSelected];
+    }
+
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Effects"];
 
     BOOL hasSelection = _selectedEffectsCount > 0;
+    BOOL hasSingleEffect = (effectIndex >= 0);
+    BOOL multipleSelected = _selectedEffectsCount > 1;
+
+    // --- Cut / Copy / Paste / Delete ---
 
     NSMenuItem *cutItem = [[NSMenuItem alloc] initWithTitle:@"Cut"
                                                     action:@selector(cut:)
@@ -1493,13 +1591,527 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
     [menu addItem:[NSMenuItem separatorItem]];
 
+    // --- Edit Effect Settings ---
+
     NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit Effect Settings..."
                                                      action:@selector(editEffectSettings:)
                                               keyEquivalent:@""];
     editItem.tag = kMenuTagEditSettings;
     editItem.target = self;
-    editItem.enabled = (effectIndex >= 0);
+    editItem.enabled = hasSingleEffect;
     [menu addItem:editItem];
+
+    // --- Split Effect ---
+
+    BOOL canSplit = hasSingleEffect;
+    if (canSplit && effectIndex < (NSInteger)_renderEffectCount) {
+        XLEffectRenderInfo info = _renderEffects[effectIndex];
+        CGFloat durationMS = info.endTimeMS - info.startTimeMS;
+        if (durationMS <= kMinimumEffectWidthMS * 2.0 ||
+            timeMS <= info.startTimeMS || timeMS >= info.endTimeMS) {
+            canSplit = NO;
+        }
+    }
+    NSMenuItem *splitItem = [[NSMenuItem alloc] initWithTitle:@"Split Effect"
+                                                      action:@selector(splitEffect:)
+                                               keyEquivalent:@""];
+    splitItem.tag = kMenuTagSplit;
+    splitItem.target = self;
+    splitItem.enabled = canSplit;
+    [menu addItem:splitItem];
+
+    // --- Create Timing from Effect ---
+
+    NSMenuItem *createTimingItem = [[NSMenuItem alloc] initWithTitle:@"Create Timing"
+                                                             action:@selector(createTimingFromEffect:)
+                                                      keyEquivalent:@""];
+    createTimingItem.tag = kMenuTagCreateTiming;
+    createTimingItem.target = self;
+    createTimingItem.enabled = hasSelection;
+    [menu addItem:createTimingItem];
+
+    // --- Duplicate Submenu ---
+
+    NSMenu *dupMenu = [[NSMenu alloc] initWithTitle:@"Duplicate"];
+
+    NSMenuItem *dupItem = [[NSMenuItem alloc] initWithTitle:@"Duplicate"
+                                                    action:@selector(duplicateEffect:)
+                                             keyEquivalent:@""];
+    dupItem.tag = kMenuTagDuplicate;
+    dupItem.target = self;
+    dupItem.representedObject = @(kDuplicateDirectionNone);
+    dupItem.enabled = hasSingleEffect;
+    [dupMenu addItem:dupItem];
+
+    [dupMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *dupRight = [[NSMenuItem alloc] initWithTitle:@"Duplicate Right"
+                                                     action:@selector(duplicateEffect:)
+                                              keyEquivalent:@""];
+    dupRight.tag = kMenuTagDuplicateRight;
+    dupRight.target = self;
+    dupRight.representedObject = @(kDuplicateDirectionRight);
+    dupRight.enabled = hasSelection;
+    [dupMenu addItem:dupRight];
+
+    NSMenuItem *dupLeft = [[NSMenuItem alloc] initWithTitle:@"Duplicate Left"
+                                                    action:@selector(duplicateEffect:)
+                                             keyEquivalent:@""];
+    dupLeft.tag = kMenuTagDuplicateLeft;
+    dupLeft.target = self;
+    dupLeft.representedObject = @(kDuplicateDirectionLeft);
+    dupLeft.enabled = hasSelection;
+    [dupMenu addItem:dupLeft];
+
+    NSMenuItem *dupUp = [[NSMenuItem alloc] initWithTitle:@"Duplicate Up"
+                                                  action:@selector(duplicateEffect:)
+                                           keyEquivalent:@""];
+    dupUp.tag = kMenuTagDuplicateUp;
+    dupUp.target = self;
+    dupUp.representedObject = @(kDuplicateDirectionUp);
+    dupUp.enabled = hasSelection;
+    [dupMenu addItem:dupUp];
+
+    NSMenuItem *dupDown = [[NSMenuItem alloc] initWithTitle:@"Duplicate Down"
+                                                    action:@selector(duplicateEffect:)
+                                             keyEquivalent:@""];
+    dupDown.tag = kMenuTagDuplicateDown;
+    dupDown.target = self;
+    dupDown.representedObject = @(kDuplicateDirectionDown);
+    dupDown.enabled = hasSelection;
+    [dupMenu addItem:dupDown];
+
+    NSMenuItem *dupSubmenu = [[NSMenuItem alloc] initWithTitle:@"Duplicate"
+                                                       action:nil
+                                                keyEquivalent:@""];
+    dupSubmenu.submenu = dupMenu;
+    [menu addItem:dupSubmenu];
+
+    // --- Alignment Submenu (requires multiple effects selected) ---
+
+    NSMenu *alignMenu = [[NSMenu alloc] initWithTitle:@"Alignment"];
+
+    NSMenuItem *alignStart = [[NSMenuItem alloc] initWithTitle:@"Align Start Times"
+                                                       action:@selector(alignEffects:)
+                                                keyEquivalent:@""];
+    alignStart.tag = kMenuTagAlignStartTimes;
+    alignStart.target = self;
+    alignStart.representedObject = @(XLAlignmentTypeStartTimes);
+    alignStart.enabled = multipleSelected;
+    [alignMenu addItem:alignStart];
+
+    NSMenuItem *alignEnd = [[NSMenuItem alloc] initWithTitle:@"Align End Times"
+                                                     action:@selector(alignEffects:)
+                                              keyEquivalent:@""];
+    alignEnd.tag = kMenuTagAlignEndTimes;
+    alignEnd.target = self;
+    alignEnd.representedObject = @(XLAlignmentTypeEndTimes);
+    alignEnd.enabled = multipleSelected;
+    [alignMenu addItem:alignEnd];
+
+    NSMenuItem *alignBoth = [[NSMenuItem alloc] initWithTitle:@"Align Both Times"
+                                                      action:@selector(alignEffects:)
+                                               keyEquivalent:@""];
+    alignBoth.tag = kMenuTagAlignBothTimes;
+    alignBoth.target = self;
+    alignBoth.representedObject = @(XLAlignmentTypeBothTimes);
+    alignBoth.enabled = multipleSelected;
+    [alignMenu addItem:alignBoth];
+
+    NSMenuItem *alignCenter = [[NSMenuItem alloc] initWithTitle:@"Align Centerpoints"
+                                                        action:@selector(alignEffects:)
+                                                 keyEquivalent:@""];
+    alignCenter.tag = kMenuTagAlignCenterpoints;
+    alignCenter.target = self;
+    alignCenter.representedObject = @(XLAlignmentTypeCenterpoints);
+    alignCenter.enabled = multipleSelected;
+    [alignMenu addItem:alignCenter];
+
+    NSMenuItem *alignDuration = [[NSMenuItem alloc] initWithTitle:@"Align Match Duration"
+                                                          action:@selector(alignEffects:)
+                                                   keyEquivalent:@""];
+    alignDuration.tag = kMenuTagAlignMatchDuration;
+    alignDuration.target = self;
+    alignDuration.representedObject = @(XLAlignmentTypeMatchDuration);
+    alignDuration.enabled = multipleSelected;
+    [alignMenu addItem:alignDuration];
+
+    NSMenuItem *shiftStart = [[NSMenuItem alloc] initWithTitle:@"Shift Align Start Times"
+                                                       action:@selector(alignEffects:)
+                                                keyEquivalent:@""];
+    shiftStart.tag = kMenuTagAlignShiftStartTimes;
+    shiftStart.target = self;
+    shiftStart.representedObject = @(XLAlignmentTypeShiftStartTimes);
+    shiftStart.enabled = multipleSelected;
+    [alignMenu addItem:shiftStart];
+
+    NSMenuItem *shiftEnd = [[NSMenuItem alloc] initWithTitle:@"Shift Align End Times"
+                                                     action:@selector(alignEffects:)
+                                              keyEquivalent:@""];
+    shiftEnd.tag = kMenuTagAlignShiftEndTimes;
+    shiftEnd.target = self;
+    shiftEnd.representedObject = @(XLAlignmentTypeShiftEndTimes);
+    shiftEnd.enabled = multipleSelected;
+    [alignMenu addItem:shiftEnd];
+
+    NSMenuItem *alignTiming = [[NSMenuItem alloc] initWithTitle:@"Align To Closest Timing Mark"
+                                                        action:@selector(alignEffects:)
+                                                 keyEquivalent:@""];
+    alignTiming.tag = kMenuTagAlignToTimingMark;
+    alignTiming.target = self;
+    alignTiming.representedObject = @(XLAlignmentTypeToClosestTimingMark);
+    alignTiming.enabled = hasSelection;
+    [alignMenu addItem:alignTiming];
+
+    NSMenuItem *closeGap = [[NSMenuItem alloc] initWithTitle:@"Close Gap"
+                                                     action:@selector(alignEffects:)
+                                              keyEquivalent:@""];
+    closeGap.tag = kMenuTagCloseGap;
+    closeGap.target = self;
+    closeGap.representedObject = @(XLAlignmentTypeCloseGap);
+    closeGap.enabled = multipleSelected;
+    [alignMenu addItem:closeGap];
+
+    NSMenuItem *alignSubmenu = [[NSMenuItem alloc] initWithTitle:@"Alignment"
+                                                         action:nil
+                                                  keyEquivalent:@""];
+    alignSubmenu.submenu = alignMenu;
+    [menu addItem:alignSubmenu];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Effect Presets / Random Effects ---
+
+    NSMenuItem *presetsItem = [[NSMenuItem alloc] initWithTitle:@"Effect Presets"
+                                                        action:@selector(effectPresets:)
+                                                 keyEquivalent:@""];
+    presetsItem.tag = kMenuTagEffectPresets;
+    presetsItem.target = self;
+    [menu addItem:presetsItem];
+
+    NSMenuItem *randomItem = [[NSMenuItem alloc] initWithTitle:@"Create Random Effects"
+                                                       action:@selector(createRandomEffects:)
+                                                keyEquivalent:@""];
+    randomItem.tag = kMenuTagRandomEffects;
+    randomItem.target = self;
+    [menu addItem:randomItem];
+
+    // --- Reset Effect ---
+
+    NSMenuItem *resetItem = [[NSMenuItem alloc] initWithTitle:@"Reset Effect"
+                                                      action:@selector(resetEffect:)
+                                               keyEquivalent:@""];
+    resetItem.tag = kMenuTagResetEffect;
+    resetItem.target = self;
+    resetItem.enabled = hasSingleEffect;
+    [menu addItem:resetItem];
+
+    // --- Description ---
+
+    NSMenuItem *descItem = [[NSMenuItem alloc] initWithTitle:@"Description"
+                                                     action:@selector(editDescription:)
+                                              keyEquivalent:@""];
+    descItem.tag = kMenuTagDescription;
+    descItem.target = self;
+    descItem.enabled = hasSelection;
+    [menu addItem:descItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Lock / Unlock ---
+
+    BOOL anyLocked = NO;
+    BOOL anyUnlocked = NO;
+    BOOL anyRenderDisabled = NO;
+    BOOL anyRenderEnabled = NO;
+    for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+        if ([self isEffectSelected:idx]) {
+            XLEffectRenderInfo info = _renderEffects[idx];
+            if (info.locked) anyLocked = YES;
+            else anyUnlocked = YES;
+            if (info.renderDisabled) anyRenderDisabled = YES;
+            else anyRenderEnabled = YES;
+        }
+    }
+
+    NSMenuItem *lockItem = [[NSMenuItem alloc] initWithTitle:@"Lock"
+                                                      action:@selector(lockEffects:)
+                                               keyEquivalent:@""];
+    lockItem.tag = kMenuTagLock;
+    lockItem.target = self;
+    lockItem.enabled = hasSelection && anyUnlocked;
+    [menu addItem:lockItem];
+
+    NSMenuItem *unlockItem = [[NSMenuItem alloc] initWithTitle:@"Unlock"
+                                                       action:@selector(unlockEffects:)
+                                                keyEquivalent:@""];
+    unlockItem.tag = kMenuTagUnlock;
+    unlockItem.target = self;
+    unlockItem.enabled = hasSelection && anyLocked;
+    [menu addItem:unlockItem];
+
+    // --- Enable / Disable Render ---
+
+    NSMenuItem *disableRenderItem = [[NSMenuItem alloc] initWithTitle:@"Disable Render"
+                                                              action:@selector(disableRender:)
+                                                       keyEquivalent:@""];
+    disableRenderItem.tag = kMenuTagDisableRender;
+    disableRenderItem.target = self;
+    disableRenderItem.enabled = hasSelection && anyRenderEnabled;
+    [menu addItem:disableRenderItem];
+
+    NSMenuItem *enableRenderItem = [[NSMenuItem alloc] initWithTitle:@"Enable Render"
+                                                              action:@selector(enableRender:)
+                                                       keyEquivalent:@""];
+    enableRenderItem.tag = kMenuTagEnableRender;
+    enableRenderItem.target = self;
+    enableRenderItem.enabled = hasSelection && anyRenderDisabled;
+    [menu addItem:enableRenderItem];
+
+    // --- Symbol Library ---
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *createSymbol = [[NSMenuItem alloc] initWithTitle:@"Create Symbol from Effect..."
+                                                         action:@selector(createSymbolFromEffect:)
+                                                  keyEquivalent:@""];
+    createSymbol.tag = kMenuTagCreateSymbol;
+    createSymbol.target = self;
+    createSymbol.enabled = hasSingleEffect && !multipleSelected;
+    [menu addItem:createSymbol];
+
+    NSMenuItem *unlinkSymbol = [[NSMenuItem alloc] initWithTitle:@"Unlink from Symbol"
+                                                         action:@selector(unlinkFromSymbol:)
+                                                  keyEquivalent:@""];
+    unlinkSymbol.tag = kMenuTagUnlinkSymbol;
+    unlinkSymbol.target = self;
+    unlinkSymbol.enabled = hasSelection;
+    [menu addItem:unlinkSymbol];
+
+    // Link to Symbol submenu (placeholder - populated dynamically when symbols exist)
+    NSMenu *linkMenu = [[NSMenu alloc] initWithTitle:@"Link to Symbol"];
+    NSMenuItem *linkPlaceholder = [[NSMenuItem alloc] initWithTitle:@"(No symbols defined)"
+                                                            action:nil
+                                                     keyEquivalent:@""];
+    linkPlaceholder.enabled = NO;
+    [linkMenu addItem:linkPlaceholder];
+
+    NSMenuItem *linkSubmenu = [[NSMenuItem alloc] initWithTitle:@"Link to Symbol"
+                                                        action:nil
+                                                 keyEquivalent:@""];
+    linkSubmenu.submenu = linkMenu;
+    linkSubmenu.enabled = hasSelection;
+    [menu addItem:linkSubmenu];
+
+    // --- Timing (edit effect start/end time) ---
+
+    BOOL canEditTiming = hasSingleEffect && !multipleSelected;
+    if (canEditTiming && effectIndex < (NSInteger)_renderEffectCount) {
+        if (_renderEffects[effectIndex].locked) {
+            canEditTiming = NO;
+        }
+    }
+    NSMenuItem *timingItem = [[NSMenuItem alloc] initWithTitle:@"Timing"
+                                                       action:@selector(editEffectTiming:)
+                                                keyEquivalent:@""];
+    timingItem.tag = kMenuTagTiming;
+    timingItem.target = self;
+    timingItem.enabled = canEditTiming;
+    [menu addItem:timingItem];
+
+    return menu;
+}
+
+/// Build the context menu shown when right-clicking on a timing mark.
+- (NSMenu *)buildTimingContextMenuWithLayerIndex:(NSInteger)layerIndex
+                                      layerCount:(NSInteger)layerCount
+                                 multipleSelected:(BOOL)multipleSelected {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Timing"];
+
+    BOOL hasSelection = _selectedEffectsCount > 0;
+    BOOL hasSingleEffect = (_contextMenuEffectIndex >= 0);
+
+    // --- Timing-specific operations based on layer ---
+
+    if (layerIndex == 0) {
+        // Phrase layer (layer 0)
+        NSMenuItem *breakdownPhrase = [[NSMenuItem alloc] initWithTitle:@"Breakdown Phrase"
+                                                                action:@selector(breakdownPhrase:)
+                                                         keyEquivalent:@""];
+        breakdownPhrase.tag = kMenuTagBreakdownPhrase;
+        breakdownPhrase.target = self;
+        breakdownPhrase.enabled = hasSingleEffect;
+        [menu addItem:breakdownPhrase];
+
+        if (multipleSelected) {
+            NSMenuItem *breakdownPhrases = [[NSMenuItem alloc] initWithTitle:@"Breakdown Selected Phrases"
+                                                                     action:@selector(breakdownSelectedPhrases:)
+                                                              keyEquivalent:@""];
+            breakdownPhrases.tag = kMenuTagBreakdownSelectedPhrases;
+            breakdownPhrases.target = self;
+            [menu addItem:breakdownPhrases];
+        }
+    } else if (layerIndex == 1) {
+        // Word layer (layer 1)
+        NSMenuItem *breakdownWord = [[NSMenuItem alloc] initWithTitle:@"Breakdown Word"
+                                                              action:@selector(breakdownWord:)
+                                                       keyEquivalent:@""];
+        breakdownWord.tag = kMenuTagBreakdownWord;
+        breakdownWord.target = self;
+        breakdownWord.enabled = hasSingleEffect;
+        [menu addItem:breakdownWord];
+
+        if (multipleSelected) {
+            NSMenuItem *breakdownWords = [[NSMenuItem alloc] initWithTitle:@"Breakdown Selected Words"
+                                                                   action:@selector(breakdownSelectedWords:)
+                                                            keyEquivalent:@""];
+            breakdownWords.tag = kMenuTagBreakdownSelectedWords;
+            breakdownWords.target = self;
+            [menu addItem:breakdownWords];
+        }
+    }
+
+    // Divide Timings (available for all timing layers)
+    NSMenuItem *divideItem = [[NSMenuItem alloc] initWithTitle:@"Divide Timings"
+                                                       action:@selector(divideTimings:)
+                                                keyEquivalent:@""];
+    divideItem.tag = kMenuTagDivideTimings;
+    divideItem.target = self;
+    divideItem.enabled = hasSingleEffect;
+    [menu addItem:divideItem];
+
+    // Auto Label Timings (phrase layer only)
+    if (layerIndex == 0) {
+        NSMenuItem *autoLabel = [[NSMenuItem alloc] initWithTitle:@"Auto Label Timings"
+                                                          action:@selector(autoLabelTimings:)
+                                                   keyEquivalent:@""];
+        autoLabel.tag = kMenuTagAutoLabelTimings;
+        autoLabel.target = self;
+        [menu addItem:autoLabel];
+    }
+
+    // Phoneme layer operations (layer 2)
+    if (layerIndex == 2) {
+        NSMenuItem *addShimmer = [[NSMenuItem alloc] initWithTitle:@"Add \"-shimmer\""
+                                                           action:@selector(addShimmer:)
+                                                    keyEquivalent:@""];
+        addShimmer.tag = kMenuTagAddShimmer;
+        addShimmer.target = self;
+        addShimmer.enabled = hasSingleEffect;
+        [menu addItem:addShimmer];
+
+        NSMenuItem *removeShimmer = [[NSMenuItem alloc] initWithTitle:@"Remove \"-shimmer\""
+                                                              action:@selector(removeShimmer:)
+                                                       keyEquivalent:@""];
+        removeShimmer.tag = kMenuTagRemoveShimmer;
+        removeShimmer.target = self;
+        removeShimmer.enabled = hasSingleEffect;
+        [menu addItem:removeShimmer];
+
+        NSMenuItem *altPhonemes = [[NSMenuItem alloc] initWithTitle:@"Create Alternating Phonemes"
+                                                            action:@selector(createAlternatingPhonemes:)
+                                                     keyEquivalent:@""];
+        altPhonemes.tag = kMenuTagCreateAlternatingPhonemes;
+        altPhonemes.target = self;
+        altPhonemes.enabled = hasSingleEffect;
+        [menu addItem:altPhonemes];
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Lock / Unlock ---
+
+    BOOL anyLocked = NO;
+    BOOL anyUnlocked = NO;
+    for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+        if ([self isEffectSelected:idx] && _renderEffects[idx].isTimingMark) {
+            if (_renderEffects[idx].locked) anyLocked = YES;
+            else anyUnlocked = YES;
+        }
+    }
+
+    NSMenuItem *lockItem = [[NSMenuItem alloc] initWithTitle:@"Lock"
+                                                      action:@selector(lockEffects:)
+                                               keyEquivalent:@""];
+    lockItem.tag = kMenuTagLock;
+    lockItem.target = self;
+    lockItem.enabled = hasSelection && anyUnlocked;
+    [menu addItem:lockItem];
+
+    NSMenuItem *unlockItem = [[NSMenuItem alloc] initWithTitle:@"Unlock"
+                                                       action:@selector(unlockEffects:)
+                                                keyEquivalent:@""];
+    unlockItem.tag = kMenuTagUnlock;
+    unlockItem.target = self;
+    unlockItem.enabled = hasSelection && anyLocked;
+    [menu addItem:unlockItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Cut / Copy / Paste / Delete ---
+
+    NSMenuItem *cutItem = [[NSMenuItem alloc] initWithTitle:@"Cut"
+                                                    action:@selector(cut:)
+                                             keyEquivalent:@"x"];
+    cutItem.tag = kMenuTagCut;
+    cutItem.target = self;
+    cutItem.enabled = hasSelection;
+    [menu addItem:cutItem];
+
+    NSMenuItem *copyItem = [[NSMenuItem alloc] initWithTitle:@"Copy"
+                                                     action:@selector(copy:)
+                                              keyEquivalent:@"c"];
+    copyItem.tag = kMenuTagCopy;
+    copyItem.target = self;
+    copyItem.enabled = hasSelection;
+    [menu addItem:copyItem];
+
+    NSMenuItem *pasteItem = [[NSMenuItem alloc] initWithTitle:@"Paste"
+                                                      action:@selector(paste:)
+                                               keyEquivalent:@"v"];
+    pasteItem.tag = kMenuTagPaste;
+    pasteItem.target = self;
+    [menu addItem:pasteItem];
+
+    NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete"
+                                                       action:@selector(deleteSelectedEffects:)
+                                                keyEquivalent:@""];
+    deleteItem.tag = kMenuTagDelete;
+    deleteItem.target = self;
+    deleteItem.enabled = hasSelection;
+    [menu addItem:deleteItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Find / Replace ---
+
+    NSMenuItem *findItem = [[NSMenuItem alloc] initWithTitle:@"Find..."
+                                                     action:@selector(findTimingLabel:)
+                                              keyEquivalent:@""];
+    findItem.tag = kMenuTagFindTimingLabel;
+    findItem.target = self;
+    [menu addItem:findItem];
+
+    NSMenuItem *findNext = [[NSMenuItem alloc] initWithTitle:@"Find Next"
+                                                     action:@selector(findNextTimingLabel:)
+                                              keyEquivalent:@""];
+    findNext.tag = kMenuTagFindNextTimingLabel;
+    findNext.target = self;
+    [menu addItem:findNext];
+
+    NSMenuItem *findPrev = [[NSMenuItem alloc] initWithTitle:@"Find Previous"
+                                                     action:@selector(findPreviousTimingLabel:)
+                                              keyEquivalent:@""];
+    findPrev.tag = kMenuTagFindPreviousTimingLabel;
+    findPrev.target = self;
+    [menu addItem:findPrev];
+
+    NSMenuItem *replaceAll = [[NSMenuItem alloc] initWithTitle:@"Replace All..."
+                                                       action:@selector(replaceAllTimingLabels:)
+                                                keyEquivalent:@""];
+    replaceAll.tag = kMenuTagReplaceAllTimingLabels;
+    replaceAll.target = self;
+    [menu addItem:replaceAll];
 
     return menu;
 }
@@ -1543,6 +2155,240 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         if ([_delegate respondsToSelector:@selector(effectsGrid:didDoubleClickEffectAtRow:effectIndex:)]) {
             [_delegate effectsGrid:self didDoubleClickEffectAtRow:row effectIndex:_selectedEffectID];
         }
+    }
+}
+
+- (void)splitEffect:(id)sender {
+    if (_contextMenuEffectIndex < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSplitEffectAtIndex:atTimeMS:)]) {
+        [_delegate effectsGrid:self
+            didRequestSplitEffectAtIndex:_contextMenuEffectIndex
+                                atTimeMS:_contextMenuTimeMS];
+    }
+}
+
+- (void)duplicateEffect:(id)sender {
+    NSInteger direction = kDuplicateDirectionNone;
+    if ([sender isKindOfClass:[NSMenuItem class]]) {
+        NSNumber *dirNum = [(NSMenuItem *)sender representedObject];
+        if (dirNum) direction = dirNum.integerValue;
+    }
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestDuplicateEffectAtIndex:direction:)]) {
+        [_delegate effectsGrid:self
+            didRequestDuplicateEffectAtIndex:idx
+                                  direction:direction];
+    }
+}
+
+- (void)createTimingFromEffect:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestCreateTimingFromEffects:)]) {
+        [_delegate effectsGrid:self
+            didRequestCreateTimingFromEffects:[self selectedEffectIndices]];
+    }
+}
+
+- (void)lockEffects:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetLocked:forEffects:)]) {
+        [_delegate effectsGrid:self
+            didRequestSetLocked:YES
+                     forEffects:[self selectedEffectIndices]];
+    }
+}
+
+- (void)unlockEffects:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetLocked:forEffects:)]) {
+        [_delegate effectsGrid:self
+            didRequestSetLocked:NO
+                     forEffects:[self selectedEffectIndices]];
+    }
+}
+
+- (void)disableRender:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetRenderDisabled:forEffects:)]) {
+        [_delegate effectsGrid:self
+            didRequestSetRenderDisabled:YES
+                             forEffects:[self selectedEffectIndices]];
+    }
+}
+
+- (void)enableRender:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetRenderDisabled:forEffects:)]) {
+        [_delegate effectsGrid:self
+            didRequestSetRenderDisabled:NO
+                             forEffects:[self selectedEffectIndices]];
+    }
+}
+
+- (void)editDescription:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestEditDescriptionForEffectAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestEditDescriptionForEffectAtIndex:idx];
+    }
+}
+
+- (void)resetEffect:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestResetEffectAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestResetEffectAtIndex:idx];
+    }
+}
+
+- (void)effectPresets:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGridDidRequestEffectPresets:)]) {
+        [_delegate effectsGridDidRequestEffectPresets:self];
+    }
+}
+
+- (void)createRandomEffects:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGridDidRequestCreateRandomEffects:)]) {
+        [_delegate effectsGridDidRequestCreateRandomEffects:self];
+    }
+}
+
+- (void)editEffectTiming:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestEditTimingForEffectAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestEditTimingForEffectAtIndex:idx];
+    }
+}
+
+#pragma mark - Timing Track Context Menu Actions
+
+- (void)breakdownPhrase:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestBreakdownPhraseAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestBreakdownPhraseAtIndex:idx];
+    }
+}
+
+- (void)breakdownSelectedPhrases:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestBreakdownSelectedPhrases:)]) {
+        [_delegate effectsGrid:self didRequestBreakdownSelectedPhrases:[self selectedEffectIndices]];
+    }
+}
+
+- (void)breakdownWord:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestBreakdownWordAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestBreakdownWordAtIndex:idx];
+    }
+}
+
+- (void)breakdownSelectedWords:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestBreakdownSelectedWords:)]) {
+        [_delegate effectsGrid:self didRequestBreakdownSelectedWords:[self selectedEffectIndices]];
+    }
+}
+
+- (void)divideTimings:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestDivideTimingsAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestDivideTimingsAtIndex:idx];
+    }
+}
+
+- (void)autoLabelTimings:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGridDidRequestAutoLabelTimings:)]) {
+        [_delegate effectsGridDidRequestAutoLabelTimings:self];
+    }
+}
+
+- (void)addShimmer:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestAddShimmerAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestAddShimmerAtIndex:idx];
+    }
+}
+
+- (void)removeShimmer:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestRemoveShimmerAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestRemoveShimmerAtIndex:idx];
+    }
+}
+
+- (void)createAlternatingPhonemes:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestCreateAlternatingPhonemesAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestCreateAlternatingPhonemesAtIndex:idx];
+    }
+}
+
+- (void)findTimingLabel:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGridDidRequestFindTimingLabel:)]) {
+        [_delegate effectsGridDidRequestFindTimingLabel:self];
+    }
+}
+
+- (void)findNextTimingLabel:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGridDidRequestFindNextTimingLabel:)]) {
+        [_delegate effectsGridDidRequestFindNextTimingLabel:self];
+    }
+}
+
+- (void)findPreviousTimingLabel:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGridDidRequestFindPreviousTimingLabel:)]) {
+        [_delegate effectsGridDidRequestFindPreviousTimingLabel:self];
+    }
+}
+
+- (void)replaceAllTimingLabels:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGridDidRequestReplaceAllTimingLabels:)]) {
+        [_delegate effectsGridDidRequestReplaceAllTimingLabels:self];
+    }
+}
+
+#pragma mark - Alignment Context Menu Actions
+
+- (void)alignEffects:(id)sender {
+    NSInteger alignType = XLAlignmentTypeStartTimes;
+    if ([sender isKindOfClass:[NSMenuItem class]]) {
+        NSNumber *typeNum = [(NSMenuItem *)sender representedObject];
+        if (typeNum) alignType = typeNum.integerValue;
+    }
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestAlignEffects:alignmentType:)]) {
+        [_delegate effectsGrid:self
+            didRequestAlignEffects:[self selectedEffectIndices]
+                     alignmentType:(XLAlignmentType)alignType];
+    }
+}
+
+#pragma mark - Symbol Library Context Menu Actions
+
+- (void)createSymbolFromEffect:(id)sender {
+    NSInteger idx = (_contextMenuEffectIndex >= 0) ? _contextMenuEffectIndex : _selectedEffectID;
+    if (idx < 0) return;
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestCreateSymbolFromEffectAtIndex:)]) {
+        [_delegate effectsGrid:self didRequestCreateSymbolFromEffectAtIndex:idx];
+    }
+}
+
+- (void)unlinkFromSymbol:(id)sender {
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestUnlinkFromSymbol:)]) {
+        [_delegate effectsGrid:self didRequestUnlinkFromSymbol:[self selectedEffectIndices]];
+    }
+}
+
+- (void)linkToSymbol:(id)sender {
+    NSInteger symbolIndex = 0;
+    if ([sender isKindOfClass:[NSMenuItem class]]) {
+        symbolIndex = [(NSMenuItem *)sender tag] - kMenuTagLinkSymbolBase;
+    }
+    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestLinkEffects:toSymbolIndex:)]) {
+        [_delegate effectsGrid:self
+            didRequestLinkEffects:[self selectedEffectIndices]
+                   toSymbolIndex:symbolIndex];
     }
 }
 

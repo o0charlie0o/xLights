@@ -66,6 +66,8 @@ extern NSToolbarItemIdentifier const XLToolbarItemPreview;
 + (void)addModelMenuTo:(NSMenu *)mainMenu target:(id)target;
 + (void)addEffectMenuTo:(NSMenu *)mainMenu target:(id)target;
 + (void)addWindowMenuTo:(NSMenu *)mainMenu app:(NSApplication *)app;
++ (void)addAudioMenuTo:(NSMenu *)mainMenu target:(id)target;
++ (void)addToolsMenuTo:(NSMenu *)mainMenu target:(id)target;
 + (void)addHelpMenuTo:(NSMenu *)mainMenu target:(id)target;
 
 @end

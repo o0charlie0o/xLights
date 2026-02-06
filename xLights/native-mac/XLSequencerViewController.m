@@ -2159,6 +2159,431 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     }
 }
 
+#pragma mark - XLEffectsGridDelegate (Effect Operations)
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSplitEffectAtIndex:(NSInteger)effectIndex
+                        atTimeMS:(CGFloat)timeMS
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+
+    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+    if (!effectInfo) return;
+
+    NSInteger startMS = [effectInfo[@"startTimeMS"] integerValue];
+    NSInteger endMS = [effectInfo[@"endTimeMS"] integerValue];
+    NSInteger splitMS = (NSInteger)timeMS;
+
+    if (splitMS <= startMS || splitMS >= endMS) return;
+
+    NSString *modelName = effectInfo[@"modelName"];
+    NSString *effectType = effectInfo[@"effectType"];
+    NSInteger layer = [effectInfo[@"layerIndex"] integerValue];
+
+    // Resize original to end at split point
+    [_engineBridge moveEffect:effectId startTimeMS:startMS endTimeMS:splitMS];
+
+    // Create new effect from split point to original end
+    // TODO: Copy effect settings/palette from original to the new effect
+    [_engineBridge createEffect:modelName
+                          layer:layer
+                     effectType:effectType
+                    startTimeMS:splitMS
+                      endTimeMS:endMS];
+
+    [self reloadSequenceData];
+    [gridView reloadData];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestDuplicateEffectAtIndex:(NSInteger)effectIndex
+                          direction:(NSInteger)direction
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+
+    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+    if (!effectInfo) return;
+
+    NSString *modelName = effectInfo[@"modelName"];
+    NSString *effectType = effectInfo[@"effectType"];
+    NSInteger layer = [effectInfo[@"layerIndex"] integerValue];
+    NSInteger startMS = [effectInfo[@"startTimeMS"] integerValue];
+    NSInteger endMS = [effectInfo[@"endTimeMS"] integerValue];
+    NSInteger durationMS = endMS - startMS;
+
+    NSInteger newStartMS = startMS;
+    NSInteger newEndMS = endMS;
+
+    // direction: 0=same position, 1=right, 2=left, 3=up, 4=down
+    switch (direction) {
+        case 1: // Right
+            newStartMS = endMS;
+            newEndMS = endMS + durationMS;
+            break;
+        case 2: // Left
+            newStartMS = startMS - durationMS;
+            newEndMS = startMS;
+            if (newStartMS < 0) {
+                newStartMS = 0;
+                newEndMS = durationMS;
+            }
+            break;
+        case 3: // Up - TODO: needs row mapping to determine model above
+        case 4: // Down - TODO: needs row mapping to determine model below
+            NSLog(@"Duplicate Up/Down not yet implemented - requires row-to-model mapping");
+            return;
+        default: // Same position (basic duplicate)
+            newStartMS = endMS;
+            newEndMS = endMS + durationMS;
+            break;
+    }
+
+    // TODO: Copy effect settings/palette from original to the new effect
+    NSInteger newId = [_engineBridge createEffect:modelName
+                                           layer:layer
+                                      effectType:effectType
+                                     startTimeMS:newStartMS
+                                       endTimeMS:newEndMS];
+
+    if (newId >= 0) {
+        [self reloadSequenceData];
+        [gridView reloadData];
+    }
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateTimingFromEffects:(NSIndexSet *)effectIndices
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+
+    NSString *activeTrack = [_engineBridge getActiveTimingTrackName];
+    if (!activeTrack) {
+        NSLog(@"Create Timing: no active timing track");
+        return;
+    }
+
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
+        if (effectId < 0) return;
+
+        NSDictionary *effectInfo = [self->_engineBridge getEffect:effectId];
+        if (!effectInfo) return;
+
+        NSInteger startMS = [effectInfo[@"startTimeMS"] integerValue];
+        NSInteger endMS = [effectInfo[@"endTimeMS"] integerValue];
+
+        [self->_engineBridge createTimingMark:activeTrack
+                                       layer:0
+                                 startTimeMS:startMS
+                                   endTimeMS:endMS
+                                       label:nil];
+    }];
+
+    [self reloadSequenceData];
+    [gridView reloadData];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSetLocked:(BOOL)locked
+             forEffects:(NSIndexSet *)effectIndices
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
+        if (effectId < 0) return;
+        // TODO: Engine bridge does not yet expose setEffectLocked: method.
+        // When available, call: [self->_engineBridge setEffectLocked:effectId locked:locked];
+        NSLog(@"Set effect %ld locked=%d (bridge method pending)", (long)effectId, locked);
+    }];
+
+    [self reloadSequenceData];
+    [gridView reloadData];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSetRenderDisabled:(BOOL)disabled
+                     forEffects:(NSIndexSet *)effectIndices
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
+        if (effectId < 0) return;
+        // TODO: Engine bridge does not yet expose setEffectRenderDisabled: method.
+        // When available, call: [self->_engineBridge setEffectRenderDisabled:effectId disabled:disabled];
+        NSLog(@"Set effect %ld renderDisabled=%d (bridge method pending)", (long)effectId, disabled);
+    }];
+
+    [self reloadSequenceData];
+    [gridView reloadData];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditDescriptionForEffectAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+
+    NSString *currentDesc = [_engineBridge getEffectParameter:effectId key:@"Description"] ?: @"";
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Effect Description";
+    alert.informativeText = @"Enter a description for this effect:";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    input.stringValue = currentDesc;
+    alert.accessoryView = input;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            NSString *newDesc = input.stringValue;
+            [self->_engineBridge setEffectParameter:effectId key:@"Description" value:newDesc];
+            [self reloadSequenceData];
+            [gridView reloadData];
+        }
+    }];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestResetEffectAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+
+    // TODO: Engine bridge does not yet expose a resetEffectToDefaults: method.
+    // When available, call: [self->_engineBridge resetEffectToDefaults:effectId];
+    NSLog(@"Reset effect %ld to defaults (bridge method pending)", (long)effectId);
+
+    [self reloadSequenceData];
+    [gridView reloadData];
+}
+
+- (void)effectsGridDidRequestEffectPresets:(XLEffectsGridView *)gridView
+{
+    // TODO: Open the effect presets panel/dialog when implemented.
+    NSLog(@"Effect Presets panel requested (not yet implemented)");
+}
+
+- (void)effectsGridDidRequestCreateRandomEffects:(XLEffectsGridView *)gridView
+{
+    // TODO: Implement random effects generation for the selected range.
+    NSLog(@"Create Random Effects requested (not yet implemented)");
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditTimingForEffectAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+
+    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+    if (!effectInfo) return;
+
+    NSInteger currentStartMS = [effectInfo[@"startTimeMS"] integerValue];
+    NSInteger currentEndMS = [effectInfo[@"endTimeMS"] integerValue];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Effect Timing";
+    alert.informativeText = @"Edit start and end time (milliseconds):";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 60)];
+
+    NSTextField *startLabel = [NSTextField labelWithString:@"Start (ms):"];
+    startLabel.frame = NSMakeRect(0, 32, 80, 20);
+    [accessoryView addSubview:startLabel];
+
+    NSTextField *startField = [[NSTextField alloc] initWithFrame:NSMakeRect(85, 32, 200, 24)];
+    startField.stringValue = [NSString stringWithFormat:@"%ld", (long)currentStartMS];
+    [accessoryView addSubview:startField];
+
+    NSTextField *endLabel = [NSTextField labelWithString:@"End (ms):"];
+    endLabel.frame = NSMakeRect(0, 2, 80, 20);
+    [accessoryView addSubview:endLabel];
+
+    NSTextField *endField = [[NSTextField alloc] initWithFrame:NSMakeRect(85, 2, 200, 24)];
+    endField.stringValue = [NSString stringWithFormat:@"%ld", (long)currentEndMS];
+    [accessoryView addSubview:endField];
+
+    alert.accessoryView = accessoryView;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            NSInteger newStartMS = startField.integerValue;
+            NSInteger newEndMS = endField.integerValue;
+            if (newEndMS > newStartMS && newStartMS >= 0) {
+                [self->_engineBridge moveEffect:effectId startTimeMS:newStartMS endTimeMS:newEndMS];
+                [self reloadSequenceData];
+                [gridView reloadData];
+            }
+        }
+    }];
+}
+
+#pragma mark - XLEffectsGridDelegate (Timing Track Operations)
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownPhraseAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+    // TODO: Implement phrase breakdown via engine bridge
+    NSLog(@"Breakdown Phrase at effect %ld (not yet implemented)", (long)effectId);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownSelectedPhrases:(NSIndexSet *)effectIndices
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+    // TODO: Implement batch phrase breakdown via engine bridge
+    NSLog(@"Breakdown Selected Phrases (%lu marks) (not yet implemented)",
+          (unsigned long)effectIndices.count);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownWordAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+    // TODO: Implement word breakdown via engine bridge
+    NSLog(@"Breakdown Word at effect %ld (not yet implemented)", (long)effectId);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownSelectedWords:(NSIndexSet *)effectIndices
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+    // TODO: Implement batch word breakdown via engine bridge
+    NSLog(@"Breakdown Selected Words (%lu marks) (not yet implemented)",
+          (unsigned long)effectIndices.count);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestDivideTimingsAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+    // TODO: Implement timing subdivision via engine bridge
+    NSLog(@"Divide Timings at effect %ld (not yet implemented)", (long)effectId);
+}
+
+- (void)effectsGridDidRequestAutoLabelTimings:(XLEffectsGridView *)gridView
+{
+    // TODO: Implement auto-labeling of timing marks
+    NSLog(@"Auto Label Timings requested (not yet implemented)");
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestAddShimmerAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+    // TODO: Append "-shimmer" to phoneme label via engine bridge
+    NSLog(@"Add -shimmer to effect %ld (not yet implemented)", (long)effectId);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestRemoveShimmerAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+    // TODO: Remove "-shimmer" from phoneme label via engine bridge
+    NSLog(@"Remove -shimmer from effect %ld (not yet implemented)", (long)effectId);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateAlternatingPhonemesAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+    // TODO: Create alternating phonemes via engine bridge
+    NSLog(@"Create Alternating Phonemes at effect %ld (not yet implemented)", (long)effectId);
+}
+
+- (void)effectsGridDidRequestFindTimingLabel:(XLEffectsGridView *)gridView
+{
+    // TODO: Show find dialog for timing labels
+    NSLog(@"Find Timing Label requested (not yet implemented)");
+}
+
+- (void)effectsGridDidRequestFindNextTimingLabel:(XLEffectsGridView *)gridView
+{
+    // TODO: Find next matching timing label
+    NSLog(@"Find Next Timing Label requested (not yet implemented)");
+}
+
+- (void)effectsGridDidRequestFindPreviousTimingLabel:(XLEffectsGridView *)gridView
+{
+    // TODO: Find previous matching timing label
+    NSLog(@"Find Previous Timing Label requested (not yet implemented)");
+}
+
+- (void)effectsGridDidRequestReplaceAllTimingLabels:(XLEffectsGridView *)gridView
+{
+    // TODO: Show find-replace dialog for timing labels
+    NSLog(@"Replace All Timing Labels requested (not yet implemented)");
+}
+
+#pragma mark - XLEffectsGridDelegate (Alignment Operations)
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestAlignEffects:(NSIndexSet *)effectIndices
+           alignmentType:(XLAlignmentType)alignmentType
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+
+    NSString *typeName;
+    switch (alignmentType) {
+        case XLAlignmentTypeStartTimes:           typeName = @"Align Start Times"; break;
+        case XLAlignmentTypeEndTimes:             typeName = @"Align End Times"; break;
+        case XLAlignmentTypeBothTimes:            typeName = @"Align Both Times"; break;
+        case XLAlignmentTypeCenterpoints:         typeName = @"Align Centerpoints"; break;
+        case XLAlignmentTypeMatchDuration:        typeName = @"Align Match Duration"; break;
+        case XLAlignmentTypeShiftStartTimes:      typeName = @"Shift Align Start Times"; break;
+        case XLAlignmentTypeShiftEndTimes:        typeName = @"Shift Align End Times"; break;
+        case XLAlignmentTypeToClosestTimingMark:  typeName = @"Align To Closest Timing Mark"; break;
+        case XLAlignmentTypeCloseGap:             typeName = @"Close Gap"; break;
+    }
+    // TODO: Implement alignment operations via engine bridge
+    NSLog(@"%@ for %lu effects (not yet implemented)", typeName, (unsigned long)effectIndices.count);
+}
+
+#pragma mark - XLEffectsGridDelegate (Symbol Library Operations)
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateSymbolFromEffectAtIndex:(NSInteger)effectIndex
+{
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0 || !_engineBridge) return;
+    // TODO: Create a symbol from the effect via engine bridge
+    NSLog(@"Create Symbol from Effect %ld (not yet implemented)", (long)effectId);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestUnlinkFromSymbol:(NSIndexSet *)effectIndices
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+    // TODO: Unlink selected effects from their symbols via engine bridge
+    NSLog(@"Unlink from Symbol for %lu effects (not yet implemented)",
+          (unsigned long)effectIndices.count);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestLinkEffects:(NSIndexSet *)effectIndices
+           toSymbolIndex:(NSInteger)symbolIndex
+{
+    if (!_engineBridge || effectIndices.count == 0) return;
+    // TODO: Link selected effects to the specified symbol via engine bridge
+    NSLog(@"Link %lu effects to Symbol index %ld (not yet implemented)",
+          (unsigned long)effectIndices.count, (long)symbolIndex);
+}
+
 #pragma mark - XLRowHeadingsDataSource
 
 - (NSInteger)numberOfRowsInRowHeadings:(XLRowHeadingsView *)view {
@@ -2325,6 +2750,595 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)rowHeadings:(XLRowHeadingsView *)view didChangeVerticalScrollOffset:(CGFloat)offsetY {
     // Use scroll coordinator for synchronized vertical scroll
     [_scrollCoordinator viewDidScrollVertically:offsetY fromView:view];
+}
+
+#pragma mark - Row Headings Layer Management
+
+- (NSString *)modelNameForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return nil;
+
+    // If this is a layer sub-row, walk backwards to find the parent element row
+    if (_rowData[row].isLayerRow) {
+        NSInteger parentElementIndex = _rowData[row].elementIndex;
+        for (NSInteger i = row - 1; i >= 0; i--) {
+            if (!_rowData[i].isLayerRow && _rowData[i].elementIndex == parentElementIndex) {
+                return [NSString stringWithUTF8String:_rowData[i].name];
+            }
+        }
+        return nil;
+    }
+
+    return [NSString stringWithUTF8String:_rowData[row].name];
+}
+
+- (NSInteger)layerIndexForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return 0;
+
+    if (_rowData[row].isLayerRow) {
+        return _rowData[row].layerIndex;
+    }
+
+    // Main element row defaults to layer 0
+    return 0;
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view insertLayerAboveRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerIndex = [self layerIndexForRow:row];
+    NSInteger result = [_engineBridge insertLayer:modelName atIndex:layerIndex];
+    if (result >= 0) {
+        [self reloadSequenceData];
+    }
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view insertLayerBelowRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerIndex = [self layerIndexForRow:row];
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+
+    if (layerIndex < layerCount - 1) {
+        NSInteger result = [_engineBridge insertLayer:modelName atIndex:layerIndex + 1];
+        if (result >= 0) {
+            [self reloadSequenceData];
+        }
+    } else {
+        NSInteger result = [_engineBridge addLayer:modelName];
+        if (result >= 0) {
+            [self reloadSequenceData];
+        }
+    }
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view insertMultipleLayersBelowRow:(NSInteger)row count:(NSInteger)count {
+    if (!_engineBridge || !_usingRealData || count <= 0) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerIndex = [self layerIndexForRow:row];
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+
+    for (NSInteger i = 0; i < count; i++) {
+        if (layerIndex < layerCount - 1) {
+            [_engineBridge insertLayer:modelName atIndex:layerIndex + 1];
+        } else {
+            [_engineBridge addLayer:modelName];
+        }
+    }
+
+    [self reloadSequenceData];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteLayerAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+    if (layerCount <= 1) return;
+
+    NSInteger layerIndex = [self layerIndexForRow:row];
+
+    // Check if layer has effects and confirm deletion
+    NSArray *effects = [_engineBridge getEffectsForLayer:modelName layer:layerIndex];
+    if (effects.count > 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Confirm Layer Deletion";
+        alert.informativeText = [NSString stringWithFormat:
+            @"Layer contains %ld effect(s). Are you sure you want to delete Layer %ld of '%@'?",
+            (long)effects.count, (long)(layerIndex + 1), modelName];
+        [alert addButtonWithTitle:@"Delete"];
+        [alert addButtonWithTitle:@"Cancel"];
+        alert.alertStyle = NSAlertStyleWarning;
+
+        if ([alert runModal] != NSAlertFirstButtonReturn) {
+            return;
+        }
+    }
+
+    BOOL success = [_engineBridge removeLayer:modelName layer:layerIndex];
+    if (success) {
+        [self reloadSequenceData];
+    }
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteMultipleLayersAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerIndex = [self layerIndexForRow:row];
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+    if (layerCount <= 1) return;
+
+    NSInteger maxDeletable = layerCount - layerIndex;
+
+    // Ask how many layers to delete
+    NSAlert *countAlert = [[NSAlert alloc] init];
+    countAlert.messageText = @"Delete Multiple Layers";
+    countAlert.informativeText = [NSString stringWithFormat:
+        @"Enter number of layers to delete (max %ld):", (long)maxDeletable];
+    [countAlert addButtonWithTitle:@"Delete"];
+    [countAlert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 100, 24)];
+    input.stringValue = [NSString stringWithFormat:@"%ld", (long)maxDeletable];
+    countAlert.accessoryView = input;
+    [countAlert.window makeFirstResponder:input];
+
+    if ([countAlert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSInteger numToDelete = input.integerValue;
+    if (numToDelete <= 0 || numToDelete > maxDeletable) return;
+
+    // Check if any layers contain effects
+    BOOL containsEffects = NO;
+    for (NSInteger i = layerIndex; i < layerIndex + numToDelete; i++) {
+        NSArray *effects = [_engineBridge getEffectsForLayer:modelName layer:i];
+        if (effects.count > 0) {
+            containsEffects = YES;
+            break;
+        }
+    }
+
+    if (containsEffects) {
+        NSAlert *confirmAlert = [[NSAlert alloc] init];
+        confirmAlert.messageText = @"Confirm Layer Deletion";
+        confirmAlert.informativeText = @"One or more layers contain effects. Delete?";
+        [confirmAlert addButtonWithTitle:@"Delete"];
+        [confirmAlert addButtonWithTitle:@"Cancel"];
+        confirmAlert.alertStyle = NSAlertStyleWarning;
+
+        if ([confirmAlert runModal] != NSAlertFirstButtonReturn) return;
+    }
+
+    // Delete layers from bottom to top to preserve indices
+    for (NSInteger i = layerIndex + numToDelete - 1; i >= layerIndex; i--) {
+        [_engineBridge removeLayer:modelName layer:i];
+    }
+
+    // If we deleted layer 0, add a new layer so the model always has at least one
+    if (layerIndex == 0) {
+        NSInteger remaining = [_engineBridge getLayerCount:modelName];
+        if (remaining == 0) {
+            [_engineBridge addLayer:modelName];
+        }
+    }
+
+    [self reloadSequenceData];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteUnusedLayersAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+    BOOL deleted = NO;
+
+    // Delete from top to bottom, skipping layers with effects and keeping at least one layer
+    for (NSInteger i = layerCount - 1; i >= 0; i--) {
+        NSInteger currentCount = [_engineBridge getLayerCount:modelName];
+        if (currentCount <= 1) break;
+
+        NSArray *effects = [_engineBridge getEffectsForLayer:modelName layer:i];
+        if (effects.count == 0) {
+            [_engineBridge removeLayer:modelName layer:i];
+            deleted = YES;
+        }
+    }
+
+    if (deleted) {
+        [self reloadSequenceData];
+    }
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view editLayerNameAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerIndex = [self layerIndexForRow:row];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Layer Name";
+    alert.informativeText = @"Enter a new name for this layer:";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
+    // Pre-fill with current layer name if it's a named layer row
+    if (_rowData[row].isLayerRow) {
+        NSString *currentName = [NSString stringWithUTF8String:_rowData[row].name];
+        // Strip leading spaces and brackets from display name like "   [Layer 2]"
+        currentName = [currentName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if ([currentName hasPrefix:@"["] && [currentName hasSuffix:@"]"]) {
+            currentName = @"";  // Default layer name, start fresh
+        }
+        input.stringValue = currentName;
+    }
+    alert.accessoryView = input;
+    [alert.window makeFirstResponder:input];
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *newName = input.stringValue;
+        // TODO: Set layer name via engine bridge when setLayerName: is available
+        NSLog(@"XLSequencerViewController: Set layer name for '%@' layer %ld to '%@'",
+              modelName, (long)layerIndex, newName);
+    }
+}
+
+- (void)rowHeadingsCollapseAllModels:(XLRowHeadingsView *)view {
+    // Collapse all expanded model rows
+    BOOL changed = NO;
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (!_rowData[i].isLayerRow && _rowData[i].expanded) {
+            _rowData[i].expanded = NO;
+            changed = YES;
+        }
+    }
+
+    if (changed) {
+        // Remove all layer sub-rows
+        NSUInteger writeIdx = 0;
+        for (NSUInteger readIdx = 0; readIdx < _rowCount; readIdx++) {
+            if (!_rowData[readIdx].isLayerRow) {
+                if (writeIdx != readIdx) {
+                    _rowData[writeIdx] = _rowData[readIdx];
+                }
+                writeIdx++;
+            }
+        }
+        _rowCount = writeIdx;
+
+        [_rowHeadingsView reloadData];
+        [_effectsGridView reloadData];
+    }
+}
+
+- (void)rowHeadingsCollapseAllLayers:(XLRowHeadingsView *)view {
+    // Same as collapse all models - layers are model sub-rows
+    [self rowHeadingsCollapseAllModels:view];
+}
+
+#pragma mark - Model Operations (Row Heading Context Menu)
+
+- (void)rowHeadings:(XLRowHeadingsView *)view toggleStrandsAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+
+    // Toggle expand/collapse on this row (shows/hides strands/nodes)
+    if ([self respondsToSelector:@selector(rowHeadings:didToggleExpandAtRow:)]) {
+        [self rowHeadings:view didToggleExpandAtRow:row];
+    }
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view showAllEffectsAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+
+    // Select all effects across all layers for this model
+    for (NSInteger layer = 0; layer < layerCount; layer++) {
+        NSArray *effects = [_engineBridge getEffectsForLayer:modelName layer:layer];
+        for (NSDictionary *effect in effects) {
+            NSInteger effectId = [effect[@"id"] integerValue];
+            [_engineBridge selectEffect:effectId];
+        }
+    }
+
+    [_effectsGridView reloadData];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view toggleRenderDisabledAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSInteger elemIdx = _rowData[row].elementIndex;
+    NSDictionary *elemInfo = [_engineBridge getSequenceElementAtIndex:elemIdx];
+    if (!elemInfo) return;
+
+    BOOL currentlyDisabled = [elemInfo[@"isRenderDisabled"] boolValue];
+    // Toggle render state - use the element property update pattern
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    // For now, log the toggle and update row data to reflect intended state.
+    // Full implementation requires engine bridge support for setting element render state.
+    NSLog(@"XLSequencerViewController: Toggle render %@ for '%@'",
+          currentlyDisabled ? @"enabled" : @"disabled", modelName);
+
+    [_effectsGridView reloadData];
+}
+
+- (void)rowHeadingsEnableRenderOnAllModels:(XLRowHeadingsView *)view {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSLog(@"XLSequencerViewController: Enable render on all models");
+    [_effectsGridView reloadData];
+}
+
+- (BOOL)rowHeadingsIsRenderDisabledAtRow:(XLRowHeadingsView *)view row:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return NO;
+    if (!_engineBridge || !_usingRealData) return NO;
+
+    NSInteger elemIdx = _rowData[row].elementIndex;
+    NSDictionary *elemInfo = [_engineBridge getSequenceElementAtIndex:elemIdx];
+    if (!elemInfo) return NO;
+
+    return [elemInfo[@"isRenderDisabled"] boolValue];
+}
+
+- (BOOL)rowHeadingsHasAnyRenderDisabled:(XLRowHeadingsView *)view {
+    if (!_engineBridge || !_usingRealData) return NO;
+
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].isLayerRow) continue;
+        if (_rowData[i].type == XLElementTypeTiming) continue;
+
+        NSInteger elemIdx = _rowData[i].elementIndex;
+        NSDictionary *elemInfo = [_engineBridge getSequenceElementAtIndex:elemIdx];
+        if (elemInfo && [elemInfo[@"isRenderDisabled"] boolValue]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view playModelAtRow:(NSInteger)row {
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+    NSLog(@"XLSequencerViewController: Play model '%@' (placeholder)", modelName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view exportModelAtRow:(NSInteger)row {
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+    NSLog(@"XLSequencerViewController: Export model '%@' (placeholder)", modelName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view selectAllModelEffectsAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    [_engineBridge deselectAllEffects];
+
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+    for (NSInteger layer = 0; layer < layerCount; layer++) {
+        NSArray *effects = [_engineBridge getEffectsForLayer:modelName layer:layer];
+        for (NSDictionary *effect in effects) {
+            NSInteger effectId = [effect[@"id"] integerValue];
+            [_engineBridge selectEffect:effectId];
+        }
+    }
+
+    [_effectsGridView reloadData];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view copyModelEffectsAtRow:(NSInteger)row {
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+    NSLog(@"XLSequencerViewController: Copy effects for model '%@' (placeholder)", modelName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view cutModelEffectsAtRow:(NSInteger)row {
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+    NSLog(@"XLSequencerViewController: Cut effects for model '%@' (placeholder)", modelName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view pasteModelEffectsAtRow:(NSInteger)row {
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+    NSLog(@"XLSequencerViewController: Paste effects for model '%@' (placeholder)", modelName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteModelEffectsAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+
+    NSInteger layerCount = [_engineBridge getLayerCount:modelName];
+    NSInteger totalEffects = 0;
+    for (NSInteger layer = 0; layer < layerCount; layer++) {
+        NSArray *effects = [_engineBridge getEffectsForLayer:modelName layer:layer];
+        totalEffects += effects.count;
+    }
+
+    if (totalEffects == 0) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Delete Model Effects";
+    alert.informativeText = [NSString stringWithFormat:
+        @"Are you sure you want to delete all %ld effects from '%@'?",
+        (long)totalEffects, modelName];
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    for (NSInteger layer = 0; layer < layerCount; layer++) {
+        NSArray *effects = [_engineBridge getEffectsForLayer:modelName layer:layer];
+        for (NSDictionary *effect in effects) {
+            NSInteger effectId = [effect[@"id"] integerValue];
+            [_engineBridge deleteEffect:effectId];
+        }
+    }
+
+    [self reloadSequenceData];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view copyModelEffectsIncludingSubmodelsAtRow:(NSInteger)row {
+    NSString *modelName = [self modelNameForRow:row];
+    if (!modelName) return;
+    NSLog(@"XLSequencerViewController: Copy effects incl submodels for '%@' (placeholder)", modelName);
+}
+
+#pragma mark - Timing Track Operations (Row Heading Context Menu)
+
+- (void)rowHeadingsAddTimingTrack:(XLRowHeadingsView *)view {
+    [self addTimingTrack:nil];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view renameTimingTrackAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+
+    NSString *oldName = [NSString stringWithUTF8String:_rowData[row].name];
+    if (!oldName || oldName.length == 0) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Rename Timing Track";
+    alert.informativeText = @"Enter the new name:";
+    [alert addButtonWithTitle:@"Rename"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
+    input.stringValue = oldName;
+    alert.accessoryView = input;
+    [alert.window makeFirstResponder:input];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *newName = [input.stringValue stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (newName.length == 0 || [newName isEqualToString:oldName]) return;
+
+    BOOL success = [_engineBridge renameTimingTrack:oldName toName:newName];
+    if (success) {
+        [self reloadSequenceData];
+    } else {
+        NSAlert *errorAlert = [[NSAlert alloc] init];
+        errorAlert.messageText = @"Rename Failed";
+        errorAlert.informativeText = [NSString stringWithFormat:
+            @"Could not rename timing track '%@' to '%@'. The name may already be in use.",
+            oldName, newName];
+        [errorAlert addButtonWithTitle:@"OK"];
+        [errorAlert runModal];
+    }
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteTimingTrackAtRow:(NSInteger)row {
+    if (!_engineBridge || !_usingRealData) return;
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+
+    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
+    if (!trackName || trackName.length == 0) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Delete Timing Track";
+    alert.informativeText = [NSString stringWithFormat:
+        @"Are you sure you want to delete the timing track '%@'?\n\nThis action cannot be undone.",
+        trackName];
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    BOOL success = [_engineBridge deleteTimingTrack:trackName];
+    if (success) {
+        [self reloadSequenceData];
+    }
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view importTimingTrackAtRow:(NSInteger)row {
+    NSLog(@"XLSequencerViewController: Import timing track (placeholder)");
+    [self importTiming:nil];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view exportTimingTrackAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
+    NSLog(@"XLSequencerViewController: Export timing track '%@' (placeholder)", trackName);
+}
+
+- (void)rowHeadingsHideAllTimingTracks:(XLRowHeadingsView *)view {
+    BOOL changed = NO;
+    NSUInteger writeIdx = 0;
+
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].type == XLElementTypeTiming) {
+            changed = YES;
+            continue;
+        }
+        if (writeIdx != i) {
+            _rowData[writeIdx] = _rowData[i];
+        }
+        writeIdx++;
+    }
+
+    if (changed) {
+        _rowCount = writeIdx;
+        [_rowHeadingsView reloadData];
+        [_effectsGridView reloadData];
+    }
+}
+
+- (void)rowHeadingsShowAllTimingTracks:(XLRowHeadingsView *)view {
+    [self reloadSequenceData];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view importNotesAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
+    NSLog(@"XLSequencerViewController: Import notes for track '%@' (placeholder)", trackName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view importLyricsAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
+    NSLog(@"XLSequencerViewController: Import lyrics for track '%@' (placeholder)", trackName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view breakdownPhrasesAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
+    NSLog(@"XLSequencerViewController: Breakdown phrases for track '%@' (placeholder)", trackName);
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view breakdownWordsAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
+    NSLog(@"XLSequencerViewController: Breakdown words for track '%@' (placeholder)", trackName);
 }
 
 #pragma mark - Track Height Slider

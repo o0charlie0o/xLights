@@ -48,9 +48,17 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 @property (nonatomic, assign) NSInteger draggingTimingMarkId;
 @property (nonatomic, assign) CGFloat dragStartTimeMS;
 
+// Right-click context position (ms)
+@property (nonatomic, assign) NSInteger rightClickPositionMS;
+
 @end
 
-@implementation XLTimelineRulerView
+// Timing tag storage (10 slots, C array for direct access)
+static const NSInteger kTimingTagCount = 10;
+
+@implementation XLTimelineRulerView {
+    NSInteger _timingTags[10];  // -1 = unset
+}
 
 #pragma mark - Initialization
 
@@ -89,6 +97,12 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
     _selectedTimingMarkId = -1;
     _draggingTimingMark = NO;
     _draggingTimingMarkId = -1;
+
+    // Timing tags (bookmarks)
+    for (NSInteger i = 0; i < kTimingTagCount; i++) {
+        _timingTags[i] = -1;
+    }
+    _rightClickPositionMS = 0;
 
     [self setupPlayheadLayer];
     [self setupTimingMarksLayer];
@@ -684,31 +698,95 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
-    if (!_timingMarksEditable) {
-        [super rightMouseDown:event];
-        return;
+    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    NSTimeInterval clickTime = [self timeForPoint:loc.x];
+    clickTime = [self snapTimeToFrame:clickTime];
+    clickTime = fmax(0, fmin(clickTime, _sequenceDuration));
+    _rightClickPositionMS = (NSInteger)(clickTime * 1000.0);
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Timeline"];
+
+    // --- Zoom items ---
+    BOOL hasSelection = NO;
+    if ([_delegate respondsToSelector:@selector(timelineRulerHasTimeSelection:)]) {
+        hasSelection = [_delegate timelineRulerHasTimeSelection:self];
     }
 
-    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
-    NSInteger hitMarkId = [self timingMarkIdAtPoint:loc];
+    NSMenuItem *zoomSelItem = [[NSMenuItem alloc] initWithTitle:@"Zoom to Selection"
+                                                        action:@selector(contextZoomToSelection:)
+                                                 keyEquivalent:@""];
+    zoomSelItem.target = self;
+    zoomSelItem.enabled = hasSelection;
+    [menu addItem:zoomSelItem];
 
-    if (hitMarkId >= 0) {
+    NSMenuItem *resetZoomItem = [[NSMenuItem alloc] initWithTitle:@"Reset Zoom"
+                                                          action:@selector(contextResetZoom:)
+                                                   keyEquivalent:@""];
+    resetZoomItem.target = self;
+    [menu addItem:resetZoomItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Timing mark delete (if right-clicked on one) ---
+    NSInteger hitMarkId = [self timingMarkIdAtPoint:loc];
+    if (hitMarkId >= 0 && _timingMarksEditable) {
         _selectedTimingMarkId = hitMarkId;
         [_timingMarksLayer setNeedsDisplay];
 
-        // Show context menu
-        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Timing Mark"];
-        NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete Timing Mark"
-                                                            action:@selector(deleteSelectedTimingMark:)
-                                                     keyEquivalent:@""];
-        deleteItem.target = self;
-        [menu addItem:deleteItem];
-
-        [NSMenu popUpContextMenu:menu withEvent:event forView:self];
-    } else {
-        [super rightMouseDown:event];
+        NSMenuItem *deleteMarkItem = [[NSMenuItem alloc] initWithTitle:@"Delete Timing Mark"
+                                                               action:@selector(deleteSelectedTimingMark:)
+                                                        keyEquivalent:@""];
+        deleteMarkItem.target = self;
+        [menu addItem:deleteMarkItem];
+        [menu addItem:[NSMenuItem separatorItem]];
     }
+
+    // --- Timing tags 0-9 ---
+    for (NSInteger i = 0; i < kTimingTagCount; i++) {
+        NSMenuItem *tagItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%ld", (long)i]
+                                                         action:@selector(contextToggleTimingTag:)
+                                                  keyEquivalent:@""];
+        tagItem.target = self;
+        tagItem.tag = i;
+        tagItem.state = (_timingTags[i] != -1) ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:tagItem];
+    }
+
+    // --- Delete Tag submenu (only if any tags are active) ---
+    NSInteger tagCount = [self activeTimingTagCount];
+    if (tagCount > 0) {
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        NSMenu *deleteSubmenu = [[NSMenu alloc] initWithTitle:@"Delete"];
+
+        if (tagCount > 1) {
+            NSMenuItem *deleteAllItem = [[NSMenuItem alloc] initWithTitle:@"All"
+                                                                  action:@selector(contextDeleteAllTimingTags:)
+                                                           keyEquivalent:@""];
+            deleteAllItem.target = self;
+            [deleteSubmenu addItem:deleteAllItem];
+        }
+
+        for (NSInteger i = 0; i < kTimingTagCount; i++) {
+            if (_timingTags[i] != -1) {
+                NSMenuItem *deleteTagItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%ld", (long)i]
+                                                                      action:@selector(contextDeleteTimingTag:)
+                                                               keyEquivalent:@""];
+                deleteTagItem.target = self;
+                deleteTagItem.tag = i;
+                [deleteSubmenu addItem:deleteTagItem];
+            }
+        }
+
+        NSMenuItem *deleteSubmenuItem = [[NSMenuItem alloc] initWithTitle:@"Delete" action:nil keyEquivalent:@""];
+        [menu setSubmenu:deleteSubmenu forItem:deleteSubmenuItem];
+        [menu addItem:deleteSubmenuItem];
+    }
+
+    [NSMenu popUpContextMenu:menu withEvent:event forView:self];
 }
+
+#pragma mark - Context Menu Actions
 
 - (void)deleteSelectedTimingMark:(id)sender {
     if (_selectedTimingMarkId >= 0 && _timingMarksEditable) {
@@ -717,6 +795,55 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
         }
         _selectedTimingMarkId = -1;
         [_timingMarksLayer setNeedsDisplay];
+    }
+}
+
+- (void)contextZoomToSelection:(id)sender {
+    if ([_delegate respondsToSelector:@selector(timelineRulerDidRequestZoomToSelection:)]) {
+        [_delegate timelineRulerDidRequestZoomToSelection:self];
+    }
+}
+
+- (void)contextResetZoom:(id)sender {
+    if ([_delegate respondsToSelector:@selector(timelineRulerDidRequestResetZoom:)]) {
+        [_delegate timelineRulerDidRequestResetZoom:self];
+    }
+}
+
+- (void)contextToggleTimingTag:(id)sender {
+    NSInteger tagIndex = [(NSMenuItem *)sender tag];
+    if (tagIndex < 0 || tagIndex >= kTimingTagCount) return;
+
+    if (_timingTags[tagIndex] != -1) {
+        _timingTags[tagIndex] = -1;
+    } else {
+        _timingTags[tagIndex] = _rightClickPositionMS;
+    }
+
+    [self.layer setNeedsDisplay];
+
+    if ([_delegate respondsToSelector:@selector(timelineRuler:didToggleTimingTag:atPositionMS:)]) {
+        [_delegate timelineRuler:self didToggleTimingTag:tagIndex atPositionMS:_timingTags[tagIndex]];
+    }
+}
+
+- (void)contextDeleteTimingTag:(id)sender {
+    NSInteger tagIndex = [(NSMenuItem *)sender tag];
+    if (tagIndex < 0 || tagIndex >= kTimingTagCount) return;
+
+    _timingTags[tagIndex] = -1;
+    [self.layer setNeedsDisplay];
+
+    if ([_delegate respondsToSelector:@selector(timelineRuler:didToggleTimingTag:atPositionMS:)]) {
+        [_delegate timelineRuler:self didToggleTimingTag:tagIndex atPositionMS:-1];
+    }
+}
+
+- (void)contextDeleteAllTimingTags:(id)sender {
+    [self clearAllTimingTags];
+
+    if ([_delegate respondsToSelector:@selector(timelineRulerDidRequestClearAllTimingTags:)]) {
+        [_delegate timelineRulerDidRequestClearAllTimingTags:self];
     }
 }
 
@@ -910,6 +1037,38 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 
 - (NSSize)intrinsicContentSize {
     return NSMakeSize(NSViewNoIntrinsicMetric, kRulerHeight);
+}
+
+#pragma mark - Timing Tags (Bookmarks)
+
+- (NSInteger *)timingTagPositions {
+    return _timingTags;
+}
+
+- (void)setTimingTag:(NSInteger)tagIndex toPositionMS:(NSInteger)positionMS {
+    if (tagIndex < 0 || tagIndex >= kTimingTagCount) return;
+
+    if (_sequenceDuration > 0 && positionMS > (NSInteger)(_sequenceDuration * 1000.0)) {
+        positionMS = (NSInteger)(_sequenceDuration * 1000.0);
+    }
+
+    _timingTags[tagIndex] = positionMS;
+    [self.layer setNeedsDisplay];
+}
+
+- (void)clearAllTimingTags {
+    for (NSInteger i = 0; i < kTimingTagCount; i++) {
+        _timingTags[i] = -1;
+    }
+    [self.layer setNeedsDisplay];
+}
+
+- (NSInteger)activeTimingTagCount {
+    NSInteger count = 0;
+    for (NSInteger i = 0; i < kTimingTagCount; i++) {
+        if (_timingTags[i] != -1) count++;
+    }
+    return count;
 }
 
 @end

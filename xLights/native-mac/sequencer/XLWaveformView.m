@@ -108,6 +108,10 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _cursorPositionMS = -1.0;
     _sequenceLengthMS = 0.0;
     _showStereo = NO;
+    _waveformType = XLWaveformTypeRaw;
+    _doubleHeight = NO;
+    _customLowNote = -1;
+    _customHighNote = -1;
     _waveformColor = nil;
     _needsRedraw = YES;
     _dragging = NO;
@@ -833,6 +837,177 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
     if ([_delegate respondsToSelector:@selector(waveformView:didChangeScrollOffset:)]) {
         [_delegate waveformView:self didChangeScrollOffset:_scrollOffsetX];
+    }
+}
+
+#pragma mark - Context Menu
+
+static const NSInteger kMenuTagRenderSelected = 100;
+static const NSInteger kMenuTagWaveformRaw = 200;
+static const NSInteger kMenuTagWaveformBass = 201;
+static const NSInteger kMenuTagWaveformTreble = 202;
+static const NSInteger kMenuTagWaveformAlto = 203;
+static const NSInteger kMenuTagWaveformCustom = 204;
+static const NSInteger kMenuTagWaveformNonVocals = 205;
+static const NSInteger kMenuTagDoubleHeight = 300;
+
+- (NSMenu *)menuForEvent:(NSEvent *)event {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Waveform"];
+
+    // "Render Selected Region" — only if a loop region is selected
+    if (self.hasLoopRegion) {
+        NSMenuItem *renderItem = [[NSMenuItem alloc] initWithTitle:@"Render Selected Region"
+                                                            action:@selector(contextMenuRenderSelected:)
+                                                     keyEquivalent:@""];
+        renderItem.target = self;
+        renderItem.tag = kMenuTagRenderSelected;
+        [menu addItem:renderItem];
+    }
+
+    // Only show waveform type options when audio data is loaded
+    if (_audioData) {
+        if (menu.numberOfItems > 0) {
+            [menu addItem:[NSMenuItem separatorItem]];
+        }
+
+        // Waveform type radio group
+        struct {
+            NSString *title;
+            NSInteger tag;
+            XLWaveformType type;
+        } waveformTypes[] = {
+            { @"Raw waveform",              kMenuTagWaveformRaw,      XLWaveformTypeRaw },
+            { @"Bass waveform",             kMenuTagWaveformBass,     XLWaveformTypeBass },
+            { @"Treble waveform",           kMenuTagWaveformTreble,   XLWaveformTypeTreble },
+            { @"Alto waveform",             kMenuTagWaveformAlto,     XLWaveformTypeAlto },
+            { @"Custom filtered waveform",  kMenuTagWaveformCustom,   XLWaveformTypeCustom },
+            { @"Non Vocals waveform",       kMenuTagWaveformNonVocals, XLWaveformTypeNonVocals },
+        };
+
+        for (int i = 0; i < 6; i++) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:waveformTypes[i].title
+                                                          action:@selector(contextMenuWaveformType:)
+                                                   keyEquivalent:@""];
+            item.target = self;
+            item.tag = waveformTypes[i].tag;
+            item.state = (_waveformType == waveformTypes[i].type)
+                         ? NSControlStateValueOn : NSControlStateValueOff;
+            [menu addItem:item];
+        }
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Double height toggle
+        NSMenuItem *doubleItem = [[NSMenuItem alloc] initWithTitle:@"Double height waveform"
+                                                            action:@selector(contextMenuDoubleHeight:)
+                                                     keyEquivalent:@""];
+        doubleItem.target = self;
+        doubleItem.tag = kMenuTagDoubleHeight;
+        doubleItem.state = _doubleHeight ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:doubleItem];
+    }
+
+    if (menu.numberOfItems == 0) {
+        return nil;
+    }
+
+    return menu;
+}
+
+- (void)contextMenuRenderSelected:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(waveformViewDidRequestRenderSelectedRegion:)]) {
+        [_delegate waveformViewDidRequestRenderSelectedRegion:self];
+    }
+}
+
+- (void)contextMenuWaveformType:(NSMenuItem *)sender {
+    XLWaveformType newType;
+    switch (sender.tag) {
+        case kMenuTagWaveformRaw:      newType = XLWaveformTypeRaw; break;
+        case kMenuTagWaveformBass:     newType = XLWaveformTypeBass; break;
+        case kMenuTagWaveformTreble:   newType = XLWaveformTypeTreble; break;
+        case kMenuTagWaveformAlto:     newType = XLWaveformTypeAlto; break;
+        case kMenuTagWaveformNonVocals: newType = XLWaveformTypeNonVocals; break;
+        case kMenuTagWaveformCustom: {
+            [self showCustomFilterDialog];
+            return;
+        }
+        default: return;
+    }
+
+    _waveformType = newType;
+    _needsRedraw = YES;
+    [self.layer setNeedsDisplay];
+
+    if ([_delegate respondsToSelector:@selector(waveformView:didChangeWaveformType:lowNote:highNote:)]) {
+        [_delegate waveformView:self didChangeWaveformType:_waveformType lowNote:_customLowNote highNote:_customHighNote];
+    }
+}
+
+- (void)showCustomFilterDialog {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Custom Filtered Waveform";
+    alert.informativeText = @"Enter the MIDI note range (0-127):";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    // Create accessory view with two text fields for low/high note
+    NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 240, 54)];
+
+    NSTextField *lowLabel = [NSTextField labelWithString:@"Low Note:"];
+    lowLabel.frame = NSMakeRect(0, 30, 80, 18);
+    [accessoryView addSubview:lowLabel];
+
+    NSTextField *lowField = [[NSTextField alloc] initWithFrame:NSMakeRect(85, 28, 60, 22)];
+    NSInteger startLow = (_customLowNote >= 0) ? _customLowNote : 0;
+    lowField.stringValue = [NSString stringWithFormat:@"%ld", (long)startLow];
+    [accessoryView addSubview:lowField];
+
+    NSTextField *highLabel = [NSTextField labelWithString:@"High Note:"];
+    highLabel.frame = NSMakeRect(0, 2, 80, 18);
+    [accessoryView addSubview:highLabel];
+
+    NSTextField *highField = [[NSTextField alloc] initWithFrame:NSMakeRect(85, 0, 60, 22)];
+    NSInteger startHigh = (_customHighNote >= 0) ? _customHighNote : 127;
+    highField.stringValue = [NSString stringWithFormat:@"%ld", (long)startHigh];
+    [accessoryView addSubview:highField];
+
+    alert.accessoryView = accessoryView;
+    [alert.window setInitialFirstResponder:lowField];
+
+    NSModalResponse response = [alert runModal];
+    if (response == NSAlertFirstButtonReturn) {
+        NSInteger low = lowField.integerValue;
+        NSInteger high = highField.integerValue;
+
+        // Clamp to valid MIDI range
+        low = MAX(0, MIN(127, low));
+        high = MAX(0, MIN(127, high));
+        if (low > high) {
+            NSInteger temp = low;
+            low = high;
+            high = temp;
+        }
+
+        _customLowNote = low;
+        _customHighNote = high;
+        _waveformType = XLWaveformTypeCustom;
+        _needsRedraw = YES;
+        [self.layer setNeedsDisplay];
+
+        if ([_delegate respondsToSelector:@selector(waveformView:didChangeWaveformType:lowNote:highNote:)]) {
+            [_delegate waveformView:self didChangeWaveformType:_waveformType lowNote:_customLowNote highNote:_customHighNote];
+        }
+    }
+}
+
+- (void)contextMenuDoubleHeight:(NSMenuItem *)sender {
+    _doubleHeight = !_doubleHeight;
+    _needsRedraw = YES;
+    [self.layer setNeedsDisplay];
+
+    if ([_delegate respondsToSelector:@selector(waveformView:didChangeDoubleHeight:)]) {
+        [_delegate waveformView:self didChangeDoubleHeight:_doubleHeight];
     }
 }
 

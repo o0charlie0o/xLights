@@ -2623,6 +2623,18 @@ static XLEngineBridge *_sharedBridge = nil;
     return _effectEngine->addLayer(stdModel);
 }
 
+- (NSInteger)insertLayer:(NSString *)modelName atIndex:(NSInteger)index {
+    if (!modelName) return -1;
+
+    [self ensureEngineInitialized];
+    if (!_effectEngine) {
+        return -1;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    return _effectEngine->insertLayer(stdModel, (int)index);
+}
+
 - (BOOL)removeLayer:(NSString *)modelName layer:(NSInteger)layer {
     if (!modelName) return NO;
 

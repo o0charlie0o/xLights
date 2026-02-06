@@ -47,6 +47,21 @@
 /// Called when a timing mark is deleted (via context menu or key).
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestDeleteTimingMarkId:(NSInteger)markId;
 
+/// Called when the user requests "Zoom to Selection" from the context menu.
+- (void)timelineRulerDidRequestZoomToSelection:(XLTimelineRulerView *)ruler;
+
+/// Called when the user requests "Reset Zoom" from the context menu.
+- (void)timelineRulerDidRequestResetZoom:(XLTimelineRulerView *)ruler;
+
+/// Called when a timing tag is toggled. position is in milliseconds, or -1 to clear.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didToggleTimingTag:(NSInteger)tagIndex atPositionMS:(NSInteger)positionMS;
+
+/// Called when all timing tags are cleared.
+- (void)timelineRulerDidRequestClearAllTimingTags:(XLTimelineRulerView *)ruler;
+
+/// Returns YES if the sequencer currently has a time selection (for enabling "Zoom to Selection").
+- (BOOL)timelineRulerHasTimeSelection:(XLTimelineRulerView *)ruler;
+
 @end
 
 /// CALayer-backed timeline ruler view for the native macOS sequencer.
@@ -118,5 +133,20 @@
 
 /// Reload timing marks from the data source and redraw.
 - (void)reloadTimingMarks;
+
+#pragma mark - Timing Tags (Bookmarks)
+
+/// Timing tag positions in milliseconds (10 slots, indexed 0-9).
+/// A value of -1 means the tag is unset.
+@property (nonatomic, readonly) NSInteger *timingTagPositions;
+
+/// Set a timing tag position. Use positionMS = -1 to clear a tag.
+- (void)setTimingTag:(NSInteger)tagIndex toPositionMS:(NSInteger)positionMS;
+
+/// Clear all timing tags.
+- (void)clearAllTimingTags;
+
+/// Returns the number of active timing tags.
+- (NSInteger)activeTimingTagCount;
 
 @end

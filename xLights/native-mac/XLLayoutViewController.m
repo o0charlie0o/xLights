@@ -546,6 +546,194 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     }
 }
 
+#pragma mark - XLMetalPreviewDelegate (Context Menu)
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestLockModel:(NSString *)modelName lock:(BOOL)lock {
+    BOOL success = [_engineBridge updateModelProperty:modelName key:@"Locked" value:@(lock)];
+    if (success) {
+        [_undoController registerPropertyChange:modelName key:@"Locked" oldValue:@(!lock) newValue:@(lock)];
+        [self selectModel:modelName];
+        [_previewView reloadModels];
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestDeleteModel:(NSString *)modelName {
+    NSDictionary *modelData = [_engineBridge getModelData:modelName];
+    BOOL success = [_engineBridge deleteModel:modelName];
+    if (success) {
+        [_undoController registerModelDeleted:modelName modelData:modelData];
+        [self clearSelection];
+        [_modelTreeController reloadData];
+        [_previewView reloadModels];
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestFlipModel:(NSString *)modelName horizontal:(BOOL)horizontal {
+    NSDictionary *info = [_engineBridge getModelInfo:modelName];
+    if (!info) return;
+
+    NSString *key = horizontal ? @"ScaleX" : @"ScaleY";
+    float currentScale = [info[key] floatValue];
+    if (currentScale == 0) currentScale = 1.0f;
+    float newScale = -currentScale;
+
+    BOOL success = [_engineBridge updateModelProperty:modelName key:key value:@(newScale)];
+    if (success) {
+        [_undoController registerPropertyChange:modelName key:key oldValue:@(currentScale) newValue:@(newScale)];
+        [self selectModel:modelName];
+        [_previewView reloadModels];
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestAlignModels:(NSString *)alignment {
+    NSArray<NSString *> *selectedNames = [_modelTreeController selectedModelNames];
+    if (selectedNames.count < 2) return;
+
+    // Use the first selected model as the reference
+    NSString *refName = selectedNames.firstObject;
+    NSDictionary *refBounds = [_engineBridge getModelBounds:refName];
+    if (!refBounds) return;
+
+    float refMinX = [refBounds[@"minX"] floatValue];
+    float refMaxX = [refBounds[@"maxX"] floatValue];
+    float refMinY = [refBounds[@"minY"] floatValue];
+    float refMaxY = [refBounds[@"maxY"] floatValue];
+
+    for (NSUInteger i = 1; i < selectedNames.count; i++) {
+        NSString *name = selectedNames[i];
+        NSDictionary *bounds = [_engineBridge getModelBounds:name];
+        NSDictionary *info = [_engineBridge getModelInfo:name];
+        if (!bounds || !info) continue;
+
+        float curMinX = [bounds[@"minX"] floatValue];
+        float curMaxX = [bounds[@"maxX"] floatValue];
+        float curMinY = [bounds[@"minY"] floatValue];
+        float curMaxY = [bounds[@"maxY"] floatValue];
+        float curPosX = [info[@"WorldPosX"] floatValue];
+        float curPosY = [info[@"WorldPosY"] floatValue];
+
+        float newPosX = curPosX;
+        float newPosY = curPosY;
+
+        if ([alignment isEqualToString:@"Top"]) {
+            newPosY = curPosY + (refMaxY - curMaxY);
+        } else if ([alignment isEqualToString:@"Bottom"]) {
+            newPosY = curPosY + (refMinY - curMinY);
+        } else if ([alignment isEqualToString:@"Left"]) {
+            newPosX = curPosX + (refMinX - curMinX);
+        } else if ([alignment isEqualToString:@"Right"]) {
+            newPosX = curPosX + (refMaxX - curMaxX);
+        } else if ([alignment isEqualToString:@"Horizontal Center"]) {
+            float refCenterX = (refMinX + refMaxX) / 2.0f;
+            float curCenterX = (curMinX + curMaxX) / 2.0f;
+            newPosX = curPosX + (refCenterX - curCenterX);
+        } else if ([alignment isEqualToString:@"Vertical Center"]) {
+            float refCenterY = (refMinY + refMaxY) / 2.0f;
+            float curCenterY = (curMinY + curMaxY) / 2.0f;
+            newPosY = curPosY + (refCenterY - curCenterY);
+        }
+
+        if (newPosX != curPosX) {
+            [_engineBridge updateModelProperty:name key:@"WorldPosX" value:@(newPosX)];
+        }
+        if (newPosY != curPosY) {
+            [_engineBridge updateModelProperty:name key:@"WorldPosY" value:@(newPosY)];
+        }
+    }
+
+    [_previewView reloadModels];
+    [self selectModel:_previewView.selectedModelName];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestDistributeModels:(NSString *)direction {
+    NSArray<NSString *> *selectedNames = [_modelTreeController selectedModelNames];
+    if (selectedNames.count < 3) return;
+
+    BOOL horizontal = [direction isEqualToString:@"Horizontal"];
+
+    // Collect positions and sort
+    NSMutableArray<NSDictionary *> *models = [NSMutableArray array];
+    for (NSString *name in selectedNames) {
+        NSDictionary *bounds = [_engineBridge getModelBounds:name];
+        NSDictionary *info = [_engineBridge getModelInfo:name];
+        if (!bounds || !info) continue;
+
+        float center;
+        if (horizontal) {
+            center = ([bounds[@"minX"] floatValue] + [bounds[@"maxX"] floatValue]) / 2.0f;
+        } else {
+            center = ([bounds[@"minY"] floatValue] + [bounds[@"maxY"] floatValue]) / 2.0f;
+        }
+        [models addObject:@{@"name": name, @"center": @(center), @"info": info}];
+    }
+
+    [models sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"center"] compare:b[@"center"]];
+    }];
+
+    float firstCenter = [models.firstObject[@"center"] floatValue];
+    float lastCenter = [models.lastObject[@"center"] floatValue];
+    float spacing = (lastCenter - firstCenter) / (float)(models.count - 1);
+
+    for (NSUInteger i = 1; i < models.count - 1; i++) {
+        NSDictionary *model = models[i];
+        NSString *name = model[@"name"];
+        NSDictionary *info = model[@"info"];
+        float currentCenter = [model[@"center"] floatValue];
+        float targetCenter = firstCenter + spacing * (float)i;
+        float delta = targetCenter - currentCenter;
+
+        NSString *key = horizontal ? @"WorldPosX" : @"WorldPosY";
+        float currentPos = [info[key] floatValue];
+        [_engineBridge updateModelProperty:name key:key value:@(currentPos + delta)];
+    }
+
+    [_previewView reloadModels];
+    [self selectModel:_previewView.selectedModelName];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestResizeModels:(NSString *)dimension {
+    NSArray<NSString *> *selectedNames = [_modelTreeController selectedModelNames];
+    if (selectedNames.count < 2) return;
+
+    // Use the first selected model as the reference
+    NSString *refName = selectedNames.firstObject;
+    NSDictionary *refBounds = [_engineBridge getModelBounds:refName];
+    if (!refBounds) return;
+
+    float refWidth = [refBounds[@"maxX"] floatValue] - [refBounds[@"minX"] floatValue];
+    float refHeight = [refBounds[@"maxY"] floatValue] - [refBounds[@"minY"] floatValue];
+
+    BOOL matchWidth = [dimension isEqualToString:@"Match Width"] || [dimension isEqualToString:@"Match Size"];
+    BOOL matchHeight = [dimension isEqualToString:@"Match Height"] || [dimension isEqualToString:@"Match Size"];
+
+    for (NSUInteger i = 1; i < selectedNames.count; i++) {
+        NSString *name = selectedNames[i];
+        NSDictionary *bounds = [_engineBridge getModelBounds:name];
+        NSDictionary *info = [_engineBridge getModelInfo:name];
+        if (!bounds || !info) continue;
+
+        float curWidth = [bounds[@"maxX"] floatValue] - [bounds[@"minX"] floatValue];
+        float curHeight = [bounds[@"maxY"] floatValue] - [bounds[@"minY"] floatValue];
+
+        if (matchWidth && curWidth > 0.01f) {
+            float curScaleX = [info[@"ScaleX"] floatValue];
+            if (curScaleX == 0) curScaleX = 1.0f;
+            float newScaleX = curScaleX * (refWidth / curWidth);
+            [_engineBridge updateModelProperty:name key:@"ScaleX" value:@(newScaleX)];
+        }
+        if (matchHeight && curHeight > 0.01f) {
+            float curScaleY = [info[@"ScaleY"] floatValue];
+            if (curScaleY == 0) curScaleY = 1.0f;
+            float newScaleY = curScaleY * (refHeight / curHeight);
+            [_engineBridge updateModelProperty:name key:@"ScaleY" value:@(newScaleY)];
+        }
+    }
+
+    [_previewView reloadModels];
+    [self selectModel:_previewView.selectedModelName];
+}
+
 #pragma mark - Undo/Redo Actions
 
 - (void)undo {

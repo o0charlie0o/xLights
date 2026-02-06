@@ -49,6 +49,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 @interface XLMetalPreviewView () {
     CVDisplayLinkRef _displayLink;
     int _renderLogCount;
+    BOOL _rightMouseDidDrag;
 }
 
 @property (nonatomic, strong) id<MTLDevice> device;
@@ -1130,7 +1131,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)rightMouseDown:(NSEvent *)event {
     _lastDragPoint = [self convertPoint:event.locationInWindow fromView:nil];
-    _isRightDragging = YES;
+    _isRightDragging = NO;
+    _rightMouseDidDrag = NO;
 }
 
 - (void)rightMouseDragged:(NSEvent *)event {
@@ -1138,6 +1140,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     float dx = (float)(current.x - _lastDragPoint.x);
     float dy = (float)(current.y - _lastDragPoint.y);
     _lastDragPoint = current;
+
+    _isRightDragging = YES;
+    _rightMouseDidDrag = YES;
 
     // Right drag = pan
     [_cameraController panByDeltaX:dx deltaY:dy sensitivity:0.002f];
@@ -1150,6 +1155,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)rightMouseUp:(NSEvent *)event {
     _isRightDragging = NO;
+
+    if (!_rightMouseDidDrag) {
+        [self showContextMenuForEvent:event];
+    }
+    _rightMouseDidDrag = NO;
 }
 
 - (void)mouseExited:(NSEvent *)event {
@@ -1529,6 +1539,414 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         [[NSCursor resizeUpDownCursor] set];
     } else {
         [[NSCursor arrowCursor] set];
+    }
+}
+
+#pragma mark - Context Menu
+
+- (NSString *)hitTestModelAtEvent:(NSEvent *)event {
+    NSPoint localPoint = [self convertPoint:event.locationInWindow fromView:nil];
+
+    CGSize drawableSize = _mlayer.drawableSize;
+    CGFloat scale = self.window.backingScaleFactor ?: 1.0;
+    float ndcX = (float)(localPoint.x * scale / drawableSize.width) * 2.0f - 1.0f;
+    float ndcY = (float)(localPoint.y * scale / drawableSize.height) * 2.0f - 1.0f;
+
+    float aspect = (float)drawableSize.width / (float)drawableSize.height;
+    simd_float4x4 viewMatrix = _cameraController.viewMatrix;
+    simd_float4x4 projMatrix = [_cameraController projectionMatrixForAspect:aspect];
+    simd_float4x4 viewProj = simd_mul(projMatrix, viewMatrix);
+    simd_float4x4 invViewProj = simd_inverse(viewProj);
+
+    simd_float4 nearPoint = simd_mul(invViewProj, (simd_float4){ndcX, ndcY, 0.0f, 1.0f});
+    simd_float4 farPoint = simd_mul(invViewProj, (simd_float4){ndcX, ndcY, 1.0f, 1.0f});
+
+    simd_float3 rayOrigin = (simd_float3){nearPoint.x, nearPoint.y, nearPoint.z} / nearPoint.w;
+    simd_float3 rayEnd = (simd_float3){farPoint.x, farPoint.y, farPoint.z} / farPoint.w;
+    simd_float3 rayDir = simd_normalize(rayEnd - rayOrigin);
+
+    NSString *closestModel = nil;
+    float closestDist = FLT_MAX;
+
+    for (NSDictionary *modelData in _modelDataCache) {
+        NSDictionary *bounds = modelData[@"bounds"];
+        if (!bounds || bounds.count == 0) continue;
+
+        float minX = [bounds[@"minX"] floatValue];
+        float maxX = [bounds[@"maxX"] floatValue];
+        float minY = [bounds[@"minY"] floatValue];
+        float maxY = [bounds[@"maxY"] floatValue];
+        float minZ = [bounds[@"minZ"] floatValue];
+        float maxZ = [bounds[@"maxZ"] floatValue];
+
+        // Expand bounding box slightly for easier clicking
+        float pad = fmaxf(fmaxf(maxX - minX, maxY - minY), maxZ - minZ) * 0.05f;
+        pad = fmaxf(pad, 5.0f);
+        minX -= pad; maxX += pad;
+        minY -= pad; maxY += pad;
+        minZ -= pad; maxZ += pad;
+
+        // Ray-AABB intersection test
+        float tmin = -FLT_MAX;
+        float tmax = FLT_MAX;
+
+        for (int axis = 0; axis < 3; axis++) {
+            float orig, dir, bmin, bmax;
+            switch (axis) {
+                case 0: orig = rayOrigin.x; dir = rayDir.x; bmin = minX; bmax = maxX; break;
+                case 1: orig = rayOrigin.y; dir = rayDir.y; bmin = minY; bmax = maxY; break;
+                case 2: orig = rayOrigin.z; dir = rayDir.z; bmin = minZ; bmax = maxZ; break;
+                default: continue;
+            }
+
+            if (fabsf(dir) < 1e-8f) {
+                if (orig < bmin || orig > bmax) { tmin = FLT_MAX; break; }
+            } else {
+                float t1 = (bmin - orig) / dir;
+                float t2 = (bmax - orig) / dir;
+                if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+                tmin = fmaxf(tmin, t1);
+                tmax = fminf(tmax, t2);
+                if (tmin > tmax) { tmin = FLT_MAX; break; }
+            }
+        }
+
+        if (tmin < FLT_MAX && tmin < closestDist && tmax >= 0.0f) {
+            closestDist = tmin;
+            closestModel = modelData[@"name"];
+        }
+    }
+
+    return closestModel;
+}
+
+- (void)showContextMenuForEvent:(NSEvent *)event {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Preview"];
+
+    // Determine what model is under the cursor
+    NSString *modelUnderCursor = [self hitTestModelAtEvent:event];
+
+    // If there is a model under cursor, select it first
+    if (modelUnderCursor) {
+        [self selectModel:modelUnderCursor];
+    }
+
+    BOOL hasSelectedModel = (_selectedModelName != nil);
+
+    // Model operations (when a model is selected)
+    if (hasSelectedModel) {
+        NSMenuItem *selectItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Select \"%@\"", _selectedModelName]
+                                                            action:nil
+                                                     keyEquivalent:@""];
+        selectItem.enabled = NO;
+        [menu addItem:selectItem];
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Lock/Unlock
+        NSDictionary *info = [_engineBridge getModelInfo:_selectedModelName];
+        BOOL isLocked = [info[@"Locked"] boolValue];
+
+        if (isLocked) {
+            NSMenuItem *unlockItem = [[NSMenuItem alloc] initWithTitle:@"Unlock Model"
+                                                                action:@selector(contextMenuUnlockModel:)
+                                                         keyEquivalent:@""];
+            unlockItem.target = self;
+            unlockItem.representedObject = _selectedModelName;
+            [menu addItem:unlockItem];
+        } else {
+            NSMenuItem *lockItem = [[NSMenuItem alloc] initWithTitle:@"Lock Model"
+                                                              action:@selector(contextMenuLockModel:)
+                                                       keyEquivalent:@""];
+            lockItem.target = self;
+            lockItem.representedObject = _selectedModelName;
+            [menu addItem:lockItem];
+        }
+
+        // Delete
+        NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete Model"
+                                                            action:@selector(contextMenuDeleteModel:)
+                                                     keyEquivalent:@""];
+        deleteItem.target = self;
+        deleteItem.representedObject = _selectedModelName;
+        deleteItem.enabled = !isLocked;
+        [menu addItem:deleteItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Flip
+        NSMenuItem *flipHItem = [[NSMenuItem alloc] initWithTitle:@"Flip Horizontal"
+                                                           action:@selector(contextMenuFlipHorizontal:)
+                                                    keyEquivalent:@""];
+        flipHItem.target = self;
+        flipHItem.representedObject = _selectedModelName;
+        flipHItem.enabled = !isLocked;
+        [menu addItem:flipHItem];
+
+        NSMenuItem *flipVItem = [[NSMenuItem alloc] initWithTitle:@"Flip Vertical"
+                                                           action:@selector(contextMenuFlipVertical:)
+                                                    keyEquivalent:@""];
+        flipVItem.target = self;
+        flipVItem.representedObject = _selectedModelName;
+        flipVItem.enabled = !isLocked;
+        [menu addItem:flipVItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Multi-model operations (Align, Distribute, Resize)
+        // These are shown when a model is selected; the delegate decides
+        // if there's actually a multi-selection from the model tree
+        NSMenu *alignMenu = [[NSMenu alloc] initWithTitle:@"Align"];
+        for (NSString *option in @[@"Top", @"Bottom", @"Left", @"Right", @"Horizontal Center", @"Vertical Center"]) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                         action:@selector(contextMenuAlignModels:)
+                                                  keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = option;
+            [alignMenu addItem:item];
+        }
+        NSMenuItem *alignItem = [[NSMenuItem alloc] initWithTitle:@"Align" action:nil keyEquivalent:@""];
+        [menu setSubmenu:alignMenu forItem:alignItem];
+        [menu addItem:alignItem];
+
+        NSMenu *distributeMenu = [[NSMenu alloc] initWithTitle:@"Distribute"];
+        for (NSString *option in @[@"Horizontal", @"Vertical"]) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                         action:@selector(contextMenuDistributeModels:)
+                                                  keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = option;
+            [distributeMenu addItem:item];
+        }
+        NSMenuItem *distributeItem = [[NSMenuItem alloc] initWithTitle:@"Distribute" action:nil keyEquivalent:@""];
+        [menu setSubmenu:distributeMenu forItem:distributeItem];
+        [menu addItem:distributeItem];
+
+        NSMenu *resizeMenu = [[NSMenu alloc] initWithTitle:@"Resize"];
+        for (NSString *option in @[@"Match Width", @"Match Height", @"Match Size"]) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                         action:@selector(contextMenuResizeModels:)
+                                                  keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = option;
+            [resizeMenu addItem:item];
+        }
+        NSMenuItem *resizeItem = [[NSMenuItem alloc] initWithTitle:@"Resize" action:nil keyEquivalent:@""];
+        [menu setSubmenu:resizeMenu forItem:resizeItem];
+        [menu addItem:resizeItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+    }
+
+    // View operations
+    NSMenuItem *resetItem = [[NSMenuItem alloc] initWithTitle:@"Reset View"
+                                                      action:@selector(contextMenuResetView:)
+                                               keyEquivalent:@""];
+    resetItem.target = self;
+    [menu addItem:resetItem];
+
+    NSMenuItem *saveImageItem = [[NSMenuItem alloc] initWithTitle:@"Save Layout Image"
+                                                          action:@selector(contextMenuSaveLayoutImage:)
+                                                   keyEquivalent:@""];
+    saveImageItem.target = self;
+    [menu addItem:saveImageItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // Viewpoint management
+    NSMenuItem *setDefaultVP = [[NSMenuItem alloc] initWithTitle:@"Set Current ViewPoint as Default"
+                                                          action:@selector(contextMenuSetDefaultViewpoint:)
+                                                   keyEquivalent:@""];
+    setDefaultVP.target = self;
+    [menu addItem:setDefaultVP];
+
+    NSMenuItem *restoreDefaultVP = [[NSMenuItem alloc] initWithTitle:@"Restore Default ViewPoint"
+                                                              action:@selector(contextMenuRestoreDefaultViewpoint:)
+                                                       keyEquivalent:@""];
+    restoreDefaultVP.target = self;
+    [menu addItem:restoreDefaultVP];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *saveVP = [[NSMenuItem alloc] initWithTitle:@"Save Current ViewPoint"
+                                                    action:@selector(contextMenuSaveViewpoint:)
+                                             keyEquivalent:@""];
+    saveVP.target = self;
+    [menu addItem:saveVP];
+
+    // Load ViewPoint submenu
+    NSArray<NSString *> *viewpointNames = [_cameraController savedViewpointNames];
+    if (viewpointNames.count > 0) {
+        NSMenu *loadVPMenu = [[NSMenu alloc] initWithTitle:@"Load ViewPoint"];
+        for (NSString *name in viewpointNames) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
+                                                         action:@selector(contextMenuLoadViewpoint:)
+                                                  keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = name;
+            [loadVPMenu addItem:item];
+        }
+        NSMenuItem *loadVPItem = [[NSMenuItem alloc] initWithTitle:@"Load ViewPoint" action:nil keyEquivalent:@""];
+        [menu setSubmenu:loadVPMenu forItem:loadVPItem];
+        [menu addItem:loadVPItem];
+
+        // Delete ViewPoint submenu
+        NSMenu *deleteVPMenu = [[NSMenu alloc] initWithTitle:@"Delete ViewPoint"];
+        for (NSString *name in viewpointNames) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:name
+                                                         action:@selector(contextMenuDeleteViewpoint:)
+                                                  keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = name;
+            [deleteVPMenu addItem:item];
+        }
+        NSMenuItem *deleteVPItem = [[NSMenuItem alloc] initWithTitle:@"Delete ViewPoint" action:nil keyEquivalent:@""];
+        [menu setSubmenu:deleteVPMenu forItem:deleteVPItem];
+        [menu addItem:deleteVPItem];
+    }
+
+    [NSMenu popUpContextMenu:menu withEvent:event forView:self];
+}
+
+#pragma mark - Context Menu Actions
+
+- (void)contextMenuLockModel:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestLockModel:lock:)]) {
+        [_delegate previewView:self didRequestLockModel:modelName lock:YES];
+    }
+}
+
+- (void)contextMenuUnlockModel:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestLockModel:lock:)]) {
+        [_delegate previewView:self didRequestLockModel:modelName lock:NO];
+    }
+}
+
+- (void)contextMenuDeleteModel:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Delete Model \"%@\"?", modelName];
+    alert.informativeText = @"This action cannot be undone.";
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.buttons.firstObject.hasDestructiveAction = YES;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        if ([_delegate respondsToSelector:@selector(previewView:didRequestDeleteModel:)]) {
+            [_delegate previewView:self didRequestDeleteModel:modelName];
+        }
+    }
+}
+
+- (void)contextMenuFlipHorizontal:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestFlipModel:horizontal:)]) {
+        [_delegate previewView:self didRequestFlipModel:modelName horizontal:YES];
+    }
+}
+
+- (void)contextMenuFlipVertical:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestFlipModel:horizontal:)]) {
+        [_delegate previewView:self didRequestFlipModel:modelName horizontal:NO];
+    }
+}
+
+- (void)contextMenuAlignModels:(NSMenuItem *)sender {
+    NSString *alignment = sender.representedObject;
+    if (!alignment) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestAlignModels:)]) {
+        [_delegate previewView:self didRequestAlignModels:alignment];
+    }
+}
+
+- (void)contextMenuDistributeModels:(NSMenuItem *)sender {
+    NSString *direction = sender.representedObject;
+    if (!direction) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestDistributeModels:)]) {
+        [_delegate previewView:self didRequestDistributeModels:direction];
+    }
+}
+
+- (void)contextMenuResizeModels:(NSMenuItem *)sender {
+    NSString *dimension = sender.representedObject;
+    if (!dimension) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestResizeModels:)]) {
+        [_delegate previewView:self didRequestResizeModels:dimension];
+    }
+}
+
+- (void)contextMenuResetView:(NSMenuItem *)sender {
+    [self resetCamera];
+    [self frameAllModels];
+}
+
+- (void)contextMenuSaveLayoutImage:(NSMenuItem *)sender {
+    // Placeholder: save the current Metal view contents as an image
+    NSLog(@"XLMetalPreviewView: Save Layout Image (not yet implemented)");
+
+    NSBeep();
+}
+
+- (void)contextMenuSetDefaultViewpoint:(NSMenuItem *)sender {
+    [_cameraController saveAsDefaultViewpoint];
+}
+
+- (void)contextMenuRestoreDefaultViewpoint:(NSMenuItem *)sender {
+    if ([_cameraController restoreDefaultViewpoint]) {
+        _contentDirty = YES;
+    }
+}
+
+- (void)contextMenuSaveViewpoint:(NSMenuItem *)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Save ViewPoint";
+    alert.informativeText = @"Enter a name for this viewpoint:";
+    [alert addButtonWithTitle:@"Save"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
+    input.placeholderString = @"ViewPoint Name";
+    alert.accessoryView = input;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *name = input.stringValue;
+        if (name.length > 0) {
+            [_cameraController saveViewpointWithName:name];
+        }
+    }
+}
+
+- (void)contextMenuLoadViewpoint:(NSMenuItem *)sender {
+    NSString *name = sender.representedObject;
+    if (!name) return;
+    if ([_cameraController loadViewpointWithName:name]) {
+        _contentDirty = YES;
+    }
+}
+
+- (void)contextMenuDeleteViewpoint:(NSMenuItem *)sender {
+    NSString *name = sender.representedObject;
+    if (!name) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Delete ViewPoint \"%@\"?", name];
+    alert.informativeText = @"This action cannot be undone.";
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.buttons.firstObject.hasDestructiveAction = YES;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        [_cameraController deleteViewpointWithName:name];
     }
 }
 

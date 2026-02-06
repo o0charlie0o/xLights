@@ -472,6 +472,9 @@
 /// Add a new effect layer to a model
 - (NSInteger)addLayer:(NSString *)modelName;
 
+/// Insert a new effect layer at a specific index
+- (NSInteger)insertLayer:(NSString *)modelName atIndex:(NSInteger)index;
+
 /// Remove an effect layer from a model
 - (BOOL)removeLayer:(NSString *)modelName layer:(NSInteger)layer;
 

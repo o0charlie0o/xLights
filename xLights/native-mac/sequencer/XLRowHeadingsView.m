@@ -551,44 +551,534 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 - (NSMenu *)defaultContextMenuForRow:(NSInteger)row {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Row Actions"];
 
-    NSMenuItem *addLayer = [[NSMenuItem alloc] initWithTitle:@"Add Layer"
-                                                     action:@selector(contextAddLayer:)
-                                              keyEquivalent:@""];
-    addLayer.target = self;
-    addLayer.tag = row;
-    [menu addItem:addLayer];
+    // Determine element type for this row
+    XLElementType elementType = XLElementTypeModel;
 
-    NSMenuItem *deleteElement = [[NSMenuItem alloc] initWithTitle:@"Delete Element"
-                                                          action:@selector(contextDeleteElement:)
-                                                   keyEquivalent:@""];
-    deleteElement.target = self;
-    deleteElement.tag = row;
-    [menu addItem:deleteElement];
+    if (_dataSource) {
+        elementType = [_dataSource rowHeadings:self elementTypeForRow:row];
+    }
 
-    [menu addItem:[NSMenuItem separatorItem]];
-
-    NSMenuItem *rename = [[NSMenuItem alloc] initWithTitle:@"Rename..."
-                                                   action:@selector(contextRename:)
-                                            keyEquivalent:@""];
-    rename.target = self;
-    rename.tag = row;
-    [menu addItem:rename];
+    if (elementType == XLElementTypeTiming) {
+        [self buildTimingContextMenu:menu forRow:row];
+    } else {
+        [self buildModelContextMenu:menu forRow:row elementType:elementType];
+    }
 
     return menu;
 }
 
+- (void)buildModelContextMenu:(NSMenu *)menu forRow:(NSInteger)row elementType:(XLElementType)elementType {
+    // --- Layer Management Section ---
+    if (elementType == XLElementTypeModel ||
+        elementType == XLElementTypeSubmodel ||
+        elementType == XLElementTypeStrand ||
+        elementType == XLElementTypeModelGroup) {
+
+        NSMenuItem *insertAbove = [[NSMenuItem alloc] initWithTitle:@"Insert Layer Above"
+                                                             action:@selector(contextInsertLayerAbove:)
+                                                      keyEquivalent:@""];
+        insertAbove.target = self;
+        insertAbove.tag = row;
+        [menu addItem:insertAbove];
+
+        NSMenuItem *insertBelow = [[NSMenuItem alloc] initWithTitle:@"Insert Layer Below"
+                                                             action:@selector(contextInsertLayerBelow:)
+                                                      keyEquivalent:@""];
+        insertBelow.target = self;
+        insertBelow.tag = row;
+        [menu addItem:insertBelow];
+
+        NSMenuItem *insertMultiple = [[NSMenuItem alloc] initWithTitle:@"Insert Multiple Layers Below"
+                                                               action:@selector(contextInsertMultipleLayersBelow:)
+                                                        keyEquivalent:@""];
+        insertMultiple.target = self;
+        insertMultiple.tag = row;
+        [menu addItem:insertMultiple];
+
+        NSMenuItem *deleteLayer = [[NSMenuItem alloc] initWithTitle:@"Delete Layer"
+                                                             action:@selector(contextDeleteLayer:)
+                                                      keyEquivalent:@""];
+        deleteLayer.target = self;
+        deleteLayer.tag = row;
+        [menu addItem:deleteLayer];
+
+        NSMenuItem *deleteMultiple = [[NSMenuItem alloc] initWithTitle:@"Delete Multiple Layers"
+                                                               action:@selector(contextDeleteMultipleLayers:)
+                                                        keyEquivalent:@""];
+        deleteMultiple.target = self;
+        deleteMultiple.tag = row;
+        [menu addItem:deleteMultiple];
+
+        NSMenuItem *deleteUnused = [[NSMenuItem alloc] initWithTitle:@"Delete Unused Layers"
+                                                              action:@selector(contextDeleteUnusedLayers:)
+                                                       keyEquivalent:@""];
+        deleteUnused.target = self;
+        deleteUnused.tag = row;
+        [menu addItem:deleteUnused];
+
+        NSMenuItem *editName = [[NSMenuItem alloc] initWithTitle:@"Edit Layer Name"
+                                                          action:@selector(contextEditLayerName:)
+                                                   keyEquivalent:@""];
+        editName.target = self;
+        editName.tag = row;
+        [menu addItem:editName];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+    }
+
+    // --- Model Structure Section ---
+    NSMenuItem *toggleStrands = [[NSMenuItem alloc] initWithTitle:@"Toggle Strands"
+                                                          action:@selector(contextToggleStrands:)
+                                                   keyEquivalent:@""];
+    toggleStrands.target = self;
+    toggleStrands.tag = row;
+    [menu addItem:toggleStrands];
+
+    NSMenuItem *showAllEffects = [[NSMenuItem alloc] initWithTitle:@"Show All Effects"
+                                                           action:@selector(contextShowAllEffects:)
+                                                    keyEquivalent:@""];
+    showAllEffects.target = self;
+    showAllEffects.tag = row;
+    [menu addItem:showAllEffects];
+
+    // Collapse All Models
+    NSMenuItem *collapseModels = [[NSMenuItem alloc] initWithTitle:@"Collapse All Models"
+                                                           action:@selector(contextCollapseAllModels:)
+                                                    keyEquivalent:@""];
+    collapseModels.target = self;
+    collapseModels.tag = row;
+    [menu addItem:collapseModels];
+
+    // Collapse All Layers
+    NSMenuItem *collapseLayers = [[NSMenuItem alloc] initWithTitle:@"Collapse All Layers"
+                                                           action:@selector(contextCollapseAllLayers:)
+                                                    keyEquivalent:@""];
+    collapseLayers.target = self;
+    collapseLayers.tag = row;
+    [menu addItem:collapseLayers];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Render Enable/Disable ---
+    BOOL isRenderDisabled = NO;
+    if ([_delegate respondsToSelector:@selector(rowHeadingsIsRenderDisabledAtRow:row:)]) {
+        isRenderDisabled = [_delegate rowHeadingsIsRenderDisabledAtRow:self row:row];
+    }
+    NSString *renderTitle = isRenderDisabled ? @"Enable Render" : @"Disable Render";
+    NSMenuItem *toggleRender = [[NSMenuItem alloc] initWithTitle:renderTitle
+                                                         action:@selector(contextToggleRenderDisabled:)
+                                                  keyEquivalent:@""];
+    toggleRender.target = self;
+    toggleRender.tag = row;
+    [menu addItem:toggleRender];
+
+    BOOL hasAnyDisabled = NO;
+    if ([_delegate respondsToSelector:@selector(rowHeadingsHasAnyRenderDisabled:)]) {
+        hasAnyDisabled = [_delegate rowHeadingsHasAnyRenderDisabled:self];
+    }
+    if (hasAnyDisabled) {
+        NSMenuItem *enableAll = [[NSMenuItem alloc] initWithTitle:@"Enable Render On All Models"
+                                                          action:@selector(contextEnableRenderAll:)
+                                                   keyEquivalent:@""];
+        enableAll.target = self;
+        enableAll.tag = row;
+        [menu addItem:enableAll];
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Playback / Export ---
+    NSMenuItem *playModel = [[NSMenuItem alloc] initWithTitle:@"Play Model"
+                                                      action:@selector(contextPlayModel:)
+                                               keyEquivalent:@""];
+    playModel.target = self;
+    playModel.tag = row;
+    [menu addItem:playModel];
+
+    NSMenuItem *exportModel = [[NSMenuItem alloc] initWithTitle:@"Export Model"
+                                                        action:@selector(contextExportModel:)
+                                                 keyEquivalent:@""];
+    exportModel.target = self;
+    exportModel.tag = row;
+    [menu addItem:exportModel];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Effect Operations ---
+    NSMenuItem *selectAll = [[NSMenuItem alloc] initWithTitle:@"Select All Model Effects"
+                                                      action:@selector(contextSelectAllModelEffects:)
+                                               keyEquivalent:@""];
+    selectAll.target = self;
+    selectAll.tag = row;
+    [menu addItem:selectAll];
+
+    NSMenuItem *copyEffects = [[NSMenuItem alloc] initWithTitle:@"Copy Model Effects"
+                                                        action:@selector(contextCopyModelEffects:)
+                                                 keyEquivalent:@""];
+    copyEffects.target = self;
+    copyEffects.tag = row;
+    [menu addItem:copyEffects];
+
+    NSMenuItem *cutEffects = [[NSMenuItem alloc] initWithTitle:@"Cut Model Effects"
+                                                       action:@selector(contextCutModelEffects:)
+                                                keyEquivalent:@""];
+    cutEffects.target = self;
+    cutEffects.tag = row;
+    [menu addItem:cutEffects];
+
+    NSMenuItem *pasteEffects = [[NSMenuItem alloc] initWithTitle:@"Paste Model Effects"
+                                                         action:@selector(contextPasteModelEffects:)
+                                                  keyEquivalent:@""];
+    pasteEffects.target = self;
+    pasteEffects.tag = row;
+    [menu addItem:pasteEffects];
+
+    NSMenuItem *deleteEffects = [[NSMenuItem alloc] initWithTitle:@"Delete Model Effects"
+                                                          action:@selector(contextDeleteModelEffects:)
+                                                   keyEquivalent:@""];
+    deleteEffects.target = self;
+    deleteEffects.tag = row;
+    [menu addItem:deleteEffects];
+
+    NSMenuItem *copyInclSubs = [[NSMenuItem alloc] initWithTitle:@"Copy Effects incl SubModels"
+                                                         action:@selector(contextCopyModelEffectsInclSubmodels:)
+                                                  keyEquivalent:@""];
+    copyInclSubs.target = self;
+    copyInclSubs.tag = row;
+    [menu addItem:copyInclSubs];
+}
+
+- (void)buildTimingContextMenu:(NSMenu *)menu forRow:(NSInteger)row {
+    // --- Timing Track Management ---
+    NSMenuItem *addTiming = [[NSMenuItem alloc] initWithTitle:@"Add Timing Track"
+                                                      action:@selector(contextAddTimingTrack:)
+                                               keyEquivalent:@""];
+    addTiming.target = self;
+    addTiming.tag = row;
+    [menu addItem:addTiming];
+
+    NSMenuItem *renameTiming = [[NSMenuItem alloc] initWithTitle:@"Rename Timing Track"
+                                                         action:@selector(contextRenameTimingTrack:)
+                                                  keyEquivalent:@""];
+    renameTiming.target = self;
+    renameTiming.tag = row;
+    [menu addItem:renameTiming];
+
+    NSMenuItem *deleteTiming = [[NSMenuItem alloc] initWithTitle:@"Delete Timing Track"
+                                                         action:@selector(contextDeleteTimingTrack:)
+                                                  keyEquivalent:@""];
+    deleteTiming.target = self;
+    deleteTiming.tag = row;
+    [menu addItem:deleteTiming];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Import / Export ---
+    NSMenuItem *importTiming = [[NSMenuItem alloc] initWithTitle:@"Import Timing Track"
+                                                         action:@selector(contextImportTimingTrack:)
+                                                  keyEquivalent:@""];
+    importTiming.target = self;
+    importTiming.tag = row;
+    [menu addItem:importTiming];
+
+    NSMenuItem *exportTiming = [[NSMenuItem alloc] initWithTitle:@"Export Timing Track"
+                                                         action:@selector(contextExportTimingTrack:)
+                                                  keyEquivalent:@""];
+    exportTiming.target = self;
+    exportTiming.tag = row;
+    [menu addItem:exportTiming];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Visibility ---
+    NSMenuItem *hideAll = [[NSMenuItem alloc] initWithTitle:@"Hide All Timing Tracks"
+                                                    action:@selector(contextHideAllTimingTracks:)
+                                             keyEquivalent:@""];
+    hideAll.target = self;
+    hideAll.tag = row;
+    [menu addItem:hideAll];
+
+    NSMenuItem *showAll = [[NSMenuItem alloc] initWithTitle:@"Show All Timing Tracks"
+                                                    action:@selector(contextShowAllTimingTracks:)
+                                             keyEquivalent:@""];
+    showAll.target = self;
+    showAll.tag = row;
+    [menu addItem:showAll];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Lyrics / Notes / Breakdown ---
+    NSMenuItem *importNotes = [[NSMenuItem alloc] initWithTitle:@"Import Notes"
+                                                        action:@selector(contextImportNotes:)
+                                                 keyEquivalent:@""];
+    importNotes.target = self;
+    importNotes.tag = row;
+    [menu addItem:importNotes];
+
+    NSMenuItem *importLyrics = [[NSMenuItem alloc] initWithTitle:@"Import Lyrics"
+                                                         action:@selector(contextImportLyrics:)
+                                                  keyEquivalent:@""];
+    importLyrics.target = self;
+    importLyrics.tag = row;
+    [menu addItem:importLyrics];
+
+    NSMenuItem *breakdownPhrases = [[NSMenuItem alloc] initWithTitle:@"Breakdown Phrases"
+                                                             action:@selector(contextBreakdownPhrases:)
+                                                      keyEquivalent:@""];
+    breakdownPhrases.target = self;
+    breakdownPhrases.tag = row;
+    [menu addItem:breakdownPhrases];
+
+    NSMenuItem *breakdownWords = [[NSMenuItem alloc] initWithTitle:@"Breakdown Words"
+                                                           action:@selector(contextBreakdownWords:)
+                                                    keyEquivalent:@""];
+    breakdownWords.target = self;
+    breakdownWords.tag = row;
+    [menu addItem:breakdownWords];
+}
+
 #pragma mark - Context Menu Actions
 
-- (void)contextAddLayer:(NSMenuItem *)sender {
-    NSLog(@"XLRowHeadingsView: Add Layer for row %ld", (long)sender.tag);
+- (void)contextInsertLayerAbove:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:insertLayerAboveRow:)]) {
+        [_delegate rowHeadings:self insertLayerAboveRow:row];
+    }
 }
 
-- (void)contextDeleteElement:(NSMenuItem *)sender {
-    NSLog(@"XLRowHeadingsView: Delete Element for row %ld", (long)sender.tag);
+- (void)contextInsertLayerBelow:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:insertLayerBelowRow:)]) {
+        [_delegate rowHeadings:self insertLayerBelowRow:row];
+    }
 }
 
-- (void)contextRename:(NSMenuItem *)sender {
-    NSLog(@"XLRowHeadingsView: Rename for row %ld", (long)sender.tag);
+- (void)contextInsertMultipleLayersBelow:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+
+    // Show count dialog using NSAlert with an accessory text field
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Insert Multiple Layers";
+    alert.informativeText = @"Enter number of layers to insert:";
+    [alert addButtonWithTitle:@"Insert"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 100, 24)];
+    input.stringValue = @"2";
+    alert.accessoryView = input;
+
+    [alert.window makeFirstResponder:input];
+
+    NSModalResponse response = [alert runModal];
+    if (response == NSAlertFirstButtonReturn) {
+        NSInteger count = input.integerValue;
+        if (count > 0 && count <= 100) {
+            if ([_delegate respondsToSelector:@selector(rowHeadings:insertMultipleLayersBelowRow:count:)]) {
+                [_delegate rowHeadings:self insertMultipleLayersBelowRow:row count:count];
+            }
+        }
+    }
+}
+
+- (void)contextDeleteLayer:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:deleteLayerAtRow:)]) {
+        [_delegate rowHeadings:self deleteLayerAtRow:row];
+    }
+}
+
+- (void)contextDeleteMultipleLayers:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:deleteMultipleLayersAtRow:)]) {
+        [_delegate rowHeadings:self deleteMultipleLayersAtRow:row];
+    }
+}
+
+- (void)contextDeleteUnusedLayers:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:deleteUnusedLayersAtRow:)]) {
+        [_delegate rowHeadings:self deleteUnusedLayersAtRow:row];
+    }
+}
+
+- (void)contextEditLayerName:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:editLayerNameAtRow:)]) {
+        [_delegate rowHeadings:self editLayerNameAtRow:row];
+    }
+}
+
+- (void)contextCollapseAllModels:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsCollapseAllModels:)]) {
+        [_delegate rowHeadingsCollapseAllModels:self];
+    }
+}
+
+- (void)contextCollapseAllLayers:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsCollapseAllLayers:)]) {
+        [_delegate rowHeadingsCollapseAllLayers:self];
+    }
+}
+
+#pragma mark - Model Context Menu Actions
+
+- (void)contextToggleStrands:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:toggleStrandsAtRow:)]) {
+        [_delegate rowHeadings:self toggleStrandsAtRow:row];
+    }
+}
+
+- (void)contextShowAllEffects:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:showAllEffectsAtRow:)]) {
+        [_delegate rowHeadings:self showAllEffectsAtRow:row];
+    }
+}
+
+- (void)contextToggleRenderDisabled:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:toggleRenderDisabledAtRow:)]) {
+        [_delegate rowHeadings:self toggleRenderDisabledAtRow:row];
+    }
+}
+
+- (void)contextEnableRenderAll:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsEnableRenderOnAllModels:)]) {
+        [_delegate rowHeadingsEnableRenderOnAllModels:self];
+    }
+}
+
+- (void)contextPlayModel:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:playModelAtRow:)]) {
+        [_delegate rowHeadings:self playModelAtRow:row];
+    }
+}
+
+- (void)contextExportModel:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:exportModelAtRow:)]) {
+        [_delegate rowHeadings:self exportModelAtRow:row];
+    }
+}
+
+- (void)contextSelectAllModelEffects:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:selectAllModelEffectsAtRow:)]) {
+        [_delegate rowHeadings:self selectAllModelEffectsAtRow:row];
+    }
+}
+
+- (void)contextCopyModelEffects:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:copyModelEffectsAtRow:)]) {
+        [_delegate rowHeadings:self copyModelEffectsAtRow:row];
+    }
+}
+
+- (void)contextCutModelEffects:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:cutModelEffectsAtRow:)]) {
+        [_delegate rowHeadings:self cutModelEffectsAtRow:row];
+    }
+}
+
+- (void)contextPasteModelEffects:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:pasteModelEffectsAtRow:)]) {
+        [_delegate rowHeadings:self pasteModelEffectsAtRow:row];
+    }
+}
+
+- (void)contextDeleteModelEffects:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:deleteModelEffectsAtRow:)]) {
+        [_delegate rowHeadings:self deleteModelEffectsAtRow:row];
+    }
+}
+
+- (void)contextCopyModelEffectsInclSubmodels:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:copyModelEffectsIncludingSubmodelsAtRow:)]) {
+        [_delegate rowHeadings:self copyModelEffectsIncludingSubmodelsAtRow:row];
+    }
+}
+
+#pragma mark - Timing Context Menu Actions
+
+- (void)contextAddTimingTrack:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsAddTimingTrack:)]) {
+        [_delegate rowHeadingsAddTimingTrack:self];
+    }
+}
+
+- (void)contextRenameTimingTrack:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:renameTimingTrackAtRow:)]) {
+        [_delegate rowHeadings:self renameTimingTrackAtRow:row];
+    }
+}
+
+- (void)contextDeleteTimingTrack:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:deleteTimingTrackAtRow:)]) {
+        [_delegate rowHeadings:self deleteTimingTrackAtRow:row];
+    }
+}
+
+- (void)contextImportTimingTrack:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:importTimingTrackAtRow:)]) {
+        [_delegate rowHeadings:self importTimingTrackAtRow:row];
+    }
+}
+
+- (void)contextExportTimingTrack:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:exportTimingTrackAtRow:)]) {
+        [_delegate rowHeadings:self exportTimingTrackAtRow:row];
+    }
+}
+
+- (void)contextHideAllTimingTracks:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsHideAllTimingTracks:)]) {
+        [_delegate rowHeadingsHideAllTimingTracks:self];
+    }
+}
+
+- (void)contextShowAllTimingTracks:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsShowAllTimingTracks:)]) {
+        [_delegate rowHeadingsShowAllTimingTracks:self];
+    }
+}
+
+- (void)contextImportNotes:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:importNotesAtRow:)]) {
+        [_delegate rowHeadings:self importNotesAtRow:row];
+    }
+}
+
+- (void)contextImportLyrics:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:importLyricsAtRow:)]) {
+        [_delegate rowHeadings:self importLyricsAtRow:row];
+    }
+}
+
+- (void)contextBreakdownPhrases:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:breakdownPhrasesAtRow:)]) {
+        [_delegate rowHeadings:self breakdownPhrasesAtRow:row];
+    }
+}
+
+- (void)contextBreakdownWords:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:breakdownWordsAtRow:)]) {
+        [_delegate rowHeadings:self breakdownWordsAtRow:row];
+    }
 }
 
 #pragma mark - Drag and Drop (Source)

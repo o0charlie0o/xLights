@@ -157,6 +157,132 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 /// This is called FIRST, before the grid view's own key handling.
 - (BOOL)effectsGrid:(XLEffectsGridView *)gridView shouldHandleKeyEvent:(NSEvent *)event;
 
+/// Request to split an effect at the given time position.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSplitEffectAtIndex:(NSInteger)effectIndex
+                        atTimeMS:(CGFloat)timeMS;
+
+/// Request to duplicate an effect.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestDuplicateEffectAtIndex:(NSInteger)effectIndex
+                          direction:(NSInteger)direction;
+
+/// Request to create timing marks from the selected effects.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateTimingFromEffects:(NSIndexSet *)effectIndices;
+
+/// Request to lock or unlock effects.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSetLocked:(BOOL)locked
+             forEffects:(NSIndexSet *)effectIndices;
+
+/// Request to enable or disable rendering of effects.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSetRenderDisabled:(BOOL)disabled
+                     forEffects:(NSIndexSet *)effectIndices;
+
+/// Request to edit an effect's description.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditDescriptionForEffectAtIndex:(NSInteger)effectIndex;
+
+/// Request to reset an effect to defaults.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestResetEffectAtIndex:(NSInteger)effectIndex;
+
+/// Request to open the effect presets panel.
+- (void)effectsGridDidRequestEffectPresets:(XLEffectsGridView *)gridView;
+
+/// Request to create random effects for the selected range.
+- (void)effectsGridDidRequestCreateRandomEffects:(XLEffectsGridView *)gridView;
+
+/// Request to edit an effect's timing (start/end time).
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditTimingForEffectAtIndex:(NSInteger)effectIndex;
+
+// --- Timing Track Operations ---
+
+/// Request to breakdown a phrase timing mark into words.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownPhraseAtIndex:(NSInteger)effectIndex;
+
+/// Request to breakdown all selected phrases into words.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownSelectedPhrases:(NSIndexSet *)effectIndices;
+
+/// Request to breakdown a word timing mark into phonemes.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownWordAtIndex:(NSInteger)effectIndex;
+
+/// Request to breakdown all selected words into phonemes.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestBreakdownSelectedWords:(NSIndexSet *)effectIndices;
+
+/// Request to divide (halve) timing marks.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestDivideTimingsAtIndex:(NSInteger)effectIndex;
+
+/// Request to auto-label timing marks.
+- (void)effectsGridDidRequestAutoLabelTimings:(XLEffectsGridView *)gridView;
+
+/// Request to add "-shimmer" suffix to phoneme labels.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestAddShimmerAtIndex:(NSInteger)effectIndex;
+
+/// Request to remove "-shimmer" suffix from phoneme labels.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestRemoveShimmerAtIndex:(NSInteger)effectIndex;
+
+/// Request to create alternating phonemes.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateAlternatingPhonemesAtIndex:(NSInteger)effectIndex;
+
+/// Request to find a text label in timing marks.
+- (void)effectsGridDidRequestFindTimingLabel:(XLEffectsGridView *)gridView;
+
+/// Request to find the next occurrence of the current search text.
+- (void)effectsGridDidRequestFindNextTimingLabel:(XLEffectsGridView *)gridView;
+
+/// Request to find the previous occurrence of the current search text.
+- (void)effectsGridDidRequestFindPreviousTimingLabel:(XLEffectsGridView *)gridView;
+
+/// Request to replace all occurrences of text in timing labels.
+- (void)effectsGridDidRequestReplaceAllTimingLabels:(XLEffectsGridView *)gridView;
+
+// --- Alignment Operations ---
+
+/// Alignment operation types.
+typedef NS_ENUM(NSInteger, XLAlignmentType) {
+    XLAlignmentTypeStartTimes,
+    XLAlignmentTypeEndTimes,
+    XLAlignmentTypeBothTimes,
+    XLAlignmentTypeCenterpoints,
+    XLAlignmentTypeMatchDuration,
+    XLAlignmentTypeShiftStartTimes,
+    XLAlignmentTypeShiftEndTimes,
+    XLAlignmentTypeToClosestTimingMark,
+    XLAlignmentTypeCloseGap,
+};
+
+/// Request to align selected effects.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestAlignEffects:(NSIndexSet *)effectIndices
+           alignmentType:(XLAlignmentType)alignmentType;
+
+// --- Symbol Library Operations ---
+
+/// Request to create a symbol from the given effect.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestCreateSymbolFromEffectAtIndex:(NSInteger)effectIndex;
+
+/// Request to unlink effects from their symbols.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestUnlinkFromSymbol:(NSIndexSet *)effectIndices;
+
+/// Request to link effects to an existing symbol.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestLinkEffects:(NSIndexSet *)effectIndices
+           toSymbolIndex:(NSInteger)symbolIndex;
+
 @end
 
 /// Metal-backed NSView that renders the sequencer effects timeline.

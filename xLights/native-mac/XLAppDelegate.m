@@ -277,6 +277,497 @@ void XLSetCommandPaletteVisible(bool visible) {
     }];
 }
 
+#pragma mark - File Menu Actions
+
+- (IBAction)selectShowFolder:(id)sender {
+    [self promptForShowFolder];
+}
+
+- (IBAction)backupShowFolder:(id)sender {
+    NSString *showFolder = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+    if (!showFolder) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Show Folder";
+        alert.informativeText = @"Please select a show folder first.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    // Create backup in show folder's Backup subdirectory
+    NSString *backupDir = [showFolder stringByAppendingPathComponent:@"Backup"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSError *error = nil;
+
+    if (![fm fileExistsAtPath:backupDir]) {
+        [fm createDirectoryAtPath:backupDir withIntermediateDirectories:YES attributes:nil error:&error];
+        if (error) {
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Backup Failed";
+            alert.informativeText = [NSString stringWithFormat:@"Could not create backup directory: %@", error.localizedDescription];
+            alert.alertStyle = NSAlertStyleWarning;
+            [alert addButtonWithTitle:@"OK"];
+            [alert runModal];
+            return;
+        }
+    }
+
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    formatter.dateFormat = @"yyyy-MM-dd_HHmmss";
+    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+    NSString *backupPath = [backupDir stringByAppendingPathComponent:timestamp];
+
+    [fm createDirectoryAtPath:backupPath withIntermediateDirectories:YES attributes:nil error:&error];
+    if (error) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Backup Failed";
+        alert.informativeText = error.localizedDescription;
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    // Copy XML and xlights files to backup
+    NSArray *contents = [fm contentsOfDirectoryAtPath:showFolder error:nil];
+    NSInteger copiedCount = 0;
+    for (NSString *file in contents) {
+        NSString *ext = file.pathExtension.lowercaseString;
+        if ([ext isEqualToString:@"xml"] || [ext isEqualToString:@"xlights"] ||
+            [ext isEqualToString:@"xsq"] || [ext isEqualToString:@"xbkp"]) {
+            NSString *src = [showFolder stringByAppendingPathComponent:file];
+            NSString *dst = [backupPath stringByAppendingPathComponent:file];
+            [fm copyItemAtPath:src toPath:dst error:nil];
+            copiedCount++;
+        }
+    }
+
+    NSLog(@"XLAppDelegate: Backup complete - %ld files to %@", (long)copiedCount, backupPath);
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Backup Complete";
+    alert.informativeText = [NSString stringWithFormat:@"Backed up %ld files to:\n%@", (long)copiedCount, backupPath];
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)restoreBackup:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Restore Backup";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)alternateBackup:(id)sender {
+    NSString *showFolder = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+    if (!showFolder) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Show Folder";
+        alert.informativeText = @"Please select a show folder first.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    panel.message = @"Select alternate backup destination";
+    panel.prompt = @"Backup Here";
+
+    [panel beginWithCompletionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URL) {
+            NSFileManager *fm = [NSFileManager defaultManager];
+            NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+            formatter.dateFormat = @"yyyy-MM-dd_HHmmss";
+            NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+            NSString *backupPath = [panel.URL.path stringByAppendingPathComponent:
+                                    [NSString stringWithFormat:@"xLights_Backup_%@", timestamp]];
+
+            NSError *error = nil;
+            [fm createDirectoryAtPath:backupPath withIntermediateDirectories:YES attributes:nil error:&error];
+            if (error) {
+                NSAlert *alert = [[NSAlert alloc] init];
+                alert.messageText = @"Alternate Backup Failed";
+                alert.informativeText = error.localizedDescription;
+                alert.alertStyle = NSAlertStyleWarning;
+                [alert addButtonWithTitle:@"OK"];
+                [alert runModal];
+                return;
+            }
+
+            NSArray *contents = [fm contentsOfDirectoryAtPath:showFolder error:nil];
+            NSInteger copiedCount = 0;
+            for (NSString *file in contents) {
+                NSString *ext = file.pathExtension.lowercaseString;
+                if ([ext isEqualToString:@"xml"] || [ext isEqualToString:@"xlights"] ||
+                    [ext isEqualToString:@"xsq"] || [ext isEqualToString:@"xbkp"]) {
+                    NSString *src = [showFolder stringByAppendingPathComponent:file];
+                    NSString *dst = [backupPath stringByAppendingPathComponent:file];
+                    [fm copyItemAtPath:src toPath:dst error:nil];
+                    copiedCount++;
+                }
+            }
+
+            NSLog(@"XLAppDelegate: Alternate backup complete - %ld files to %@", (long)copiedCount, backupPath);
+
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Alternate Backup Complete";
+            alert.informativeText = [NSString stringWithFormat:@"Backed up %ld files to:\n%@", (long)copiedCount, backupPath];
+            alert.alertStyle = NSAlertStyleInformational;
+            [alert addButtonWithTitle:@"OK"];
+            [alert runModal];
+        }
+    }];
+}
+
+- (IBAction)showSequenceSettings:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Sequence Settings";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)showKeyBindings:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Key Bindings";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)exportHousePreviewVideo:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Export House Preview Video";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+#pragma mark - Audio Menu Actions
+
+- (IBAction)setPlaybackSpeed:(id)sender {
+    NSMenuItem *selectedItem = (NSMenuItem *)sender;
+    NSMenu *menu = selectedItem.menu;
+
+    // Clear all speed items (tags 25-400), set selected
+    for (NSMenuItem *item in menu.itemArray) {
+        if (item.action == @selector(setPlaybackSpeed:)) {
+            item.state = (item == selectedItem) ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
+
+    NSInteger speedPercent = selectedItem.tag;
+    double speed = speedPercent / 100.0;
+    NSLog(@"XLAppDelegate: Playback speed set to %.2fx", speed);
+
+    // TODO: Wire to engine playback speed
+}
+
+- (IBAction)setVolume:(id)sender {
+    NSMenuItem *selectedItem = (NSMenuItem *)sender;
+    NSMenu *menu = selectedItem.menu;
+
+    // Clear all volume items, set selected
+    for (NSMenuItem *item in menu.itemArray) {
+        if (item.action == @selector(setVolume:)) {
+            item.state = (item == selectedItem) ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
+
+    NSInteger volumePercent = selectedItem.tag;
+    NSLog(@"XLAppDelegate: Volume set to %ld%%", (long)volumePercent);
+
+    // TODO: Wire to engine volume control
+}
+
+#pragma mark - Tools Menu Actions
+
+- (IBAction)showTest:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Test";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)checkSequence:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Check Sequence";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)cleanupFileLocations:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Cleanup File Locations";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)packageSequence:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Package Sequence";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)downloadSequences:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Download Sequences/Lyrics";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)batchRender:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Batch Render";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)fppConnect:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"FPP Connect";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)bulkControllerUpload:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Bulk Controller Upload";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)runScripts:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Run Scripts";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)exportModelsFromTools:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Export Models";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)exportEffectsFromTools:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Export Effects";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)exportControllerConnections:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Export Controller Connections";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)viewLog:(id)sender {
+    // Open the log file in Console.app or default text editor
+    NSString *logPath = [NSString stringWithFormat:@"%@/Library/Logs/xLights", NSHomeDirectory()];
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // Find the most recent log file
+    NSArray *contents = [fm contentsOfDirectoryAtPath:logPath error:nil];
+    NSString *latestLog = nil;
+    NSDate *latestDate = nil;
+
+    for (NSString *file in contents) {
+        if ([file.pathExtension isEqualToString:@"log"]) {
+            NSString *fullPath = [logPath stringByAppendingPathComponent:file];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
+            NSDate *modDate = attrs[NSFileModificationDate];
+            if (!latestDate || [modDate compare:latestDate] == NSOrderedDescending) {
+                latestDate = modDate;
+                latestLog = fullPath;
+            }
+        }
+    }
+
+    if (latestLog) {
+        [[NSWorkspace sharedWorkspace] openFile:latestLog];
+    } else {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Log File Found";
+        alert.informativeText = @"Could not find any xLights log files.";
+        alert.alertStyle = NSAlertStyleInformational;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+    }
+}
+
+- (IBAction)packageLogFiles:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Package Log Files";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)purgeDownloadCache:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Purge Download Cache";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)purgeRenderCache:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Purge Render Cache";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)generate2DPath:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Generate 2D Path";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)generateCustomModel:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Generate Custom Model";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)remapCustomModel:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Remap Custom Model";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)generateLyricsFromData:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Generate Lyrics From Data";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)convertSequence:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Convert";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)prepareAudio:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Prepare Audio";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+#pragma mark - Help Menu Actions
+
+- (IBAction)showTipOfTheDay:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Tip of the Day";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (IBAction)showUserManual:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://manual.xlights.org"]];
+}
+
+- (IBAction)visitForum:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://nutcracker123.com/forum/"]];
+}
+
+- (IBAction)showVideoTutorials:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://videos.xlights.org"]];
+}
+
+- (IBAction)visitFacebook:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://www.facebook.com/groups/628061113896314/"]];
+}
+
+- (IBAction)visitIssueTracker:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/xLightsSequencer/xLights/issues"]];
+}
+
+- (IBAction)showDonate:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://www.xlights.org/donate/"]];
+}
+
+- (IBAction)visitWebsite:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://www.xlights.org"]];
+}
+
+- (IBAction)showReleaseNotes:(id)sender {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/xLightsSequencer/xLights/releases"]];
+}
+
+- (IBAction)checkForUpdates:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Check for Updates";
+    alert.informativeText = @"Not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
 #pragma mark - Sequence Actions
 
 - (IBAction)newSequence:(id)sender {

@@ -136,4 +136,29 @@
 /// Restore camera state from NSUserDefaults. Returns YES if state was restored.
 - (BOOL)restoreCameraState;
 
+#pragma mark - Named Viewpoints
+
+/// Save current camera state as a named viewpoint.
+/// @param name Display name for the viewpoint
+- (void)saveViewpointWithName:(NSString *)name;
+
+/// Load a previously saved viewpoint by name.
+/// @param name The viewpoint name to load
+/// @return YES if the viewpoint was found and loaded
+- (BOOL)loadViewpointWithName:(NSString *)name;
+
+/// Delete a saved viewpoint by name.
+/// @param name The viewpoint name to delete
+/// @return YES if the viewpoint was found and deleted
+- (BOOL)deleteViewpointWithName:(NSString *)name;
+
+/// Get an array of all saved viewpoint names.
+- (NSArray<NSString *> *)savedViewpointNames;
+
+/// Save current camera state as the default viewpoint.
+- (void)saveAsDefaultViewpoint;
+
+/// Restore the default viewpoint. Returns YES if a default was saved.
+- (BOOL)restoreDefaultViewpoint;
+
 @end
