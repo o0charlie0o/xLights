@@ -8,22 +8,25 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/wx.h>
 #include <wx/string.h>
 #include <wx/msgdlg.h>
-
-#include "ValueCurve.h"
-#include "xLightsVersion.h"
 #include "xLightsMain.h"
 #include "xLightsXmlFile.h"
 #include "UtilFunctions.h"
-#include "AudioManager.h"
 #include "ExternalHooks.h"
+#include <log4cpp/Category.hh>
+#endif
+
+#include "ValueCurve.h"
+#include "xLightsVersion.h"
+#include "AudioManager.h"
 #include "sequencer/SequenceElements.h"
 
-#include <log4cpp/Category.hh>
-
 #include <limits>
+#include <cassert>
+#include <cstdio>
 
 AudioManager* ValueCurve::__audioManager = nullptr;
 SequenceElements* ValueCurve::__sequenceElements = nullptr;
@@ -37,8 +40,8 @@ float ValueCurve::SafeParameter(size_t p, float v)
     if (low == MINVOID) low = _min;
     if (high == MAXVOID) high = _max;
 
-    wxASSERT(_min != MINVOIDF);
-    wxASSERT(_max != MAXVOIDF);
+    assert(_min != MINVOIDF);
+    assert(_max != MAXVOIDF);
 
     return std::min(high, std::max(low, v));
 }
@@ -77,12 +80,12 @@ float ValueCurve::Denormalise(int parm, float value) const
 
     if (low == MINVOID)
     {
-        wxASSERT(_min != MINVOIDF);
+        assert(_min != MINVOIDF);
         low = _min;
     }
     if (high == MAXVOID)
     {
-        wxASSERT(_max != MAXVOIDF);
+        assert(_max != MAXVOIDF);
         high = _max;
     }
 
@@ -105,6 +108,7 @@ std::string ValueCurve::GetValueCurveFolder(const std::string& showFolder)
     if (showFolder == "") return "";
 
     std::string vcf = showFolder + "/valuecurves";
+#ifndef XLIGHTS_NATIVE
     if (!wxDir::Exists(vcf))
     {
         wxMkdir(vcf);
@@ -113,6 +117,7 @@ std::string ValueCurve::GetValueCurveFolder(const std::string& showFolder)
             return "";
         }
     }
+#endif
     return vcf;
 }
 
@@ -639,7 +644,7 @@ void ValueCurve::Flip()
     }
     else if (_type == "Decaying Sine") {}
     else if (_type == "Abs Sine") {}
-    else { wxASSERT(false); }
+    else { assert(false); }
 }
 
 // call this function from adjustSettings when a value curve has been changed to have a different divider ... it will convert the values to the equivalent and then you can serialise the value curve
@@ -663,12 +668,12 @@ float ValueCurve::Normalise(int parm, float value)
 
     if (low == MINVOID)
     {
-        wxASSERT(_min != MINVOIDF);
+        assert(_min != MINVOIDF);
         low = _min;
     }
     if (high == MAXVOID)
     {
-        wxASSERT(_max != MAXVOIDF);
+        assert(_max != MAXVOIDF);
         high = _max;
     }
 
@@ -795,7 +800,7 @@ void ValueCurve::ConvertChangedScale(float newmin, float newmax)
     if (newrange < oldrange)
     {
         // this is suspicious ... generally ranges increase with versions not decrease so I am going to ignore this request
-        wxASSERT(false);
+        assert(false);
         // continue otherwise it doesnt stop it happening in future
         // return;
     }
@@ -824,8 +829,8 @@ void ValueCurve::ConvertChangedScale(float newmin, float newmax)
     // now handle custom
     if (_type == "Custom")
     {
-        wxASSERT(_min != MINVOIDF);
-        wxASSERT(_max != MAXVOIDF);
+        assert(_min != MINVOIDF);
+        assert(_max != MAXVOIDF);
         //old max of 10, 1.0 = 10 
         //new max of 20, 0.5 = 10 
         //y = y * 0.5 or 10/20 i.e. old range/new range
@@ -1283,7 +1288,7 @@ ValueCurve::ValueCurve(const std::string& id, float min, float max, const std::s
     _timingTrack = timingTrack;
     _filterLabelText = filterLabelText;
     _isFilterLabelRegex = isFilterLabelRegex;
-    wxASSERT(_divisor == 1 || _divisor == 10 || _divisor == 100);
+    assert(_divisor == 1 || _divisor == 10 || _divisor == 100);
     _timeOffset = 0;
     _parameter1 = SafeParameter(1, parameter1);
     _parameter2 = SafeParameter(2, parameter2);
@@ -1319,7 +1324,7 @@ void ValueCurve::SetDefault(float min, float max, int divisor)
     {
         _divisor = divisor;
     }
-    wxASSERT(_divisor == 1 || _divisor == 10 || _divisor == 100);
+    assert(_divisor == 1 || _divisor == 10 || _divisor == 100);
 
     RenderType();
 }
@@ -1413,6 +1418,7 @@ void ValueCurve::Deserialise(const std::string& s, bool holdminmax)
                             // this should be updated every release by 1 until we decide to change a slider range for the first time
                             // at that point we are going to need to force people to go back to a version after 2017.24 but before the
                             // first version with the change
+#ifndef XLIGHTS_NATIVE
                             if (!::IsVersionOlder("2018.46", xlights_version_string.ToStdString()))
                             {
                                 static std::string warnedfile = "";
@@ -1423,6 +1429,7 @@ void ValueCurve::Deserialise(const std::string& s, bool holdminmax)
                                     DisplayWarning("Sequence contains value curves that cannot be converted automatically. Please open and save this sequence in v2018.23 before proceeding.");
                                 }
                             }
+#endif
                             FixChangedScale(oldmin, oldmax, _divisor);
                         }
                     }
@@ -1444,14 +1451,22 @@ void ValueCurve::Deserialise(const std::string& s, bool holdminmax)
     }
 }
 
+namespace {
+    std::string FormatFloat2(float v) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.2f", v);
+        return std::string(buf);
+    }
+}
+
 std::string ValueCurve::Serialise()
 {
     std::string res = "";
 
     if (IsActive())
     {
-        wxASSERT(_min != MINVOIDF);
-        wxASSERT(_max != MAXVOIDF);
+        assert(_min != MINVOIDF);
+        assert(_max != MAXVOIDF);
 
         res += "Active=TRUE|";
         res += "Id=" + _id + "|";
@@ -1459,8 +1474,8 @@ std::string ValueCurve::Serialise()
         {
             res += "Type=" + _type + "|";
         }
-        res += "Min=" + std::string(wxString::Format("%.2f", _min).c_str()) + "|";
-        res += "Max=" + std::string(wxString::Format("%.2f", _max).c_str()) + "|";
+        res += "Min=" + FormatFloat2(_min) + "|";
+        res += "Max=" + FormatFloat2(_max) + "|";
         if (_timingTrack != "") {
             res += "TT=" + _timingTrack + "|";
         }
@@ -1472,19 +1487,19 @@ std::string ValueCurve::Serialise()
         }
         if (_parameter1 != 0)
         {
-            res += "P1=" + std::string(wxString::Format("%.2f", _parameter1).c_str()) + "|";
+            res += "P1=" + FormatFloat2(_parameter1) + "|";
         }
         if (_parameter2 != 0)
         {
-            res += "P2=" + std::string(wxString::Format("%.2f", _parameter2).c_str()) + "|";
+            res += "P2=" + FormatFloat2(_parameter2) + "|";
         }
         if (_parameter3 != 0)
         {
-            res += "P3=" + std::string(wxString::Format("%.2f", _parameter3).c_str()) + "|";
+            res += "P3=" + FormatFloat2(_parameter3) + "|";
         }
         if (_parameter4 != 0)
         {
-            res += "P4=" + std::string(wxString::Format("%.2f", _parameter4).c_str()) + "|";
+            res += "P4=" + FormatFloat2(_parameter4) + "|";
         }
         if (_timeOffset != 0)
         {
@@ -1504,7 +1519,7 @@ std::string ValueCurve::Serialise()
             res += "Values=";
             for (auto it = _values.begin(); it != _values.end(); ++it)
             {
-                res += std::string(wxString::Format("%.2f", it->x).c_str()) + ":" + std::string(wxString::Format("%.2f", it->y).c_str());
+                res += FormatFloat2(it->x) + ":" + FormatFloat2(it->y);
                 if (!(*it == _values.back()))
                 {
                     res += ";";
@@ -1520,6 +1535,7 @@ std::string ValueCurve::Serialise()
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 void ValueCurve::LoadXVC(const wxFileName& fn)
 {
     LoadXVC(fn.GetFullPath().ToStdString());
@@ -1609,6 +1625,7 @@ void ValueCurve::SaveXVC(const std::string& filename)
     SetActive(active);
     SetId(id);
 }
+#endif
 
 void ValueCurve::SetSerialisedValue(const std::string &k, const std::string &s)
 {
@@ -1619,7 +1636,7 @@ void ValueCurve::SetSerialisedValue(const std::string &k, const std::string &s)
             _active = false;
         } else {
             // it should already be true
-            wxASSERT(_active == true);
+            assert(_active == true);
         }
     } else if (k == "Type") {
         _type = s;
@@ -1679,22 +1696,22 @@ void ValueCurve::SetType(std::string type)
 
 float ValueCurve::GetScaledValue(float offset) const
 {
-    wxASSERT(_min != MINVOIDF);
-    wxASSERT(_max != MAXVOIDF);
+    assert(_min != MINVOIDF);
+    assert(_max != MAXVOIDF);
     return (_min + (_max - _min) * offset) / _divisor;
 }
 
 float ValueCurve::GetOutputValueAt(float offset, long startMS, long endMS)
 {
-    wxASSERT(_min != MINVOIDF);
-    wxASSERT(_max != MAXVOIDF);
+    assert(_min != MINVOIDF);
+    assert(_max != MAXVOIDF);
     return _min + (_max - _min) * GetValueAt(offset, startMS, endMS);
 }
 
 float ValueCurve::GetOutputValueAtDivided(float offset, long startMS, long endMS)
 {
-    wxASSERT(_min != MINVOIDF);
-    wxASSERT(_max != MAXVOIDF);
+    assert(_min != MINVOIDF);
+    assert(_max != MAXVOIDF);
     return (_min + (_max - _min) * GetValueAt(offset, startMS, endMS)) / _divisor;
 }
 
@@ -2139,6 +2156,7 @@ void ValueCurve::SetPointAt(float x, float y)
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 wxBitmap ValueCurve::GetImage(int w, int h, double scaleFactor)
 {
     if (scaleFactor < 1.0) {
@@ -2198,6 +2216,7 @@ wxBitmap ValueCurve::GetImage(int w, int h, double scaleFactor)
     }
     return bmp;
 }
+#endif
 
 void ValueCurve::ScaleAndOffsetValues(float scale, int offset)
 {
@@ -2218,7 +2237,7 @@ void ValueCurve::ScaleAndOffsetValues(float scale, int offset)
         // custom values are 0-1, so we need to scale them
         float range = _max - _min;
         if (std::abs(range) <= std::numeric_limits<float>::epsilon()) {
-            wxASSERT(false); // shouldn't be zero
+            assert(false); // shouldn't be zero
             return;
         }
         for (auto& it : _values) {

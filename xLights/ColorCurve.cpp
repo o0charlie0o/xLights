@@ -8,6 +8,7 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/wx.h>
 #include <wx/string.h>
 #include <wx/xml/xml.h>
@@ -15,20 +16,28 @@
 #include <wx/colour.h>
 #include <wx/colordlg.h>
 #include <wx/graphics.h>
-
-#include "ColorCurve.h"
 #include "ColorCurveDialog.h"
 #include "UtilFunctions.h"
 #include "ColorPanel.h"
-
 #include "xlColourData.h"
-
 #include <log4cpp/Category.hh>
 
 #if wxUSE_GRAPHICS_CONTEXT == 0
 #error Please refer to README.windows to make necessary changes to wxWidgets setup.h file.
 #error You will also need to rebuild wxWidgets once the change is made.
 #endif
+#endif
+
+#include "ColorCurve.h"
+
+#include <cassert>
+#include <cstdlib>
+
+namespace {
+    bool StringContains(const std::string& haystack, const std::string& needle) {
+        return haystack.find(needle) != std::string::npos;
+    }
+}
 
 ColorCurve::ColorCurve(const std::string& id, const std::string type, xlColor c)
 {
@@ -45,7 +54,7 @@ ColorCurve::ColorCurve()
     _values.clear();
     _active = false;
     _timecurve = TC_TIME;
-    _values.push_back(ccSortableColorPoint(0.5, *wxBLACK));
+    _values.push_back(ccSortableColorPoint(0.5, xlBLACK));
     _id = "";
 }
 
@@ -68,13 +77,13 @@ ColorCurve::ColorCurve(const std::string& s)
 
     if (_values.size() == 0)
     {
-        _values.push_back(ccSortableColorPoint(0.5, *wxBLACK));
+        _values.push_back(ccSortableColorPoint(0.5, xlBLACK));
     }
 }
 
 bool ColorCurve::IsColorCurve(const std::string& s)
 {
-    return Contains(s, "Active=");
+    return StringContains(s, "Active=");
 }
 
 void ColorCurve::Deserialise(const std::string& s)
@@ -99,25 +108,34 @@ void ColorCurve::Deserialise(const std::string& s)
         _timecurve = TC_TIME;
         _values.clear();
         _type = "Gradient";
-        wxArrayString v = wxSplit(wxString(s.c_str()), '|');
-        for (auto vs = v.begin(); vs != v.end(); vs++)
+        std::string remaining = s;
+        while (!remaining.empty())
         {
-            if (vs->Find('=') != std::string::npos)
+            std::string token;
+            size_t pos = remaining.find('|');
+            if (pos == std::string::npos)
             {
-                wxArrayString v1;
-                v1.Add(vs->SubString(0, vs->Find('=')-1));
-                v1.Add(vs->SubString(vs->Find('=')+1, vs->Length()));
-                if (v1.size() == 2)
-                {
-                    SetSerialisedValue(v1[0].ToStdString(), v1[1].ToStdString());
-                }
+                token = remaining;
+                remaining.clear();
+            }
+            else
+            {
+                token = remaining.substr(0, pos);
+                remaining = remaining.substr(pos + 1);
+            }
+            size_t eqPos = token.find('=');
+            if (eqPos != std::string::npos)
+            {
+                std::string k = token.substr(0, eqPos);
+                std::string v = token.substr(eqPos + 1);
+                SetSerialisedValue(k, v);
             }
         }
     }
 
     if (_values.size() == 0)
     {
-        _values.push_back(ccSortableColorPoint(0.5, *wxBLACK));
+        _values.push_back(ccSortableColorPoint(0.5, xlBLACK));
     }
 }
 
@@ -135,7 +153,7 @@ std::string ColorCurve::Serialise()
         }
         if (_timecurve != TC_TIME)
         {
-            res += "Timecurve=" + wxString::Format("%d", _timecurve).ToStdString() + "|";
+            res += "Timecurve=" + std::to_string(_timecurve) + "|";
         }
         res += "Values=";
         for (auto it = _values.begin(); it != _values.end(); ++it)
@@ -157,12 +175,11 @@ std::string ColorCurve::Serialise()
 
 void ColorCurve::SetSerialisedValue(std::string k, std::string s)
 {
-    wxString kk = wxString(k.c_str());
-    if (kk == "Id")
+    if (k == "Id")
     {
         _id = s;
     }
-    else if (kk == "Active")
+    else if (k == "Active")
     {
         if (s == "FALSE")
         {
@@ -171,27 +188,40 @@ void ColorCurve::SetSerialisedValue(std::string k, std::string s)
         else
         {
             // it should already be true
-            wxASSERT(_active == true);
+            assert(_active == true);
         }
     }
-    else if (kk == "Type")
+    else if (k == "Type")
     {
         _type = s;
     }
-    else if (kk == "Timecurve")
+    else if (k == "Timecurve")
     {
-        _timecurve = wxAtoi(s);
+        _timecurve = std::atoi(s.c_str());
     }
-    else if (kk == "Values")
+    else if (k == "Values")
+    {
+        std::string remaining = s;
+        while (!remaining.empty())
         {
-            wxArrayString points = wxSplit(s, ';');
-
-            for (auto p = points.begin(); p != points.end(); p++)
+            std::string token;
+            size_t pos = remaining.find(';');
+            if (pos == std::string::npos)
             {
-                std::string ss = p->ToStdString();
-                _values.push_back(ccSortableColorPoint(ss));
+                token = remaining;
+                remaining.clear();
+            }
+            else
+            {
+                token = remaining.substr(0, pos);
+                remaining = remaining.substr(pos + 1);
+            }
+            if (!token.empty())
+            {
+                _values.push_back(ccSortableColorPoint(token));
             }
         }
+    }
 
     _values.sort();
 }
@@ -381,7 +411,9 @@ void ColorCurve::DeletePoint(float offset)
     }
     else
     {
+#ifndef XLIGHTS_NATIVE
         wxBell();
+#endif
     }
 }
 
@@ -396,7 +428,7 @@ void ColorCurve::Flip()
     }
 }
 
-void ColorCurve::SetDefault(const wxColor& color)
+void ColorCurve::SetDefault(const xlColor& color)
 {
     // we should only set default if the current CC only has one point
     if (_values.size() == 1)
@@ -405,6 +437,7 @@ void ColorCurve::SetDefault(const wxColor& color)
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void ColorCurve::LoadXCC(const std::string& filename)
 {
     // reset everything
@@ -435,6 +468,7 @@ void ColorCurve::LoadXCC(const std::string& filename)
     }
     _id = oldid;
 }
+#endif
 
 void ColorCurve::SetValueAt(float offset, xlColor c)
 {
@@ -453,6 +487,7 @@ void ColorCurve::SetValueAt(float offset, xlColor c)
     _values.sort();
 }
 
+#ifndef XLIGHTS_NATIVE
 wxBitmap ColorCurve::GetImage(int x, int y, bool bars)
 {
     wxImage bmp(x, y);
@@ -500,12 +535,14 @@ wxBitmap ColorCurve::GetSolidColourImage(int x, int y, const wxColour& c)
     dc.DrawRectangle(0, 0, x, y);
     return b;
 }
+#endif
 
 std::string ColorCurve::GetColorCurveFolder(const std::string& showFolder)
 {
     if (showFolder == "") return "";
 
     std::string ccf = showFolder + "/colorcurves";
+#ifndef XLIGHTS_NATIVE
     if (!wxDir::Exists(ccf))
     {
         wxMkdir(ccf);
@@ -514,6 +551,7 @@ std::string ColorCurve::GetColorCurveFolder(const std::string& showFolder)
             return "";
         }
     }
+#endif
     return ccf;
 }
 
@@ -581,6 +619,58 @@ const ccSortableColorPoint* ColorCurve::GetNextActivePoint(float x, float& durat
     return nullptr;
 }
 
+float ColorCurve::FindMinPointLessThan(float point)
+{
+    float res = 0.0;
+
+    for (auto it = _values.begin(); it != _values.end(); ++it)
+    {
+        if (it->x < point)
+        {
+            res = it->x + 0.025;
+        }
+    }
+
+    return ccSortableColorPoint::Normalise(res);
+}
+float ColorCurve::FindMaxPointGreaterThan(float point)
+{
+    float res = 1.0;
+
+    for (auto it = _values.begin(); it != _values.end(); ++it)
+    {
+        if (it->x > point)
+        {
+            res = it->x - 0.025;
+            break;
+        }
+    }
+
+    return ccSortableColorPoint::Normalise(res);
+}
+void ColorCurve::NextTimeCurve(bool supportslinear, bool supportsradial)
+{
+    _timecurve++; 
+
+    SetValidTimeCurve(supportslinear, supportsradial);
+}
+
+void ColorCurve::SetValidTimeCurve(bool supportslinear, bool supportsradial)
+{
+    if (_timecurve > TC_CCW) _timecurve = TC_TIME;
+
+    if ((_timecurve == TC_LEFT || _timecurve == TC_RIGHT || _timecurve == TC_UP || _timecurve == TC_DOWN) && !supportslinear)
+    {
+        _timecurve = TC_RADIALIN;
+    }
+
+    if ((_timecurve == TC_CW || _timecurve == TC_CCW || _timecurve == TC_RADIALIN || +_timecurve == TC_RADIALOUT) && !supportsradial)
+    {
+        _timecurve = TC_TIME;
+    }
+}
+
+#ifndef XLIGHTS_NATIVE
 #pragma region ColorCurveButton
 #include <wx/dcmemory.h>
 
@@ -658,13 +748,13 @@ void ColorCurveButton::ToggleActive()
 
 void ColorCurveButton::SetDefaultCC(const std::string& color)
 {
-    _cc->SetDefault(wxColor(color));
+    _cc->SetDefault(xlColor(color));
 }
 
 void ColorCurveButton::SetColor(std::string color, bool notify)
 {
     _cc->SetActive(false);
-    _cc->SetDefault(wxColor(color));
+    _cc->SetDefault(xlColor(color));
     _color = color;
     UpdateBitmap();
     if (notify) {
@@ -724,55 +814,5 @@ ColorCurve* ColorCurveButton::GetValue() const
     return _cc;
 }
 
-float ColorCurve::FindMinPointLessThan(float point)
-{
-    float res = 0.0;
-
-    for (auto it = _values.begin(); it != _values.end(); ++it)
-    {
-        if (it->x < point)
-        {
-            res = it->x + 0.025;
-        }
-    }
-
-    return ccSortableColorPoint::Normalise(res);
-}
-float ColorCurve::FindMaxPointGreaterThan(float point)
-{
-    float res = 1.0;
-
-    for (auto it = _values.begin(); it != _values.end(); ++it)
-    {
-        if (it->x > point)
-        {
-            res = it->x - 0.025;
-            break;
-        }
-    }
-
-    return ccSortableColorPoint::Normalise(res);
-}
-void ColorCurve::NextTimeCurve(bool supportslinear, bool supportsradial)
-{
-    _timecurve++; 
-
-    SetValidTimeCurve(supportslinear, supportsradial);
-}
-
-void ColorCurve::SetValidTimeCurve(bool supportslinear, bool supportsradial)
-{
-    if (_timecurve > TC_CCW) _timecurve = TC_TIME;
-
-    if ((_timecurve == TC_LEFT || _timecurve == TC_RIGHT || _timecurve == TC_UP || _timecurve == TC_DOWN) && !supportslinear)
-    {
-        _timecurve = TC_RADIALIN;
-    }
-
-    if ((_timecurve == TC_CW || _timecurve == TC_CCW || _timecurve == TC_RADIALIN || +_timecurve == TC_RADIALOUT) && !supportsradial)
-    {
-        _timecurve = TC_TIME;
-    }
-}
-
 #pragma endregion
+#endif

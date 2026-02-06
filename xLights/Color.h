@@ -10,17 +10,22 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/colour.h>
+#endif
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <cassert>
 
 #if __has_include(<simd/simd.h>)
 #include <simd/simd.h>
 #endif
 
 class xlColor;
+#ifndef XLIGHTS_NATIVE
 class wxString;
+#endif
 class ColorCurve;
 
 class HSVValue
@@ -90,12 +95,14 @@ public:
         green = rgb.green;
         alpha = rgb.alpha;
     }
+#ifndef XLIGHTS_NATIVE
     xlColor(const wxColor &rgb) {
         red = rgb.Red();
         blue = rgb.Blue();
         green = rgb.Green();
         alpha = 255;
     }
+#endif
     xlColor(const std::string &str) {
         SetFromString(str);
     }
@@ -217,7 +224,7 @@ public:
 
     xlColor ApplyBrightness(float b)
     {
-        wxASSERT(b >= 0.0 && b <= 1.0);
+        assert(b >= 0.0 && b <= 1.0);
         return xlColor(b * red, b * green, b * blue);
     }
 
@@ -290,12 +297,14 @@ public:
     void SetFromString(const std::string &str);
     operator std::string() const;
 
+#ifndef XLIGHTS_NATIVE
     void SetFromString(const wxString &str);
     operator wxString() const;
     wxColor asWxColor() const;
     xlColor(const wxString &str) {
         SetFromString(str);
     }
+#endif
 
 #if __has_include(<simd/simd.h>)
     simd_uchar4 asChar4() const {
@@ -352,4 +361,6 @@ enum ColorDisplayMode
     MODE_BLUE
 };
 
+#ifndef XLIGHTS_NATIVE
 const std::string& GetColourName(const wxColour& c);
+#endif

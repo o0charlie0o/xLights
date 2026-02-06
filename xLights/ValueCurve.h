@@ -10,9 +10,12 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/position.h>
+#endif
 #include <string>
 #include <list>
+#include <cassert>
 
 #define MINVOID -91234
 #define MAXVOID 91234
@@ -21,7 +24,9 @@
 
 #define VC_X_POINTS 200.0
 
+#ifndef XLIGHTS_NATIVE
 class wxFileName;
+#endif
 class AudioManager;
 class SequenceElements;
 
@@ -126,12 +131,14 @@ public:
     ValueCurve(const std::string& serialised);
     ValueCurve(const std::string& id, float min, float max = 100.0f, const std::string type = "Flat", float parameter1 = 0.0f, float parameter2 = 0.0f, float parameter3 = 0.0f, float parameter4 = 0.0f, bool wrap = false, float divisor = 1.0, const std::string& timingTrack = "", const std::string& filterLabelText = "", bool isFilterLabelRegex = false);
     void SetDefault(float min = MINVOIDF, float max = MAXVOIDF, int divisor = MAXVOID);
+#ifndef XLIGHTS_NATIVE
     wxBitmap GetImage(int x, int y, double scaleFactor = 1.0);
-    std::string Serialise();
     void LoadXVC(const wxFileName& fn);
-    void LoadXVC(const std::string& fn);
     void SaveXVC(const wxFileName& fn);
+    void LoadXVC(const std::string& fn);
     void SaveXVC(const std::string& fn);
+#endif
+    std::string Serialise();
     static void GetRangeParm(int parm, const std::string& type, float& low, float& high);
     bool IsOk() const { return _id != ""; }
     void Deserialise(const std::string& s, bool holdminmax = false);
@@ -139,9 +146,9 @@ public:
     void FixChangedScale(float oldmin, float oldmax, int divisor);
     void UnFixChangedScale(float newmin, float newmax);
     void ConvertChangedScale(float newmin, float newmax);
-    float GetMax() const { wxASSERT(_max != MAXVOIDF); return _max; }
-    float GetMin() const { wxASSERT(_min != MINVOIDF); return _min; }
-    int GetDivisor() const { wxASSERT(_divisor != MAXVOID); return (int)_divisor; }
+    float GetMax() const { assert(_max != MAXVOIDF); return _max; }
+    float GetMin() const { assert(_min != MINVOIDF); return _min; }
+    int GetDivisor() const { assert(_divisor != MAXVOID); return (int)_divisor; }
     void SetRealValue() { _realValues = true; }
     void SetLimits(float min, float max) { _min = min; _max = max; }
     void FixScale(int scale);

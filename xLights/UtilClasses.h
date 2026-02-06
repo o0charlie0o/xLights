@@ -14,8 +14,12 @@
 #include <string>
 #include <algorithm>
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/filepicker.h>
 #include "UtilFunctions.h"
+#else
+#include "utils/string_utils.h"
+#endif
 
 class EffectManager;
 
@@ -242,6 +246,7 @@ public:
     std::pair<int, int> back() const { return _ranges.back(); }
 };
 
+#ifndef XLIGHTS_NATIVE
 class ImageFilePickerCtrl : public wxFilePickerCtrl
 {
 public:
@@ -253,6 +258,7 @@ public:
     {
     }
 };
+#endif
 
 class LogarithmicScale {
 public:

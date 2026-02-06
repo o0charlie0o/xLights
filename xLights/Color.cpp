@@ -17,7 +17,9 @@
 #include <algorithm>
 #include <map>
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/colour.h>
+#endif
 #include "Color.h"
 
 static const std::map<std::string, xlColor> NAME_MAP = {
@@ -171,11 +173,15 @@ void xlColor::SetFromString(const std::string &str) {
             blue = c->second.blue;
             alpha = c->second.alpha;
         } else {
+#ifndef XLIGHTS_NATIVE
             //need to do the slower lookups
             wxColor c(str);
             red = c.Red();
             green = c.Green();
             blue = c.Blue();
+#else
+            red = green = blue = 0;
+#endif
         }
     }
 }
@@ -283,6 +289,7 @@ HSVValue& HSVValue::operator=(const xlColor& c) {
 }
 
 
+#ifndef XLIGHTS_NATIVE
 void xlColor::SetFromString(const wxString &str) {
     SetFromString(str.ToStdString());
 }
@@ -293,6 +300,7 @@ xlColor::operator wxString() const {
 wxColor xlColor::asWxColor() const {
     return wxColor(red, green, blue, alpha);
 }
+#endif
 
 // HSL functions
 double Hue2RGB(double v1, double v2, double H) {
@@ -408,12 +416,14 @@ typedef struct NAMED_COLOUR {
     uint8_t green;
     uint8_t blue;
 
+#ifndef XLIGHTS_NATIVE
     float HowClose(wxColour c) const
     {
       return std::sqrt(((int)c.Red() - (int)red) * ((int)c.Red() - (int)red) +
                        ((int)c.Green() - (int)green) * ((int)c.Green() - (int)green) +
                        ((int)c.Blue() - (int)blue) * ((int)c.Blue() - (int)blue));
     }
+#endif
 } NAMED_COLOUR;
 
 static NAMED_COLOUR namedColours[] = {
@@ -562,6 +572,7 @@ static NAMED_COLOUR namedColours[] = {
     { "Black", 0x00, 0x00, 0x00 }
 };
 
+#ifndef XLIGHTS_NATIVE
 const std::string& GetColourName(const wxColour& c)
 {
     const NAMED_COLOUR* nc = nullptr;
@@ -579,3 +590,4 @@ const std::string& GetColourName(const wxColour& c)
 
     return nc->name;
 }
+#endif
