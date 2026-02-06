@@ -24,6 +24,10 @@
 #else
 #include "../FSEQFile.h"
 #include "ModelEngine.h"
+#include "render/NativeRenderCoordinator.h"
+#include "render/NativeSequenceData.h"
+#include "render/IRenderContext.h"
+#include "interfaces/IEffectProvider.h"
 #endif
 
 #include <algorithm>
@@ -83,11 +87,34 @@ void RenderEngine::setOutputProvider(IOutputProvider* provider)
     _outputProvider = provider;
 }
 
+void RenderEngine::setEffectProvider(IEffectProvider* provider)
+{
+    _effectProvider = provider;
+}
+
+// Lightweight IRenderContext adapter for the coordinator
+namespace {
+class RenderEngineContext : public IRenderContext {
+public:
+    RenderEngineContext(int frameTimeMS, double sequenceDuration)
+        : _frameTimeMS(frameTimeMS), _duration(sequenceDuration) {}
+
+    void* getAudioManager() override { return nullptr; }
+    double getSequenceDuration() override { return _duration; }
+    int getFrameTimeMS() override { return _frameTimeMS; }
+
+private:
+    int _frameTimeMS;
+    double _duration;
+};
+} // anonymous namespace
+
 // --- FSEQ Loading ---
 
 bool RenderEngine::loadFSEQ(const std::string& fseqPath)
 {
     closeFSEQ();
+    _fseqPath = fseqPath;
 
     _fseqFile.reset(FSEQFile::openFSEQFile(fseqPath));
     if (!_fseqFile) {
@@ -559,17 +586,150 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 
 void RenderEngine::renderAll(RenderCompleteCallback callback)
 {
-    // No-op for FSEQ playback (data is already pre-rendered in the file)
-    if (callback) callback(false);
+    if (!_effectProvider || !_modelProvider) {
+        printf("RenderEngine::renderAll — missing effect or model provider, skipping\n");
+        if (callback) callback(false);
+        notifyRenderComplete(false);
+        return;
+    }
+
+    // Determine sequence parameters
+    int frameTimeMS = getFrameTimeMS();
+    int numFrames = getNumFrames();
+    int32_t totalChannels = _outputProvider ? _outputProvider->getTotalChannels() : 0;
+
+    if (numFrames <= 0 || totalChannels <= 0) {
+        printf("RenderEngine::renderAll — invalid sequence: %d frames, %d channels\n",
+               numFrames, totalChannels);
+        if (callback) callback(false);
+        notifyRenderComplete(false);
+        return;
+    }
+
+    double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
+    printf("RenderEngine::renderAll — rendering %d frames (%dms), %d channels, %.1fs\n",
+           numFrames, frameTimeMS, totalChannels, duration);
+
+    // Create render context
+    auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration);
+
+    // Allocate output buffer
+    _renderedData = std::make_unique<NativeSequenceData>(
+        static_cast<uint32_t>(totalChannels),
+        static_cast<uint32_t>(numFrames),
+        static_cast<uint32_t>(frameTimeMS));
+
+    // Create coordinator and set up progress forwarding
+    _coordinator = std::make_unique<NativeRenderCoordinator>(
+        _effectProvider, _modelProvider, context.get());
+
+    // Bridge coordinator listener to RenderEngineListener
+    class ListenerBridge : public RenderCoordinatorListener {
+    public:
+        explicit ListenerBridge(RenderEngine* engine) : _engine(engine) {}
+        void onRenderProgress(float pct, int done, int total) override {
+            RenderStatus status;
+            status.isRendering = true;
+            status.modelsComplete = done;
+            status.modelsTotal = total;
+            status.progressPercent = pct;
+            _engine->notifyRenderProgress(status);
+        }
+        void onRenderError(const std::string& model, const std::string& msg) override {
+            _engine->notifyRenderError(model, msg);
+        }
+    private:
+        RenderEngine* _engine;
+    };
+
+    ListenerBridge bridge(this);
+    _coordinator->setListener(&bridge);
+
+    bool completed = _coordinator->renderAll(*_renderedData);
+
+    _coordinator->setListener(nullptr);
+    _coordinator.reset();
+
+    bool wasCancelled = !completed;
+    notifyRenderComplete(wasCancelled);
+    if (callback) callback(wasCancelled);
+
+    printf("RenderEngine::renderAll — %s\n", wasCancelled ? "cancelled" : "complete");
 }
 
-void RenderEngine::renderRange(int startMS, int endMS, bool clear, RenderCompleteCallback callback)
+void RenderEngine::renderRange(int startMS, int endMS, bool clear,
+                               RenderCompleteCallback callback)
 {
-    if (callback) callback(false);
+    if (!_effectProvider || !_modelProvider) {
+        if (callback) callback(false);
+        return;
+    }
+
+    int frameTimeMS = getFrameTimeMS();
+    int32_t totalChannels = _outputProvider ? _outputProvider->getTotalChannels() : 0;
+    int numFrames = getNumFrames();
+
+    if (numFrames <= 0 || totalChannels <= 0) {
+        if (callback) callback(false);
+        return;
+    }
+
+    double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
+    auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration);
+
+    // Reuse or create sequence data buffer
+    if (!_renderedData || _renderedData->getNumChannels() != static_cast<uint32_t>(totalChannels)
+        || _renderedData->getNumFrames() != static_cast<uint32_t>(numFrames)) {
+        _renderedData = std::make_unique<NativeSequenceData>(
+            static_cast<uint32_t>(totalChannels),
+            static_cast<uint32_t>(numFrames),
+            static_cast<uint32_t>(frameTimeMS));
+    }
+
+    if (clear) {
+        int startFrame = startMS / frameTimeMS;
+        int endFrame = std::min(endMS / frameTimeMS, numFrames);
+        for (int f = startFrame; f < endFrame; ++f) {
+            _renderedData->zeroFrame(static_cast<uint32_t>(f));
+        }
+    }
+
+    _coordinator = std::make_unique<NativeRenderCoordinator>(
+        _effectProvider, _modelProvider, context.get());
+
+    bool completed = _coordinator->renderRange(startMS, endMS, *_renderedData);
+
+    _coordinator.reset();
+
+    bool wasCancelled = !completed;
+    notifyRenderComplete(wasCancelled);
+    if (callback) callback(wasCancelled);
 }
 
-void RenderEngine::renderModelRange(const std::string& modelName, int startMS, int endMS, bool clear) {}
-bool RenderEngine::abortRender(int timeoutMS) { return true; }
+void RenderEngine::renderModelRange(const std::string& modelName,
+                                    int startMS, int endMS, bool clear)
+{
+    // For now, render the full range (model-specific filtering can be added later)
+    renderRange(startMS, endMS, clear, nullptr);
+}
+
+bool RenderEngine::abortRender(int timeoutMS)
+{
+    if (_coordinator) {
+        _coordinator->abort();
+        // Wait for completion (coordinator blocks in renderAll/renderRange)
+        // The abort flag will cause the render to exit within one frame time
+        return true;
+    }
+    return true;
+}
+
+bool RenderEngine::exportRenderedFSEQ(const std::string& outputPath,
+                                      int compressionLevel)
+{
+    if (!_renderedData) return false;
+    return _renderedData->exportToFSEQ(outputPath, compressionLevel);
+}
 
 FrameBuffer RenderEngine::getFrameBuffer(const std::string& modelName) const
 {
@@ -655,8 +815,18 @@ bool RenderEngine::getGPUEnabled() const { return false; }
 void RenderEngine::setGPUEnabled(bool enabled) {}
 void RenderEngine::setRenderMode(RenderMode mode) { _renderMode.store(mode); }
 RenderMode RenderEngine::getRenderMode() const { return _renderMode.load(); }
-bool RenderEngine::isRendering() const { return false; }
-RenderStatus RenderEngine::getRenderStatus() const { return {}; }
+bool RenderEngine::isRendering() const {
+    return _coordinator && _coordinator->isRendering();
+}
+
+RenderStatus RenderEngine::getRenderStatus() const {
+    RenderStatus status;
+    status.isRendering = isRendering();
+    if (_fseqLoaded && _fseqFile) {
+        status.framesTotal = static_cast<int>(_fseqFile->getNumFrames());
+    }
+    return status;
+}
 
 int RenderEngine::getFrameTimeMS() const
 {

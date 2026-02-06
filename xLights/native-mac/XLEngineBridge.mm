@@ -235,9 +235,10 @@ static XLEngineBridge *_sharedBridge = nil;
         _effectEngine = std::make_unique<xlEngine::EffectEngine>(_nativeEffectProvider.get());
         _renderEngine = std::make_unique<xlEngine::RenderEngine>(_nativeRenderProvider.get());
 
-        // Give RenderEngine access to model and output providers for FSEQ rendering
+        // Give RenderEngine access to providers for rendering
         _renderEngine->setModelProvider(_nativeModelProvider.get());
         _renderEngine->setOutputProvider(_nativeOutputProvider.get());
+        _renderEngine->setEffectProvider(_nativeEffectProvider.get());
 
         _standaloneMode = YES;
         _engineInitialized = YES;

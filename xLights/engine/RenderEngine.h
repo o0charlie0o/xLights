@@ -46,8 +46,12 @@
 class xLightsFrame;
 class PixelBufferClass;
 class FSEQFile;
+class NativeSequenceData;
 
 namespace xlEngine {
+
+class IEffectProvider;
+class NativeRenderCoordinator;
 
 // Rendering mode: CPU-only or GPU-accelerated (Metal on macOS, OpenGL elsewhere)
 enum class RenderMode {
@@ -311,6 +315,9 @@ public:
     // Set the output provider for resolving controller channel mappings.
     void setOutputProvider(IOutputProvider* provider);
 
+    // Set the effect provider for accessing sequence effect data during rendering.
+    void setEffectProvider(IEffectProvider* provider);
+
     // Load an FSEQ file for playback rendering.
     // Returns true if the file was loaded and channel mappings were resolved.
     bool loadFSEQ(const std::string& fseqPath);
@@ -320,6 +327,10 @@ public:
 
     // Check if an FSEQ file is loaded.
     bool isFSEQLoaded() const;
+
+    // Export the most recently rendered data to an FSEQ file.
+    // Returns true on success. Only valid after renderAll/renderRange completes.
+    bool exportRenderedFSEQ(const std::string& outputPath, int compressionLevel = 2);
 #endif
 
 private:
@@ -337,9 +348,17 @@ private:
     IRenderProvider* _provider; // render provider interface
 
 #ifdef XLIGHTS_NATIVE
-    // --- FSEQ Playback State (Native Build) ---
+    // --- Native Render State ---
     IModelProvider* _modelProvider = nullptr;
     IOutputProvider* _outputProvider = nullptr;
+    IEffectProvider* _effectProvider = nullptr;
+
+    // Render coordinator for effect-based rendering
+    std::unique_ptr<NativeRenderCoordinator> _coordinator;
+    std::unique_ptr<NativeSequenceData> _renderedData;
+    std::string _fseqPath; // Path of currently loaded FSEQ
+
+    // --- FSEQ Playback State ---
 
     std::unique_ptr<FSEQFile> _fseqFile;
     std::vector<uint8_t> _currentFrameData;
