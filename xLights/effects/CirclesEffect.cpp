@@ -9,18 +9,28 @@
  **************************************************************/
 
 #include "CirclesEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "CirclesPanel.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/circles-16.xpm"
 #include "../../include/circles-24.xpm"
 #include "../../include/circles-32.xpm"
 #include "../../include/circles-48.xpm"
 #include "../../include/circles-64.xpm"
+#endif
 
-CirclesEffect::CirclesEffect(int i) : RenderableEffect(i, "Circles", circles_16, circles_24, circles_32, circles_48, circles_64)
+CirclesEffect::CirclesEffect(int i) : RenderableEffect(i, "Circles",
+#ifndef XLIGHTS_NATIVE
+    circles_16, circles_24, circles_32, circles_48, circles_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -30,9 +40,11 @@ CirclesEffect::~CirclesEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *CirclesEffect::CreatePanel(wxWindow *parent) {
     return new CirclesPanel(parent);
 }
+#endif
 
 class RgbBalls
 {
@@ -132,6 +144,7 @@ public:
     MetaBall *metaballs;
 };
 
+#ifndef XLIGHTS_NATIVE
 void CirclesEffect::SetDefaultParameters() {
     CirclesPanel *cp = (CirclesPanel*)panel;
     if (cp == nullptr) {
@@ -157,6 +170,7 @@ void CirclesEffect::SetDefaultParameters() {
     SetCheckBoxValue(cp->CheckBox_Circles_Random_m, false);
     SetCheckBoxValue(cp->CheckBox_Circles_Linear_Fade, false);
 }
+#endif
 
 void CirclesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
 

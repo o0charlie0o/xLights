@@ -69,7 +69,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 
 private:
     void RenderMetaBalls(RenderBuffer& buffer, int numBalls, MetaBall* metaballs);

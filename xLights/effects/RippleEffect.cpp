@@ -9,24 +9,37 @@
  **************************************************************/
 
 #include "RippleEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "RipplePanel.h"
+#include "../ExternalHooks.h"
+#include "../models/Model.h"
+#include "../xLightsMain.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
-#include "../ExternalHooks.h"
-#include "../models/Model.h"
-#include "../xLightsMain.h"
 
 #include "nanosvg/src/nanosvg.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/ripple-16.xpm"
 #include "../../include/ripple-24.xpm"
 #include "../../include/ripple-32.xpm"
 #include "../../include/ripple-48.xpm"
 #include "../../include/ripple-64.xpm"
+#endif
 
-RippleEffect::RippleEffect(int id) : RenderableEffect(id, "Ripple", ripple_16, ripple_24, ripple_32, ripple_48, ripple_64)
+#include <cassert>
+#include <sstream>
+
+RippleEffect::RippleEffect(int id) : RenderableEffect(id, "Ripple",
+#ifndef XLIGHTS_NATIVE
+    ripple_16, ripple_24, ripple_32, ripple_48, ripple_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -35,9 +48,11 @@ RippleEffect::~RippleEffect()
 {
     //dtor
 }
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *RippleEffect::CreatePanel(wxWindow *parent) {
     return new RipplePanel(parent);
 }
+#endif
 
 #define RENDER_RIPPLE_CIRCLE     0
 #define RENDER_RIPPLE_SQUARE     1
@@ -56,6 +71,7 @@ xlEffectPanel *RippleEffect::CreatePanel(wxWindow *parent) {
 #define MOVEMENT_IMPLODE    1
 #define MOVEMENT_NONE       2
 
+#ifndef XLIGHTS_NATIVE
 void RippleEffect::SetDefaultParameters()
 {
     RipplePanel* rp = (RipplePanel*)panel;
@@ -98,6 +114,7 @@ void RippleEffect::SetDefaultParameters()
     SetCheckBoxValue(rp->CheckBox_Ripple3D, false);
     SetChoiceValue(rp->Choice_Ripple_Draw_Style, "Old");
 }
+#endif
 
 typedef std::pair<double, double> dpoint;
 typedef std::pair<int, int> ipoint;
@@ -157,69 +174,36 @@ static void getCirclePoints(dpointvec& ppts)
 
 static void getCrossPoints(dpointvec& ppts)
 {
-    const wxPoint points[] = { wxPoint(2, 0),
-                               wxPoint(2, 6),
-                               wxPoint(0, 6),
-                               wxPoint(0, 7),
-                               wxPoint(2, 7),
-                               wxPoint(2, 10),
-                               wxPoint(3, 10),
-                               wxPoint(3, 7),
-                               wxPoint(5, 7),
-                               wxPoint(5, 6),
-                               wxPoint(3, 6),
-                               wxPoint(3, 0) };
+    struct pt { int x; int y; };
+    const pt points[] = { {2, 0}, {2, 6}, {0, 6}, {0, 7}, {2, 7}, {2, 10},
+                          {3, 10}, {3, 7}, {5, 7}, {5, 6}, {3, 6}, {3, 0} };
     ppts.clear();
-    for (const auto& pt : points) {
-        ppts.push_back({ (pt.x - 2.5) / 7.0, (pt.y - 6.5) / 10 });
+    for (const auto& p : points) {
+        ppts.push_back({ (p.x - 2.5) / 7.0, (p.y - 6.5) / 10 });
     }
 }
 
 static void getTreePoints(dpointvec& ppts)
 {
-    const wxPoint points[] = {
-        wxPoint(3, 3),
-        wxPoint(3, 0),
-        wxPoint(5, 0),
-        wxPoint(5, 3),
-        wxPoint(0, 3),
-        wxPoint(2, 6),
-        wxPoint(1, 6),
-        wxPoint(3, 9),
-        wxPoint(2, 9),
-        wxPoint(4, 11),
-        wxPoint(6, 9),
-        wxPoint(5, 9),
-        wxPoint(7, 6),
-        wxPoint(6, 6),
-        wxPoint(8, 3)
-    };
+    struct pt { int x; int y; };
+    const pt points[] = { {3, 3}, {3, 0}, {5, 0}, {5, 3}, {0, 3}, {2, 6},
+                          {1, 6}, {3, 9}, {2, 9}, {4, 11}, {6, 9}, {5, 9},
+                          {7, 6}, {6, 6}, {8, 3} };
     ppts.clear();
-    for (const auto& pt : points) {
-        ppts.push_back({ (pt.x - 4.0) / 11.0, (pt.y - 5.5) / 11.0 });
+    for (const auto& p : points) {
+        ppts.push_back({ (p.x - 4.0) / 11.0, (p.y - 5.5) / 11.0 });
     }
 }
 
 static void getPresentPoints(dpointvec& ppts)
 {
-    const wxPoint points[] = {
-        wxPoint(5, 9),
-        wxPoint(2, 11),
-        wxPoint(2, 9),
-        wxPoint(5, 9),
-        wxPoint(8, 11),
-        wxPoint(8, 9),
-        wxPoint(5, 9),
-        wxPoint(0, 9),
-        wxPoint(0, 0),
-        wxPoint(10, 0),
-        wxPoint(10, 9),
-        wxPoint(5, 9),
-        wxPoint(5, 0)
-    };
+    struct pt { int x; int y; };
+    const pt points[] = { {5, 9}, {2, 11}, {2, 9}, {5, 9}, {8, 11}, {8, 9},
+                          {5, 9}, {0, 9}, {0, 0}, {10, 0}, {10, 9}, {5, 9},
+                          {5, 0} };
 
-    for (const auto& pt : points) {
-        ppts.push_back({ (pt.x - 5.0) / 7.0, (pt.y - 5.5) / 10.0 });
+    for (const auto& p : points) {
+        ppts.push_back({ (p.x - 5.0) / 7.0, (p.y - 5.5) / 10.0 });
     }
 }
 
@@ -1025,7 +1009,19 @@ void RippleEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
     bool drawLines = false;
     bool rippleSpaced = false;
 
+#ifdef XLIGHTS_NATIVE
+    // Split StyleStr by spaces without wxSplit
+    std::vector<std::string> swords;
+    {
+        std::istringstream iss(StyleStr);
+        std::string token;
+        while (iss >> token) {
+            swords.push_back(token);
+        }
+    }
+#else
     auto swords = wxSplit(StyleStr, ' ');
+#endif
     if (swords.size() > 1) {
         drawNew = true;
         if (swords[0] == "Lines") {
@@ -1153,7 +1149,7 @@ void RippleEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
         Drawpresent(buffer, Movement, xc, yc, radius, hsv, Ripple_Thickness, CheckBox_Ripple3D);
         break;
     default:
-        wxASSERT(false);
+        assert(false);
         break;
     }
 }
@@ -1278,7 +1274,7 @@ void RippleEffect::Drawstar(RenderBuffer& buffer, int Movement, int xc, int yc, 
         offsetangle = 90.0 - 360.0 / 8;
         break;
     default:
-        wxASSERT(false);
+        assert(false);
         break;
     }
 
@@ -1464,31 +1460,17 @@ void RippleEffect::Drawheart(RenderBuffer& buffer, int Movement, int xc, int yc,
 
 void RippleEffect::Drawtree(RenderBuffer& buffer, int Movement, int xc, int yc, double radius, HSVValue& hsv, int Ripple_Thickness, int CheckBox_Ripple3D)
 {
+    struct pt { int x; int y; };
     struct line {
-        wxPoint start;
-        wxPoint end;
-
-        line(const wxPoint s, const wxPoint e)
-        {
-            start = s;
-            end = e;
-        }
+        pt start;
+        pt end;
     };
 
-    const line points[] = { line(wxPoint(3, 0), wxPoint(5, 0)),
-                            line(wxPoint(5, 0), wxPoint(5, 3)),
-                            line(wxPoint(3, 0), wxPoint(3, 3)),
-                            line(wxPoint(0, 3), wxPoint(8, 3)),
-                            line(wxPoint(0, 3), wxPoint(2, 6)),
-                            line(wxPoint(8, 3), wxPoint(6, 6)),
-                            line(wxPoint(1, 6), wxPoint(2, 6)),
-                            line(wxPoint(6, 6), wxPoint(7, 6)),
-                            line(wxPoint(1, 6), wxPoint(3, 9)),
-                            line(wxPoint(7, 6), wxPoint(5, 9)),
-                            line(wxPoint(2, 9), wxPoint(3, 9)),
-                            line(wxPoint(5, 9), wxPoint(6, 9)),
-                            line(wxPoint(6, 9), wxPoint(4, 11)),
-                            line(wxPoint(2, 9), wxPoint(4, 11)) };
+    const line points[] = { {{3,0},{5,0}}, {{5,0},{5,3}}, {{3,0},{3,3}},
+                            {{0,3},{8,3}}, {{0,3},{2,6}}, {{8,3},{6,6}},
+                            {{1,6},{2,6}}, {{6,6},{7,6}}, {{1,6},{3,9}},
+                            {{7,6},{5,9}}, {{2,9},{3,9}}, {{5,9},{6,9}},
+                            {{6,9},{4,11}}, {{2,9},{4,11}} };
     int count = sizeof(points) / sizeof(line);
 
     xlColor color(hsv);
@@ -1523,29 +1505,16 @@ void RippleEffect::Drawtree(RenderBuffer& buffer, int Movement, int xc, int yc, 
 
 void RippleEffect::Drawcrucifix(RenderBuffer& buffer, int Movement, int xc, int yc, double radius, HSVValue& hsv, int Ripple_Thickness, int CheckBox_Ripple3D)
 {
+    struct pt { int x; int y; };
     struct line {
-        wxPoint start;
-        wxPoint end;
-
-        line(const wxPoint s, const wxPoint e)
-        {
-            start = s;
-            end = e;
-        }
+        pt start;
+        pt end;
     };
 
-    const line points[] = { line(wxPoint(2, 0), wxPoint(2, 6)),
-                            line(wxPoint(2, 6), wxPoint(0, 6)),
-                            line(wxPoint(0, 6), wxPoint(0, 7)),
-                            line(wxPoint(0, 7), wxPoint(2, 7)),
-                            line(wxPoint(2, 7), wxPoint(2, 10)),
-                            line(wxPoint(2, 10), wxPoint(3, 10)),
-                            line(wxPoint(3, 10), wxPoint(3, 7)),
-                            line(wxPoint(3, 7), wxPoint(5, 7)),
-                            line(wxPoint(5, 7), wxPoint(5, 6)),
-                            line(wxPoint(5, 6), wxPoint(3, 6)),
-                            line(wxPoint(3, 6), wxPoint(3, 0)),
-                            line(wxPoint(3, 0), wxPoint(2, 0)) };
+    const line points[] = { {{2,0},{2,6}}, {{2,6},{0,6}}, {{0,6},{0,7}},
+                            {{0,7},{2,7}}, {{2,7},{2,10}}, {{2,10},{3,10}},
+                            {{3,10},{3,7}}, {{3,7},{5,7}}, {{5,7},{5,6}},
+                            {{5,6},{3,6}}, {{3,6},{3,0}}, {{3,0},{2,0}} };
     int count = sizeof(points) / sizeof(line);
 
     xlColor color(hsv);
@@ -1580,26 +1549,15 @@ void RippleEffect::Drawcrucifix(RenderBuffer& buffer, int Movement, int xc, int 
 
 void RippleEffect::Drawpresent(RenderBuffer& buffer, int Movement, int xc, int yc, double radius, HSVValue& hsv, int Ripple_Thickness, int CheckBox_Ripple3D)
 {
+    struct pt { int x; int y; };
     struct line {
-        wxPoint start;
-        wxPoint end;
-
-        line(const wxPoint s, const wxPoint e)
-        {
-            start = s;
-            end = e;
-        }
+        pt start;
+        pt end;
     };
 
-    const line points[] = { line(wxPoint(0, 0), wxPoint(0, 9)),
-                            line(wxPoint(0, 9), wxPoint(10, 9)),
-                            line(wxPoint(10, 9), wxPoint(10, 0)),
-                            line(wxPoint(10, 0), wxPoint(0, 0)),
-                            line(wxPoint(5, 0), wxPoint(5, 9)),
-                            line(wxPoint(5, 9), wxPoint(2, 11)),
-                            line(wxPoint(2, 11), wxPoint(2, 9)),
-                            line(wxPoint(5, 9), wxPoint(8, 11)),
-                            line(wxPoint(8, 11), wxPoint(8, 9)) };
+    const line points[] = { {{0,0},{0,9}}, {{0,9},{10,9}}, {{10,9},{10,0}},
+                            {{10,0},{0,0}}, {{5,0},{5,9}}, {{5,9},{2,11}},
+                            {{2,11},{2,9}}, {{5,9},{8,11}}, {{8,11},{8,9}} };
     int count = sizeof(points) / sizeof(line);
 
     xlColor color(hsv);
@@ -1681,6 +1639,7 @@ std::list<std::string> RippleEffect::GetFileReferences(Model* model, const Setti
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> RippleEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -1713,6 +1672,7 @@ bool RippleEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap& Settin
 
     return rc;
 }
+#endif
 
 // This section is not doing what I want
 bool RippleEffect::needToAdjustSettings(const std::string& version)

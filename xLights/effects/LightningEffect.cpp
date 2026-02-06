@@ -9,17 +9,21 @@
  **************************************************************/
 
 #include "LightningEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "LightningPanel.h"
+#endif
 
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/lightning-16.xpm"
 #include "../../include/lightning-24.xpm"
 #include "../../include/lightning-32.xpm"
 #include "../../include/lightning-48.xpm"
 #include "../../include/lightning-64.xpm"
+#endif
 
 #include <algorithm>
 
@@ -81,7 +85,13 @@ namespace
     }
 }
 
-LightningEffect::LightningEffect(int id) : RenderableEffect(id, "Lightning", lightning_16, lightning_24, lightning_32, lightning_48, lightning_64)
+LightningEffect::LightningEffect(int id) : RenderableEffect(id, "Lightning",
+#ifndef XLIGHTS_NATIVE
+    lightning_16, lightning_24, lightning_32, lightning_48, lightning_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     //ctor
 }
@@ -91,6 +101,7 @@ LightningEffect::~LightningEffect()
     //dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel *LightningEffect::CreatePanel(wxWindow *parent) {
     return new LightningPanel(parent);
 }
@@ -117,6 +128,7 @@ void LightningEffect::SetDefaultParameters() {
 
     SetCheckBoxValue(lp->CheckBox_ForkedLightning, false);
 }
+#endif
 
 void LightningEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();

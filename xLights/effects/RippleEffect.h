@@ -70,8 +70,10 @@ public:
         return true;
     }
     virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap& SettingsMap) const override;
+#ifndef XLIGHTS_NATIVE
     virtual bool CleanupFileLocations(xLightsFrame* frame, SettingsMap& SettingsMap) override;
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
     virtual bool CanRenderPartialTimeInterval() const override
     {
         return true;
@@ -157,7 +159,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 
 private:
 

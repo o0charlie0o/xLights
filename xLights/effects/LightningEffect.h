@@ -73,5 +73,7 @@ public:
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
 };

@@ -10,25 +10,34 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifndef XLIGHTS_NATIVE
 #include <wx/bmpbndl.h>
-#include <string>
-#include "../Color.h"
 #include "assist/AssistPanel.h"
 #include "../graphics/xlGraphicsAccumulators.h"
+#endif
 
+#include <string>
+#include <list>
+#include <cassert>
+#include "../Color.h"
+
+#ifndef XLIGHTS_NATIVE
 class wxPanel;
 class wxWindow;
 class wxBitmap;
+class wxSlider;
+class wxCheckBox;
+class wxSpinCtrl;
+class xlEffectPanel;
+class xLightsFrame;
+#endif
+
 class Model;
 class SequenceElements;
 class Effect;
 class SettingsMap;
 class RenderBuffer;
-class wxSlider;
-class wxCheckBox;
 class AudioManager;
-class wxSpinCtrl;
-class xlEffectPanel;
 class EffectManager;
 class EffectLayer;
 
@@ -54,7 +63,9 @@ public:
         return tooltip;
     };
 
+#ifndef XLIGHTS_NATIVE
     virtual const wxBitmapBundle& GetEffectIcon(int defSize = 16) const;
+#endif
     virtual int GetId() const
     {
         return id;
@@ -79,10 +90,12 @@ public:
     {
         return std::list<std::string>();
     }
+#ifndef XLIGHTS_NATIVE
     virtual bool CleanupFileLocations(xLightsFrame* frame, SettingsMap& SettingsMap)
     {
         return false;
     }
+#endif
     virtual bool AppropriateOnNodes() const
     {
         return true;
@@ -101,14 +114,18 @@ public:
         mSequenceElements = els;
     }
 
+#ifndef XLIGHTS_NATIVE
     xlEffectPanel* GetPanel(wxWindow* parent);
+#endif
     virtual void SetDefaultParameters()
     {}
     virtual void SetPanelStatus(Model* cls)
     {}
     virtual void SetEffectTimeRange(int startTimeMs, int endTimeMs)
     {}
+#ifndef XLIGHTS_NATIVE
     virtual wxString GetEffectString();
+#endif
 
     // Methods for rendering the effect
     virtual bool CanRenderOnBackgroundThread(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
@@ -126,39 +143,45 @@ public:
         return true;
     }
 
+#ifndef XLIGHTS_NATIVE
     // return 0 if this is completely drawin the effect background
     // return 1 to have the grid place a normal icon
     // return 2 to have the grid place a smaller icon
     virtual int DrawEffectBackground(const Effect* e, int x1, int y1, int x2, int y2,
                                      xlVertexColorAccumulator& backgrounds, xlColor* colorMask, bool ramps);
+#endif
 
     virtual bool needToAdjustSettings(const std::string& version);
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true);
     virtual void AdjustSettingsAfterSplit(Effect *first, Effect *second) {}
 
+#ifndef XLIGHTS_NATIVE
     virtual AssistPanel* GetAssistPanel(wxWindow* parent, xLightsFrame* xl_frame);
     virtual bool HasAssistPanel()
     {
         return false;
     }
+#endif
 
     static std::string UpgradeValueCurve(EffectManager* effectManager, const std::string& name, const std::string& value, const std::string& effectName);
 protected:
+#ifndef XLIGHTS_NATIVE
     static void SetSliderValue(wxSlider* slider, int value);
     static void SetSpinValue(wxSpinCtrl* spin, int value);
     static void SetChoiceValue(wxChoice* choice, std::string value);
     static void SetRadioValue(wxRadioButton* radio);
     static void SetTextValue(wxTextCtrl* choice, std::string value);
     static void SetCheckBoxValue(wxCheckBox* w, bool b);
+#endif
 
     virtual double GetSettingVCMin(const std::string& name) const
     {
-        wxASSERT(false);
+        assert(false);
         return 0.0;
     }
     virtual double GetSettingVCMax(const std::string& name) const
     {
-        wxASSERT(false);
+        assert(false);
         return 100.0;
     }
     virtual int GetSettingVCDivisor(const std::string& name) const
@@ -176,6 +199,7 @@ protected:
     void AdjustSettingsToBeFitToTime(int effectIdx, SettingsMap& settings, int startMS, int endMS, xlColorVector& colors);
     virtual void RemoveDefaults(const std::string& version, Effect* effect);
 
+#ifndef XLIGHTS_NATIVE
     void initBitmaps(const char** data16,
                      const char** data24,
                      const char** data32,
@@ -183,15 +207,20 @@ protected:
                      const char** data64);
 
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) = 0;
+#endif
     std::string name;
     std::string tooltip;
     int id;
+#ifndef XLIGHTS_NATIVE
     xlEffectPanel* panel;
+#endif
     SequenceElements* mSequenceElements;
+#ifndef XLIGHTS_NATIVE
     wxBitmapBundle icon16;
     wxBitmapBundle icon24;
     wxBitmapBundle icon32;
     wxBitmapBundle icon48;
+#endif
 
 private:
 };

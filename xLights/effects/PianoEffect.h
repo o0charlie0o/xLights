@@ -13,7 +13,9 @@
 #include "RenderableEffect.h"
 
 #include <list>
+#ifndef XLIGHTS_NATIVE
 class PianoPanel;
+#endif
 
 #define PIANO_SCALE_MIN 0
 #define PIANO_SCALE_MAX 100
@@ -28,7 +30,9 @@ public:
         return false;
     }
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#ifndef XLIGHTS_NATIVE
     static std::vector<float> Parse(wxString& l);
+#endif
     virtual void SetDefaultParameters() override;
     virtual void SetPanelStatus(Model* cls) override;
     virtual void RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) override;
@@ -36,7 +40,9 @@ public:
     {
         return 5;
     }
+#ifndef XLIGHTS_NATIVE
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
+#endif
     virtual bool AppropriateOnNodes() const override
     {
         return false;
@@ -58,16 +64,22 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override
     {
         return true;
     };
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
+#ifndef XLIGHTS_NATIVE
     void SetPanelTimingTracks();
+#endif
 
 private:
+#ifndef XLIGHTS_NATIVE
     PianoPanel* _panel;
+#endif
     void RenderPiano(RenderBuffer& buffer, SequenceElements* elements, const int startmidi, const int endmidi, const bool sharps, const std::string type, int scale, std::string MIDITrack, int xoffset, bool fadeNotes);
     void ReduceChannels(std::list<std::pair<float, float>>* pdata, int start, int end, bool sharps);
     void DrawTruePiano(RenderBuffer& buffer, std::list<std::pair<float, float>>* pdata, bool sharps, int start, int end, int scale, int xoffset, bool fadeNotes);

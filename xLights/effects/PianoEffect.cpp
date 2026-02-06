@@ -10,25 +10,43 @@
 
 #include <vector>
 
+#ifndef XLIGHTS_NATIVE
 #include "../../include/piano-16.xpm"
 #include "../../include/piano-64.xpm"
+#endif
 
 #include "PianoEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "PianoPanel.h"
+#include "../xLightsXmlFile.h"
+#include "models/Model.h"
+#endif
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../UtilFunctions.h"
 #include "../sequencer/Effect.h"
-#include "../xLightsXmlFile.h"
-#include "models/Model.h"
 
+#ifndef XLIGHTS_NATIVE
 #include <log4cpp/Category.hh>
+#endif
+
+#include <cstdlib>
+#include <string>
+#include <algorithm>
 
 PianoEffect::PianoEffect(int id) :
-    RenderableEffect(id, "Piano", piano_16, piano_64, piano_64, piano_64, piano_64)
+    RenderableEffect(id, "Piano",
+#ifndef XLIGHTS_NATIVE
+    piano_16, piano_64, piano_64, piano_64, piano_64
+#else
+    nullptr, nullptr, nullptr, nullptr, nullptr
+#endif
+    )
 {
     // ctor
+#ifndef XLIGHTS_NATIVE
     _panel = nullptr;
+#endif
 }
 
 PianoEffect::~PianoEffect()
@@ -36,6 +54,7 @@ PianoEffect::~PianoEffect()
     // dtor
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> PianoEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res = RenderableEffect::CheckEffectSettings(settings, media, model, eff, renderCache);
@@ -74,6 +93,7 @@ void PianoEffect::SetPanelTimingTracks()
     event.SetString(timingtracks);
     wxPostEvent(fp, event);
 }
+#endif
 
 void PianoEffect::adjustSettings(const std::string& version, Effect* effect, bool removeDefaults)
 {
@@ -82,6 +102,7 @@ void PianoEffect::adjustSettings(const std::string& version, Effect* effect, boo
         RenderableEffect::adjustSettings(version, effect, removeDefaults);
     }
 
+#ifndef XLIGHTS_NATIVE
     if (IsVersionOlder("2016.45", version)) {
         SettingsMap& settings = effect->GetSettings();
         wxString oldsettings = settings.Get("E_CHOICE_Piano_Notes_Source", "newsettings");
@@ -100,8 +121,10 @@ void PianoEffect::adjustSettings(const std::string& version, Effect* effect, boo
             settings.erase("E_SLIDER_Piano_MIDI_Speed");
         }
     }
+#endif
 }
 
+#ifndef XLIGHTS_NATIVE
 xlEffectPanel* PianoEffect::CreatePanel(wxWindow* parent)
 {
     _panel = new PianoPanel(parent);
@@ -127,7 +150,9 @@ void PianoEffect::SetDefaultParameters()
 
     SetPanelTimingTracks();
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void PianoEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
 {
     wxString timing = effect->GetSettings().Get("E_CHOICE_Piano_MIDITrack_APPLYLAST", "");
@@ -138,6 +163,7 @@ void PianoEffect::RenameTimingTrack(std::string oldname, std::string newname, Ef
 
     SetPanelTimingTracks();
 }
+#endif
 
 void PianoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
@@ -178,8 +204,10 @@ void PianoEffect::RenderPiano(RenderBuffer& buffer, SequenceElements* elements, 
     std::string& _MIDITrack = cache->_MIDItrack;
 
     if (buffer.needToInit) {
+#ifndef XLIGHTS_NATIVE
         // just in case the timing tracks have changed
         SetPanelTimingTracks();
+#endif
 
         buffer.needToInit = false;
         if (_MIDITrack != MIDITrack) {
@@ -520,6 +548,7 @@ void PianoEffect::DrawBarsPiano(RenderBuffer& buffer, std::list<std::pair<float,
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 std::vector<float> PianoEffect::Parse(wxString& l)
 {
     std::vector<float> res;
@@ -537,6 +566,7 @@ std::vector<float> PianoEffect::Parse(wxString& l)
 
     return res;
 }
+#endif
 
 std::list<std::string> PianoEffect::ExtractNotes(const std::string& label)
 {
@@ -597,7 +627,7 @@ int PianoEffect::ConvertNote(const std::string& note)
         nletter = 7;
         break;
     default: {
-        int number = wxAtoi(n);
+        int number = std::atoi(n.c_str());
         if (number < 0)
             number = 0;
         if (number > 127)
@@ -625,7 +655,7 @@ int PianoEffect::ConvertNote(const std::string& note)
     }
 
     if (n != "") {
-        octave = wxAtoi(n);
+        octave = std::atoi(n.c_str());
     }
 
     int number = 12 + (octave * 12) + nletter + sharp;
@@ -648,13 +678,19 @@ std::tuple<int, int, int>* FindTracker(std::list<std::tuple<int, int, int>>& tra
 
 std::map<int, std::list<std::pair<float, float>>> PianoEffect::LoadTimingTrack(const std::string& track, int intervalMS, bool fadeNotes)
 {
+#ifndef XLIGHTS_NATIVE
     static log4cpp::Category& logger_pianodata = log4cpp::Category::getInstance(std::string("log_pianodata"));
+#endif
     std::map<int, std::list<std::pair<float, float>>> res;
 
+#ifndef XLIGHTS_NATIVE
     logger_pianodata.debug("Loading timings from timing track " + track);
+#endif
 
     if (mSequenceElements == nullptr) {
+#ifndef XLIGHTS_NATIVE
         logger_pianodata.debug("No timing tracks found.");
+#endif
         return res;
     }
 
@@ -662,7 +698,9 @@ std::map<int, std::list<std::pair<float, float>>> PianoEffect::LoadTimingTrack(c
     EffectLayer* el = GetTiming(track);
 
     if (el == nullptr) {
+#ifndef XLIGHTS_NATIVE
         logger_pianodata.debug("Timing track not found.");
+#endif
         return res;
     }
 
