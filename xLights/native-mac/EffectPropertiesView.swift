@@ -162,6 +162,22 @@ final class EffectSelectionState {
                 }
             }
         }
+
+        // Also load buffer/layer settings (B_ prefixed keys)
+        let bufferKeys = [
+            "B_CHOICE_BufferStyle",
+            "B_CHOICE_BufferTransform",
+            "B_SPINCTRL_BufferStagger",
+            "B_CHOICE_PerPreviewCamera",
+            "B_SLIDER_Blur",
+            "B_CHECKBOX_OverlayBkg"
+        ]
+        for key in bufferKeys {
+            if let value = bridge.getEffectParameter(effectId, key: key) {
+                newParams[key] = value
+            }
+        }
+
         parameters = newParams
     }
 

@@ -467,13 +467,13 @@ static const CGFloat kZoomSliderWidth = 80.0;
 - (void)playPauseAction:(id)sender {
     if (_isPlaying) {
         self.isPlaying = NO;
-        [_engineBridge pause];
+        // Let the delegate (sequencer VC) handle pause via playback controller
         if ([_delegate respondsToSelector:@selector(transportBarDidPause:)]) {
             [_delegate transportBarDidPause:self];
         }
     } else {
         self.isPlaying = YES;
-        [_engineBridge play];
+        // Let the delegate (sequencer VC) handle play via playback controller
         if ([_delegate respondsToSelector:@selector(transportBarDidPlay:)]) {
             [_delegate transportBarDidPlay:self];
         }
@@ -483,8 +483,7 @@ static const CGFloat kZoomSliderWidth = 80.0;
 - (void)stopAction:(id)sender {
     self.isPlaying = NO;
     self.currentPositionMS = 0.0;
-    [_engineBridge stop];
-    [_engineBridge seek:0];
+    // Let the delegate (sequencer VC) handle stop via playback controller
     if ([_delegate respondsToSelector:@selector(transportBarDidStop:)]) {
         [_delegate transportBarDidStop:self];
     }

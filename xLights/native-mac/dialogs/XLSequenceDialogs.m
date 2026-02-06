@@ -16,7 +16,7 @@ static const CGFloat kLabelWidth = 120.0;
 
 #pragma mark - XLNewSequenceDialog
 
-@interface XLNewSequenceDialog ()
+@interface XLNewSequenceDialog () <NSTextFieldDelegate>
 
 @property (nonatomic, strong) NSTextField *nameField;
 @property (nonatomic, strong) NSTextField *durationField;
@@ -39,7 +39,7 @@ static const CGFloat kLabelWidth = 120.0;
         self.minHeight = 220;
         _sequenceName = @"New Sequence";
         _durationSeconds = 60;
-        _frameIntervalMs = 50;
+        _frameIntervalMs = 25;
     }
     return self;
 }
@@ -53,6 +53,7 @@ static const CGFloat kLabelWidth = 120.0;
     // Sequence name
     _nameField = [XLBaseSheetController createTextField];
     _nameField.stringValue = _sequenceName;
+    _nameField.delegate = (id<NSTextFieldDelegate>)self;
     [_nameField.widthAnchor constraintEqualToConstant:200].active = YES;
 
     NSStackView *nameRow = [XLBaseSheetController formRowWithLabel:@"Sequence Name:"
@@ -206,6 +207,32 @@ static const CGFloat kLabelWidth = 120.0;
     }
 
     return nil;
+}
+
+- (void)sheetDidLoad {
+    // Generate a unique default name if the current one already exists
+    if (_showDirectory) {
+        NSString *baseName = _sequenceName;
+        NSString *path = [_showDirectory stringByAppendingPathComponent:
+            [baseName stringByAppendingPathExtension:@"xsq"]];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+            for (int suffix = 2; suffix < 1000; suffix++) {
+                NSString *candidate = [NSString stringWithFormat:@"%@ (%d)", baseName, suffix];
+                NSString *candidatePath = [_showDirectory stringByAppendingPathComponent:
+                    [candidate stringByAppendingPathExtension:@"xsq"]];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:candidatePath]) {
+                    _nameField.stringValue = candidate;
+                    _sequenceName = candidate;
+                    break;
+                }
+            }
+        }
+    }
+    [self updateOKButtonState];
+}
+
+- (void)controlTextDidChange:(NSNotification *)obj {
+    [self updateOKButtonState];
 }
 
 - (void)okClicked:(id)sender {

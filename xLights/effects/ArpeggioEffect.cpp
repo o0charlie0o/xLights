@@ -29,7 +29,9 @@
 #include "../UtilFunctions.h"
 #include "../models/Model.h"
 #include "../models/ModelGroup.h"
+#ifndef XLIGHTS_NATIVE
 #include <log4cpp/Category.hh>
+#endif
 
 static const std::string CHOICE_Arpeggio_TimingTrack("CHOICE_Arpeggio_TimingTrack");
 static const std::string TEXTCTRL_Arpeggio_Steps("TEXTCTRL_Arpeggio_Steps");
@@ -200,6 +202,7 @@ wxString ArpeggioEffect::GetEffectString() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void ArpeggioEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     SettingsMap &settingsMap = effect->GetSettings();
     if (settingsMap.Get("E_TEXTCTRL_Arpeggio_Steps", "") == "0") {
@@ -240,6 +243,7 @@ void ArpeggioEffect::RemoveDefaults(const std::string &version, Effect *effect) 
     }
     RenderableEffect::RemoveDefaults(version, effect);
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void ArpeggioEffect::SetPanelStatus(Model* cls) {

@@ -20,7 +20,9 @@
 #include "../AudioManager.h"
 #include "../UtilFunctions.h"
 #include "../models/Model.h"
+#ifndef XLIGHTS_NATIVE
 #include "../Parallel.h"
+#endif
 
 #ifndef XLIGHTS_NATIVE
 #include "../../include/liquid-16.xpm"
@@ -31,7 +33,9 @@
 #endif
 
 #include <cassert>
+#ifndef XLIGHTS_NATIVE
 #include <log4cpp/Category.hh>
+#endif
 
 //#define LE_INTERPOLATE
 #define MAX_PARTICLES 100000

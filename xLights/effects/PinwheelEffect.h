@@ -135,12 +135,16 @@ protected:
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
 #endif
     
+#ifndef XLIGHTS_NATIVE
     void RenderNewMethod(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer);
     virtual void RenderNewArms(RenderBuffer& buffer, PinwheelData &data);
     void RenderOldMethod(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer);
-    
+
     void Draw_arm(RenderBuffer& buffer, int base_degrees, int max_radius, int pinwheel_twist, int xc_adj, int yc_adj, int colorIdx, Pinwheel3DType pinwheel_3d, float round);
+#endif
 
     Pinwheel3DType to3dType(const std::string& pinwheel_3d);
+#ifndef XLIGHTS_NATIVE
     void adjustColor(Pinwheel3DType pw3dType, xlColor& color, HSVValue& hsv, bool allowAlpha, float round);
+#endif
 };

@@ -108,6 +108,7 @@ typedef struct {
 // Single-buffered (small data, updated infrequently, less contention)
 @property (nonatomic, strong) id<MTLBuffer> playbackBuffer;
 @property (nonatomic, strong) id<MTLBuffer> dropIndicatorBuffer;
+@property (nonatomic, strong) id<MTLBuffer> cellHighlightBuffer;
 @property (nonatomic, strong) id<MTLBuffer> rubberBandBuffer;
 
 @end
@@ -204,6 +205,11 @@ typedef struct {
     _dropIndicatorBuffer = [_device newBufferWithLength:6 * sizeof(RoundedRectVertex)
                                                 options:MTLResourceStorageModeShared];
     [_dropIndicatorBuffer setLabel:@"DropIndicatorBuffer"];
+
+    // Cell highlight buffer (6 vertices for fill + 6 for outline = 12 total)
+    _cellHighlightBuffer = [_device newBufferWithLength:12 * sizeof(RoundedRectVertex)
+                                                options:MTLResourceStorageModeShared];
+    [_cellHighlightBuffer setLabel:@"CellHighlightBuffer"];
 
     // Rubber band selection buffer (6 vertices for fill + up to 512 for dashed border)
     _rubberBandBuffer = [_device newBufferWithLength:520 * sizeof(SimpleVertex)
@@ -506,6 +512,10 @@ activeTimingColorIndex:(NSInteger)activeTimingColorIndex
           dropEndMS:(CGFloat)dropEndMS
    rubberBandActive:(BOOL)rubberBandActive
      rubberBandRect:(NSRect)rubberBandRect
+  cellHighlightActive:(BOOL)cellHighlightActive
+    cellHighlightRow:(NSInteger)cellHighlightRow
+cellHighlightStartMS:(CGFloat)cellHighlightStartMS
+  cellHighlightEndMS:(CGFloat)cellHighlightEndMS
 {
     // Wait for a buffer slot to become available (blocks if all 3 are in-flight).
     // This prevents CPU from writing to a buffer the GPU is still reading.
@@ -595,6 +605,13 @@ activeTimingColorIndex:(NSInteger)activeTimingColorIndex
     [self drawIconsWithEncoder:encoder uniforms:uniforms params:fp
                    bufferIndex:bufferIndex
                        effects:effects effectCount:effectCount];
+
+    // Draw cell selection highlight (blue outline for keyboard effect insertion)
+    if (cellHighlightActive && cellHighlightRow >= 0) {
+        [self drawCellHighlightWithEncoder:encoder uniforms:uniforms params:fp
+                                       row:cellHighlightRow
+                                   startMS:cellHighlightStartMS endMS:cellHighlightEndMS];
+    }
 
     // Draw drop indicator (ghost effect) during palette drag
     if (showDropIndicator && dropRow >= 0) {
@@ -1254,6 +1271,83 @@ activeTimingColorIndex:(NSInteger)activeTimingColorIndex
     [encoder setVertexBuffer:_dropIndicatorBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+}
+
+#pragma mark - Cell Selection Highlight
+
+- (void)drawCellHighlightWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                            uniforms:(EffectsGridUniforms)uniforms
+                              params:(XLGridFrameParams)fp
+                                 row:(NSInteger)row
+                             startMS:(CGFloat)startMS
+                               endMS:(CGFloat)endMS
+{
+    if (!_cellHighlightBuffer) return;
+
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+
+    CGFloat x1 = startMS * zoomLevel - scrollOffset.x;
+    CGFloat x2 = endMS * zoomLevel - scrollOffset.x;
+    CGFloat y1 = row * rowHeight - scrollOffset.y + kEffectBlockInset;
+    CGFloat y2 = (row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
+
+    // Skip if off-screen or invalid
+    if (x2 < 0 || x1 > viewSize.width) return;
+    if (y2 < 0 || y1 > viewSize.height) return;
+    if (x2 <= x1 || y2 <= y1) return;
+
+    simd_float2 rectMin = simd_make_float2(x1, y1);
+    simd_float2 rectMax = simd_make_float2(x2, y2);
+    float cornerRadius = (float)kEffectBlockCornerRadius;
+
+    RoundedRectVertex *vptr = (RoundedRectVertex *)_cellHighlightBuffer.contents;
+
+    // First 6 vertices: semi-transparent blue fill
+    simd_float4 fillColor = simd_make_float4(0.3, 0.5, 1.0, 0.15);
+    for (int i = 0; i < 6; i++) {
+        vptr[i].color = fillColor;
+        vptr[i].rectMin = rectMin;
+        vptr[i].rectMax = rectMax;
+        vptr[i].cornerRadius = cornerRadius;
+    }
+    vptr[0].position = simd_make_float2(x1, y1);
+    vptr[1].position = simd_make_float2(x2, y1);
+    vptr[2].position = simd_make_float2(x1, y2);
+    vptr[3].position = simd_make_float2(x2, y1);
+    vptr[4].position = simd_make_float2(x2, y2);
+    vptr[5].position = simd_make_float2(x1, y2);
+
+    // Next 6 vertices: blue outline (1px expanded)
+    simd_float4 outlineColor = simd_make_float4(0.3, 0.6, 1.0, 0.8);
+    simd_float2 outRectMin = simd_make_float2(x1 - 1, y1 - 1);
+    simd_float2 outRectMax = simd_make_float2(x2 + 1, y2 + 1);
+    for (int i = 6; i < 12; i++) {
+        vptr[i].color = outlineColor;
+        vptr[i].rectMin = outRectMin;
+        vptr[i].rectMax = outRectMax;
+        vptr[i].cornerRadius = cornerRadius;
+    }
+    vptr[6].position  = simd_make_float2(x1 - 1, y1 - 1);
+    vptr[7].position  = simd_make_float2(x2 + 1, y1 - 1);
+    vptr[8].position  = simd_make_float2(x1 - 1, y2 + 1);
+    vptr[9].position  = simd_make_float2(x2 + 1, y1 - 1);
+    vptr[10].position = simd_make_float2(x2 + 1, y2 + 1);
+    vptr[11].position = simd_make_float2(x1 - 1, y2 + 1);
+
+    // Draw fill
+    [encoder setRenderPipelineState:_effectBlockPipeline];
+    [encoder setVertexBuffer:_cellHighlightBuffer offset:0 atIndex:0];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+    // Draw outline
+    [encoder setRenderPipelineState:_outlinePipeline];
+    [encoder setVertexBuffer:_cellHighlightBuffer offset:0 atIndex:0];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:6 vertexCount:6];
 }
 
 #pragma mark - Rubber Band Selection

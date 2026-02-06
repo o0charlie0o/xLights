@@ -249,12 +249,17 @@
 #pragma mark - Playback Control
 
 - (void)play {
+    NSLog(@"XLPlaybackController: play() called — isPlaying=%d isPaused=%d", _isPlaying, _isPaused);
+
     if (_isPlaying && !_isPaused) return;
+
+    // If resuming from pause, just restart the timer
+    BOOL resumingFromPause = _isPlaying && _isPaused;
 
     [self updateSequenceInfo];
 
     if (_durationMS <= 0) {
-        NSLog(@"XLPlaybackController: Cannot play - no sequence loaded or duration is zero");
+        NSLog(@"XLPlaybackController: Cannot play - no sequence loaded or duration is zero (durationMS=%ld)", (long)_durationMS);
         // Notify delegate of failure
         if ([_delegate respondsToSelector:@selector(playbackControllerDidStopPlayback:)]) {
             [_delegate playbackControllerDidStopPlayback:self];
@@ -275,7 +280,7 @@
 
     _isPlaying = YES;
     _isPaused = NO;
-    _playOriginMS = _positionMS;  // Remember where play was pressed
+    _playOriginMS = resumingFromPause ? _playOriginMS : _positionMS;
     _playbackStartTime = CFAbsoluteTimeGetCurrent();
     _playbackStartPositionMS = _positionMS;
     _lastFrameTime = _playbackStartTime;
@@ -289,6 +294,14 @@
 
     // Start the playback loop (for frame timing and preview rendering)
     [self startPlaybackTimer];
+
+    // Render the initial frame immediately (don't wait for first timer fire)
+    [self renderFrameAtTime:_positionMS];
+
+    // Notify delegate of initial position so playhead updates immediately
+    if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
+        [_delegate playbackController:self didUpdatePositionMS:_positionMS];
+    }
 
     // Start audio playback (if audio is available)
     if (_useNativeAudio && _audioPlayer.isLoaded) {
@@ -311,8 +324,8 @@
         [_delegate playbackControllerDidStartPlayback:self];
     }
 
-    NSLog(@"XLPlaybackController: Playback started at %ldms, duration %ldms, frameTime %ldms, nativeAudio=%d, hasAudio=%d",
-          (long)_positionMS, (long)_durationMS, (long)_frameTimeMS, _useNativeAudio, (_useNativeAudio && _audioPlayer.isLoaded));
+    NSLog(@"XLPlaybackController: Playback started at %ldms, duration %ldms, frameTime %ldms, nativeAudio=%d, hasAudio=%d, previewView=%@",
+          (long)_positionMS, (long)_durationMS, (long)_frameTimeMS, _useNativeAudio, (_useNativeAudio && _audioPlayer.isLoaded), _previewView);
 }
 
 - (void)pause {

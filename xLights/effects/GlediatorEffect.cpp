@@ -33,8 +33,9 @@
 #ifndef XLIGHTS_NATIVE
 #include "../../include/glediator-16.xpm"
 #include "../../include/glediator-64.xpm"
-#endif
+
 #include <log4cpp/Category.hh>
+#endif
 #include "../UtilFunctions.h"
 
 #ifndef XLIGHTS_NATIVE
@@ -230,6 +231,7 @@ void GlediatorEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void GlediatorEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults)
 {
     // give the base class a chance to adjust any settings
@@ -256,8 +258,10 @@ void GlediatorEffect::adjustSettings(const std::string &version, Effect *effect,
         }
     }
 }
+#endif
 
-std::list<std::string> GlediatorEffect::GetFileReferences(Model* model, const SettingsMap &SettingsMap) const 
+#ifndef XLIGHTS_NATIVE
+std::list<std::string> GlediatorEffect::GetFileReferences(Model* model, const SettingsMap &SettingsMap) const
 {
     std::list<std::string> res;
     if (SettingsMap["E_FILEPICKERCTRL_Glediator_Filename"] != "") {
@@ -265,6 +269,7 @@ std::list<std::string> GlediatorEffect::GetFileReferences(Model* model, const Se
     }
     return res;
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 bool GlediatorEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap)

@@ -30,7 +30,9 @@
 #include "../../include/state-64.xpm"
 #endif
 
+#ifndef XLIGHTS_NATIVE
 #include <log4cpp/Category.hh>
+#endif
 #include <sstream>
 #include <algorithm>
 
@@ -138,6 +140,7 @@ void StateEffect::SetPanelStatus(Model* cls) {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> StateEffect::GetStates(Model* cls, std::string model) {
     std::list<std::string> res;
 
@@ -162,6 +165,7 @@ std::list<std::string> StateEffect::GetStates(Model* cls, std::string model) {
 
     return res;
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 xlEffectPanel* StateEffect::CreatePanel(wxWindow* parent) {

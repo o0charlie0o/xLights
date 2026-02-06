@@ -982,18 +982,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                         float r = pixels[pixelIdx + 0] / 255.0f;
                         float g = pixels[pixelIdx + 1] / 255.0f;
                         float b = pixels[pixelIdx + 2] / 255.0f;
-                        float a = pixels[pixelIdx + 3] / 255.0f;
-
-                        // Only use pixel color if alpha > 0 (has rendered content)
-                        if (a > 0.01f) {
-                            vertex.color = (simd_float4){r, g, b, 1.0f};
-                            gotPixelColor = YES;
-                        }
+                        // Use pixel color directly — alpha 0 means "off" (black)
+                        vertex.color = (simd_float4){r, g, b, 1.0f};
+                        gotPixelColor = YES;
                     }
                 }
             }
 
-            // Fall back to layout color if no pixel data
+            // Fall back to layout color if no pixel data for this model
             if (!gotPixelColor) {
                 vertex.color = (simd_float4){
                     baseGray * (0.3f + 0.7f * defaultR),

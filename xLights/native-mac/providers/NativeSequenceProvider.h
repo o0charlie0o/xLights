@@ -143,6 +143,7 @@ public:
     int getFrameMS() const override;
     bool isSequenceLoaded() const override;
     std::string getMediaPath() const override;
+    std::string getSequenceType() const;
     unsigned int getNumChannels() const override;
     unsigned int getNumFrames() const override;
 
@@ -170,6 +171,19 @@ public:
     /// @param showFolderPath Path to the show folder (for resolving relative media paths).
     /// @return true if the sequence was loaded successfully.
     bool loadSequenceWithShowFolder(const std::string& sequencePath, const std::string& showFolderPath);
+
+    /// Create a new empty sequence in memory (not yet saved to disk).
+    /// @param name Sequence name (used as display name).
+    /// @param durationSeconds Sequence duration in seconds.
+    /// @param frameMS Milliseconds per frame (e.g. 50 for 20fps).
+    /// @param mediaPath Optional audio file path. If provided, sequence type is "Media".
+    /// @param showFolderPath Show folder for resolving relative media paths.
+    /// @return true if the sequence was created successfully.
+    bool createNewSequence(const std::string& name,
+                           double durationSeconds,
+                           int frameMS,
+                           const std::string& mediaPath = "",
+                           const std::string& showFolderPath = "");
 
     /// Close the current sequence and release resources.
     void closeAndReleaseSequence();
@@ -209,6 +223,10 @@ public:
     /// Check if the sequence has audio media.
     /// @return true if audio is available and loaded.
     bool hasAudioMedia() const;
+
+    /// Set the sequence file path (used for auto-save).
+    /// @param path Full path to the .xsq sequence file.
+    void setSequencePath(const std::string& path);
 
     /// Get all sequence elements (models and timing tracks).
     /// @return Vector of sequence elements with their effects.

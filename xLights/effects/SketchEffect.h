@@ -54,7 +54,9 @@ public:
 #endif
 
 protected:
+#ifndef XLIGHTS_NATIVE
     void RemoveDefaults( const std::string& version, Effect* effect ) override;
+#endif
 #ifndef XLIGHTS_NATIVE
     xlEffectPanel* CreatePanel( wxWindow* parent ) override;
 

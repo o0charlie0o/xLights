@@ -421,7 +421,8 @@ std::vector<std::string> NativeModelProvider::getModelNames() const {
 }
 
 std::vector<std::string> NativeModelProvider::getGroupNames() const {
-    return {}; // Not implemented in native standalone mode
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _groupNames;
 }
 
 Model* NativeModelProvider::getModel(const std::string& name) {
@@ -482,7 +483,18 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
 
     std::lock_guard<std::mutex> lock(_mutex);
     _modelNames.clear();
+    _groupNames.clear();
     _modelAttributes.clear();
+
+    // Parse group names first (from modelGroups section)
+    NSArray<NSXMLElement*>* groupElements = [xmlDoc.rootElement nodesForXPath:@"//modelGroups/modelGroup" error:nil];
+    for (NSXMLElement* elem in groupElements) {
+        NSXMLNode* nameAttr = [elem attributeForName:@"name"];
+        if (nameAttr && nameAttr.stringValue) {
+            _groupNames.push_back([nameAttr.stringValue UTF8String]);
+        }
+    }
+
     for (NSXMLElement* elem in modelElements) {
         NSXMLNode* nameAttr = [elem attributeForName:@"name"];
         if (nameAttr && nameAttr.stringValue) {
@@ -503,7 +515,8 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
     // Parse views
     parseViewsFromXML([content UTF8String]);
 
-    NSLog(@"NativeModelProvider: Loaded %zu models with attributes from XML", _modelNames.size());
+    NSLog(@"NativeModelProvider: Loaded %zu groups + %zu models with attributes from XML",
+          _groupNames.size(), _modelNames.size());
     return true;
 }
 
@@ -524,6 +537,7 @@ std::map<std::string, std::string> NativeModelProvider::getModelAttributes(const
 void NativeModelProvider::clearModels() {
     std::lock_guard<std::mutex> lock(_mutex);
     _modelNames.clear();
+    _groupNames.clear();
     _modelAttributes.clear();
     _views.clear();
     _showFolderPath.clear();
@@ -563,10 +577,16 @@ size_t NativeModelProvider::getViewCount() const {
 SequenceViewInfo NativeModelProvider::getViewAtIndex(size_t index) const {
     std::lock_guard<std::mutex> lock(_mutex);
     if (index == 0) {
-        // Return empty Master View (all models)
+        // Master View: groups first, then individual models (matches legacy AddAllModelsToSequence)
         SequenceViewInfo masterView;
         masterView.name = "Master View";
-        masterView.models = _modelNames;
+        masterView.models.reserve(_groupNames.size() + _modelNames.size());
+        for (const auto& g : _groupNames) {
+            masterView.models.push_back(g);
+        }
+        for (const auto& m : _modelNames) {
+            masterView.models.push_back(m);
+        }
         return masterView;
     }
     if (index - 1 >= _views.size()) {

@@ -19,6 +19,7 @@
 #include "../AudioManager.h"
 #include "../models/Model.h"
 #include "../UtilFunctions.h"
+#include <functional>
 
 #ifndef XLIGHTS_NATIVE
 #include "../../include/meteors-16.xpm"
@@ -29,7 +30,19 @@
 #endif
 #include "../UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../Parallel.h"
+#else
+// Sequential fallback for native build
+template <typename T>
+void parallel_for(std::list<T> &list, std::function<void(T&, int)>& f, int /*minStep*/ = 1) {
+    int idx = 0;
+    for (auto &a : list) {
+        f(a, idx);
+        idx++;
+    }
+}
+#endif
 
 MeteorsEffect::MeteorsEffect(int id) : RenderableEffect(id, "Meteors",
 #ifndef XLIGHTS_NATIVE

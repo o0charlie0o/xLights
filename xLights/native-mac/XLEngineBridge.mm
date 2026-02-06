@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLEngineBridge.h"
+#import "effects/XLEffectPanelDefinitions.h"
 
 // Include C++ engine headers
 // During transition period, these will delegate to the existing xLightsFrame
@@ -67,6 +68,7 @@ enum class ElementType { ELEMENT_TYPE_TIMING, ELEMENT_TYPE_MODEL, ELEMENT_TYPE_S
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <set>
 
@@ -103,6 +105,13 @@ static XLEngineBridge *_sharedBridge = nil;
 
     // --- Native Mode View Selection ---
     NSInteger _currentViewIndex;  // 0 = Master View, 1+ = custom views
+
+    // --- Native Mode Group Tracking ---
+    std::set<std::string> _groupNames;  // Element names that are model groups
+
+    // --- Auto-Save ---
+    dispatch_source_t _autoSaveTimer;
+    dispatch_queue_t _autoSaveQueue;
 }
 
 #pragma mark - Lifecycle
@@ -127,6 +136,7 @@ static XLEngineBridge *_sharedBridge = nil;
         _standaloneMode = YES;  // Start in standalone mode
         _legacySupportEnabled = legacySupport;
         _showFolderPath = "";
+        _autoSaveQueue = dispatch_queue_create("org.xlights.autosave", DISPATCH_QUEUE_SERIAL);
 
         if (_legacySupportEnabled) {
             // In legacy mode, try to initialize with xLightsFrame if available
@@ -145,6 +155,29 @@ static XLEngineBridge *_sharedBridge = nil;
         }
     }
     return self;
+}
+
+- (void)rebuildGroupNamesFromShowXML {
+    _groupNames.clear();
+    if (_showFolderPath.empty()) return;
+
+    NSString* showFolder = [NSString stringWithUTF8String:_showFolderPath.c_str()];
+    NSString* rgbPath = [showFolder stringByAppendingPathComponent:@"xlights_rgbeffects.xml"];
+    NSData* xmlData = [NSData dataWithContentsOfFile:rgbPath];
+    if (!xmlData) return;
+
+    NSError* error = nil;
+    NSXMLDocument* xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (!xmlDoc || error) return;
+
+    NSArray<NSXMLElement*>* groupNodes =
+        [xmlDoc.rootElement nodesForXPath:@"//modelGroups/modelGroup" error:nil];
+    for (NSXMLElement* groupElem in groupNodes) {
+        NSString* groupName = [[groupElem attributeForName:@"name"] stringValue];
+        if (groupName) {
+            _groupNames.insert([groupName UTF8String]);
+        }
+    }
 }
 
 - (void)ensureEngineInitialized {
@@ -344,6 +377,18 @@ static XLEngineBridge *_sharedBridge = nil;
                 NSLog(@"XLEngineBridge: loadFromSequenceFile = %s", effectsLoaded ? "YES" : "NO");
             }
 
+            // Update render provider with sequence timing
+            if (_nativeRenderProvider && _nativeSequenceProvider) {
+                int frameMSVal = _nativeSequenceProvider->getFrameMS();
+                int durationMSVal = (int)(_nativeSequenceProvider->getSequenceDuration() * 1000.0);
+                if (frameMSVal > 0 && durationMSVal > 0) {
+                    _nativeRenderProvider->setSequenceInfo(frameMSVal, durationMSVal);
+                }
+            }
+
+            // Build group name set from show XML for icon display
+            [self rebuildGroupNamesFromShowXML];
+
             // Try to load the corresponding FSEQ file for playback rendering
             [self loadFSEQForSequence:path];
         }
@@ -464,16 +509,145 @@ static XLEngineBridge *_sharedBridge = nil;
     return _sequenceEngine->isSequenceLoaded() ? YES : NO;
 }
 
-- (BOOL)createSequence:(NSInteger)durationMS
+- (BOOL)createSequence:(NSString *)name
+            durationMS:(NSInteger)durationMS
                frameMS:(NSInteger)frameMS
              mediaFile:(NSString * _Nullable)mediaFile {
     [self ensureEngineInitialized];
 
-    // In standalone/native mode, create sequence through native provider
-    // Note: NativeSequenceProvider doesn't support creating new sequences yet
+    std::string stdName = name ? [name UTF8String] : "New Sequence";
+    std::string media = mediaFile ? [mediaFile UTF8String] : "";
+
 #ifdef XLIGHTS_NATIVE
-    NSLog(@"XLEngineBridge: createSequence not yet supported in native mode");
-    return NO;
+    if (!_nativeSequenceProvider) {
+        NSLog(@"XLEngineBridge: Cannot create sequence - sequence provider not available");
+        return NO;
+    }
+
+    @try {
+        double durationSec = durationMS / 1000.0;
+        int frameMSInt = (int)frameMS;
+
+        bool created = _nativeSequenceProvider->createNewSequence(
+            stdName, durationSec, frameMSInt, media, _showFolderPath);
+
+        if (!created) {
+            NSLog(@"XLEngineBridge: NativeSequenceProvider failed to create sequence");
+            return NO;
+        }
+
+        // Initialize the effect provider with a default timing track, groups, and models.
+        // Matches legacy AddAllModelsToSequence(): groups first, then individual models.
+        if (_nativeEffectProvider) {
+            _nativeEffectProvider->clear();
+            _nativeEffectProvider->setSequenceLengthMS((int)durationMS);
+
+            // Add a default timing track
+            size_t timingIdx = _nativeEffectProvider->addElement(
+                "New Timing", xlEngine::SequenceElementType::Timing);
+            if (timingIdx != SIZE_MAX) {
+                _nativeEffectProvider->setTimingTrackActive("New Timing");
+            }
+
+            // Parse groups and models from the show XML (xlights_rgbeffects.xml)
+            // to get the correct ordering: groups first, then individual models
+            _groupNames.clear();
+            size_t groupCount = 0;
+            size_t modelCount = 0;
+            if (!_showFolderPath.empty()) {
+                NSString* showFolder = [NSString stringWithUTF8String:_showFolderPath.c_str()];
+                NSString* rgbPath = [showFolder stringByAppendingPathComponent:@"xlights_rgbeffects.xml"];
+                NSData* xmlData = [NSData dataWithContentsOfFile:rgbPath];
+                if (xmlData) {
+                    NSError* xmlError = nil;
+                    NSXMLDocument* xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&xmlError];
+                    if (xmlDoc && !xmlError) {
+                        // Add groups first (matches legacy ordering)
+                        NSArray<NSXMLElement*>* groupNodes =
+                            [xmlDoc.rootElement nodesForXPath:@"//modelGroups/modelGroup" error:nil];
+                        for (NSXMLElement* groupElem in groupNodes) {
+                            NSString* groupName = [[groupElem attributeForName:@"name"] stringValue];
+                            if (groupName) {
+                                std::string stdName = [groupName UTF8String];
+                                _nativeEffectProvider->addElement(
+                                    stdName, xlEngine::SequenceElementType::Model);
+                                _groupNames.insert(stdName);
+                                groupCount++;
+                            }
+                        }
+
+                        // Then add individual models
+                        NSArray<NSXMLElement*>* modelNodes =
+                            [xmlDoc.rootElement nodesForXPath:@"//models/model" error:nil];
+                        for (NSXMLElement* modelElem in modelNodes) {
+                            NSString* modelName = [[modelElem attributeForName:@"name"] stringValue];
+                            if (modelName) {
+                                _nativeEffectProvider->addElement(
+                                    [modelName UTF8String], xlEngine::SequenceElementType::Model);
+                                modelCount++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback: if XML parsing didn't work, use model provider names
+            if (groupCount == 0 && modelCount == 0 && _nativeModelProvider) {
+                auto modelNames = _nativeModelProvider->getModelNames();
+                for (const auto& modelName : modelNames) {
+                    _nativeEffectProvider->addElement(
+                        modelName, xlEngine::SequenceElementType::Model);
+                }
+                modelCount = modelNames.size();
+            }
+
+            NSLog(@"XLEngineBridge: Added %lu groups + %lu models to new sequence",
+                  (unsigned long)groupCount, (unsigned long)modelCount);
+        }
+
+        NSLog(@"XLEngineBridge: createSequence completed - name: %@, duration: %ldms, frameMS: %ldms, media: %@",
+              name, (long)durationMS, (long)frameMS, mediaFile ?: @"(none)");
+
+        // Update render provider with sequence timing so renderAll knows frame count
+        if (_nativeRenderProvider) {
+            _nativeRenderProvider->setSequenceInfo((int)frameMS, (int)durationMS);
+        }
+
+        // Auto-save: write the .xsq file immediately to the show folder
+        if (!_showFolderPath.empty()) {
+            NSString *showFolder = [NSString stringWithUTF8String:_showFolderPath.c_str()];
+            NSString *baseName = [NSString stringWithUTF8String:stdName.c_str()];
+            NSString *xsqFile = [showFolder stringByAppendingPathComponent:
+                                 [baseName stringByAppendingString:@".xsq"]];
+
+            // Avoid overwriting existing sequences — append (2), (3), etc.
+            NSFileManager *fm = [NSFileManager defaultManager];
+            if ([fm fileExistsAtPath:xsqFile]) {
+                int suffix = 2;
+                while (suffix < 1000) {
+                    NSString *candidate = [showFolder stringByAppendingPathComponent:
+                                           [NSString stringWithFormat:@"%@ (%d).xsq", baseName, suffix]];
+                    if (![fm fileExistsAtPath:candidate]) {
+                        xsqFile = candidate;
+                        break;
+                    }
+                    suffix++;
+                }
+            }
+
+            std::string xsqPath = [xsqFile UTF8String];
+            _nativeSequenceProvider->setSequencePath(xsqPath);
+            auto meta = [self buildSequenceMetadata];
+            _nativeEffectProvider->saveToSequenceFile(xsqPath, meta);
+            NSLog(@"XLEngineBridge: Auto-saved new sequence to %s", xsqPath.c_str());
+        }
+
+        return YES;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception creating sequence: %@ - %@",
+              exception.name, exception.reason);
+        return NO;
+    }
 #else
     if (_standaloneMode) {
         NSLog(@"XLEngineBridge: createSequence not yet supported in standalone mode");
@@ -488,8 +662,6 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     @try {
-        // Convert parameters
-        std::string media = mediaFile ? [mediaFile UTF8String] : "";
         uint32_t duration = (uint32_t)durationMS;
         uint32_t frameInterval = (uint32_t)frameMS;
 
@@ -561,7 +733,10 @@ static XLEngineBridge *_sharedBridge = nil;
         if (song) { metadata.song = [song UTF8String]; changed = YES; }
         NSString *artist = info[@"artist"];
         if (artist) { metadata.artist = [artist UTF8String]; changed = YES; }
-        if (changed) NSLog(@"XLEngineBridge: setSequenceInfo updated native metadata");
+        if (changed) {
+            NSLog(@"XLEngineBridge: setSequenceInfo updated native metadata");
+            [self scheduleAutoSave];
+        }
         return changed;
     }
     return NO;
@@ -796,8 +971,32 @@ static XLEngineBridge *_sharedBridge = nil;
         return;
     }
 
-    _renderEngine->renderAll(nullptr);
-    NSLog(@"XLEngineBridge: renderAll()");
+    NSLog(@"XLEngineBridge: renderAll() — dispatching to background");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        self->_renderEngine->renderAll(nullptr);
+        NSLog(@"XLEngineBridge: renderAll() — complete");
+
+        // Export FSEQ file alongside the sequence
+        if (self->_nativeSequenceProvider) {
+            std::string seqPath = self->_nativeSequenceProvider->getSequencePath();
+            if (!seqPath.empty()) {
+                // Derive FSEQ path: replace .xLights extension with .fseq
+                std::string fseqPath;
+                auto dotPos = seqPath.rfind('.');
+                if (dotPos != std::string::npos) {
+                    fseqPath = seqPath.substr(0, dotPos) + ".fseq";
+                } else {
+                    fseqPath = seqPath + ".fseq";
+                }
+                bool exported = self->_renderEngine->exportRenderedFSEQ(fseqPath, 2);
+                if (exported) {
+                    NSLog(@"XLEngineBridge: Exported FSEQ to %s", fseqPath.c_str());
+                } else {
+                    NSLog(@"XLEngineBridge: Failed to export FSEQ (no rendered data or write error)");
+                }
+            }
+        }
+    });
 }
 
 - (void)renderRange:(NSInteger)startMS endMS:(NSInteger)endMS {
@@ -890,6 +1089,16 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     return _renderEngine->isRendering() ? YES : NO;
+}
+
+- (float)getRenderProgress {
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        return 0.0f;
+    }
+
+    auto status = _renderEngine->getRenderStatus();
+    return status.progressPercent / 100.0f;
 }
 
 #pragma mark - Model Operations
@@ -2215,63 +2424,86 @@ static XLEngineBridge *_sharedBridge = nil;
         return @[];
     }
 #ifdef XLIGHTS_NATIVE
-    // Get elements from native sequence provider
-    if (!_nativeSequenceProvider) {
+    // Get elements from the effect provider (authoritative source for both
+    // loaded sequences and newly created ones)
+    if (!_nativeEffectProvider) {
         return @[];
     }
 
-    const auto& elements = _nativeSequenceProvider->getElements();
+    size_t elementCount = _nativeEffectProvider->getElementCount();
 
-    // Get models for current view (if not Master View)
-    std::set<std::string> viewModels;
-    bool filterByView = false;
-    if (_currentViewIndex > 0 && _nativeModelProvider) {
-        auto viewInfo = _nativeModelProvider->getViewAtIndex((size_t)_currentViewIndex);
-        for (const auto& modelName : viewInfo.models) {
-            viewModels.insert(modelName);
+    // Build name→index lookup for the effect provider
+    std::unordered_map<std::string, size_t> nameToIndex;
+    nameToIndex.reserve(elementCount);
+    for (size_t i = 0; i < elementCount; i++) {
+        xlEngine::ElementInfo ei;
+        if (_nativeEffectProvider->getElement(i, ei)) {
+            nameToIndex[ei.name] = i;
         }
-        filterByView = !viewModels.empty();
     }
 
-    NSMutableArray *result = [NSMutableArray arrayWithCapacity:elements.size()];
+    // Get the current view's ordered model list
+    std::vector<std::string> viewModelOrder;
+    if (_nativeModelProvider) {
+        auto viewInfo = _nativeModelProvider->getViewAtIndex((size_t)_currentViewIndex);
+        viewModelOrder = viewInfo.models;
+    }
+    std::set<std::string> viewModelSet(viewModelOrder.begin(), viewModelOrder.end());
 
-    for (size_t i = 0; i < elements.size(); i++) {
-        const auto& elem = elements[i];
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:elementCount];
 
-        // Filter by view if not Master View
-        if (filterByView && elem.type != "timing") {
-            if (viewModels.find(elem.name) == viewModels.end()) {
-                continue; // Skip elements not in view
-            }
+    // Helper block to build a dictionary for an element at effect provider index
+    auto buildElementDict = [&](size_t idx) -> NSDictionary* {
+        xlEngine::ElementInfo elemInfo;
+        if (!_nativeEffectProvider->getElement(idx, elemInfo)) {
+            return nil;
         }
 
-        // Determine type string
         NSString* typeString = @"model";
-        if (elem.type == "timing") {
+        if (elemInfo.type == xlEngine::SequenceElementType::Timing) {
             typeString = @"timing";
         }
 
-        // Count total effects across all layers
-        NSInteger effectCount = 0;
-        for (const auto& layer : elem.layers) {
-            effectCount += layer.effects.size();
-        }
+        BOOL isGroup = (_groupNames.find(elemInfo.name) != _groupNames.end()) ? YES : NO;
+        NSString* elementType = isGroup ? @"group" : typeString;
 
-        NSDictionary* info = @{
-            @"index": @(i),
-            @"name": [NSString stringWithUTF8String:elem.name.c_str()],
-            @"type": typeString,
-            @"effectLayerCount": @(elem.layers.size()),
-            @"effectCount": @(effectCount),
-            @"visible": @(elem.visible),
-            @"collapsed": @(elem.collapsed),
-            @"isGroup": @NO,
+        return @{
+            @"index": @(idx),
+            @"name": [NSString stringWithUTF8String:elemInfo.name.c_str()],
+            @"type": elementType,
+            @"effectLayerCount": @(elemInfo.effectLayerCount),
+            @"effectCount": @(elemInfo.effectCount),
+            @"visible": @(elemInfo.visible),
+            @"collapsed": @(elemInfo.collapsed),
+            @"isGroup": @(isGroup),
             @"hasSubmodels": @NO,
             @"hasStrands": @NO,
             @"submodelCount": @0,
             @"strandCount": @0,
         };
-        [result addObject:info];
+    };
+
+    // 1. Add timing tracks first (in effect provider order)
+    for (size_t i = 0; i < elementCount; i++) {
+        xlEngine::ElementInfo ei;
+        if (_nativeEffectProvider->getElement(i, ei) &&
+            ei.type == xlEngine::SequenceElementType::Timing) {
+            NSDictionary* info = buildElementDict(i);
+            if (info) [result addObject:info];
+        }
+    }
+
+    // 2. Add models/groups in view order
+    for (const auto& modelName : viewModelOrder) {
+        auto it = nameToIndex.find(modelName);
+        if (it != nameToIndex.end()) {
+            xlEngine::ElementInfo ei;
+            if (_nativeEffectProvider->getElement(it->second, ei) &&
+                ei.type != xlEngine::SequenceElementType::Timing) {
+                NSDictionary* info = buildElementDict(it->second);
+                if (info) [result addObject:info];
+            }
+        }
     }
 
     NSLog(@"XLEngineBridge: getSequenceElements returning %lu elements (view index %ld)",
@@ -2443,7 +2675,9 @@ static XLEngineBridge *_sharedBridge = nil;
     std::string stdEffect = [effectType UTF8String];
 
     int effectId = _effectEngine->createEffect(stdModel, (int)layer, stdEffect, (int)startMS, (int)endMS);
-    if (effectId < 0) {
+    if (effectId >= 0) {
+        [self scheduleAutoSave];
+    } else {
         NSLog(@"XLEngineBridge: Failed to create effect %@ on %@", effectType, modelName);
     }
     return effectId;
@@ -2457,7 +2691,9 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     bool result = _effectEngine->deleteEffect((int)effectId);
-    if (!result) {
+    if (result) {
+        [self scheduleAutoSave];
+    } else {
         NSLog(@"XLEngineBridge: Failed to delete effect %ld", (long)effectId);
     }
     return result ? YES : NO;
@@ -2507,9 +2743,56 @@ static XLEngineBridge *_sharedBridge = nil;
 - (NSArray<NSDictionary *> *)getEffectParameters:(NSString *)effectType {
     if (!effectType) return @[];
 
+    // Use the static panel registry as the primary source — it has proper
+    // labels, min/max, defaults, and choices for all defined effects.
+    const XLEffectPanelDef *panelDef = [[XLEffectPanelRegistry sharedRegistry] definitionForEffect:effectType];
+    if (panelDef && panelDef->parameters) {
+        NSMutableArray *result = [NSMutableArray array];
+        for (const XLParameterDef *p = panelDef->parameters; p->key != NULL; p++) {
+            NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+            dict[@"key"] = [NSString stringWithUTF8String:p->key];
+            dict[@"displayLabel"] = [NSString stringWithUTF8String:p->displayLabel];
+
+            NSString *typeStr = @"string";
+            switch (p->type) {
+                case XLParameterTypeInt:    typeStr = @"int"; break;
+                case XLParameterTypeFloat:  typeStr = @"float"; break;
+                case XLParameterTypeBool:   typeStr = @"bool"; break;
+                case XLParameterTypeChoice: typeStr = @"choice"; break;
+                case XLParameterTypeColor:  typeStr = @"color"; break;
+                case XLParameterTypeString: typeStr = @"string"; break;
+                case XLParameterTypeFile:   typeStr = @"file"; break;
+                case XLParameterTypeFont:   typeStr = @"font"; break;
+                case XLParameterTypeValueCurve:  typeStr = @"valueCurve"; break;
+                case XLParameterTypeColorCurve:  typeStr = @"colorCurve"; break;
+            }
+            dict[@"type"] = typeStr;
+
+            dict[@"group"] = [NSString stringWithUTF8String:p->group];
+            dict[@"minValue"] = @(p->minValue);
+            dict[@"maxValue"] = @(p->maxValue);
+            dict[@"defaultValue"] = [NSString stringWithFormat:@"%.2f", p->defaultValue];
+            dict[@"supportsValueCurve"] = @((p->flags & XLParameterFlagsSupportsValueCurve) != 0);
+
+            if (p->choices) {
+                NSMutableArray *choices = [NSMutableArray array];
+                for (const char * const *c = p->choices; *c != NULL; c++) {
+                    [choices addObject:[NSString stringWithUTF8String:*c]];
+                }
+                dict[@"choices"] = choices;
+            } else {
+                dict[@"choices"] = @[];
+            }
+
+            [result addObject:dict];
+        }
+        return result;
+    }
+
+    // Fallback: use the engine's buildDefaultParameters (scans existing effects)
     [self ensureEngineInitialized];
     if (!_effectEngine) {
-        NSLog(@"[EffectInspector] bridge.getEffectParameters('%@'): no engine", effectType);
+        NSLog(@"[EffectInspector] bridge.getEffectParameters('%@'): no engine and no panel definition", effectType);
         return @[];
     }
 
@@ -2521,39 +2804,18 @@ static XLEngineBridge *_sharedBridge = nil;
         dict[@"key"] = [NSString stringWithUTF8String:param.key.c_str()];
         dict[@"displayLabel"] = [NSString stringWithUTF8String:param.displayLabel.c_str()];
 
-        // Convert ParameterType enum to string to match Swift enum rawValue
         NSString *typeStr = @"string";
         switch (param.type) {
-            case xlEngine::ParameterType::Int:
-                typeStr = @"int";
-                break;
-            case xlEngine::ParameterType::Float:
-                typeStr = @"float";
-                break;
-            case xlEngine::ParameterType::Bool:
-                typeStr = @"bool";
-                break;
-            case xlEngine::ParameterType::String:
-                typeStr = @"string";
-                break;
-            case xlEngine::ParameterType::Color:
-                typeStr = @"color";
-                break;
-            case xlEngine::ParameterType::Choice:
-                typeStr = @"choice";
-                break;
-            case xlEngine::ParameterType::File:
-                typeStr = @"file";
-                break;
-            case xlEngine::ParameterType::ValueCurve:
-                typeStr = @"valueCurve";
-                break;
-            case xlEngine::ParameterType::Font:
-                typeStr = @"font";
-                break;
-            case xlEngine::ParameterType::ColorCurve:
-                typeStr = @"colorCurve";
-                break;
+            case xlEngine::ParameterType::Int:         typeStr = @"int"; break;
+            case xlEngine::ParameterType::Float:       typeStr = @"float"; break;
+            case xlEngine::ParameterType::Bool:        typeStr = @"bool"; break;
+            case xlEngine::ParameterType::String:      typeStr = @"string"; break;
+            case xlEngine::ParameterType::Color:       typeStr = @"color"; break;
+            case xlEngine::ParameterType::Choice:      typeStr = @"choice"; break;
+            case xlEngine::ParameterType::File:        typeStr = @"file"; break;
+            case xlEngine::ParameterType::ValueCurve:  typeStr = @"valueCurve"; break;
+            case xlEngine::ParameterType::Font:        typeStr = @"font"; break;
+            case xlEngine::ParameterType::ColorCurve:  typeStr = @"colorCurve"; break;
         }
         dict[@"type"] = typeStr;
 
@@ -2584,7 +2846,12 @@ static XLEngineBridge *_sharedBridge = nil;
 
     std::string stdKey = [key UTF8String];
     std::string stdValue = [value UTF8String];
-    return _effectEngine->setEffectParameter((int)effectId, stdKey, stdValue) ? YES : NO;
+    BOOL result = _effectEngine->setEffectParameter((int)effectId, stdKey, stdValue) ? YES : NO;
+    if (result) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"XLEffectDidChangeNotification" object:self];
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (NSString *)getEffectParameter:(NSInteger)effectId key:(NSString *)key {
@@ -2609,7 +2876,12 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     std::string stdSettings = [settings UTF8String];
-    return _effectEngine->setEffectSettings((int)effectId, stdSettings) ? YES : NO;
+    BOOL result = _effectEngine->setEffectSettings((int)effectId, stdSettings) ? YES : NO;
+    if (result) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"XLEffectDidChangeNotification" object:self];
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (NSString *)getEffectSettings:(NSInteger)effectId {
@@ -2631,7 +2903,12 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     std::string stdPalette = [palette UTF8String];
-    return _effectEngine->setEffectPalette((int)effectId, stdPalette) ? YES : NO;
+    BOOL result = _effectEngine->setEffectPalette((int)effectId, stdPalette) ? YES : NO;
+    if (result) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"XLEffectDidChangeNotification" object:self];
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (NSString *)getEffectPalette:(NSInteger)effectId {
@@ -2650,7 +2927,11 @@ static XLEngineBridge *_sharedBridge = nil;
         return NO;
     }
 
-    return _effectEngine->moveEffect((int)effectId, (int)startMS, (int)endMS) ? YES : NO;
+    BOOL result = _effectEngine->moveEffect((int)effectId, (int)startMS, (int)endMS) ? YES : NO;
+    if (result) {
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (NSArray<NSDictionary *> *)getEffectsForModel:(NSString *)modelName {
@@ -2725,7 +3006,11 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     std::string stdModel = [modelName UTF8String];
-    return _effectEngine->addLayer(stdModel);
+    NSInteger result = _effectEngine->addLayer(stdModel);
+    if (result >= 0) {
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (NSInteger)insertLayer:(NSString *)modelName atIndex:(NSInteger)index {
@@ -2737,7 +3022,11 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     std::string stdModel = [modelName UTF8String];
-    return _effectEngine->insertLayer(stdModel, (int)index);
+    NSInteger result = _effectEngine->insertLayer(stdModel, (int)index);
+    if (result >= 0) {
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (BOOL)removeLayer:(NSString *)modelName layer:(NSInteger)layer {
@@ -2749,7 +3038,11 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     std::string stdModel = [modelName UTF8String];
-    return _effectEngine->removeLayer(stdModel, (int)layer) ? YES : NO;
+    BOOL result = _effectEngine->removeLayer(stdModel, (int)layer) ? YES : NO;
+    if (result) {
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (BOOL)selectEffect:(NSInteger)effectId {
@@ -2793,7 +3086,11 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     std::string stdType = [newType UTF8String];
-    return _effectEngine->convertEffectType((int)effectId, stdType) ? YES : NO;
+    BOOL result = _effectEngine->convertEffectType((int)effectId, stdType) ? YES : NO;
+    if (result) {
+        [self scheduleAutoSave];
+    }
+    return result;
 }
 
 - (BOOL)setEffectLocked:(NSInteger)effectId locked:(BOOL)locked {
@@ -2802,6 +3099,7 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
     if (!_nativeEffectProvider) return NO;
     auto result = _nativeEffectProvider->setEffectLocked((int64_t)effectId, locked ? true : false);
+    if (result.success) [self scheduleAutoSave];
     return result.success ? YES : NO;
 #else
     if (!_frame) return NO;
@@ -2829,6 +3127,7 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
     if (!_nativeEffectProvider) return NO;
     auto result = _nativeEffectProvider->setEffectRenderDisabled((int64_t)effectId, disabled ? true : false);
+    if (result.success) [self scheduleAutoSave];
     return result.success ? YES : NO;
 #else
     if (!_frame) return NO;
@@ -2856,6 +3155,7 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
     if (!_nativeEffectProvider) return NO;
     auto result = _nativeEffectProvider->resetEffectToDefaults((int64_t)effectId);
+    if (result.success) [self scheduleAutoSave];
     return result.success ? YES : NO;
 #else
     if (!_frame) return NO;
@@ -2877,6 +3177,47 @@ static XLEngineBridge *_sharedBridge = nil;
     }
     return NO;
 #endif
+}
+
+#pragma mark - Auto-Save
+
+- (void)scheduleAutoSave {
+    if (_autoSaveTimer) {
+        dispatch_source_cancel(_autoSaveTimer);
+        _autoSaveTimer = nil;
+    }
+
+    _autoSaveTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _autoSaveQueue);
+    dispatch_source_set_timer(_autoSaveTimer,
+        dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), DISPATCH_TIME_FOREVER, 0);
+    dispatch_source_set_event_handler(_autoSaveTimer, ^{
+        [self performAutoSave];
+    });
+    dispatch_resume(_autoSaveTimer);
+}
+
+- (xlEngine::NativeEffectProvider::SequenceMetadata)buildSequenceMetadata {
+    xlEngine::NativeEffectProvider::SequenceMetadata meta;
+    if (_nativeSequenceProvider) {
+        meta.durationSeconds = _nativeSequenceProvider->getSequenceDuration();
+        meta.frameMS = _nativeSequenceProvider->getFrameMS();
+        meta.mediaFile = _nativeSequenceProvider->getMediaPath();
+        std::string seqType = _nativeSequenceProvider->getSequenceType();
+        meta.sequenceType = seqType.empty() ? "Animation" : seqType;
+    }
+    return meta;
+}
+
+- (void)performAutoSave {
+    if (!_nativeEffectProvider || !_nativeSequenceProvider) return;
+    std::string path = _nativeSequenceProvider->getSequencePath();
+    if (path.empty()) return;
+
+    auto meta = [self buildSequenceMetadata];
+    bool saved = _nativeEffectProvider->saveToSequenceFile(path, meta);
+    if (saved) {
+        NSLog(@"XLEngineBridge: Auto-saved sequence to %s", path.c_str());
+    }
 }
 
 #pragma mark - Timing Track Operations
@@ -3224,6 +3565,7 @@ static XLEngineBridge *_sharedBridge = nil;
     if (result.success) {
         NSLog(@"XLEngineBridge: Created timing mark '%s' at %ld-%ld ms",
               labelStr.c_str(), (long)startTimeMS, (long)endTimeMS);
+        [self scheduleAutoSave];
         return (NSInteger)result.effectId;
     }
     return -1;
@@ -3288,6 +3630,7 @@ static XLEngineBridge *_sharedBridge = nil;
     auto result = _nativeEffectProvider->updateEffectType(static_cast<int64_t>(markId), stdLabel);
     if (result.success) {
         NSLog(@"XLEngineBridge: Set timing mark %ld label to '%@'", (long)markId, label);
+        [self scheduleAutoSave];
     } else {
         NSLog(@"XLEngineBridge: Failed to set timing mark %ld label", (long)markId);
     }
@@ -3406,6 +3749,7 @@ static XLEngineBridge *_sharedBridge = nil;
     size_t idx = _nativeEffectProvider->addElement(stdName, xlEngine::SequenceElementType::Timing);
     if (idx != SIZE_MAX) {
         NSLog(@"XLEngineBridge: Created native timing track: %@", name);
+        [self scheduleAutoSave];
         return YES;
     }
     NSLog(@"XLEngineBridge: Failed to create native timing track: %@", name);
@@ -3525,6 +3869,7 @@ static XLEngineBridge *_sharedBridge = nil;
 
     if (_nativeEffectProvider->removeElement(elementIndex)) {
         NSLog(@"XLEngineBridge: Deleted timing track: %@", name);
+        [self scheduleAutoSave];
         return YES;
     }
     return NO;

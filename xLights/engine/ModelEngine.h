@@ -48,6 +48,11 @@ struct NodeCoord {
     uint32_t stringNum = 0;
 };
 
+// Generate node coordinates from model XML attributes.
+// Used by both ModelEngine (for preview) and NativeRenderCoordinator (for rendering).
+std::vector<NodeCoord> generateNodesFromAttributes(
+    const std::map<std::string, std::string>& attrs);
+
 struct ModelInfo {
     std::string name;
     std::string type;           // DisplayAs value (e.g. "Custom", "SingleLine", "Matrix")

@@ -38,8 +38,8 @@ public:
     virtual void SetDefaultParameters() override;
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
 #endif
-    virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap& SettingsMap) const override;
 #ifndef XLIGHTS_NATIVE
+    virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap& SettingsMap) const override;
     virtual bool CleanupFileLocations(xLightsFrame* frame, SettingsMap& SettingsMap) override;
 #endif
     virtual bool AppropriateOnNodes() const override
@@ -50,7 +50,9 @@ public:
     {
         return true;
     }
+#ifndef XLIGHTS_NATIVE
     static bool IsVideoFile(std::string filename);
+#endif
 
     // Currently not possible but I think changes could be made to make it support partial
     // virtual bool CanRenderPartialTimeInterval() const override { return true; }
@@ -83,10 +85,12 @@ protected:
 #ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
 #endif
+#ifndef XLIGHTS_NATIVE
     virtual bool needToAdjustSettings(const std::string& version) override
     {
         return true;
     };
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
+#endif
 };
 

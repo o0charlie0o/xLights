@@ -18,6 +18,7 @@
 @class XLInspectorViewController;
 @class XLEngineBridge;
 @class XLPlaybackController;
+@class XLRenderProgressIndicator;
 
 /// Main window controller for the native macOS xLights UI.
 ///
@@ -49,6 +50,9 @@
 
 /// Playback controller for synchronized preview rendering
 @property (nonatomic, strong, readonly) XLPlaybackController *playbackController;
+
+/// Render progress ring indicator in the toolbar
+@property (nonatomic, strong, readonly) XLRenderProgressIndicator *renderProgressIndicator;
 
 /// Show/hide inspector sidebar
 - (void)toggleInspector:(id)sender;

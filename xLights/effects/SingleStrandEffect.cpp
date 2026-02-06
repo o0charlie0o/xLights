@@ -15,13 +15,17 @@
 #include "../sequencer/Effect.h"
 #include "../ValueCurve.h"
 #include <cassert>
+#ifndef XLIGHTS_NATIVE
 #include "../sequencer/EffectLayer.h"
 #include "../sequencer/Element.h"
+#endif
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 
-#define XLIGHTS_FX 
+#ifndef XLIGHTS_NATIVE
+#define XLIGHTS_FX
 #include "FX.h"
+#endif
 
 #ifndef XLIGHTS_NATIVE
 #include "../../include/singleStrand-16.xpm"
@@ -147,6 +151,7 @@ void SingleStrandEffect::adjustSettings(const std::string& version, Effect* effe
         }
     }
     
+#ifndef XLIGHTS_NATIVE
     if (IsVersionOlder("2024.05", version)) {
         std::string mn = effect->GetParentEffectLayer()->GetParentElement()->GetFullName();
         if (mn.find("/") != std::string::npos) {
@@ -163,6 +168,7 @@ void SingleStrandEffect::adjustSettings(const std::string& version, Effect* effe
             }
         }
     }
+#endif
     // give the base class a chance to adjust any settings
     if (RenderableEffect::needToAdjustSettings(version)) {
         RenderableEffect::adjustSettings(version, effect, removeDefaults);
@@ -320,6 +326,7 @@ void SingleStrandEffect::RenderSingleStrandSkips(RenderBuffer &buffer, Effect *e
 #endif
 }
 
+#ifndef XLIGHTS_NATIVE
 class SingleStrandFXRenderCache : public EffectRenderCache
 {
 public:
@@ -380,6 +387,7 @@ void SingleStrandEffect::RenderSingleStrandFX(RenderBuffer& buffer, Effect* eff,
 
     buffer.needToInit = false;
 }
+#endif
 
 int mapChaseType(const std::string &Chase_Type) {
     if ("Left-Right" == Chase_Type) return 0;

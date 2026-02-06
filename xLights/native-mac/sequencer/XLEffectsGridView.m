@@ -179,6 +179,12 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 @property (nonatomic, assign) CGFloat dropTargetEndMS;
 @property (nonatomic, copy) NSString *dropEffectType;
 
+// Cell selection (empty area selected for keyboard effect insertion)
+@property (nonatomic, assign, readwrite) BOOL hasCellSelection;
+@property (nonatomic, assign, readwrite) NSInteger cellSelectionRow;
+@property (nonatomic, assign, readwrite) CGFloat cellSelectionStartMS;
+@property (nonatomic, assign, readwrite) CGFloat cellSelectionEndMS;
+
 // Display link
 @property (nonatomic, assign) BOOL needsRedraw;
 @property (nonatomic, assign) BOOL isDrawing;  // Guard against concurrent draws
@@ -303,6 +309,12 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _dropTargetStartMS = 0;
     _dropTargetEndMS = 0;
     _dropEffectType = nil;
+
+    // Cell selection state
+    _hasCellSelection = NO;
+    _cellSelectionRow = -1;
+    _cellSelectionStartMS = 0;
+    _cellSelectionEndMS = 0;
 
     // Cross-row drag state
     _dragCurrentRow = -1;
@@ -687,7 +699,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
               dropStartMS:_dropTargetStartMS
                 dropEndMS:_dropTargetEndMS
          rubberBandActive:_isRubberBanding
-           rubberBandRect:rubberBandRect];
+           rubberBandRect:rubberBandRect
+      cellHighlightActive:_hasCellSelection
+        cellHighlightRow:_cellSelectionRow
+    cellHighlightStartMS:_cellSelectionStartMS
+      cellHighlightEndMS:_cellSelectionEndMS];
 
     // Draw timing mark labels on their own overlay layer
     [self drawTimingLabels];
@@ -1017,6 +1033,59 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _needsRedraw = YES;
 }
 
+- (void)clearCellSelection {
+    if (_hasCellSelection) {
+        _hasCellSelection = NO;
+        _cellSelectionRow = -1;
+        _cellSelectionStartMS = 0;
+        _cellSelectionEndMS = 0;
+        _needsRedraw = YES;
+    }
+}
+
+- (void)computeCellBoundsForTimeMS:(CGFloat)timeMS
+                           startMS:(CGFloat *)outStart
+                             endMS:(CGFloat *)outEnd
+{
+    if (_timingMarkCount > 0 && _timingMarkValues != NULL) {
+        // Find the pair of timing marks surrounding timeMS
+        CGFloat prevMark = 0;
+        CGFloat nextMark = _sequenceLengthMS;
+
+        for (NSUInteger i = 0; i < _timingMarkCount; i++) {
+            CGFloat mark = _timingMarkValues[i];
+            if (mark <= timeMS && mark > prevMark) prevMark = mark;
+            if (mark > timeMS && mark < nextMark) nextMark = mark;
+        }
+
+        *outStart = prevMark;
+        *outEnd = nextMark;
+    } else {
+        // No timing track active — use the visible grid line interval (zoom-dependent).
+        // This mirrors the grid line spacing from XLEffectsGridRenderer so the cell
+        // selection matches the drawn grid columns.
+        // IMPORTANT: The renderer receives scaledZoom (zoomLevel * contentsScale) in physical
+        // pixels, so we must apply the same scale factor here to match its grid intervals.
+        static const CGFloat gridIntervals[] = { 50, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000 };
+        static const NSInteger numIntervals = sizeof(gridIntervals) / sizeof(gridIntervals[0]);
+        static const CGFloat targetPixelsPerMark = 80.0;
+
+        CGFloat scale = _metalLayer ? _metalLayer.contentsScale : 1.0;
+        CGFloat scaledZoom = _zoomLevel * scale;
+        CGFloat intervalMS = gridIntervals[numIntervals - 1];
+        for (NSInteger i = 0; i < numIntervals; i++) {
+            if (gridIntervals[i] * scaledZoom >= targetPixelsPerMark) {
+                intervalMS = gridIntervals[i];
+                break;
+            }
+        }
+
+        CGFloat snappedStart = floor(timeMS / intervalMS) * intervalMS;
+        *outStart = snappedStart;
+        *outEnd = snappedStart + intervalMS;
+    }
+}
+
 - (void)selectAllEffectsInRow:(NSInteger)row {
     [self clearAllSelections];
     _selectedEffectID = -1;
@@ -1144,6 +1213,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
 
     if (hitEffectIndex >= 0) {
+        // Clicking an effect clears any cell selection
+        [self clearCellSelection];
+
         if (shiftDown) {
             // Shift+click: extend selection from primary to this effect
             if (_selectedEffectID >= 0) {
@@ -1256,6 +1328,15 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             [_delegate effectsGrid:self didClickAtTimeMS:timeMS row:row];
         }
 
+        // Set cell selection for keyboard effect insertion
+        CGFloat cellStart, cellEnd;
+        [self computeCellBoundsForTimeMS:timeMS startMS:&cellStart endMS:&cellEnd];
+        _hasCellSelection = YES;
+        _cellSelectionRow = row;
+        _cellSelectionStartMS = cellStart;
+        _cellSelectionEndMS = cellEnd;
+        _needsRedraw = YES;
+
         // Start rubber band selection
         _rubberBandOrigin = loc;
         _rubberBandCurrent = loc;
@@ -1284,6 +1365,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         }
     } else if (_mouseDownEffectIndex < 0 && !_isRubberBanding) {
         _isRubberBanding = YES;
+        [self clearCellSelection];
     }
 
     if (_isResizing && _mouseDownEffectIndex >= 0) {
@@ -2981,10 +3063,12 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
     NSPasteboard *pb = sender.draggingPasteboard;
+    NSLog(@"XLEffectsGridView: draggingEntered types=%@", pb.types);
     if ([pb.types containsObject:XLEffectTypePasteboardType]) {
         _isReceivingDrop = YES;
         [self updateDropIndicatorForDraggingInfo:sender];
         _needsRedraw = YES;
+        NSLog(@"XLEffectsGridView: draggingEntered - accepted effect drop");
         return NSDragOperationCopy;
     }
     return NSDragOperationNone;
@@ -3015,7 +3099,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     NSPasteboard *pb = sender.draggingPasteboard;
     NSString *effectType = [pb stringForType:XLEffectTypePasteboardType];
 
+    NSLog(@"XLEffectsGridView: performDragOperation effectType='%@' dropTargetRow=%ld startMS=%.0f endMS=%.0f",
+          effectType, (long)_dropTargetRow, _dropTargetStartMS, _dropTargetEndMS);
+
     if (!effectType || _dropTargetRow < 0) {
+        NSLog(@"XLEffectsGridView: performDragOperation - no effectType or invalid drop row, rejecting");
         _isReceivingDrop = NO;
         _dropTargetRow = -1;
         _dropEffectType = nil;
@@ -3023,7 +3111,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         return NO;
     }
 
-    if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestCreateEffectOfType:atRow:startTimeMS:endTimeMS:)]) {
+    BOOL delegateResponds = [_delegate respondsToSelector:@selector(effectsGrid:didRequestCreateEffectOfType:atRow:startTimeMS:endTimeMS:)];
+    NSLog(@"XLEffectsGridView: delegate responds to didRequestCreateEffectOfType: %@", delegateResponds ? @"YES" : @"NO");
+    if (delegateResponds) {
         [_delegate effectsGrid:self
             didRequestCreateEffectOfType:effectType
                                    atRow:_dropTargetRow

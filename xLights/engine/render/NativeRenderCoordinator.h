@@ -41,9 +41,11 @@
 #include "NativePixelBuffer.h"
 
 class NativeSequenceData;
+class NativeRenderBuffer;
 
 namespace xlEngine {
 
+struct EffectInstanceInfo;
 class IEffectProvider;
 class IModelProvider;
 
@@ -109,6 +111,9 @@ public:
     // Check if rendering is active.
     bool isRendering() const;
 
+    // Get current render progress (0.0 to 1.0).
+    float getProgress() const;
+
 private:
     // Per-model render job
     struct ModelJob {
@@ -120,10 +125,12 @@ private:
 
     std::vector<ModelJob> buildModelJobs();
     ModelGeometry extractGeometry(const std::string& modelName);
+    size_t findParentGroupElement(const std::string& modelName);
 
     void renderModel(ModelJob& job, int startMS, int endMS,
                      NativeSequenceData& output);
     void renderModelAtTime(ModelJob& job, int timeMS);
+    bool renderNativeEffect(const EffectInstanceInfo& effectInfo, NativeRenderBuffer& buf);
     void writeModelOutput(const ModelJob& job, int frameIndex,
                           NativeSequenceData& output);
 
@@ -134,6 +141,7 @@ private:
 
     std::atomic<bool> _abort{false};
     std::atomic<bool> _rendering{false};
+    std::atomic<float> _progress{0.0f};
     mutable std::mutex _listenerMutex;
 };
 

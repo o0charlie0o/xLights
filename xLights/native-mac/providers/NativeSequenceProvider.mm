@@ -70,6 +70,12 @@ std::string NativeSequenceProvider::getMediaPath() const
     return _metadata.mediaPath;
 }
 
+std::string NativeSequenceProvider::getSequenceType() const
+{
+    std::lock_guard<std::mutex> lock(_metadataMutex);
+    return _metadata.sequenceType;
+}
+
 unsigned int NativeSequenceProvider::getNumChannels() const
 {
     // TODO: Parse channel count from sequence data
@@ -95,9 +101,25 @@ bool NativeSequenceProvider::loadSequence(const std::string& path)
 
 bool NativeSequenceProvider::saveSequence(const std::string& path)
 {
-    // TODO: Implement sequence saving
-    NSLog(@"NativeSequenceProvider: saveSequence not yet implemented");
-    return false;
+    std::string savePath = path;
+    if (savePath.empty()) {
+        std::lock_guard<std::mutex> lock(_metadataMutex);
+        savePath = _metadata.sequencePath;
+    }
+    if (savePath.empty()) {
+        NSLog(@"NativeSequenceProvider: saveSequence failed - no file path");
+        return false;
+    }
+
+    // Update stored path
+    {
+        std::lock_guard<std::mutex> lock(_metadataMutex);
+        _metadata.sequencePath = savePath;
+    }
+
+    // Actual XML serialization is handled by NativeEffectProvider via XLEngineBridge
+    NSLog(@"NativeSequenceProvider: saveSequence path set to %s", savePath.c_str());
+    return true;
 }
 
 bool NativeSequenceProvider::closeSequence()
@@ -272,6 +294,58 @@ bool NativeSequenceProvider::loadSequenceWithShowFolder(const std::string& seque
           _metadata.sequenceName.c_str(),
           _metadata.durationSeconds,
           _metadata.frameMS);
+
+    return true;
+}
+
+bool NativeSequenceProvider::createNewSequence(const std::string& name,
+                                                double durationSeconds,
+                                                int frameMS,
+                                                const std::string& mediaPath,
+                                                const std::string& showFolderPath)
+{
+    // Clean up any existing sequence
+    closeAndReleaseSequence();
+
+    _showFolderPath = showFolderPath;
+
+    {
+        std::lock_guard<std::mutex> lock(_metadataMutex);
+        _metadata.sequenceName = name;
+        _metadata.sequencePath = "";  // Not yet saved to disk
+        _metadata.durationSeconds = durationSeconds;
+        _metadata.frameMS = (frameMS > 0) ? frameMS : 50;
+        _metadata.sequenceType = mediaPath.empty() ? "Animation" : "Media";
+        _metadata.author = "";
+        _metadata.song = "";
+        _metadata.artist = "";
+
+        if (!mediaPath.empty()) {
+            _metadata.mediaPath = resolveMediaPath(mediaPath);
+        }
+    }
+
+    // Load audio if media file provided
+    if (!mediaPath.empty()) {
+        std::string resolved;
+        {
+            std::lock_guard<std::mutex> lock(_metadataMutex);
+            resolved = _metadata.mediaPath;
+        }
+        if (!resolved.empty()) {
+            loadAudioMedia(resolved);
+        }
+    }
+
+    _sequenceLoaded.store(true);
+    _playbackState.store(PlaybackState::Stopped);
+    _currentPosition.store(0.0);
+
+    notifySequenceLoaded();
+
+    NSLog(@"NativeSequenceProvider: Created new sequence '%s' (%.1f sec, %d ms/frame, type: %s)",
+          name.c_str(), durationSeconds, frameMS,
+          mediaPath.empty() ? "Animation" : "Media");
 
     return true;
 }
@@ -486,6 +560,17 @@ bool NativeSequenceProvider::parseSequenceXML(const std::string& filePath)
         }
     }
 
+    // Fallback: check root element attributes for metadata (older native save format)
+    if (_metadata.durationSeconds <= 0) {
+        NSXMLNode* durationAttr = [root attributeForName:@"Duration"];
+        if (durationAttr) {
+            int durationMS = [durationAttr.stringValue intValue];
+            if (durationMS > 0) {
+                _metadata.durationSeconds = durationMS / 1000.0;
+            }
+        }
+    }
+
     // Default frame MS if not specified
     if (_metadata.frameMS <= 0) {
         _metadata.frameMS = 50;  // 20 FPS default
@@ -603,6 +688,12 @@ size_t NativeSequenceProvider::getElementCount() const
 {
     std::lock_guard<std::mutex> lock(_elementsMutex);
     return _elements.size();
+}
+
+void NativeSequenceProvider::setSequencePath(const std::string& path)
+{
+    std::lock_guard<std::mutex> lock(_metadataMutex);
+    _metadata.sequencePath = path;
 }
 
 std::string NativeSequenceProvider::resolveMediaPath(const std::string& mediaFile)

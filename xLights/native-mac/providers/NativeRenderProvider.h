@@ -93,18 +93,18 @@ public:
 
 // Native render buffer wrapper for standalone operation.
 // This provides a simple pixel buffer that doesn't depend on wxWidgets.
-class NativePixelBuffer {
+class ProviderPixelBuffer {
 public:
-    NativePixelBuffer(int width, int height);
-    ~NativePixelBuffer();
+    ProviderPixelBuffer(int width, int height);
+    ~ProviderPixelBuffer();
 
     // Disable copy
-    NativePixelBuffer(const NativePixelBuffer&) = delete;
-    NativePixelBuffer& operator=(const NativePixelBuffer&) = delete;
+    ProviderPixelBuffer(const ProviderPixelBuffer&) = delete;
+    ProviderPixelBuffer& operator=(const ProviderPixelBuffer&) = delete;
 
     // Enable move
-    NativePixelBuffer(NativePixelBuffer&& other) noexcept;
-    NativePixelBuffer& operator=(NativePixelBuffer&& other) noexcept;
+    ProviderPixelBuffer(ProviderPixelBuffer&& other) noexcept;
+    ProviderPixelBuffer& operator=(ProviderPixelBuffer&& other) noexcept;
 
     // Pixel access
     void setPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255);
@@ -194,6 +194,9 @@ public:
     /// @param source Pointer to data source. Must outlive this provider.
     void setSequenceDataSource(ISequenceDataSource* source);
 
+    /// Sets sequence timing info directly (when no ISequenceDataSource is available).
+    void setSequenceInfo(int frameTimeMS, int durationMS);
+
     /// Sets whether GPU rendering should be enabled.
     /// @param enabled true to enable GPU rendering.
     void setGPUEnabled(bool enabled);
@@ -201,22 +204,22 @@ public:
     /// Gets a native pixel buffer for a model.
     /// @param modelName Name of the model.
     /// @return Pointer to the pixel buffer, or nullptr if not found.
-    NativePixelBuffer* getNativePixelBuffer(const std::string& modelName);
+    ProviderPixelBuffer* getProviderPixelBuffer(const std::string& modelName);
 
     /// Creates a native pixel buffer for a model.
     /// @param modelName Name of the model.
     /// @param width Buffer width.
     /// @param height Buffer height.
     /// @return Pointer to the created buffer.
-    NativePixelBuffer* createNativePixelBuffer(const std::string& modelName,
+    ProviderPixelBuffer* createProviderPixelBuffer(const std::string& modelName,
                                                int width, int height);
 
     /// Removes a native pixel buffer for a model.
     /// @param modelName Name of the model to remove buffer for.
-    void removeNativePixelBuffer(const std::string& modelName);
+    void removeProviderPixelBuffer(const std::string& modelName);
 
     /// Clears all native pixel buffers.
-    void clearNativePixelBuffers();
+    void clearProviderPixelBuffers();
 
     /// Returns whether this provider is using an external ModelManager.
     /// @return true if wrapping an external ModelManager.
@@ -259,8 +262,12 @@ private:
     // External sequence data source (not owned)
     ISequenceDataSource* _sequenceDataSource;
 
+    // Direct sequence info (used when _sequenceDataSource is not set)
+    int _directFrameTimeMS = 0;
+    int _directDurationMS = 0;
+
     // Native pixel buffers per model
-    std::map<std::string, std::unique_ptr<NativePixelBuffer>> _nativePixelBuffers;
+    std::map<std::string, std::unique_ptr<ProviderPixelBuffer>> _nativePixelBuffers;
     mutable std::mutex _bufferMutex;
 
     // Metal infrastructure

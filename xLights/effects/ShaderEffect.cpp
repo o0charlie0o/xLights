@@ -1982,11 +1982,9 @@ ShaderEffect::~ShaderEffect()
 {
 }
 
-#ifndef XLIGHTS_NATIVE
 void ShaderEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
 {
 }
-#endif
 
 bool ShaderEffect::CanRenderOnBackgroundThread(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
 {

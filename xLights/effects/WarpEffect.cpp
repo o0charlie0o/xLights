@@ -599,6 +599,7 @@ void WarpEffect::SetDefaultParameters()
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void WarpEffect::RemoveDefaults(const std::string &version, Effect *effect)
 {
     SettingsMap &settingsMap = effect->GetSettings();
@@ -616,6 +617,7 @@ void WarpEffect::RemoveDefaults(const std::string &version, Effect *effect)
 
     RenderableEffect::RemoveDefaults(version, effect);
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void WarpEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer)

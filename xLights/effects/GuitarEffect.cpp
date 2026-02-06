@@ -32,7 +32,9 @@
 #include <list>
 #include <cstdlib>
 
+#ifndef XLIGHTS_NATIVE
 #include <log4cpp/Category.hh>
+#endif
 
 class GuitarTiming
 {
@@ -458,7 +460,9 @@ public:
 
     void GeneratePossibleTimings(const std::string& type, uint8_t maxFrets)
     {
+#ifndef XLIGHTS_NATIVE
         static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
+#endif
 
         // if there are no notes it may be because the timings were set using SnnPnn
         if (_notes.size() == 0)
@@ -567,10 +571,12 @@ public:
             }
         }
 
+#ifndef XLIGHTS_NATIVE
         if (max != _notes.size())
         {
             logger_base.warn("One or more notes not found on %s at %lu.", (const char*)type.c_str(), _startMS);
         }
+#endif
 
         bool allZero = false;
 
@@ -813,6 +819,7 @@ public:
     std::string _MIDItrack;
 };
 
+#ifndef XLIGHTS_NATIVE
 //render Guitar fx during sequence:
 void GuitarEffect::RenderGuitar(RenderBuffer& buffer, SequenceElements* elements, const std::string& type, const std::string& MIDITrack, const std::string& stringAppearance, int maxFrets, bool showStrings, bool fade, bool collapse, double stringWaveFactor, double baseWaveFactor, bool varyWavelengthBasedOnFret)
 {
@@ -857,6 +864,7 @@ void GuitarEffect::RenderGuitar(RenderBuffer& buffer, SequenceElements* elements
 
     DrawGuitar(buffer, cache->GetTimingAt(time), stringAppearance, maxFrets, strings, showStrings, fade, collapse, stringWaveFactor, baseWaveFactor, varyWavelengthBasedOnFret);
 }
+#endif
 
 inline uint32_t FlipY(uint32_t y, uint32_t height)
 {
@@ -1171,6 +1179,7 @@ int GuitarEffect::ConvertNote(const std::string& note)
     return number;
 }
 
+#ifndef XLIGHTS_NATIVE
 std::list<NoteTiming*> GuitarEffect::LoadTimingTrack(const std::string& track, int intervalMS, const std::string& type, uint8_t maxFrets, uint8_t strings)
 {
     static log4cpp::Category& logger_Guitardata = log4cpp::Category::getInstance(std::string("log_Guitardata"));
@@ -1247,3 +1256,4 @@ std::list<NoteTiming*> GuitarEffect::LoadTimingTrack(const std::string& track, i
 
     return res;
 }
+#endif

@@ -16,6 +16,7 @@
 #include <string>
 #include <list>
 #include <cassert>
+#include <cmath>
 
 #define MINVOID -91234
 #define MAXVOID 91234

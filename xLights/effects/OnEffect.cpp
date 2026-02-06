@@ -22,8 +22,10 @@
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../UtilFunctions.h"
+#ifndef XLIGHTS_NATIVE
 #include "../Parallel.h"
 #include <log4cpp/Category.hh>
+#endif
 
 static const std::string TEXTCTRL_Eff_On_Start("TEXTCTRL_Eff_On_Start");
 static const std::string TEXTCTRL_Eff_On_End("TEXTCTRL_Eff_On_End");
@@ -175,6 +177,7 @@ int OnEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2, int 
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void OnEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     SettingsMap &settingsMap = effect->GetSettings();
     if (settingsMap.Get("E_TEXTCTRL_Eff_On_Start", "") == "100") {
@@ -191,6 +194,7 @@ void OnEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     }
     RenderableEffect::RemoveDefaults(version, effect);
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void OnEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer) {

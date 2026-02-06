@@ -148,6 +148,7 @@ void ColorWashEffect::adjustSettings(const std::string &version, Effect *effect,
     effect->GetSettings().erase("E_SLIDER_ColorWash_Y2");
 }
 
+#ifndef XLIGHTS_NATIVE
 void ColorWashEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     SettingsMap &settingsMap = effect->GetSettings();
     if (settingsMap.Get("E_CHECKBOX_ColorWash_HFade", "") == "0") {
@@ -170,6 +171,7 @@ void ColorWashEffect::RemoveDefaults(const std::string &version, Effect *effect)
     }
     RenderableEffect::RemoveDefaults(version, effect);
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void ColorWashEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {

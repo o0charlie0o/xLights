@@ -21,17 +21,21 @@
 #include "MovingHeadPanel.h"
 #endif
 #include "../sequencer/Effect.h"
+#ifndef XLIGHTS_NATIVE
 #include "../sequencer/Element.h"
 #include "../sequencer/SequenceElements.h"
+#endif
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../UtilFunctions.h"
+#ifndef XLIGHTS_NATIVE
 #include "../models/DMX/DmxMovingHeadAdv.h"
 #include "../models/DMX/DmxMovingHead.h"
 #include "../models/DMX/DmxMovingHeadComm.h"
 #include "../models/DMX/DmxMotor.h"
 #include "../models/ModelGroup.h"
 #include "../models/DMX/DmxColorAbilityWheel.h"
+#endif
 
 MovingHeadEffect::MovingHeadEffect(int id) : RenderableEffect(id, "Moving Head",
 #ifndef XLIGHTS_NATIVE

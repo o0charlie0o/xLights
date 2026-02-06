@@ -75,11 +75,13 @@
 - (BOOL)isSequenceLoaded;
 
 /// Create a new sequence with the specified parameters.
+/// @param name Sequence name (display name, used as filename when saving)
 /// @param durationMS Duration in milliseconds (0 to use media duration)
 /// @param frameMS Frame interval in milliseconds (default: 50 for 20fps)
 /// @param mediaFile Optional path to audio file (nil for animation sequence)
 /// @return YES if sequence was created successfully
-- (BOOL)createSequence:(NSInteger)durationMS
+- (BOOL)createSequence:(NSString *)name
+            durationMS:(NSInteger)durationMS
                frameMS:(NSInteger)frameMS
              mediaFile:(NSString * _Nullable)mediaFile;
 
@@ -160,6 +162,9 @@
 
 /// Check if rendering is in progress
 - (BOOL)isRendering;
+
+/// Get render progress (0.0 to 1.0)
+- (float)getRenderProgress;
 
 #pragma mark - Model Operations
 

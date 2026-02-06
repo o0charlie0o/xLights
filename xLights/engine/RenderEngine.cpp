@@ -31,6 +31,7 @@
 #endif
 
 #include <algorithm>
+#include <cstring>
 
 namespace xlEngine {
 
@@ -513,75 +514,220 @@ void RenderEngine::buildModelChannelMap()
 
 void RenderEngine::renderFrame(int timeMS)
 {
-    if (!_fseqLoaded || !_fseqFile) return;
+    if (_fseqLoaded && _fseqFile) {
+        // FSEQ playback path: read pre-rendered channel data
+        int stepTime = _fseqFile->getStepTime();
+        if (stepTime <= 0) stepTime = 50;
 
-    int stepTime = _fseqFile->getStepTime();
-    if (stepTime <= 0) stepTime = 50;
-
-    int frameIndex = timeMS / stepTime;
-    if (frameIndex < 0) frameIndex = 0;
-    int numFrames = static_cast<int>(_fseqFile->getNumFrames());
-    if (numFrames > 0 && frameIndex >= numFrames) {
-        frameIndex = numFrames - 1;
-    }
-
-    // Skip if we already have this frame cached
-    if (frameIndex == _currentFrameIndex) return;
-
-    // Read frame data from FSEQ
-    FSEQFile::FrameData* fd = _fseqFile->getFrame(static_cast<uint32_t>(frameIndex));
-    if (!fd) return;
-
-    uint32_t maxCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
-    _currentFrameData.resize(maxCh, 0);
-    fd->readFrame(_currentFrameData.data(), maxCh);
-    delete fd;
-    _currentFrameIndex = frameIndex;
-
-    // Build FrameBuffers for all mapped models
-    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-    _bufferCache.clear();
-
-    for (const auto& [modelName, chInfo] : _modelChannelMap) {
-        if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
-
-        FrameBuffer fb;
-        fb.modelName = modelName;
-        fb.width = chInfo.bufferWidth;
-        fb.height = chInfo.bufferHeight;
-        fb.timeMS = timeMS;
-        fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
-
-        // Map each node's channel data to the pixel buffer
-        for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
-            uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
-            if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
-
-            uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
-            uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
-            uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
-
-            int bx = chInfo.nodeBufCoords[i].first;
-            int by = chInfo.nodeBufCoords[i].second;
-            if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
-
-            size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
-            fb.pixels[idx]     = r;
-            fb.pixels[idx + 1] = g;
-            fb.pixels[idx + 2] = b;
-            fb.pixels[idx + 3] = 255;
+        int frameIndex = timeMS / stepTime;
+        if (frameIndex < 0) frameIndex = 0;
+        int numFrames = static_cast<int>(_fseqFile->getNumFrames());
+        if (numFrames > 0 && frameIndex >= numFrames) {
+            frameIndex = numFrames - 1;
         }
 
-        _bufferCache[modelName] = std::move(fb);
-    }
+        // Skip if we already have this frame cached
+        if (frameIndex == _currentFrameIndex) return;
 
-    notifyFrameRendered(timeMS);
+        // Read frame data from FSEQ
+        FSEQFile::FrameData* fd = _fseqFile->getFrame(static_cast<uint32_t>(frameIndex));
+        if (!fd) return;
+
+        uint32_t maxCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
+        _currentFrameData.resize(maxCh, 0);
+        fd->readFrame(_currentFrameData.data(), maxCh);
+        delete fd;
+        _currentFrameIndex = frameIndex;
+
+        // Build FrameBuffers for all mapped models
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _bufferCache.clear();
+
+        for (const auto& [modelName, chInfo] : _modelChannelMap) {
+            if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+
+            FrameBuffer fb;
+            fb.modelName = modelName;
+            fb.width = chInfo.bufferWidth;
+            fb.height = chInfo.bufferHeight;
+            fb.timeMS = timeMS;
+            fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+            // Map each node's channel data to the pixel buffer
+            for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+                if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
+
+                uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
+                uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
+                uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
+
+                int bx = chInfo.nodeBufCoords[i].first;
+                int by = chInfo.nodeBufCoords[i].second;
+                if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+                size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                fb.pixels[idx]     = r;
+                fb.pixels[idx + 1] = g;
+                fb.pixels[idx + 2] = b;
+                fb.pixels[idx + 3] = 255;
+            }
+
+            _bufferCache[modelName] = std::move(fb);
+        }
+
+        notifyFrameRendered(timeMS);
+    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
+        // Pre-rendered data path: read from in-memory rendered data (from renderAll)
+        // This is the same as the FSEQ path but reads from NativeSequenceData in memory.
+        int stepTime = static_cast<int>(_renderedData->getFrameTimeMS());
+        if (stepTime <= 0) stepTime = 50;
+
+        int frameIndex = timeMS / stepTime;
+        if (frameIndex < 0) frameIndex = 0;
+        int numFrames = static_cast<int>(_renderedData->getNumFrames());
+        if (numFrames > 0 && frameIndex >= numFrames) {
+            frameIndex = numFrames - 1;
+        }
+
+        // Skip if we already have this frame cached
+        if (frameIndex == _currentFrameIndex) return;
+
+        // Read frame data from pre-rendered buffer
+        const uint8_t* frameData = _renderedData->getFrame(static_cast<uint32_t>(frameIndex));
+        if (!frameData) return;
+
+        uint32_t numChannels = _renderedData->getNumChannels();
+        _currentFrameData.resize(numChannels, 0);
+        std::memcpy(_currentFrameData.data(), frameData, numChannels);
+        _currentFrameIndex = frameIndex;
+
+        // Build FrameBuffers for all mapped models (same logic as FSEQ path)
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _bufferCache.clear();
+
+        for (const auto& [modelName, chInfo] : _modelChannelMap) {
+            if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+
+            FrameBuffer fb;
+            fb.modelName = modelName;
+            fb.width = chInfo.bufferWidth;
+            fb.height = chInfo.bufferHeight;
+            fb.timeMS = timeMS;
+            fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+            for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+                if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
+
+                uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
+                uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
+                uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
+
+                int bx = chInfo.nodeBufCoords[i].first;
+                int by = chInfo.nodeBufCoords[i].second;
+                if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+                size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                fb.pixels[idx]     = r;
+                fb.pixels[idx + 1] = g;
+                fb.pixels[idx + 2] = b;
+                fb.pixels[idx + 3] = 255;
+            }
+
+            _bufferCache[modelName] = std::move(fb);
+        }
+
+        notifyFrameRendered(timeMS);
+    } else if (_effectProvider && _modelProvider) {
+        // Effect-based live rendering: render effects directly for preview.
+        // NOTE: This path creates fresh buffers each frame so stateful effects
+        // (like Fire) won't accumulate properly. Use renderAll() first for
+        // full-fidelity preview of stateful effects.
+        int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
+        if (frameTimeMS <= 0) frameTimeMS = 50;
+
+        int durationMS = _provider ? _provider->getSequenceDurationMS() : 0;
+        if (durationMS <= 0) {
+            // Estimate from total frames or use a reasonable default
+            int totalFrames = _provider ? _provider->getTotalFrames() : 0;
+            durationMS = (totalFrames > 0) ? totalFrames * frameTimeMS : 60000;
+        }
+        double durationSec = durationMS / 1000.0;
+
+        RenderEngineContext context(frameTimeMS, durationSec);
+        NativeRenderCoordinator coordinator(_effectProvider, _modelProvider, &context);
+
+        auto modelNames = _modelProvider->getModelNames();
+
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _bufferCache.clear();
+
+        for (const auto& name : modelNames) {
+            RenderedFrame rf = coordinator.renderModelFrame(name, timeMS);
+            if (rf.isValid()) {
+                FrameBuffer fb;
+                fb.modelName = rf.modelName;
+                fb.width = rf.width;
+                fb.height = rf.height;
+                fb.timeMS = rf.timeMS;
+                fb.pixels = std::move(rf.pixels);
+                _bufferCache[name] = std::move(fb);
+            } else if (rf.width > 0 && rf.height > 0) {
+                // Model has geometry but no effects — provide a black buffer
+                // so the preview turns off these pixels during playback
+                FrameBuffer fb;
+                fb.modelName = name;
+                fb.width = rf.width;
+                fb.height = rf.height;
+                fb.timeMS = timeMS;
+                fb.pixels.resize(static_cast<size_t>(rf.width) * rf.height * 4, 0);
+                _bufferCache[name] = std::move(fb);
+            }
+        }
+
+        notifyFrameRendered(timeMS);
+    }
 }
 
 void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 {
-    // For FSEQ playback, just render the full frame (it's fast)
-    renderFrame(timeMS);
+    if (_fseqLoaded && _fseqFile) {
+        // For FSEQ playback, render the full frame (channel data is interleaved)
+        renderFrame(timeMS);
+    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
+        // Pre-rendered data available — use the full-frame path which reads from memory
+        renderFrame(timeMS);
+    } else if (_effectProvider && _modelProvider) {
+        // Targeted single-model effect rendering
+        int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
+        if (frameTimeMS <= 0) frameTimeMS = 50;
+
+        int durationMS = _provider ? _provider->getSequenceDurationMS() : 0;
+        if (durationMS <= 0) {
+            int totalFrames = _provider ? _provider->getTotalFrames() : 0;
+            durationMS = (totalFrames > 0) ? totalFrames * frameTimeMS : 60000;
+        }
+        double durationSec = durationMS / 1000.0;
+
+        RenderEngineContext context(frameTimeMS, durationSec);
+        NativeRenderCoordinator coordinator(_effectProvider, _modelProvider, &context);
+
+        RenderedFrame rf = coordinator.renderModelFrame(modelName, timeMS);
+        if (rf.isValid()) {
+            FrameBuffer fb;
+            fb.modelName = rf.modelName;
+            fb.width = rf.width;
+            fb.height = rf.height;
+            fb.timeMS = rf.timeMS;
+            fb.pixels = std::move(rf.pixels);
+
+            std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+            _bufferCache[modelName] = std::move(fb);
+
+            notifyModelFrameRendered(modelName, timeMS);
+        }
+    }
 }
 
 void RenderEngine::renderAll(RenderCompleteCallback callback)
@@ -653,6 +799,20 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     bool wasCancelled = !completed;
     notifyRenderComplete(wasCancelled);
     if (callback) callback(wasCancelled);
+
+    // After successful render, build the model channel map so renderFrame()
+    // can read from _renderedData instead of re-rendering effects live.
+    if (!wasCancelled && _renderedData && _renderedData->isValid()) {
+        if (_modelChannelMap.empty()) {
+            buildControllerChannelMap();
+            buildModelTotalChannelsMap();
+            buildModelChannelMap();
+        }
+        // Reset frame cache so next renderFrame reads from _renderedData
+        _currentFrameIndex = -1;
+        printf("RenderEngine::renderAll — rendered data ready for preview (%u frames, %u channels)\n",
+               _renderedData->getNumFrames(), _renderedData->getNumChannels());
+    }
 
     printf("RenderEngine::renderAll — %s\n", wasCancelled ? "cancelled" : "complete");
 }
@@ -808,6 +968,9 @@ void RenderEngine::invalidateAllCaches()
     std::lock_guard<std::mutex> lock(_bufferCacheMutex);
     _bufferCache.clear();
     _currentFrameIndex = -1;
+    // Discard pre-rendered data so the live effect path is used until
+    // the user clicks Render All again.
+    _renderedData.reset();
 }
 
 bool RenderEngine::getGPUAvailable() const { return false; }
@@ -824,6 +987,11 @@ RenderStatus RenderEngine::getRenderStatus() const {
     status.isRendering = isRendering();
     if (_fseqLoaded && _fseqFile) {
         status.framesTotal = static_cast<int>(_fseqFile->getNumFrames());
+    } else {
+        status.framesTotal = getNumFrames();
+    }
+    if (status.isRendering && _coordinator) {
+        status.progressPercent = _coordinator->getProgress() * 100.0f;
     }
     return status;
 }
@@ -833,6 +1001,10 @@ int RenderEngine::getFrameTimeMS() const
     if (_fseqLoaded && _fseqFile) {
         return _fseqFile->getStepTime();
     }
+    if (_provider) {
+        int ft = _provider->getFrameTimeMS();
+        if (ft > 0) return ft;
+    }
     return 50;
 }
 
@@ -840,6 +1012,18 @@ int RenderEngine::getNumFrames() const
 {
     if (_fseqLoaded && _fseqFile) {
         return static_cast<int>(_fseqFile->getNumFrames());
+    }
+    if (_provider) {
+        int n = _provider->getTotalFrames();
+        if (n > 0) return n;
+    }
+    // Estimate from effect provider's sequence duration
+    if (_provider) {
+        int durationMS = _provider->getSequenceDurationMS();
+        int frameTimeMS = getFrameTimeMS();
+        if (durationMS > 0 && frameTimeMS > 0) {
+            return durationMS / frameTimeMS;
+        }
     }
     return 0;
 }

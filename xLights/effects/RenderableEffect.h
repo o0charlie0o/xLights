@@ -167,7 +167,9 @@ public:
     }
 #endif
 
+#ifndef XLIGHTS_NATIVE
     static std::string UpgradeValueCurve(EffectManager* effectManager, const std::string& name, const std::string& value, const std::string& effectName);
+#endif
 protected:
 #ifndef XLIGHTS_NATIVE
     static void SetSliderValue(wxSlider* slider, int value);
@@ -196,12 +198,14 @@ protected:
     double GetValueCurveDouble(const std::string& name, double def, const SettingsMap& SettingsMap, float offset, double min, double max, long startMS, long endMS, int divisor = 1);
     int GetValueCurveInt(const std::string& name, int def, const SettingsMap& SettingsMap, float offset, int min, int max, long startMS, long endMS, int divisor = 1);
     int GetValueCurveIntMax(const std::string& name, int def, const SettingsMap& SettingsMap, int min, int max, int divisor = 1);
+    bool IsVersionOlder(const std::string& compare, const std::string& version);
+#ifndef XLIGHTS_NATIVE
     EffectLayer* GetTiming(const std::string& timingtrack) const;
     Effect* GetCurrentTiming(const RenderBuffer& buffer, const std::string& timingtrack) const;
     std::string GetTimingTracks(const int maxLayers = 0, const int absoluteLayers = 0) const;
-    bool IsVersionOlder(const std::string& compare, const std::string& version);
     void AdjustSettingsToBeFitToTime(int effectIdx, SettingsMap& settings, int startMS, int endMS, xlColorVector& colors);
     virtual void RemoveDefaults(const std::string& version, Effect* effect);
+#endif
 
 #ifndef XLIGHTS_NATIVE
     void initBitmaps(const char** data16,

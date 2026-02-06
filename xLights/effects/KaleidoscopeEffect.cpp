@@ -32,8 +32,10 @@
 #endif
 #include "UtilFunctions.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../Parallel.h"
 #include <log4cpp/Category.hh>
+#endif
 
 KaleidoscopeEffect::KaleidoscopeEffect(int i) : RenderableEffect(i, "Kaleidoscope",
 #ifndef XLIGHTS_NATIVE

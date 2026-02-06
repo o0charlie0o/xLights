@@ -17,16 +17,28 @@
 #include "UtilFunctions.h"
 #include "ExternalHooks.h"
 #include <log4cpp/Category.hh>
-#endif
-
-#include "ValueCurve.h"
 #include "xLightsVersion.h"
 #include "AudioManager.h"
 #include "sequencer/SequenceElements.h"
+#endif
+
+#include "ValueCurve.h"
 
 #include <limits>
 #include <cassert>
 #include <cstdio>
+#include <cmath>
+#include <cstdlib>
+#include <algorithm>
+#include <vector>
+#include <string>
+
+#ifdef XLIGHTS_NATIVE
+inline double rand01()
+{
+    return (double)rand() / (double)RAND_MAX;
+}
+#endif
 
 AudioManager* ValueCurve::__audioManager = nullptr;
 SequenceElements* ValueCurve::__sequenceElements = nullptr;
@@ -1732,6 +1744,7 @@ float ValueCurve::ApplyGain(float value, int gain) const
     return v;
 }
 
+#ifndef XLIGHTS_NATIVE
 int ValueCurve::GetPriorTimingMark(const std::string& timingTrack, int time, bool startsOnly, const std::string& filterLabelText, bool isFilterLabelRegex) {
     auto te = __sequenceElements->GetTimingElement(timingTrack);
     if (te != nullptr) {
@@ -1787,11 +1800,21 @@ int ValueCurve::GetSubsequentTimingMark(const std::string& timingTrack, int time
     }
     return -1;
 }
+#else
+int ValueCurve::GetPriorTimingMark(const std::string& timingTrack, int time, bool startsOnly, const std::string& filterLabelText, bool isFilterLabelRegex) {
+    return -1;
+}
+
+int ValueCurve::GetSubsequentTimingMark(const std::string& timingTrack, int time, bool startsOnly, const std::string& filterLabelText, bool isFilterLabelRegex) {
+    return -1;
+}
+#endif
 
 float ValueCurve::GetValueAt(float offset, long startMS, long endMS)
 {
     float res = 0.0f;
 
+#ifndef XLIGHTS_NATIVE
     // If we are music trigger fade and we dont have values ... calculate them on the fly
     if (_type == "Music Trigger Fade") {
         // Just generate what we need on the fly
@@ -1946,7 +1969,9 @@ float ValueCurve::GetValueAt(float offset, long startMS, long endMS)
             res = min + f * (max - min);
         }
     }
-    else {
+    else
+#endif
+    {
         if (_values.size() < 2) return 1.0f;
         if (!_active) return 1.0f;
 

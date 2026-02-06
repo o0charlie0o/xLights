@@ -125,9 +125,11 @@ protected:
     {
         return false;
     }
+#ifndef XLIGHTS_NATIVE
     void WriteCmdToPixel(DmxMotorBase* motor, int value, RenderBuffer& buffer);
     std::list<const Model*> GetModels(const Model* model);
     void UpdateFixturePositions(const Model* cls){};//missing function body
+#endif
 #ifndef XLIGHTS_NATIVE
     void RenderMovingHeads(MovingHeadPanel *p, const Model* model_info, const SettingsMap &SettingsMap, RenderBuffer &buffer);
     void RenderMovingHead(std::string mh_settings, int loc, const Model* model_info, RenderBuffer &buffer);

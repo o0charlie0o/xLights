@@ -24,9 +24,9 @@
 
 namespace xlEngine {
 
-// MARK: - NativePixelBuffer Implementation
+// MARK: - ProviderPixelBuffer Implementation
 
-NativePixelBuffer::NativePixelBuffer(int width, int height)
+ProviderPixelBuffer::ProviderPixelBuffer(int width, int height)
     : _width(width)
     , _height(height)
 {
@@ -34,11 +34,11 @@ NativePixelBuffer::NativePixelBuffer(int width, int height)
     _pixels.resize(size, 0);
 }
 
-NativePixelBuffer::~NativePixelBuffer()
+ProviderPixelBuffer::~ProviderPixelBuffer()
 {
 }
 
-NativePixelBuffer::NativePixelBuffer(NativePixelBuffer&& other) noexcept
+ProviderPixelBuffer::ProviderPixelBuffer(ProviderPixelBuffer&& other) noexcept
     : _width(other._width)
     , _height(other._height)
     , _pixels(std::move(other._pixels))
@@ -47,7 +47,7 @@ NativePixelBuffer::NativePixelBuffer(NativePixelBuffer&& other) noexcept
     other._height = 0;
 }
 
-NativePixelBuffer& NativePixelBuffer::operator=(NativePixelBuffer&& other) noexcept
+ProviderPixelBuffer& ProviderPixelBuffer::operator=(ProviderPixelBuffer&& other) noexcept
 {
     if (this != &other) {
         _width = other._width;
@@ -59,7 +59,7 @@ NativePixelBuffer& NativePixelBuffer::operator=(NativePixelBuffer&& other) noexc
     return *this;
 }
 
-void NativePixelBuffer::setPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+void ProviderPixelBuffer::setPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 {
     if (x < 0 || x >= _width || y < 0 || y >= _height) {
         return;
@@ -71,7 +71,7 @@ void NativePixelBuffer::setPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, 
     _pixels[idx + 3] = a;
 }
 
-void NativePixelBuffer::getPixel(int x, int y, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) const
+void ProviderPixelBuffer::getPixel(int x, int y, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) const
 {
     if (x < 0 || x >= _width || y < 0 || y >= _height) {
         r = g = b = a = 0;
@@ -84,7 +84,7 @@ void NativePixelBuffer::getPixel(int x, int y, uint8_t& r, uint8_t& g, uint8_t& 
     a = _pixels[idx + 3];
 }
 
-void NativePixelBuffer::clear()
+void ProviderPixelBuffer::clear()
 {
     std::fill(_pixels.begin(), _pixels.end(), 0);
 }
@@ -147,7 +147,7 @@ NativeRenderProvider::~NativeRenderProvider()
 {
     stopRenderThread();
     cleanupMetal();
-    clearNativePixelBuffers();
+    clearProviderPixelBuffers();
 }
 
 // MARK: - Metal Infrastructure
@@ -203,8 +203,8 @@ RenderBuffer* NativeRenderProvider::getRenderBuffer(const std::string& modelName
 {
     // During the transition period, RenderBuffer creation requires
     // the full wxWidgets-based pipeline. Return nullptr for now.
-    // Native pixel buffers (NativePixelBuffer) are available via
-    // getNativePixelBuffer() for pure native rendering.
+    // Native pixel buffers (ProviderPixelBuffer) are available via
+    // getProviderPixelBuffer() for pure native rendering.
     return nullptr;
 }
 
@@ -212,7 +212,7 @@ PixelBufferClass* NativeRenderProvider::getPixelBuffer(const std::string& modelN
 {
     // Similar to getRenderBuffer, PixelBufferClass requires the wxWidgets
     // pipeline. Return nullptr during transition. Native code should use
-    // getNativePixelBuffer() instead.
+    // getProviderPixelBuffer() instead.
     return nullptr;
 }
 
@@ -321,6 +321,9 @@ int NativeRenderProvider::getFrameTimeMS() const
     if (_sequenceDataSource && _sequenceDataSource->isValid()) {
         return _sequenceDataSource->getFrameTimeMS();
     }
+    if (_directFrameTimeMS > 0) {
+        return _directFrameTimeMS;
+    }
     return 50; // Default frame time
 }
 
@@ -329,6 +332,9 @@ int NativeRenderProvider::getTotalFrames() const
     if (_sequenceDataSource && _sequenceDataSource->isValid()) {
         return _sequenceDataSource->getFrameCount();
     }
+    if (_directDurationMS > 0 && _directFrameTimeMS > 0) {
+        return _directDurationMS / _directFrameTimeMS;
+    }
     return 0;
 }
 
@@ -336,6 +342,9 @@ int NativeRenderProvider::getSequenceDurationMS() const
 {
     if (_sequenceDataSource && _sequenceDataSource->isValid()) {
         return _sequenceDataSource->getDurationMS();
+    }
+    if (_directDurationMS > 0) {
+        return _directDurationMS;
     }
     return 0;
 }
@@ -353,6 +362,14 @@ void NativeRenderProvider::setSequenceDataSource(ISequenceDataSource* source)
     }
 }
 
+void NativeRenderProvider::setSequenceInfo(int frameTimeMS, int durationMS)
+{
+    _directFrameTimeMS = frameTimeMS;
+    _directDurationMS = durationMS;
+    NSLog(@"NativeRenderProvider: Sequence info set — %dms frame time, %dms duration (%d frames)",
+          frameTimeMS, durationMS, (frameTimeMS > 0 ? durationMS / frameTimeMS : 0));
+}
+
 void NativeRenderProvider::setGPUEnabled(bool enabled)
 {
     _gpuEnabled.store(enabled && _gpuAvailable);
@@ -360,7 +377,7 @@ void NativeRenderProvider::setGPUEnabled(bool enabled)
           _gpuEnabled.load() ? "enabled" : "disabled");
 }
 
-NativePixelBuffer* NativeRenderProvider::getNativePixelBuffer(const std::string& modelName)
+ProviderPixelBuffer* NativeRenderProvider::getProviderPixelBuffer(const std::string& modelName)
 {
     std::lock_guard<std::mutex> lock(_bufferMutex);
     auto it = _nativePixelBuffers.find(modelName);
@@ -370,7 +387,7 @@ NativePixelBuffer* NativeRenderProvider::getNativePixelBuffer(const std::string&
     return nullptr;
 }
 
-NativePixelBuffer* NativeRenderProvider::createNativePixelBuffer(const std::string& modelName,
+ProviderPixelBuffer* NativeRenderProvider::createProviderPixelBuffer(const std::string& modelName,
                                                                   int width, int height)
 {
     if (width <= 0 || height <= 0) {
@@ -385,8 +402,8 @@ NativePixelBuffer* NativeRenderProvider::createNativePixelBuffer(const std::stri
     _nativePixelBuffers.erase(modelName);
 
     // Create new buffer
-    auto buffer = std::make_unique<NativePixelBuffer>(width, height);
-    NativePixelBuffer* ptr = buffer.get();
+    auto buffer = std::make_unique<ProviderPixelBuffer>(width, height);
+    ProviderPixelBuffer* ptr = buffer.get();
     _nativePixelBuffers[modelName] = std::move(buffer);
 
     NSLog(@"NativeRenderProvider: Created native pixel buffer for '%s': %dx%d",
@@ -395,7 +412,7 @@ NativePixelBuffer* NativeRenderProvider::createNativePixelBuffer(const std::stri
     return ptr;
 }
 
-void NativeRenderProvider::removeNativePixelBuffer(const std::string& modelName)
+void NativeRenderProvider::removeProviderPixelBuffer(const std::string& modelName)
 {
     std::lock_guard<std::mutex> lock(_bufferMutex);
     auto it = _nativePixelBuffers.find(modelName);
@@ -405,7 +422,7 @@ void NativeRenderProvider::removeNativePixelBuffer(const std::string& modelName)
     }
 }
 
-void NativeRenderProvider::clearNativePixelBuffers()
+void NativeRenderProvider::clearProviderPixelBuffers()
 {
     std::lock_guard<std::mutex> lock(_bufferMutex);
     _nativePixelBuffers.clear();
@@ -534,7 +551,7 @@ void NativeRenderProvider::renderFrame(int frameIndex)
                 int height = model->GetDefaultBufferHt();
                 if (width > 0 && height > 0) {
                     _nativePixelBuffers[modelName] =
-                        std::make_unique<NativePixelBuffer>(width, height);
+                        std::make_unique<ProviderPixelBuffer>(width, height);
                 }
             }
         }

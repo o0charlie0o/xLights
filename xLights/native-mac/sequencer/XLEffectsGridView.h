@@ -384,4 +384,19 @@ typedef NS_ENUM(NSInteger, XLAlignmentType) {
                   currentLabel:(NSString *)currentLabel
              completionHandler:(void (^)(NSString * _Nullable newLabel))completion;
 
+/// Whether a cell (empty area) is currently selected for keyboard effect insertion.
+@property (nonatomic, assign, readonly) BOOL hasCellSelection;
+
+/// Row of the selected cell.
+@property (nonatomic, assign, readonly) NSInteger cellSelectionRow;
+
+/// Start time of the selected cell in milliseconds.
+@property (nonatomic, assign, readonly) CGFloat cellSelectionStartMS;
+
+/// End time of the selected cell in milliseconds.
+@property (nonatomic, assign, readonly) CGFloat cellSelectionEndMS;
+
+/// Clear the cell selection highlight.
+- (void)clearCellSelection;
+
 @end

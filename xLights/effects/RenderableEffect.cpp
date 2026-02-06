@@ -9,12 +9,21 @@
  **************************************************************/
 
 #include "RenderableEffect.h"
+#ifndef XLIGHTS_NATIVE
 #include "../sequencer/Effect.h"
 #include "EffectManager.h"
 #include "../UtilFunctions.h"
 #include "../sequencer/SequenceElements.h"
+#endif
+#include "../UtilClasses.h"
 #include "../ValueCurve.h"
 #include "../RenderBuffer.h"
+
+#ifdef XLIGHTS_NATIVE
+// Native build: provide xlEMPTY_STRING since string_utils.cpp is not in the native target
+static const std::string xlEMPTY_STRING_NATIVE{""};
+#define xlEMPTY_STRING xlEMPTY_STRING_NATIVE
+#endif
 
 #ifndef XLIGHTS_NATIVE
 #include "assist/xlGridCanvasEmpty.h"
@@ -167,10 +176,54 @@ void RenderableEffect::initBitmaps(const char **data16,
 #endif // !XLIGHTS_NATIVE
 
 // return true if version string is older than compare string
+#ifdef XLIGHTS_NATIVE
+bool RenderableEffect::IsVersionOlder(const std::string& compare, const std::string& version)
+{
+    // Native build: simple version comparison without wx dependencies
+    auto splitVersion = [](const std::string& v) -> std::vector<int> {
+        std::vector<int> parts;
+        std::string current;
+        for (char c : v) {
+            if (c == '.') {
+                parts.push_back(current.empty() ? 0 : std::stoi(current));
+                current.clear();
+            } else {
+                current += c;
+            }
+        }
+        if (!current.empty()) {
+            parts.push_back(std::stoi(current));
+        }
+        return parts;
+    };
+
+    std::vector<int> compareParts = splitVersion(compare);
+    std::vector<int> versionParts = splitVersion(version);
+
+    if (versionParts.empty() || compareParts.empty()) return false;
+
+    if (versionParts[0] < compareParts[0]) return true;
+    if (versionParts[0] > compareParts[0]) return false;
+
+    if (versionParts.size() < 2 || compareParts.size() < 2) return false;
+    if (versionParts[1] < compareParts[1]) return true;
+    if (versionParts[1] > compareParts[1]) return false;
+
+    if (versionParts.size() > 2 && compareParts.size() == 2) return false;
+    if (versionParts.size() == 2 && compareParts.size() > 2) return true;
+
+    if (versionParts.size() > 2 && compareParts.size() > 2) {
+        if (versionParts[2] <= compareParts[2]) return true;
+        if (versionParts[2] > compareParts[2]) return false;
+    }
+    return false;
+}
+#else
 bool RenderableEffect::IsVersionOlder(const std::string& compare, const std::string& version)
 {
     return ::IsVersionOlder(compare, version);
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 // this is recursive
@@ -285,6 +338,11 @@ bool RenderableEffect::needToAdjustSettings(const std::string &version) {
     return IsVersionOlder("2024.05", version);
 }
 
+#ifdef XLIGHTS_NATIVE
+void RenderableEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults) {
+    // Native build: no-op stub. Sequence version adjustment is not needed in native build.
+}
+#else
 void RenderableEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults) {
 
     if (IsVersionOlder("2019.61", version)) {
@@ -312,7 +370,6 @@ void RenderableEffect::adjustSettings(const std::string &version, Effect *effect
             assert(vc.IsRealValue());
         }
 
-#ifndef XLIGHTS_NATIVE
         if (IsVersionOlder("2018.50", version))
         {
             // Try to fix value curve issues
@@ -416,19 +473,15 @@ void RenderableEffect::adjustSettings(const std::string &version, Effect *effect
                     if (IsVersionOlder("2016.36", version) && removeDefaults) {
                         RemoveDefaults(version, effect);
 
-#ifndef XLIGHTS_NATIVE
                         if (IsVersionOlder("4.2.20", version)) {
                             // almost all of the settings from older 4.x series need adjustment for speed things
                             AdjustSettingsToBeFitToTime(effect->GetEffectIndex(), effect->GetSettings(), effect->GetStartTimeMS(), effect->GetEndTimeMS(), effect->GetPalette());
                         }
-#endif
                     }
                 }
             }
         }
-#endif // !XLIGHTS_NATIVE
     }
-#ifndef XLIGHTS_NATIVE
     if (IsVersionOlder("2024.05", version)) {
         std::string mn = effect->GetParentEffectLayer()->GetParentElement()->GetFullName();
         SubModel * m = dynamic_cast<SubModel*>(xLightsApp::GetFrame()->GetModel(mn));
@@ -447,21 +500,27 @@ void RenderableEffect::adjustSettings(const std::string &version, Effect *effect
             }
         }
     }
-#endif
 }
+#endif // XLIGHTS_NATIVE
+#ifdef XLIGHTS_NATIVE
+std::list<std::string> RenderableEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
+{
+    return {};
+}
+#else
 std::list<std::string> RenderableEffect::CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache)
 {
     std::list<std::string> res;
-#ifndef XLIGHTS_NATIVE
     if (settings.Get("B_CHOICE_BufferStyle", "").starts_with("** ")) {
         res.push_back(wxString::Format("    WARN: Effect using legacy buffer format '%s' which will be removed in the future. Model '%s', Start %s",
                                        settings.Get("B_CHOICE_BufferStyle", ""), model->GetFullName(),
                                        FORMATTIME(eff->GetStartTimeMS())).ToStdString());
     }
-#endif
     return res;
-};
+}
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void RenderableEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     SettingsMap &palette = effect->GetPaletteMap();
     bool changed = false;
@@ -544,6 +603,7 @@ void RenderableEffect::RemoveDefaults(const std::string &version, Effect *effect
         settings.erase("T_TEXTCTRL_Fadeout");
     }
 }
+#endif // !XLIGHTS_NATIVE
 
 #ifndef XLIGHTS_NATIVE
 void RenderableEffect::AdjustSettingsToBeFitToTime(int effectIdx, SettingsMap &settings, int startMS, int endMS, xlColorVector &colors)
@@ -1024,6 +1084,7 @@ int RenderableEffect::GetValueCurveInt(const std::string &name, int def, const S
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 EffectLayer* RenderableEffect::GetTiming(const std::string& timingtrack) const
 {
     if (timingtrack == "") return nullptr;
@@ -1073,7 +1134,9 @@ Effect* RenderableEffect::GetCurrentTiming(const RenderBuffer& buffer, const std
 
     return nullptr;
 }
+#endif // !XLIGHTS_NATIVE
 
+#ifndef XLIGHTS_NATIVE
 // Upgrades any value curve where not stored as real values or the min/max/divisor has changed since the file was saved
 std::string RenderableEffect::UpgradeValueCurve(EffectManager* effectManager, const std::string& name, const std::string& value, const std::string& effectName)
 {
@@ -1094,7 +1157,6 @@ std::string RenderableEffect::UpgradeValueCurve(EffectManager* effectManager, co
                     div = effect->GetSettingVCDivisor(name);
                     doit = true;
                 }
-#ifndef XLIGHTS_NATIVE
             } else if (StartsWith(name, "C_VALUECURVE")) {
                 if (ColorPanel::GetSettingVCDivisor(name) != 0xFFFF) {
                     min = ColorPanel::GetSettingVCMin(name);
@@ -1116,7 +1178,6 @@ std::string RenderableEffect::UpgradeValueCurve(EffectManager* effectManager, co
                     div = BufferPanel::GetSettingVCDivisor(name);
                     doit = true;
                 }
-#endif
             }
             if (doit) {
                 ValueCurve valc;
@@ -1130,3 +1191,4 @@ std::string RenderableEffect::UpgradeValueCurve(EffectManager* effectManager, co
 
     return value;
 }
+#endif // !XLIGHTS_NATIVE

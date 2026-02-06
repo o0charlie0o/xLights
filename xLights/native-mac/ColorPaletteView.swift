@@ -326,6 +326,22 @@ final class ColorPaletteState {
                 self?.handleEffectSelectionChange(notification)
             }
             .store(in: &cancellables)
+
+        // Listen for SET_COLOR_N keyboard shortcuts
+        NotificationCenter.default.publisher(for: NSNotification.Name("XLSetPaletteColorNotification"))
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                self?.handleSetPaletteColor(notification)
+            }
+            .store(in: &cancellables)
+
+        // Listen for COLOR_UPDATE keyboard shortcut
+        NotificationCenter.default.publisher(for: NSNotification.Name("XLColorUpdateRequestNotification"))
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                self?.handleColorUpdateRequest(notification)
+            }
+            .store(in: &cancellables)
     }
 
     private func handleEffectSelectionChange(_ notification: Notification) {
@@ -341,6 +357,33 @@ final class ColorPaletteState {
             loadColorsFromEffect()
         } else {
             selectedEffectId = nil
+        }
+    }
+
+    private func handleSetPaletteColor(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let colorIndex = userInfo["colorIndex"] as? Int,
+              let hexColor = userInfo["hexColor"] as? String else { return }
+
+        guard colorIndex >= 0 && colorIndex < kPaletteSize else { return }
+
+        let color = PaletteColor.fromHex(hexColor)
+        setColor(at: colorIndex, color: color)
+    }
+
+    private func handleColorUpdateRequest(_ notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let selectedIds = userInfo["selectedEffectIds"] as? [NSNumber],
+              let bridge = engineBridge else { return }
+
+        for effectIdNumber in selectedIds {
+            let effectId = effectIdNumber.intValue
+            for i in 0..<kPaletteSize {
+                let colorKey = "C_BUTTON_Palette\(i + 1)"
+                let enableKey = "C_CHECKBOX_Palette\(i + 1)"
+                bridge.setEffectParameter(effectId, key: colorKey, value: colors[i].hexString)
+                bridge.setEffectParameter(effectId, key: enableKey, value: colors[i].isEnabled ? "1" : "0")
+            }
         }
     }
 

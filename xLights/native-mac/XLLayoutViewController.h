@@ -15,17 +15,22 @@
 #import "layout/XLModelTreeViewController.h"
 #import "layout/XLModelPropertiesView.h"
 #import "layout/XLLayoutUndoController.h"
+#import "input/XLKeyboardHandler.h"
 
 @class XLEngineBridge;
+@class XLKeyboardHandler;
 
 /// View controller for the Layout/Preview tab.
 ///
 /// Displays Metal-based 3D preview, model tree, and manipulation handles.
 /// Layout: Left sidebar (model tree) | Center (Metal preview) | Right sidebar (properties)
 /// The preview already uses Metal with integrated 2D/3D manipulation handles.
-@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLModelPropertiesDelegate, XLLayoutUndoDelegate>
+@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLModelPropertiesDelegate, XLLayoutUndoDelegate, XLKeyboardActionDelegate>
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
+
+/// Keyboard handler for processing key bindings in layout scope.
+@property (nonatomic, strong) XLKeyboardHandler *keyboardHandler;
 
 /// The Metal preview view (3D model rendering surface)
 @property (nonatomic, strong, readonly) XLMetalPreviewView *previewView;

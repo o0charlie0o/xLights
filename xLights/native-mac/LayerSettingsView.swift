@@ -14,8 +14,10 @@ import SwiftUI
 
 /// Modern SwiftUI implementation of the Buffer/Layer Settings panel.
 /// Provides controls for render style, transformations, blur, and roto-zoom effects.
+/// Connected to the selected effect via EffectSelectionState.
 struct LayerSettingsView: View {
     let engineBridge: XLEngineBridge
+    @Bindable var effectSelectionState: EffectSelectionState
 
     @State private var selectedTab: LayerSettingsTab = .buffer
 
@@ -38,7 +40,7 @@ struct LayerSettingsView: View {
             ScrollView {
                 switch selectedTab {
                 case .buffer:
-                    BufferSettingsSection(engineBridge: engineBridge)
+                    BufferSettingsSection(state: effectSelectionState)
                 case .rotoZoom:
                     RotoZoomSettingsSection(engineBridge: engineBridge)
                 }
@@ -68,14 +70,20 @@ enum LayerSettingsTab: Int, CaseIterable, Identifiable {
 // MARK: - Buffer Settings Section
 
 struct BufferSettingsSection: View {
-    let engineBridge: XLEngineBridge
+    @Bindable var state: EffectSelectionState
 
+    // Local @State mirrors for UI controls, synced with engine via onChange
     @State private var renderStyle: RenderStyle = .defaultStyle
     @State private var bufferStagger: Int = 0
     @State private var camera: String = "2D"
     @State private var transformation: BufferTransformation = .none
     @State private var blur: Double = 1
     @State private var overlayBackground: Bool = false
+
+    // Prevents onChange handlers from writing back during programmatic loads
+    @State private var isLoadingFromEngine: Bool = false
+
+    private var hasSelection: Bool { state.selectedEffectId != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -88,6 +96,11 @@ struct BufferSettingsSection: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: .infinity)
+                .disabled(!hasSelection)
+                .onChange(of: renderStyle) { _, newValue in
+                    guard !isLoadingFromEngine else { return }
+                    state.setParameter(key: "B_CHOICE_BufferStyle", value: newValue.settingsValue)
+                }
             }
 
             // Buffer Stagger
@@ -96,9 +109,19 @@ struct BufferSettingsSection: View {
                     TextField("", value: $bufferStagger, format: .number)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 60)
+                        .disabled(!hasSelection)
+                        .onSubmit {
+                            guard !isLoadingFromEngine else { return }
+                            state.setParameter(key: "B_SPINCTRL_BufferStagger", value: "\(bufferStagger)")
+                        }
 
                     Stepper("", value: $bufferStagger, in: -100...100)
                         .labelsHidden()
+                        .disabled(!hasSelection)
+                        .onChange(of: bufferStagger) { _, newValue in
+                            guard !isLoadingFromEngine else { return }
+                            state.setParameter(key: "B_SPINCTRL_BufferStagger", value: "\(newValue)")
+                        }
                 }
             }
 
@@ -110,6 +133,11 @@ struct BufferSettingsSection: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: .infinity)
+                .disabled(!hasSelection)
+                .onChange(of: camera) { _, newValue in
+                    guard !isLoadingFromEngine else { return }
+                    state.setParameter(key: "B_CHOICE_PerPreviewCamera", value: newValue)
+                }
             }
 
             Divider()
@@ -124,6 +152,11 @@ struct BufferSettingsSection: View {
                 }
                 .labelsHidden()
                 .frame(maxWidth: .infinity)
+                .disabled(!hasSelection)
+                .onChange(of: transformation) { _, newValue in
+                    guard !isLoadingFromEngine else { return }
+                    state.setParameter(key: "B_CHOICE_BufferTransform", value: newValue.settingsValue)
+                }
             }
 
             Divider()
@@ -133,20 +166,63 @@ struct BufferSettingsSection: View {
             SettingsRow(label: "Blur") {
                 HStack(spacing: 8) {
                     Slider(value: $blur, in: 1...15, step: 1)
+                        .disabled(!hasSelection)
 
                     Text("\(Int(blur))")
                         .frame(width: 30, alignment: .trailing)
                         .monospacedDigit()
                 }
             }
+            .onChange(of: blur) { _, newValue in
+                guard !isLoadingFromEngine else { return }
+                state.setParameter(key: "B_SLIDER_Blur", value: "\(Int(newValue))")
+            }
 
             // Overlay Background
             Toggle("Overlay Background", isOn: $overlayBackground)
                 .padding(.top, 4)
+                .disabled(!hasSelection)
+                .onChange(of: overlayBackground) { _, newValue in
+                    guard !isLoadingFromEngine else { return }
+                    state.setParameter(key: "B_CHECKBOX_OverlayBkg", value: newValue ? "1" : "0")
+                }
 
             Spacer()
         }
         .padding(12)
+        .onChange(of: state.selectedEffectId) { _, _ in
+            loadFromState()
+        }
+        .onChange(of: state.parameters) { _, _ in
+            loadFromState()
+        }
+        .onAppear {
+            loadFromState()
+        }
+    }
+
+    /// Load local UI state from EffectSelectionState.parameters
+    private func loadFromState() {
+        isLoadingFromEngine = true
+
+        let params = state.parameters
+
+        let styleStr = params["B_CHOICE_BufferStyle"] ?? "Default"
+        renderStyle = RenderStyle(settingsValue: styleStr) ?? .defaultStyle
+
+        bufferStagger = Int(params["B_SPINCTRL_BufferStagger"] ?? "0") ?? 0
+        camera = params["B_CHOICE_PerPreviewCamera"] ?? "2D"
+
+        let transformStr = params["B_CHOICE_BufferTransform"] ?? "None"
+        transformation = BufferTransformation(settingsValue: transformStr) ?? .none
+
+        blur = Double(Int(params["B_SLIDER_Blur"] ?? "1") ?? 1)
+        overlayBackground = (params["B_CHECKBOX_OverlayBkg"] ?? "0") == "1"
+
+        // Clear after the current run loop iteration so onChange handlers see the flag
+        DispatchQueue.main.async {
+            isLoadingFromEngine = false
+        }
     }
 }
 
@@ -349,18 +425,34 @@ enum RenderStyle: Int, CaseIterable, Identifiable {
     case perModelDefault = 2
     case perModelPerPreview = 3
     case singleLine = 4
-    case asPixels = 5
+    case asPixel = 5
 
     var id: Int { rawValue }
 
-    var displayName: String {
+    /// Display name shown in the picker UI
+    var displayName: String { settingsValue }
+
+    /// The string value stored in effect settings (must match legacy xLights keys)
+    var settingsValue: String {
         switch self {
         case .defaultStyle: return "Default"
         case .perPreview: return "Per Preview"
         case .perModelDefault: return "Per Model Default"
         case .perModelPerPreview: return "Per Model Per Preview"
         case .singleLine: return "Single Line"
-        case .asPixels: return "As Pixels"
+        case .asPixel: return "As Pixel"
+        }
+    }
+
+    init?(settingsValue: String) {
+        switch settingsValue {
+        case "Default", "": self = .defaultStyle
+        case "Per Preview": self = .perPreview
+        case "Per Model Default": self = .perModelDefault
+        case "Per Model Per Preview": self = .perModelPerPreview
+        case "Single Line": self = .singleLine
+        case "As Pixel": self = .asPixel
+        default: return nil
         }
     }
 }
@@ -377,16 +469,34 @@ enum BufferTransformation: Int, CaseIterable, Identifiable {
 
     var id: Int { rawValue }
 
-    var displayName: String {
+    /// Display name shown in the picker UI
+    var displayName: String { settingsValue }
+
+    /// The string value stored in effect settings (must match legacy xLights keys)
+    var settingsValue: String {
         switch self {
         case .none: return "None"
-        case .rotateCCW90: return "Rotate CC 90°"
-        case .rotateCW90: return "Rotate CW 90°"
-        case .rotate180: return "Rotate 180°"
+        case .rotateCCW90: return "Rotate CC 90"
+        case .rotateCW90: return "Rotate CW 90"
+        case .rotate180: return "Rotate 180"
         case .flipVertical: return "Flip Vertical"
         case .flipHorizontal: return "Flip Horizontal"
-        case .rotateCCW90FlipH: return "Rotate CC 90° + Flip H"
-        case .rotateCW90FlipH: return "Rotate CW 90° + Flip H"
+        case .rotateCCW90FlipH: return "Rotate CC 90 Flip Horizontal"
+        case .rotateCW90FlipH: return "Rotate CW 90 Flip Horizontal"
+        }
+    }
+
+    init?(settingsValue: String) {
+        switch settingsValue {
+        case "None", "": self = .none
+        case "Rotate CC 90": self = .rotateCCW90
+        case "Rotate CW 90": self = .rotateCW90
+        case "Rotate 180": self = .rotate180
+        case "Flip Vertical": self = .flipVertical
+        case "Flip Horizontal": self = .flipHorizontal
+        case "Rotate CC 90 Flip Horizontal": self = .rotateCCW90FlipH
+        case "Rotate CW 90 Flip Horizontal": self = .rotateCW90FlipH
+        default: return nil
         }
     }
 }
@@ -427,6 +537,7 @@ enum RotationOrder: String, CaseIterable, Identifiable {
 // MARK: - Preview
 
 #Preview {
-    LayerSettingsView(engineBridge: XLEngineBridge())
+    let state = EffectSelectionState()
+    LayerSettingsView(engineBridge: XLEngineBridge(), effectSelectionState: state)
         .frame(width: 350, height: 600)
 }

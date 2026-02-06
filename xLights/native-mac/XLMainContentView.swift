@@ -35,6 +35,10 @@ final class XLAppState {
         .layerSettings: 0.25
     ]
 
+    // Render progress state
+    var isRendering: Bool = false
+    var renderProgress: Double = 0.0
+
     // Shared engine bridge - created once, passed to all view controllers
     let engineBridge: XLEngineBridge
 
@@ -245,6 +249,7 @@ struct XLMainContentView: View {
             .toolbar {
                 toolbarContent
             }
+            .modifier(RenderProgressPoller(appState: appState))
             .onDisappear {
                 appState.saveState()
             }
@@ -385,7 +390,8 @@ struct XLMainContentView: View {
         case .layerBlending:
             LayerBlendingView(engineBridge: appState.engineBridge)
         case .layerSettings:
-            LayerSettingsView(engineBridge: appState.engineBridge)
+            LayerSettingsView(engineBridge: appState.engineBridge,
+                              effectSelectionState: appState.effectSelectionState)
         }
     }
 
@@ -422,30 +428,43 @@ struct XLMainContentView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         // Playback controls centered in toolbar
+        // Route through sequencer VC so transport bar, playback controller,
+        // and timeline all stay in sync.
         ToolbarItemGroup(placement: .principal) {
             Button {
-                appState.engineBridge.play()
+                XLSwiftUIWindowHelper.shared.sequencerViewController?.seekToStart(nil)
+            } label: {
+                Label("Go to Beginning", systemImage: "backward.end.fill")
+            }
+            .help("Go to Beginning")
+
+            Button {
+                XLSwiftUIWindowHelper.shared.sequencerViewController?.play()
             } label: {
                 Label("Play", systemImage: "play.fill")
             }
 
             Button {
-                appState.engineBridge.pause()
+                XLSwiftUIWindowHelper.shared.sequencerViewController?.pause()
             } label: {
                 Label("Pause", systemImage: "pause.fill")
             }
 
             Button {
-                appState.engineBridge.stop()
+                XLSwiftUIWindowHelper.shared.sequencerViewController?.stop()
             } label: {
                 Label("Stop", systemImage: "stop.fill")
             }
 
             Button {
-                appState.engineBridge.renderAll()
+                XLSwiftUIWindowHelper.shared.sequencerViewController?.renderAll()
             } label: {
-                Label("Render", systemImage: "gearshape.fill")
+                RenderProgressRing(
+                    isRendering: appState.isRendering,
+                    progress: appState.renderProgress
+                )
             }
+            .help("Render All")
         }
 
         // Panel toggles on the right
@@ -479,6 +498,80 @@ struct XLMainContentView: View {
                 appState.inspectorVisible.toggle()
             } label: {
                 Label("Inspector", systemImage: "sidebar.right")
+            }
+        }
+    }
+}
+
+// MARK: - Render Progress Ring
+
+/// A circular progress indicator for the toolbar render button.
+/// Shows a gear icon when idle, an animated spinning ring when rendering
+/// with indeterminate progress, or a filling arc for determinate progress.
+struct RenderProgressRing: View {
+    let isRendering: Bool
+    let progress: Double
+
+    @State private var rotation: Double = 0
+
+    private let ringSize: CGFloat = 18
+    private let lineWidth: CGFloat = 2.5
+
+    var body: some View {
+        ZStack {
+            if isRendering {
+                // Track ring
+                Circle()
+                    .stroke(Color.secondary.opacity(0.3), lineWidth: lineWidth)
+                    .frame(width: ringSize, height: ringSize)
+
+                if progress > 0.01 {
+                    // Determinate progress arc
+                    Circle()
+                        .trim(from: 0, to: progress)
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                        .frame(width: ringSize, height: ringSize)
+                        .rotationEffect(.degrees(-90))
+                } else {
+                    // Indeterminate spinner
+                    Circle()
+                        .trim(from: 0, to: 0.25)
+                        .stroke(Color.accentColor, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                        .frame(width: ringSize, height: ringSize)
+                        .rotationEffect(.degrees(rotation))
+                        .onAppear {
+                            withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
+                                rotation = 360
+                            }
+                        }
+                        .onDisappear {
+                            rotation = 0
+                        }
+                }
+            } else {
+                Image(systemName: "gearshape.fill")
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isRendering)
+    }
+}
+
+// MARK: - Render Progress Poller
+
+/// Polls the engine bridge for render progress and updates XLAppState.
+struct RenderProgressPoller: ViewModifier {
+    let appState: XLAppState
+    let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
+
+    func body(content: Content) -> some View {
+        content.onReceive(timer) { _ in
+            let bridge = appState.engineBridge
+            let rendering = bridge.isRendering()
+            appState.isRendering = rendering
+            if rendering {
+                appState.renderProgress = Double(bridge.getRenderProgress())
+            } else if appState.renderProgress > 0 {
+                appState.renderProgress = 0
             }
         }
     }

@@ -20,7 +20,9 @@
 #ifndef XLIGHTS_NATIVE
 #include "VideoPanel.h"
 #endif
+#ifndef XLIGHTS_NATIVE
 #include "../VideoReader.h"
+#endif
 #include "../sequencer/Effect.h"
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
@@ -33,10 +35,12 @@
 #include "../UtilFunctions.h"
 #include "../ExternalHooks.h"
 
+#ifndef XLIGHTS_NATIVE
 #include "../Parallel.h"
 #include "ispc/VideoFunctions.ispc.h"
 
 #include <log4cpp/Category.hh>
+#endif
 
 VideoEffect::VideoEffect(int id) : RenderableEffect(id, "Video",
 #ifndef XLIGHTS_NATIVE
@@ -131,10 +135,12 @@ std::list<std::string> VideoEffect::CheckEffectSettings(const SettingsMap& setti
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 bool VideoEffect::IsVideoFile(std::string filename)
 {
     return VideoReader::IsVideoFile(filename);
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 xlEffectPanel *VideoEffect::CreatePanel(wxWindow *parent) {
@@ -142,6 +148,7 @@ xlEffectPanel *VideoEffect::CreatePanel(wxWindow *parent) {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void VideoEffect::adjustSettings(const std::string &version, Effect *effect, bool removeDefaults)
 {
     // give the base class a chance to adjust any settings
@@ -174,6 +181,7 @@ void VideoEffect::adjustSettings(const std::string &version, Effect *effect, boo
         //settings["E_SLIDER_Video_Starttime"] = wxString::Format(wxT("%i"), st / 10);
     }
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void VideoEffect::SetDefaultParameters()
@@ -202,6 +210,7 @@ void VideoEffect::SetDefaultParameters()
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> VideoEffect::GetFileReferences(Model* model, const SettingsMap &SettingsMap) const
 {
     std::list<std::string> res;
@@ -210,6 +219,7 @@ std::list<std::string> VideoEffect::GetFileReferences(Model* model, const Settin
     }
     return res;
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 bool VideoEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap)

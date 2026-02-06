@@ -988,7 +988,7 @@ void XLSetCommandPaletteVisible(bool visible) {
     dialog.showDirectory = showDirectory;
     dialog.sequenceName = @"New Sequence";
     dialog.durationSeconds = 60;
-    dialog.frameIntervalMs = 50;
+    dialog.frameIntervalMs = 25;
 
     // Show the dialog as a sheet
     [dialog presentAsSheetForWindow:keyWindow completion:^(NSModalResponse response) {
@@ -999,7 +999,8 @@ void XLSetCommandPaletteVisible(bool visible) {
             NSString *audioFile = dialog.audioFilePath;
 
             // Create the sequence via engine bridge
-            BOOL success = [engineBridge createSequence:durationMS
+            BOOL success = [engineBridge createSequence:dialog.sequenceName
+                                             durationMS:durationMS
                                                 frameMS:frameMS
                                               mediaFile:audioFile];
 

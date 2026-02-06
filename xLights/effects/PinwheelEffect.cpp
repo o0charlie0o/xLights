@@ -24,11 +24,17 @@
 #include "../../include/pinwheel-48.xpm"
 #include "../../include/pinwheel-64.xpm"
 #endif
+#ifndef XLIGHTS_NATIVE
 #include <log4cpp/Category.hh>
+#endif
 
+#ifndef XLIGHTS_NATIVE
 #include "../Parallel.h"
+#endif
 
+#ifndef XLIGHTS_NATIVE
 #include "ispc/PinwheelFunctions.ispc.h"
+#endif
 
 PinwheelEffect::PinwheelEffect(int id) : RenderableEffect(id, "Pinwheel",
 #ifndef XLIGHTS_NATIVE

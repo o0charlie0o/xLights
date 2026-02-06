@@ -46,10 +46,12 @@ class PicturesEffect : public RenderableEffect
         virtual AssistPanel *GetAssistPanel(wxWindow *parent, xLightsFrame* xl_frame) override;
         virtual bool HasAssistPanel() override { return true; }
 #endif
+#ifndef XLIGHTS_NATIVE
         virtual bool needToAdjustSettings(const std::string &version) override;
         virtual void adjustSettings(const std::string &version, Effect *effect, bool removeDefaults = true) override;
-        virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap &SettingsMap) const override;
+#endif
 #ifndef XLIGHTS_NATIVE
+        virtual std::list<std::string> GetFileReferences(Model* model, const SettingsMap &SettingsMap) const override;
         virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
         virtual bool CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap) override;
         static bool IsPictureFile(std::string filename);

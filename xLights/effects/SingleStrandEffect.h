@@ -110,7 +110,9 @@ private:
                                  float chaseSpeed, float offset);
     void RenderSingleStrandSkips(RenderBuffer& buffer, Effect* eff, int Skips_BandSize,
                                  int Skips_SkipSize, int Skips_StartPos, const std::string& Skips_Direction, int advances);
+#ifndef XLIGHTS_NATIVE
     void RenderSingleStrandFX(RenderBuffer& buffer, Effect* eff, int intensity, int speed, const std::string& fx, const std::string& palette);
+#endif
     void draw_chase(RenderBuffer& buffer,
                     int x, bool group, int ColorScheme, int Number_Chases, bool autoReverse, int width,
                     int Color_Mix1, const std::string& Fade_Type, int ChaseDirection, bool mirror);

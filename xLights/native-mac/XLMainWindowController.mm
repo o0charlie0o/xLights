@@ -16,6 +16,7 @@
 #import "XLEngineBridge.h"
 #import "XLPlaybackController.h"
 #import "layout/XLMetalPreviewView.h"
+#import "sequencer/XLRenderProgressIndicator.h"
 
 static const CGFloat kDefaultWindowWidth = 1600.0;
 static const CGFloat kDefaultWindowHeight = 1000.0;
@@ -40,6 +41,7 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
 @property (nonatomic, strong) NSView *contentContainer;
 @property (nonatomic, strong) NSView *bottomPanelContainer;
 
+@property (nonatomic, strong, readwrite) XLRenderProgressIndicator *renderProgressIndicator;
 @property (nonatomic, assign) BOOL inspectorVisible;
 @property (nonatomic, assign) BOOL bottomPanelVisible;
 @property (nonatomic, assign) CGFloat inspectorWidth;
@@ -192,6 +194,8 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
         }
         // Connect playback controller to sequencer
         self.sequencerViewController.playbackController = self.playbackController;
+        // Connect render progress indicator
+        self.sequencerViewController.renderProgressIndicator = self.renderProgressIndicator;
     });
 }
 
@@ -385,9 +389,20 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     }
     else if ([itemIdentifier isEqualToString:@"Render"]) {
         item.label = @"Render";
-        item.image = [NSImage imageWithSystemSymbolName:@"gearshape.fill" accessibilityDescription:@"Render"];
         item.target = self;
         item.action = @selector(renderAll:);
+
+        _renderProgressIndicator = [[XLRenderProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, 28, 28)];
+        _renderProgressIndicator.toolTip = @"Render All";
+        _renderProgressIndicator.translatesAutoresizingMaskIntoConstraints = NO;
+        [_renderProgressIndicator.widthAnchor constraintEqualToConstant:28].active = YES;
+        [_renderProgressIndicator.heightAnchor constraintEqualToConstant:28].active = YES;
+
+        NSClickGestureRecognizer *click = [[NSClickGestureRecognizer alloc]
+            initWithTarget:self action:@selector(renderAll:)];
+        [_renderProgressIndicator addGestureRecognizer:click];
+
+        item.view = _renderProgressIndicator;
     }
     else if ([itemIdentifier isEqualToString:@"ToggleInspector"]) {
         item.label = @"Inspector";

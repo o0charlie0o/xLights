@@ -62,7 +62,7 @@ static std::string attrStr(const std::map<std::string, std::string>& attrs,
 // Generate node positions for a model from its XML attributes.
 // This approximates the legacy Model class node generation using only the
 // attributes stored in rgbeffects.xml — no Model objects required.
-static std::vector<NodeCoord> generateNodesFromAttributes(
+std::vector<NodeCoord> generateNodesFromAttributes(
     const std::map<std::string, std::string>& attrs)
 {
     std::string type = attrStr(attrs, "DisplayAs");

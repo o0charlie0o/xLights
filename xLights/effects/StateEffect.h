@@ -29,7 +29,9 @@ class StateEffect : public RenderableEffect
 #ifndef XLIGHTS_NATIVE
         virtual void Render(Effect *effect, const SettingsMap &settings, RenderBuffer &buffer) override;
 #endif
+#ifndef XLIGHTS_NATIVE
         std::list<std::string> GetStates(Model* cls, std::string model);
+#endif
         virtual void RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) override;
 #ifndef XLIGHTS_NATIVE
         virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;

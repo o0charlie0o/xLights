@@ -24,6 +24,7 @@
 #include "../RenderBuffer.h"
 #include "../UtilClasses.h"
 #include "../UtilFunctions.h"
+#ifndef XLIGHTS_NATIVE
 #include "../models/DMX/DmxModel.h"
 #include "../models/DMX/DmxMotor.h"
 #include "../models/DMX/DmxMovingHeadAdv.h"
@@ -33,9 +34,12 @@
 #include "../models/DMX/DmxSkulltronix.h"
 #include "../models/DMX/Servo.h"
 #include "../models/ModelGroup.h"
+#endif
 #include "../sequencer/Effect.h"
+#ifndef XLIGHTS_NATIVE
 #include "../sequencer/Element.h"
 #include "../sequencer/SequenceElements.h"
+#endif
 
 ServoEffect::ServoEffect(int id) :
     RenderableEffect(id, "Servo",
@@ -57,6 +61,7 @@ xlEffectPanel* ServoEffect::CreatePanel(wxWindow* parent) {
     return new ServoPanel(parent);
 }
 #endif
+#ifndef XLIGHTS_NATIVE
 bool ServoEffect::needToAdjustSettings(const std::string& version) {
     if (IsVersionOlder("2024.11", version)) {
         return true;
@@ -65,7 +70,7 @@ bool ServoEffect::needToAdjustSettings(const std::string& version) {
 }
 void ServoEffect::adjustSettings(const std::string& version, Effect* effect, bool removeDefaults) {
     RenderableEffect::adjustSettings(version,  effect, removeDefaults);
-    
+
     std::string vct = effect->GetSettings().Get("E_VALUECURVE_Servo", xlEMPTY_STRING);
     if (!vct.empty()) {
         ValueCurve v(vct);
@@ -90,7 +95,7 @@ void ServoEffect::adjustSettings(const std::string& version, Effect* effect, boo
             }
         }
     }
-    
+
     std::string i = effect->GetSettings().Get("E_TEXTCTRL_EndValue", xlEMPTY_STRING);
     if (i.empty()) {
         i = effect->GetSettings().Get("E_TEXTCTRL_Servo", xlEMPTY_STRING);
@@ -104,7 +109,7 @@ void ServoEffect::adjustSettings(const std::string& version, Effect* effect, boo
 void ServoEffect::AdjustSettingsAfterSplit(Effect *first, Effect *second) {
     float total = second->GetEndTimeMS() - first->GetStartTimeMS();
     float pct = (first->GetEndTimeMS() - first->GetStartTimeMS()) / total;
-    
+
     const std::string vn = "E_VALUECURVE_Servo";
     const std::string &vc = first->GetSetting(vn);
     if (vc.empty()) {
@@ -117,6 +122,7 @@ void ServoEffect::AdjustSettingsAfterSplit(Effect *first, Effect *second) {
         second->SetSetting("E_TOGGLEBUTTON_Start", "1");
     }
 }
+#endif
 
 
 #ifndef XLIGHTS_NATIVE

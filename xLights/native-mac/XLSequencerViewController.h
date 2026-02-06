@@ -21,6 +21,7 @@
 @class XLUndoController;
 @class XLPlaybackController;
 @class XLKeyboardHandler;
+@class XLRenderProgressIndicator;
 
 /// View controller for the Sequencer tab.
 ///
@@ -57,6 +58,9 @@
 /// Keyboard handler for processing key bindings.
 @property (nonatomic, strong) XLKeyboardHandler *keyboardHandler;
 
+/// Render progress indicator in the toolbar (set by XLMainWindowController).
+@property (nonatomic, weak) XLRenderProgressIndicator *renderProgressIndicator;
+
 /// Reload sequence data from the engine bridge.
 /// Call this when a sequence is loaded or unloaded, or when elements/effects change.
 - (void)reloadSequenceData;
@@ -72,6 +76,19 @@
 - (void)addTimingTrack:(id)sender;
 - (void)importTiming:(id)sender;
 - (void)generateTiming:(id)sender;
+
+#pragma mark - Playback Actions
+/// Start playback.
+- (void)play;
+
+/// Pause playback.
+- (void)pause;
+
+/// Stop playback and return to play origin.
+- (void)stop;
+
+/// Render all effects.
+- (void)renderAll;
 
 #pragma mark - Zoom and Navigation Actions
 /// Zoom in on the timeline (increase zoom level).

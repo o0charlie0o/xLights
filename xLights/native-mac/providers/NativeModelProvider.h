@@ -165,6 +165,9 @@ private:
     // Model names in order (for indexed access)
     std::vector<std::string> _modelNames;
 
+    // Group names in XML document order
+    std::vector<std::string> _groupNames;
+
     // Parsed XML attributes per model (name → {attr → value})
     std::map<std::string, std::map<std::string, std::string>> _modelAttributes;
 

@@ -17,6 +17,7 @@
 #import "layout/XLManipulationHandlesRenderer.h"
 #import "layout/XLModelPropertiesView.h"
 #import "layout/XLLayoutUndoController.h"
+#import "input/XLKeyboardHandler.h"
 
 static const CGFloat kModelTreeMinWidth = 200.0;
 static const CGFloat kModelTreeDefaultWidth = 280.0;
@@ -113,6 +114,24 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     // Initialize undo controller
     _undoController = [[XLLayoutUndoController alloc] initWithEngineBridge:_engineBridge];
     _undoController.delegate = self;
+
+    // Initialize keyboard handler for processing key bindings in layout scope
+    NSString *showFolder = [self.engineBridge getShowFolderPath];
+    NSLog(@"XLLayoutViewController viewDidLoad: showFolder from engineBridge = '%@'", showFolder);
+    if (!showFolder || showFolder.length == 0) {
+        showFolder = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+        NSLog(@"XLLayoutViewController: Fallback to UserDefaults showFolder = '%@'", showFolder);
+    }
+    self.keyboardHandler = [[XLKeyboardHandler alloc] initWithShowFolderPath:showFolder];
+    self.keyboardHandler.delegate = self;
+    NSLog(@"XLLayoutViewController: keyboardHandler initialized = %@, bindingCount = %lu",
+          self.keyboardHandler, (unsigned long)[self.keyboardHandler bindingCount]);
+
+    // Listen for show folder changes to reload key bindings
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(showFolderDidChange:)
+                                                 name:@"XLShowFolderDidChangeNotification"
+                                               object:nil];
 
     [_modelTreeController reloadData];
 }
@@ -750,6 +769,205 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 
 - (BOOL)canRedo {
     return [_undoController canRedo];
+}
+
+#pragma mark - First Responder & Keyboard Handling
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)keyDown:(NSEvent *)event {
+    if (![_keyboardHandler handleKeyEvent:event inScope:XLKeyScopeLayout]) {
+        [super keyDown:event];
+    }
+}
+
+- (void)showFolderDidChange:(NSNotification *)notification {
+    NSString *newPath = notification.userInfo[@"path"];
+    if (newPath) {
+        [_keyboardHandler setShowFolderPath:newPath];
+    } else {
+        NSString *showFolder = [self.engineBridge getShowFolderPath];
+        [_keyboardHandler setShowFolderPath:showFolder];
+    }
+}
+
+#pragma mark - XLKeyboardActionDelegate
+
+- (BOOL)performKeyAction:(NSString *)actionType
+              effectName:(NSString *)effectName
+          effectSettings:(NSString *)effectSettings
+                 inScope:(XLKeyScope)scope {
+
+    NSLog(@"XLLayoutViewController performKeyAction: actionType='%@', scope=%ld",
+          actionType, (long)scope);
+
+    // Undo/Redo (available in all scopes)
+    if ([actionType isEqualToString:@"UNDO"]) {
+        [_undoController undo];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"REDO"]) {
+        [_undoController redo];
+        return YES;
+    }
+
+    // Model lock/unlock actions
+    if ([actionType isEqualToString:@"LOCK_MODEL"]) {
+        NSString *modelName = _previewView.selectedModelName;
+        if (modelName) {
+            [self previewView:_previewView didRequestLockModel:modelName lock:YES];
+        }
+        return YES;
+    }
+    if ([actionType isEqualToString:@"UNLOCK_MODEL"]) {
+        NSString *modelName = _previewView.selectedModelName;
+        if (modelName) {
+            [self previewView:_previewView didRequestLockModel:modelName lock:NO];
+        }
+        return YES;
+    }
+
+    // Model alignment actions
+    if ([actionType isEqualToString:@"MODEL_ALIGN_TOP"]) {
+        [self previewView:_previewView didRequestAlignModels:@"Top"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_ALIGN_BOTTOM"]) {
+        [self previewView:_previewView didRequestAlignModels:@"Bottom"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_ALIGN_LEFT"]) {
+        [self previewView:_previewView didRequestAlignModels:@"Left"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_ALIGN_RIGHT"]) {
+        [self previewView:_previewView didRequestAlignModels:@"Right"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_ALIGN_CENTER_VERT"]) {
+        [self previewView:_previewView didRequestAlignModels:@"Vertical Center"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_ALIGN_CENTER_HORIZ"]) {
+        [self previewView:_previewView didRequestAlignModels:@"Horizontal Center"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_ALIGN_BACKS"]) {
+        // TODO: 3D z-axis alignment — needs getModelBounds z values
+        NSLog(@"XLLayoutViewController: MODEL_ALIGN_BACKS not yet implemented (3D)");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_ALIGN_FRONTS"]) {
+        // TODO: 3D z-axis alignment — needs getModelBounds z values
+        NSLog(@"XLLayoutViewController: MODEL_ALIGN_FRONTS not yet implemented (3D)");
+        return YES;
+    }
+
+    // Model distribute actions
+    if ([actionType isEqualToString:@"MODEL_DISTRIBUTE_HORIZ"]) {
+        [self previewView:_previewView didRequestDistributeModels:@"Horizontal"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_DISTRIBUTE_VERT"]) {
+        [self previewView:_previewView didRequestDistributeModels:@"Vertical"];
+        return YES;
+    }
+
+    // Model flip actions
+    if ([actionType isEqualToString:@"MODEL_FLIP_HORIZ"]) {
+        NSString *modelName = _previewView.selectedModelName;
+        if (modelName) {
+            [self previewView:_previewView didRequestFlipModel:modelName horizontal:YES];
+        }
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_FLIP_VERT"]) {
+        NSString *modelName = _previewView.selectedModelName;
+        if (modelName) {
+            [self previewView:_previewView didRequestFlipModel:modelName horizontal:NO];
+        }
+        return YES;
+    }
+
+    // --- Selection and Grouping ---
+
+    if ([actionType isEqualToString:@"SELECT_ALL_MODELS"]) {
+        NSOutlineView *outlineView = _modelTreeController.outlineView;
+        NSInteger rowCount = outlineView.numberOfRows;
+        if (rowCount > 0) {
+            NSMutableIndexSet *indexSet = [[NSMutableIndexSet alloc] init];
+            for (NSInteger row = 0; row < rowCount; row++) {
+                [indexSet addIndex:(NSUInteger)row];
+            }
+            [outlineView selectRowIndexes:indexSet byExtendingSelection:NO];
+            NSLog(@"XLLayoutViewController: Selected all %ld rows in model tree", (long)rowCount);
+        }
+        return YES;
+    }
+
+    if ([actionType isEqualToString:@"GROUP_MODELS"]) {
+        NSArray<NSString *> *selectedNames = [_modelTreeController selectedModelNames];
+        if (selectedNames.count >= 1) {
+            if ([_modelTreeController.delegate respondsToSelector:@selector(modelTree:didRequestGroupModels:)]) {
+                [_modelTreeController.delegate modelTree:_modelTreeController didRequestGroupModels:selectedNames];
+            }
+        } else {
+            NSLog(@"XLLayoutViewController: GROUP_MODELS — no models selected");
+        }
+        return YES;
+    }
+
+    if ([actionType isEqualToString:@"MODEL_ALIGN_GROUND"]) {
+        NSLog(@"TODO: MODEL_ALIGN_GROUND not yet implemented");
+        return YES;
+    }
+
+    // --- Model Editing Dialogs ---
+
+    if ([actionType isEqualToString:@"MODEL_SUBMODELS"]) {
+        NSLog(@"TODO: MODEL_SUBMODELS not yet implemented");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_FACES"]) {
+        NSLog(@"TODO: MODEL_FACES not yet implemented");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_STATES"]) {
+        NSLog(@"TODO: MODEL_STATES not yet implemented");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_MODELDATA"]) {
+        NSLog(@"TODO: MODEL_MODELDATA not yet implemented");
+        return YES;
+    }
+
+    // --- Layout Misc ---
+
+    if ([actionType isEqualToString:@"WIRING_VIEW"]) {
+        NSLog(@"TODO: WIRING_VIEW not yet implemented");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"EXPORT_MODEL_CAD"]) {
+        NSLog(@"TODO: EXPORT_MODEL_CAD not yet implemented");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"EXPORT_LAYOUT_DXF"]) {
+        NSLog(@"TODO: EXPORT_LAYOUT_DXF not yet implemented");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"NODE_LAYOUT"]) {
+        NSLog(@"TODO: NODE_LAYOUT not yet implemented");
+        return YES;
+    }
+    if ([actionType isEqualToString:@"SAVE_LAYOUT"]) {
+        NSLog(@"TODO: SAVE_LAYOUT not yet implemented");
+        return YES;
+    }
+
+    NSLog(@"XLLayoutViewController: Unhandled layout key action: %@", actionType);
+    return NO;
 }
 
 @end

@@ -85,13 +85,31 @@ public:
     /// @return true if loading succeeded, false otherwise
     bool loadFromSequenceFile(const std::string& filePath);
 
+    /// Sequence metadata for saving to XML (written into <head> section).
+    struct SequenceMetadata {
+        double durationSeconds;
+        int frameMS;
+        std::string sequenceType;  // "Animation" or "Media"
+        std::string mediaFile;     // relative or absolute path to audio/media
+        std::string author;
+        SequenceMetadata() : durationSeconds(0.0), frameMS(50) {}
+    };
+
     /// Export effect data to xLights sequence XML format.
+    /// @param metadata Sequence metadata to include in the <head> section
     /// @return XML string representation of the sequence data
+    std::string exportToSequenceXML(const SequenceMetadata& metadata) const;
+
+    /// Export without metadata (uses internal sequence length only).
     std::string exportToSequenceXML() const;
 
     /// Save effect data to an xLights sequence XML file.
     /// @param filePath Path to save the sequence file
+    /// @param metadata Sequence metadata to include in the <head> section
     /// @return true if saving succeeded, false otherwise
+    bool saveToSequenceFile(const std::string& filePath, const SequenceMetadata& metadata) const;
+
+    /// Save without metadata (uses internal sequence length only).
     bool saveToSequenceFile(const std::string& filePath) const;
 
     /// Clear all effect data.

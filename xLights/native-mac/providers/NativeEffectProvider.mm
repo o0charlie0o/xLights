@@ -13,6 +13,7 @@
 #import <Foundation/Foundation.h>
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 namespace xlEngine {
@@ -312,7 +313,7 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
                         }
                     }
 
-                    // The "ref" attribute indexes into EffectDB for settings
+                    // The "ref" attribute indexes into EffectDB for settings (legacy format)
                     // EffectDB entries are JUST settings: "key=val,key=val,..."
                     // (the effect type name comes from the "name" attribute, not EffectDB)
                     NSXMLNode* refAttr = [effectNode attributeForName:@"ref"];
@@ -323,6 +324,14 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
                             if (dbEntry.length > 0) {
                                 parseKVString(dbEntry, effect->settings);
                             }
+                        }
+                    }
+
+                    // Also support inline "settings" attribute (native save format)
+                    if (effect->settings.empty()) {
+                        NSXMLNode* inlineSettingsAttr = [effectNode attributeForName:@"settings"];
+                        if (inlineSettingsAttr && inlineSettingsAttr.stringValue.length > 0) {
+                            parseKVString(inlineSettingsAttr.stringValue, effect->settings);
                         }
                     }
 
@@ -346,12 +355,22 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
                     NSXMLNode* selAttr = [effectNode attributeForName:@"selected"];
                     effect->selected = selAttr ? [selAttr.stringValue boolValue] : NO;
 
-                    // The "palette" attribute indexes into ColorPalettes
+                    // The "palette" attribute indexes into ColorPalettes (legacy format)
                     NSXMLNode* paletteAttr = [effectNode attributeForName:@"palette"];
                     if (paletteAttr) {
                         int palIdx = [paletteAttr.stringValue intValue];
                         if (palIdx >= 0 && (size_t)palIdx < colorPaletteEntries.size()) {
                             parseKVString(colorPaletteEntries[palIdx], effect->palette);
+                        }
+                    }
+
+                    // Also support inline "palette" attribute (native save format)
+                    if (effect->palette.empty() && paletteAttr && paletteAttr.stringValue.length > 0) {
+                        // Check if the palette value is not just an integer index
+                        // (contains '=' which indicates inline key-value format)
+                        NSString* palStr = paletteAttr.stringValue;
+                        if ([palStr containsString:@"="]) {
+                            parseKVString(palStr, effect->palette);
                         }
                     }
 
@@ -393,13 +412,38 @@ bool NativeEffectProvider::loadFromSequenceFile(const std::string& filePath)
     }
 }
 
-std::string NativeEffectProvider::exportToSequenceXML() const
+std::string NativeEffectProvider::exportToSequenceXML(const SequenceMetadata& metadata) const
 {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     std::ostringstream xml;
     xml << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    xml << "<xsequence Duration=\"" << _sequenceLengthMS << "\">\n";
+    xml << "<xsequence BaseChannel=\"0\" ChanCtrlBasic=\"0\" ChanCtrlColor=\"0\">\n";
+
+    // Write <head> section with sequence metadata (legacy xLights compatible)
+    xml << "  <head>\n";
+    xml << "    <version>2024.15</version>\n";
+    if (metadata.durationSeconds > 0) {
+        xml << "    <sequenceDuration>" << std::fixed << std::setprecision(3)
+            << metadata.durationSeconds << "</sequenceDuration>\n";
+    } else if (_sequenceLengthMS > 0) {
+        xml << "    <sequenceDuration>" << std::fixed << std::setprecision(3)
+            << (_sequenceLengthMS / 1000.0) << "</sequenceDuration>\n";
+    }
+    if (metadata.frameMS > 0) {
+        xml << "    <sequenceTiming>" << metadata.frameMS << " ms</sequenceTiming>\n";
+    }
+    if (!metadata.sequenceType.empty()) {
+        xml << "    <sequenceType>" << metadata.sequenceType << "</sequenceType>\n";
+    }
+    if (!metadata.mediaFile.empty()) {
+        xml << "    <mediaFile>" << metadata.mediaFile << "</mediaFile>\n";
+    }
+    if (!metadata.author.empty()) {
+        xml << "    <author>" << metadata.author << "</author>\n";
+    }
+    xml << "  </head>\n";
+
     xml << "  <ElementEffects>\n";
 
     for (const auto& elem : _elements) {
@@ -423,7 +467,7 @@ std::string NativeEffectProvider::exportToSequenceXML() const
         for (const auto& layer : elem->layers) {
             xml << "      <EffectLayer>\n";
             for (const auto& effect : layer->effects) {
-                xml << "        <Effect ref=\"" << effect->effectType << "\"";
+                xml << "        <Effect name=\"" << effect->effectType << "\"";
                 xml << " startTime=\"" << effect->startTimeMS << "\"";
                 xml << " endTime=\"" << effect->endTimeMS << "\"";
                 if (effect->protected_) xml << " protected=\"1\"";
@@ -486,9 +530,15 @@ std::string NativeEffectProvider::exportToSequenceXML() const
     return xml.str();
 }
 
-bool NativeEffectProvider::saveToSequenceFile(const std::string& filePath) const
+std::string NativeEffectProvider::exportToSequenceXML() const
 {
-    std::string xml = exportToSequenceXML();
+    SequenceMetadata meta;
+    return exportToSequenceXML(meta);
+}
+
+bool NativeEffectProvider::saveToSequenceFile(const std::string& filePath, const SequenceMetadata& metadata) const
+{
+    std::string xml = exportToSequenceXML(metadata);
 
     @autoreleasepool {
         NSString* path = [NSString stringWithUTF8String:filePath.c_str()];
@@ -497,6 +547,12 @@ bool NativeEffectProvider::saveToSequenceFile(const std::string& filePath) const
         BOOL success = [content writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error];
         return success && !error;
     }
+}
+
+bool NativeEffectProvider::saveToSequenceFile(const std::string& filePath) const
+{
+    SequenceMetadata meta;
+    return saveToSequenceFile(filePath, meta);
 }
 
 void NativeEffectProvider::clear()
@@ -953,6 +1009,20 @@ EffectOperationResult NativeEffectProvider::createEffectWithSettings(
     effect->endTimeMS = endTimeMS;
     effect->settings = settings;
     effect->palette = palette;
+
+    // Apply default palette if none provided (matches legacy xLights defaults)
+    if (effect->palette.empty()) {
+        effect->palette["C_BUTTON_Palette1"] = "#FFFFFF";
+        effect->palette["C_BUTTON_Palette2"] = "#FF0000";
+        effect->palette["C_BUTTON_Palette3"] = "#00FF00";
+        effect->palette["C_BUTTON_Palette4"] = "#0000FF";
+        effect->palette["C_BUTTON_Palette5"] = "#FFFF00";
+        effect->palette["C_BUTTON_Palette6"] = "#000000";
+        effect->palette["C_BUTTON_Palette7"] = "#00FFFF";
+        effect->palette["C_BUTTON_Palette8"] = "#FF00FF";
+        effect->palette["C_CHECKBOX_Palette1"] = "1";
+        effect->palette["C_CHECKBOX_Palette2"] = "1";
+    }
 
     // Find effect type index
     for (size_t i = 0; i < _effectTypes.size(); ++i) {

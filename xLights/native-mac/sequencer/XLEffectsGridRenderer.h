@@ -107,7 +107,11 @@ activeTimingColorIndex:(NSInteger)activeTimingColorIndex
         dropStartMS:(CGFloat)dropStartMS
           dropEndMS:(CGFloat)dropEndMS
    rubberBandActive:(BOOL)rubberBandActive
-     rubberBandRect:(NSRect)rubberBandRect;
+     rubberBandRect:(NSRect)rubberBandRect
+  cellHighlightActive:(BOOL)cellHighlightActive
+    cellHighlightRow:(NSInteger)cellHighlightRow
+cellHighlightStartMS:(CGFloat)cellHighlightStartMS
+  cellHighlightEndMS:(CGFloat)cellHighlightEndMS;
 
 /// Map from effect type index to display color.
 + (NSColor *)colorForEffectIndex:(NSInteger)effectIndex;

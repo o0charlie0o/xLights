@@ -39,9 +39,9 @@
 #ifndef XLIGHTS_NATIVE
 #include "GIFImage.h"
 #include "../xLightsMain.h"
-#endif
 
 #include <log4cpp/Category.hh>
+#endif
 
 #define wrdebug(...)
 
@@ -121,6 +121,7 @@ AssistPanel *PicturesEffect::GetAssistPanel(wxWindow *parent, xLightsFrame* xl_f
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 bool PicturesEffect::needToAdjustSettings(const std::string &version)
 {
     return true;
@@ -174,6 +175,7 @@ void PicturesEffect::adjustSettings(const std::string &version, Effect *effect, 
         settings["E_SLIDER_Pictures_EndScale"] = "100";
     }
 }
+#endif
 
 //CAUTION: these must match EffectDirections exactly:
 #define RENDER_PICTURE_LEFT  0
@@ -444,6 +446,7 @@ void PicturesEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 std::list<std::string> PicturesEffect::GetFileReferences(Model* model, const SettingsMap &SettingsMap) const
 {
     std::list<std::string> res;
@@ -452,6 +455,7 @@ std::list<std::string> PicturesEffect::GetFileReferences(Model* model, const Set
     }
     return res;
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 bool PicturesEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &SettingsMap)

@@ -64,7 +64,9 @@ public:
     }
 
 protected:
+#ifndef XLIGHTS_NATIVE
     virtual void RemoveDefaults(const std::string& version, Effect* effect) override;
+#endif
 #ifndef XLIGHTS_NATIVE
     virtual xlEffectPanel* CreatePanel(wxWindow* parent) override;
     virtual void SetPanelStatus(Model* cls) override;

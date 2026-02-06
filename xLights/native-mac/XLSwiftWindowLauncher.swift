@@ -224,4 +224,38 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
             }
         }
     }
+
+    // MARK: - Top Panel Toggles
+
+    /// Toggle the Effects palette panel visibility.
+    @objc public func toggleEffectsPanel() {
+        DispatchQueue.main.async {
+            guard let appState = sSwiftAppState else { return }
+            appState.toggleTopPanel(.effects)
+        }
+    }
+
+    /// Toggle the Colors panel visibility.
+    @objc public func toggleColorsPanel() {
+        DispatchQueue.main.async {
+            guard let appState = sSwiftAppState else { return }
+            appState.toggleTopPanel(.colors)
+        }
+    }
+
+    /// Toggle the Layer Blending panel visibility.
+    @objc public func toggleLayerBlendingPanel() {
+        DispatchQueue.main.async {
+            guard let appState = sSwiftAppState else { return }
+            appState.toggleTopPanel(.layerBlending)
+        }
+    }
+
+    /// Toggle the Layer Settings panel visibility.
+    @objc public func toggleLayerSettingsPanel() {
+        DispatchQueue.main.async {
+            guard let appState = sSwiftAppState else { return }
+            appState.toggleTopPanel(.layerSettings)
+        }
+    }
 }
