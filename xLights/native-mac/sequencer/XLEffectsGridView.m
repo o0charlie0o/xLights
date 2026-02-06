@@ -1888,19 +1888,32 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     unlinkSymbol.enabled = hasSelection;
     [menu addItem:unlinkSymbol];
 
-    // Link to Symbol submenu (placeholder - populated dynamically when symbols exist)
+    // Link to Symbol submenu - populated dynamically from availableSymbolNames
     NSMenu *linkMenu = [[NSMenu alloc] initWithTitle:@"Link to Symbol"];
-    NSMenuItem *linkPlaceholder = [[NSMenuItem alloc] initWithTitle:@"(No symbols defined)"
-                                                            action:nil
-                                                     keyEquivalent:@""];
-    linkPlaceholder.enabled = NO;
-    [linkMenu addItem:linkPlaceholder];
+
+    if (_availableSymbolNames.count > 0) {
+        for (NSUInteger i = 0; i < _availableSymbolNames.count; i++) {
+            NSMenuItem *symbolItem = [[NSMenuItem alloc] initWithTitle:_availableSymbolNames[i]
+                                                               action:@selector(linkToSymbol:)
+                                                        keyEquivalent:@""];
+            symbolItem.tag = kMenuTagLinkSymbolBase + (NSInteger)i;
+            symbolItem.target = self;
+            symbolItem.enabled = hasSelection;
+            [linkMenu addItem:symbolItem];
+        }
+    } else {
+        NSMenuItem *linkPlaceholder = [[NSMenuItem alloc] initWithTitle:@"(No symbols defined)"
+                                                                action:nil
+                                                         keyEquivalent:@""];
+        linkPlaceholder.enabled = NO;
+        [linkMenu addItem:linkPlaceholder];
+    }
 
     NSMenuItem *linkSubmenu = [[NSMenuItem alloc] initWithTitle:@"Link to Symbol"
                                                         action:nil
                                                  keyEquivalent:@""];
     linkSubmenu.submenu = linkMenu;
-    linkSubmenu.enabled = hasSelection;
+    linkSubmenu.enabled = hasSelection && _availableSymbolNames.count > 0;
     [menu addItem:linkSubmenu];
 
     // --- Timing (edit effect start/end time) ---

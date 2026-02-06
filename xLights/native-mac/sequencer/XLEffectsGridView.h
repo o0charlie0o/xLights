@@ -338,6 +338,10 @@ typedef NS_ENUM(NSInteger, XLAlignmentType) {
 /// Color index of the active timing track (-1 if none). Set by VC to color grid extension lines.
 @property (nonatomic, assign) NSInteger activeTimingColorIndex;
 
+/// Available symbol names for the "Link to Symbol" context menu.
+/// Set by the view controller; the grid view uses these to populate the submenu.
+@property (nonatomic, copy) NSArray<NSString *> *availableSymbolNames;
+
 /// Reload all data from the data source and redraw.
 - (void)reloadData;
 
