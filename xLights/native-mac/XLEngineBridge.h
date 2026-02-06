@@ -587,6 +587,10 @@
 /// Rename a timing track
 - (BOOL)renameTimingTrack:(NSString *)oldName toName:(NSString *)newName;
 
+/// Get phonemes for a word using the phoneme dictionary
+/// Returns array of phoneme strings (e.g. @[@"AI", @"etc", @"rest"]) or empty array if unknown
+- (NSArray<NSString *> *)getPhonemesForWord:(NSString *)word;
+
 #pragma mark - Audio Operations
 
 /// Get the media file path for the current sequence

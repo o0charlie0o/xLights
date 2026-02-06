@@ -465,6 +465,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Symbol library manager
     XLSymbolLibraryManager *_symbolLibraryManager;
+
+    // Find/replace state for timing labels
+    NSString *_timingSearchText;
+    NSInteger _timingSearchLayer;       // Layer index being searched
+    NSString *_timingSearchTrackName;   // Track name being searched
+    NSInteger _timingLastFoundIndex;    // Index into timing marks array of last found match
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -2456,22 +2462,185 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 #pragma mark - XLEffectsGridDelegate (Timing Track Operations)
 
+/// Round a time value to the nearest frame boundary
+- (NSInteger)roundToFrameBoundary:(double)timeMS {
+    if (_frameRate <= 0) return (NSInteger)timeMS;
+    double frameDuration = 1000.0 / (double)_frameRate;
+    return (NSInteger)(round(timeMS / frameDuration) * frameDuration);
+}
+
+/// Get the active timing track name (convenience)
+- (NSString *)activeTimingTrackForOperation {
+    return [_engineBridge getActiveTimingTrackName];
+}
+
+/// Perform phrase breakdown: split a phrase timing mark into word timing marks on layer 1
+- (void)breakdownPhraseWithId:(NSInteger)effectId trackName:(NSString *)trackName {
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+
+    NSString *phrase = markInfo[@"label"];
+    NSInteger startTime = [markInfo[@"startTimeMS"] integerValue];
+    NSInteger endTime = [markInfo[@"endTimeMS"] integerValue];
+
+    if (!phrase || phrase.length == 0 || endTime <= startTime) return;
+
+    // Tokenize phrase into words (same delimiters as legacy code)
+    NSCharacterSet *delimiters = [NSCharacterSet characterSetWithCharactersInString:@" \t:;,.-_!?{}[]()<>+=|"];
+    NSArray<NSString *> *rawWords = [phrase componentsSeparatedByCharactersInSet:delimiters];
+    NSMutableArray<NSString *> *words = [NSMutableArray array];
+    for (NSString *w in rawWords) {
+        if (w.length > 0) [words addObject:w];
+    }
+
+    NSInteger numWords = (NSInteger)words.count;
+    if (numWords == 0) return;
+
+    // Clear existing word marks in this time range on layer 1
+    NSArray<NSDictionary *> *existingLayer1 = [_engineBridge getTimingMarks:trackName layer:1];
+    for (NSDictionary *mark in existingLayer1) {
+        NSInteger mStart = [mark[@"startTimeMS"] integerValue];
+        NSInteger mEnd = [mark[@"endTimeMS"] integerValue];
+        if (mStart >= startTime && mEnd <= endTime) {
+            [_engineBridge deleteTimingMark:[mark[@"id"] integerValue]];
+        }
+    }
+
+    // Create word timing marks evenly distributed
+    double intervalMS = (double)(endTime - startTime) / (double)numWords;
+    NSInteger wordStartTime = startTime;
+    for (NSInteger i = 0; i < numWords; i++) {
+        NSInteger wordEndTime = [self roundToFrameBoundary:startTime + intervalMS * (i + 1)];
+        if (i == numWords - 1 || wordEndTime > endTime) {
+            wordEndTime = endTime;
+        }
+        [_engineBridge createTimingMark:trackName layer:1
+                            startTimeMS:wordStartTime endTimeMS:wordEndTime
+                                  label:words[(NSUInteger)i]];
+        wordStartTime = wordEndTime;
+    }
+}
+
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didRequestBreakdownPhraseAtIndex:(NSInteger)effectIndex
 {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
-    // TODO: Implement phrase breakdown via engine bridge
-    NSLog(@"Breakdown Phrase at effect %ld (not yet implemented)", (long)effectId);
+
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+    NSString *trackName = markInfo[@"trackName"];
+    if (!trackName) return;
+
+    [self breakdownPhraseWithId:effectId trackName:trackName];
+    [self reloadSequenceData];
+    [gridView reloadData];
+    NSLog(@"Breakdown Phrase completed for effect %ld", (long)effectId);
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didRequestBreakdownSelectedPhrases:(NSIndexSet *)effectIndices
 {
     if (!_engineBridge || effectIndices.count == 0) return;
-    // TODO: Implement batch phrase breakdown via engine bridge
-    NSLog(@"Breakdown Selected Phrases (%lu marks) (not yet implemented)",
-          (unsigned long)effectIndices.count);
+
+    __block NSString *trackName = nil;
+
+    // Collect all effect IDs and determine track
+    NSMutableArray<NSNumber *> *effectIds = [NSMutableArray array];
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger eid = [gridView effectIdAtRenderIndex:idx];
+        if (eid >= 0) {
+            [effectIds addObject:@(eid)];
+            if (!trackName) {
+                NSDictionary *info = [self->_engineBridge getTimingMark:eid];
+                if (info[@"trackName"]) trackName = info[@"trackName"];
+            }
+        }
+    }];
+
+    if (!trackName) return;
+
+    for (NSNumber *eid in effectIds) {
+        [self breakdownPhraseWithId:eid.integerValue trackName:trackName];
+    }
+
+    [self reloadSequenceData];
+    [gridView reloadData];
+    NSLog(@"Breakdown Selected Phrases completed (%lu marks)", (unsigned long)effectIds.count);
+}
+
+/// Perform word breakdown: split a word timing mark into phoneme timing marks on layer 2.
+/// Uses a simple phoneme mapping since we don't have the wxWidgets dictionary available directly.
+/// The engine bridge can access the PhonemeDictionary through the C++ engine.
+- (void)breakdownWordWithId:(NSInteger)effectId trackName:(NSString *)trackName {
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+
+    NSString *word = markInfo[@"label"];
+    NSInteger startTime = [markInfo[@"startTimeMS"] integerValue];
+    NSInteger endTime = [markInfo[@"endTimeMS"] integerValue];
+
+    if (!word || word.length == 0 || endTime <= startTime) return;
+
+    // Get phonemes for this word from the engine bridge
+    NSArray<NSString *> *phonemes = [_engineBridge getPhonemesForWord:word];
+
+    if (!phonemes || phonemes.count == 0) {
+        // Fallback: create a single "rest" phoneme spanning the full word
+        phonemes = @[@"rest"];
+    }
+
+    // Clear existing phoneme marks in this time range on layer 2
+    NSArray<NSDictionary *> *existingLayer2 = [_engineBridge getTimingMarks:trackName layer:2];
+    for (NSDictionary *mark in existingLayer2) {
+        NSInteger mStart = [mark[@"startTimeMS"] integerValue];
+        NSInteger mEnd = [mark[@"endTimeMS"] integerValue];
+        if (mStart >= startTime && mEnd <= endTime) {
+            [_engineBridge deleteTimingMark:[mark[@"id"] integerValue]];
+        }
+    }
+
+    // Calculate timing using the same algorithm as legacy code:
+    // MBP and "etc" phonemes get shorter duration, others get longer
+    NSInteger countShort = 0;
+    for (NSString *p in phonemes) {
+        if ([p isEqualToString:@"etc"] || [p isEqualToString:@"MBP"]) countShort++;
+    }
+
+    double defaultInterval = (double)(endTime - startTime) / (double)phonemes.count;
+    double shortInterval = 50.0;
+    if (defaultInterval < 50.0) {
+        shortInterval = (_frameRate > 0) ? (1000.0 / _frameRate) : 50.0;
+    }
+
+    double adjustedInterval = defaultInterval;
+    if ((NSInteger)phonemes.count > 1) {
+        NSInteger longCount = (NSInteger)phonemes.count - countShort;
+        if (longCount > 0) {
+            adjustedInterval = ((double)(endTime - startTime) - countShort * shortInterval) / (double)longCount;
+        }
+    } else {
+        shortInterval = defaultInterval;
+    }
+
+    NSInteger phonemeStartTime = startTime;
+    NSInteger shorts = 0;
+    NSInteger longs = 0;
+    for (NSString *phoneme in phonemes) {
+        if ([phoneme isEqualToString:@"etc"] || [phoneme isEqualToString:@"MBP"]) {
+            shorts++;
+        } else {
+            longs++;
+        }
+        NSInteger phonemeEndTime = [self roundToFrameBoundary:startTime + longs * adjustedInterval + shorts * shortInterval];
+        if (phonemeEndTime > endTime) phonemeEndTime = endTime;
+        if (phonemeEndTime > phonemeStartTime) {
+            [_engineBridge createTimingMark:trackName layer:2
+                                startTimeMS:phonemeStartTime endTimeMS:phonemeEndTime
+                                      label:phoneme];
+        }
+        phonemeStartTime = phonemeEndTime;
+    }
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2479,17 +2648,46 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
-    // TODO: Implement word breakdown via engine bridge
-    NSLog(@"Breakdown Word at effect %ld (not yet implemented)", (long)effectId);
+
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+    NSString *trackName = markInfo[@"trackName"];
+    if (!trackName) return;
+
+    [self breakdownWordWithId:effectId trackName:trackName];
+    [self reloadSequenceData];
+    [gridView reloadData];
+    NSLog(@"Breakdown Word completed for effect %ld", (long)effectId);
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didRequestBreakdownSelectedWords:(NSIndexSet *)effectIndices
 {
     if (!_engineBridge || effectIndices.count == 0) return;
-    // TODO: Implement batch word breakdown via engine bridge
-    NSLog(@"Breakdown Selected Words (%lu marks) (not yet implemented)",
-          (unsigned long)effectIndices.count);
+
+    __block NSString *trackName = nil;
+
+    NSMutableArray<NSNumber *> *effectIds = [NSMutableArray array];
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger eid = [gridView effectIdAtRenderIndex:idx];
+        if (eid >= 0) {
+            [effectIds addObject:@(eid)];
+            if (!trackName) {
+                NSDictionary *info = [self->_engineBridge getTimingMark:eid];
+                if (info[@"trackName"]) trackName = info[@"trackName"];
+            }
+        }
+    }];
+
+    if (!trackName) return;
+
+    for (NSNumber *eid in effectIds) {
+        [self breakdownWordWithId:eid.integerValue trackName:trackName];
+    }
+
+    [self reloadSequenceData];
+    [gridView reloadData];
+    NSLog(@"Breakdown Selected Words completed (%lu marks)", (unsigned long)effectIds.count);
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2497,14 +2695,133 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
-    // TODO: Implement timing subdivision via engine bridge
-    NSLog(@"Divide Timings at effect %ld (not yet implemented)", (long)effectId);
+
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+
+    NSString *trackName = markInfo[@"trackName"];
+    NSInteger layer = [markInfo[@"layer"] integerValue];
+    NSInteger startTime = [markInfo[@"startTimeMS"] integerValue];
+    NSInteger endTime = [markInfo[@"endTimeMS"] integerValue];
+    NSString *label = markInfo[@"label"];
+
+    if (endTime <= startTime || !trackName) return;
+
+    NSInteger baseTiming = (_frameRate > 0) ? (1000 / _frameRate) : 50;
+    if (endTime - startTime <= baseTiming) return;
+
+    // Show divide-by dialog
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Divide Timings";
+    alert.informativeText = @"Divide timing mark into how many parts?";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *inputField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 100, 24)];
+    inputField.stringValue = @"2";
+    alert.accessoryView = inputField;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+        NSInteger divideBy = inputField.integerValue;
+        if (divideBy < 2 || divideBy > 100) return;
+
+        double splitDuration = (double)(endTime - startTime) / (double)divideBy;
+
+        // Resize original mark to first subdivision
+        NSInteger firstEnd = [self roundToFrameBoundary:(double)startTime + splitDuration];
+        [self->_engineBridge moveTimingMark:effectId startTimeMS:startTime endTimeMS:firstEnd];
+
+        // Create additional subdivisions
+        for (NSInteger j = 1; j < divideBy; j++) {
+            NSInteger newStart = [self roundToFrameBoundary:(double)startTime + splitDuration * (double)j];
+            NSInteger newEnd;
+            if (j == divideBy - 1) {
+                newEnd = endTime;
+            } else {
+                newEnd = [self roundToFrameBoundary:(double)startTime + splitDuration * (double)(j + 1)];
+            }
+            if (newStart < newEnd) {
+                [self->_engineBridge createTimingMark:trackName layer:layer
+                                         startTimeMS:newStart endTimeMS:newEnd
+                                               label:@""];
+            }
+        }
+
+        [self reloadSequenceData];
+        [gridView reloadData];
+        NSLog(@"Divide Timings completed: effect %ld divided by %ld", (long)effectId, (long)divideBy);
+    }];
 }
 
 - (void)effectsGridDidRequestAutoLabelTimings:(XLEffectsGridView *)gridView
 {
-    // TODO: Implement auto-labeling of timing marks
-    NSLog(@"Auto Label Timings requested (not yet implemented)");
+    NSString *trackName = [self activeTimingTrackForOperation];
+    if (!trackName) return;
+
+    // Show auto-label configuration dialog
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Auto Label Timings";
+    alert.informativeText = @"Set numeric labels for timing marks:";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 95)];
+
+    NSTextField *startLabel = [NSTextField labelWithString:@"Start number:"];
+    startLabel.frame = NSMakeRect(0, 67, 100, 20);
+    [accessoryView addSubview:startLabel];
+    NSTextField *startField = [[NSTextField alloc] initWithFrame:NSMakeRect(110, 67, 80, 24)];
+    startField.stringValue = @"1";
+    [accessoryView addSubview:startField];
+
+    NSTextField *endLabel = [NSTextField labelWithString:@"End number:"];
+    endLabel.frame = NSMakeRect(0, 37, 100, 20);
+    [accessoryView addSubview:endLabel];
+    NSTextField *endField = [[NSTextField alloc] initWithFrame:NSMakeRect(110, 37, 80, 24)];
+    endField.stringValue = @"100";
+    [accessoryView addSubview:endField];
+
+    NSButton *overwriteCheck = [NSButton checkboxWithTitle:@"Overwrite existing labels"
+                                                    target:nil action:nil];
+    overwriteCheck.frame = NSMakeRect(0, 5, 280, 24);
+    overwriteCheck.state = NSControlStateValueOff;
+    [accessoryView addSubview:overwriteCheck];
+
+    alert.accessoryView = accessoryView;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+
+        NSInteger startNum = startField.integerValue;
+        NSInteger endNum = endField.integerValue;
+        BOOL overwrite = (overwriteCheck.state == NSControlStateValueOn);
+        NSInteger current = startNum;
+        NSInteger increment = (startNum <= endNum) ? 1 : -1;
+
+        // Get all timing marks on layer 0
+        NSArray<NSDictionary *> *marks = [self->_engineBridge getTimingMarks:trackName layer:0];
+
+        for (NSDictionary *mark in marks) {
+            NSString *existingLabel = mark[@"label"];
+            if (overwrite || !existingLabel || existingLabel.length == 0) {
+                NSInteger markId = [mark[@"id"] integerValue];
+                NSString *newLabel = [NSString stringWithFormat:@"%ld", (long)current];
+                [self->_engineBridge setTimingMarkLabel:markId label:newLabel];
+
+                current += increment;
+                if (increment == 1 && current > endNum) {
+                    current = startNum;
+                } else if (increment == -1 && current < endNum) {
+                    current = startNum;
+                }
+            }
+        }
+
+        [self reloadSequenceData];
+        [gridView reloadData];
+        NSLog(@"Auto Label Timings completed on track '%@'", trackName);
+    }];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2512,8 +2829,21 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
-    // TODO: Append "-shimmer" to phoneme label via engine bridge
-    NSLog(@"Add -shimmer to effect %ld (not yet implemented)", (long)effectId);
+
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+
+    NSString *currentLabel = markInfo[@"label"];
+    if (!currentLabel) currentLabel = @"";
+
+    // Only add to short phoneme labels (3 chars or less, matching legacy behavior)
+    if (currentLabel.length <= 3 && ![currentLabel.lowercaseString hasSuffix:@"-shimmer"]) {
+        NSString *newLabel = [currentLabel stringByAppendingString:@"-shimmer"];
+        [_engineBridge setTimingMarkLabel:effectId label:newLabel];
+        [self reloadSequenceData];
+        [gridView reloadData];
+        NSLog(@"Added '-shimmer' to effect %ld: '%@' -> '%@'", (long)effectId, currentLabel, newLabel);
+    }
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2521,8 +2851,20 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
-    // TODO: Remove "-shimmer" from phoneme label via engine bridge
-    NSLog(@"Remove -shimmer from effect %ld (not yet implemented)", (long)effectId);
+
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+
+    NSString *currentLabel = markInfo[@"label"];
+    if (!currentLabel) return;
+
+    if ([currentLabel.lowercaseString hasSuffix:@"-shimmer"]) {
+        NSString *newLabel = [currentLabel substringToIndex:currentLabel.length - 8];
+        [_engineBridge setTimingMarkLabel:effectId label:newLabel];
+        [self reloadSequenceData];
+        [gridView reloadData];
+        NSLog(@"Removed '-shimmer' from effect %ld: '%@' -> '%@'", (long)effectId, currentLabel, newLabel);
+    }
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2530,32 +2872,251 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 {
     NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
     if (effectId < 0 || !_engineBridge) return;
-    // TODO: Create alternating phonemes via engine bridge
-    NSLog(@"Create Alternating Phonemes at effect %ld (not yet implemented)", (long)effectId);
+
+    NSDictionary *markInfo = [_engineBridge getTimingMark:effectId];
+    if (!markInfo) return;
+
+    NSString *trackName = markInfo[@"trackName"];
+    NSInteger layer = [markInfo[@"layer"] integerValue];
+    NSInteger startTime = [markInfo[@"startTimeMS"] integerValue];
+    NSInteger endTime = [markInfo[@"endTimeMS"] integerValue];
+    NSString *currentLabel = markInfo[@"label"] ?: @"";
+
+    if (endTime <= startTime || !trackName) return;
+
+    // Show alternating phonemes configuration dialog
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Create Alternating Phonemes";
+    alert.informativeText = @"Enter two phonemes and the number of alternations:";
+    [alert addButtonWithTitle:@"OK"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSView *accessoryView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 95)];
+
+    NSTextField *phoneme1Label = [NSTextField labelWithString:@"Phoneme 1:"];
+    phoneme1Label.frame = NSMakeRect(0, 67, 90, 20);
+    [accessoryView addSubview:phoneme1Label];
+    NSTextField *phoneme1Field = [[NSTextField alloc] initWithFrame:NSMakeRect(95, 67, 80, 24)];
+    phoneme1Field.stringValue = currentLabel.length > 0 ? currentLabel : @"AI";
+    [accessoryView addSubview:phoneme1Field];
+
+    NSTextField *phoneme2Label = [NSTextField labelWithString:@"Phoneme 2:"];
+    phoneme2Label.frame = NSMakeRect(0, 37, 90, 20);
+    [accessoryView addSubview:phoneme2Label];
+    NSTextField *phoneme2Field = [[NSTextField alloc] initWithFrame:NSMakeRect(95, 37, 80, 24)];
+    phoneme2Field.stringValue = @"rest";
+    [accessoryView addSubview:phoneme2Field];
+
+    NSTextField *countLabel = [NSTextField labelWithString:@"Count:"];
+    countLabel.frame = NSMakeRect(0, 7, 90, 20);
+    [accessoryView addSubview:countLabel];
+    NSTextField *countField = [[NSTextField alloc] initWithFrame:NSMakeRect(95, 7, 80, 24)];
+    countField.stringValue = @"4";
+    [accessoryView addSubview:countField];
+
+    alert.accessoryView = accessoryView;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+
+        NSString *phoneme1 = phoneme1Field.stringValue;
+        NSString *phoneme2 = phoneme2Field.stringValue;
+        NSInteger count = countField.integerValue;
+
+        if (count < 2 || phoneme1.length == 0 || phoneme2.length == 0) return;
+
+        double subdivisionDuration = (double)(endTime - startTime) / (double)count;
+
+        // Delete the original timing mark
+        [self->_engineBridge deleteTimingMark:effectId];
+
+        // Create alternating phoneme marks
+        for (NSInteger i = 0; i < count; i++) {
+            NSInteger newStart = startTime + (NSInteger)(subdivisionDuration * (double)i);
+            NSInteger newEnd = (i == count - 1) ? endTime
+                : startTime + (NSInteger)(subdivisionDuration * (double)(i + 1));
+            NSString *phonemeLabel = (i % 2 == 0) ? phoneme1 : phoneme2;
+
+            if (newStart < newEnd) {
+                [self->_engineBridge createTimingMark:trackName layer:layer
+                                         startTimeMS:newStart endTimeMS:newEnd
+                                               label:phonemeLabel];
+            }
+        }
+
+        [self reloadSequenceData];
+        [gridView reloadData];
+        NSLog(@"Created %ld alternating phonemes ('%@'/'%@') for effect %ld",
+              (long)count, phoneme1, phoneme2, (long)effectId);
+    }];
 }
 
 - (void)effectsGridDidRequestFindTimingLabel:(XLEffectsGridView *)gridView
 {
-    // TODO: Show find dialog for timing labels
-    NSLog(@"Find Timing Label requested (not yet implemented)");
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Find Timing Label";
+    alert.informativeText = @"Enter text to find:";
+    [alert addButtonWithTitle:@"Find"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *searchField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    searchField.stringValue = _timingSearchText ?: @"";
+    alert.accessoryView = searchField;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+
+        NSString *searchText = searchField.stringValue;
+        if (searchText.length == 0) return;
+
+        self->_timingSearchText = searchText;
+        self->_timingLastFoundIndex = -1;
+        self->_timingSearchTrackName = [self activeTimingTrackForOperation];
+
+        [self effectsGridDidRequestFindNextTimingLabel:gridView];
+    }];
 }
 
 - (void)effectsGridDidRequestFindNextTimingLabel:(XLEffectsGridView *)gridView
 {
-    // TODO: Find next matching timing label
-    NSLog(@"Find Next Timing Label requested (not yet implemented)");
+    if (!_timingSearchText || _timingSearchText.length == 0 || !_timingSearchTrackName) {
+        NSAlert *noSearch = [[NSAlert alloc] init];
+        noSearch.messageText = @"Find";
+        noSearch.informativeText = @"No search text. Use Find... first.";
+        [noSearch addButtonWithTitle:@"OK"];
+        [noSearch beginSheetModalForWindow:gridView.window completionHandler:nil];
+        return;
+    }
+
+    // Search all layers of the active timing track
+    for (NSInteger layer = 0; layer <= 2; layer++) {
+        NSArray<NSDictionary *> *marks = [_engineBridge getTimingMarks:_timingSearchTrackName layer:layer];
+        if (!marks || marks.count == 0) continue;
+
+        NSInteger startIdx = (_timingSearchLayer == layer) ? _timingLastFoundIndex + 1 : 0;
+        if (_timingSearchLayer > layer) continue;
+        if (_timingSearchLayer < layer) startIdx = 0;
+
+        for (NSInteger i = startIdx; i < (NSInteger)marks.count; i++) {
+            NSString *label = marks[(NSUInteger)i][@"label"];
+            if (label && [label.lowercaseString containsString:_timingSearchText.lowercaseString]) {
+                _timingLastFoundIndex = i;
+                _timingSearchLayer = layer;
+
+                // Scroll to the found mark
+                NSInteger midTimeMS = ([marks[(NSUInteger)i][@"startTimeMS"] integerValue] +
+                                       [marks[(NSUInteger)i][@"endTimeMS"] integerValue]) / 2;
+                [gridView scrollToTimeMS:(CGFloat)midTimeMS];
+                NSLog(@"Found '%@' at layer %ld, index %ld, time %ldms",
+                      label, (long)layer, (long)i, (long)midTimeMS);
+                return;
+            }
+        }
+    }
+
+    NSAlert *notFound = [[NSAlert alloc] init];
+    notFound.messageText = @"Find";
+    notFound.informativeText = @"Text not found.";
+    [notFound addButtonWithTitle:@"OK"];
+    [notFound beginSheetModalForWindow:gridView.window completionHandler:nil];
 }
 
 - (void)effectsGridDidRequestFindPreviousTimingLabel:(XLEffectsGridView *)gridView
 {
-    // TODO: Find previous matching timing label
-    NSLog(@"Find Previous Timing Label requested (not yet implemented)");
+    if (!_timingSearchText || _timingSearchText.length == 0 || !_timingSearchTrackName) {
+        NSAlert *noSearch = [[NSAlert alloc] init];
+        noSearch.messageText = @"Find";
+        noSearch.informativeText = @"No search text. Use Find... first.";
+        [noSearch addButtonWithTitle:@"OK"];
+        [noSearch beginSheetModalForWindow:gridView.window completionHandler:nil];
+        return;
+    }
+
+    // Search backwards through all layers
+    for (NSInteger layer = 2; layer >= 0; layer--) {
+        NSArray<NSDictionary *> *marks = [_engineBridge getTimingMarks:_timingSearchTrackName layer:layer];
+        if (!marks || marks.count == 0) continue;
+
+        NSInteger startIdx;
+        if (_timingSearchLayer == layer) {
+            startIdx = _timingLastFoundIndex - 1;
+        } else if (_timingSearchLayer > layer) {
+            startIdx = (NSInteger)marks.count - 1;
+        } else {
+            continue;
+        }
+
+        for (NSInteger i = startIdx; i >= 0; i--) {
+            NSString *label = marks[(NSUInteger)i][@"label"];
+            if (label && [label.lowercaseString containsString:_timingSearchText.lowercaseString]) {
+                _timingLastFoundIndex = i;
+                _timingSearchLayer = layer;
+
+                NSInteger midTimeMS = ([marks[(NSUInteger)i][@"startTimeMS"] integerValue] +
+                                       [marks[(NSUInteger)i][@"endTimeMS"] integerValue]) / 2;
+                [gridView scrollToTimeMS:(CGFloat)midTimeMS];
+                NSLog(@"Found '%@' at layer %ld, index %ld, time %ldms",
+                      label, (long)layer, (long)i, (long)midTimeMS);
+                return;
+            }
+        }
+    }
+
+    NSAlert *notFound = [[NSAlert alloc] init];
+    notFound.messageText = @"Find";
+    notFound.informativeText = @"Text not found.";
+    [notFound addButtonWithTitle:@"OK"];
+    [notFound beginSheetModalForWindow:gridView.window completionHandler:nil];
 }
 
 - (void)effectsGridDidRequestReplaceAllTimingLabels:(XLEffectsGridView *)gridView
 {
-    // TODO: Show find-replace dialog for timing labels
-    NSLog(@"Replace All Timing Labels requested (not yet implemented)");
+    if (!_timingSearchText || _timingSearchText.length == 0) {
+        NSAlert *noSearch = [[NSAlert alloc] init];
+        noSearch.messageText = @"Replace All";
+        noSearch.informativeText = @"No search text. Use Find... first.";
+        [noSearch addButtonWithTitle:@"OK"];
+        [noSearch beginSheetModalForWindow:gridView.window completionHandler:nil];
+        return;
+    }
+
+    NSString *trackName = _timingSearchTrackName ?: [self activeTimingTrackForOperation];
+    if (!trackName) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Replace All";
+    alert.informativeText = [NSString stringWithFormat:@"Replace all occurrences of \"%@\" with:", _timingSearchText];
+    [alert addButtonWithTitle:@"Replace All"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *replaceField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    replaceField.stringValue = _timingSearchText;
+    alert.accessoryView = replaceField;
+
+    [alert beginSheetModalForWindow:gridView.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+
+        NSString *replaceText = replaceField.stringValue;
+        NSInteger replacedCount = 0;
+
+        // Replace across all layers
+        for (NSInteger layer = 0; layer <= 2; layer++) {
+            NSArray<NSDictionary *> *marks = [self->_engineBridge getTimingMarks:trackName layer:layer];
+            for (NSDictionary *mark in marks) {
+                NSString *label = mark[@"label"];
+                if (label && [label.lowercaseString containsString:self->_timingSearchText.lowercaseString]) {
+                    NSInteger markId = [mark[@"id"] integerValue];
+                    [self->_engineBridge setTimingMarkLabel:markId label:replaceText];
+                    replacedCount++;
+                }
+            }
+        }
+
+        [self reloadSequenceData];
+        [gridView reloadData];
+        NSLog(@"Replace All completed: replaced %ld occurrence(s) of '%@' with '%@'",
+              (long)replacedCount, self->_timingSearchText, replaceText);
+    }];
 }
 
 #pragma mark - XLEffectsGridDelegate (Alignment Operations)
@@ -2572,14 +3133,363 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         case XLAlignmentTypeEndTimes:             typeName = @"Align End Times"; break;
         case XLAlignmentTypeBothTimes:            typeName = @"Align Both Times"; break;
         case XLAlignmentTypeCenterpoints:         typeName = @"Align Centerpoints"; break;
-        case XLAlignmentTypeMatchDuration:        typeName = @"Align Match Duration"; break;
+        case XLAlignmentTypeMatchDuration:        typeName = @"Match Duration"; break;
         case XLAlignmentTypeShiftStartTimes:      typeName = @"Shift Align Start Times"; break;
         case XLAlignmentTypeShiftEndTimes:        typeName = @"Shift Align End Times"; break;
         case XLAlignmentTypeToClosestTimingMark:  typeName = @"Align To Closest Timing Mark"; break;
         case XLAlignmentTypeCloseGap:             typeName = @"Close Gap"; break;
     }
-    // TODO: Implement alignment operations via engine bridge
-    NSLog(@"%@ for %lu effects (not yet implemented)", typeName, (unsigned long)effectIndices.count);
+
+    // Gather effect info for all selected effects, preserving index order
+    NSMutableArray<NSDictionary *> *selectedEffects = [NSMutableArray arrayWithCapacity:effectIndices.count];
+    [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
+        if (effectId < 0) return;
+        NSDictionary *info = [self->_engineBridge getEffect:effectId];
+        if (!info) return;
+        [selectedEffects addObject:info];
+    }];
+
+    if (selectedEffects.count < 1) return;
+
+    // The first selected effect serves as the reference (anchor) for alignment
+    NSDictionary *refEffect = selectedEffects[0];
+    NSInteger refStart = [refEffect[@"startTimeMS"] integerValue];
+    NSInteger refEnd = [refEffect[@"endTimeMS"] integerValue];
+    NSInteger refDuration = refEnd - refStart;
+    NSInteger refCenter = refStart + refDuration / 2;
+
+    // Dispatch to timing-mark and close-gap handlers which have different logic
+    if (alignmentType == XLAlignmentTypeToClosestTimingMark) {
+        [self alignEffectsToClosestTimingMark:selectedEffects gridView:gridView];
+        return;
+    }
+    if (alignmentType == XLAlignmentTypeCloseGap) {
+        [self closeGapBetweenEffects:selectedEffects gridView:gridView];
+        return;
+    }
+
+    // Register undo for the batch
+    [_undoController beginUndoGroupingWithActionName:typeName];
+
+    BOOL anyMoved = NO;
+    for (NSDictionary *info in selectedEffects) {
+        NSInteger effectId = [info[@"id"] integerValue];
+        NSInteger origStart = [info[@"startTimeMS"] integerValue];
+        NSInteger origEnd = [info[@"endTimeMS"] integerValue];
+        BOOL locked = [info[@"isLocked"] boolValue];
+        if (locked) continue;
+
+        NSInteger newStart = origStart;
+        NSInteger newEnd = origEnd;
+
+        switch (alignmentType) {
+            case XLAlignmentTypeStartTimes: {
+                newStart = refStart;
+                if (origEnd > refStart) {
+                    newEnd = origEnd;
+                } else {
+                    NSInteger delta = newStart - origStart;
+                    newEnd = origEnd + delta;
+                }
+                break;
+            }
+            case XLAlignmentTypeEndTimes: {
+                newEnd = refEnd;
+                if (origStart < refEnd) {
+                    newStart = origStart;
+                } else {
+                    NSInteger delta = newEnd - origEnd;
+                    newStart = origStart + delta;
+                }
+                break;
+            }
+            case XLAlignmentTypeBothTimes: {
+                newStart = refStart;
+                newEnd = refEnd;
+                break;
+            }
+            case XLAlignmentTypeCenterpoints: {
+                NSInteger effDuration = origEnd - origStart;
+                NSInteger effCenter = origStart + effDuration / 2;
+                NSInteger delta = refCenter - effCenter;
+                newStart = origStart + delta;
+                newEnd = origEnd + delta;
+                break;
+            }
+            case XLAlignmentTypeMatchDuration: {
+                newStart = origStart;
+                newEnd = origStart + refDuration;
+                break;
+            }
+            case XLAlignmentTypeShiftStartTimes: {
+                newStart = refStart;
+                NSInteger delta = newStart - origStart;
+                newEnd = origEnd + delta;
+                break;
+            }
+            case XLAlignmentTypeShiftEndTimes: {
+                newEnd = refEnd;
+                NSInteger delta = newEnd - origEnd;
+                newStart = origStart + delta;
+                break;
+            }
+            default:
+                break;
+        }
+
+        // Clamp start to >= 0
+        if (newStart < 0) {
+            NSInteger shift = -newStart;
+            newStart = 0;
+            newEnd += shift;
+        }
+
+        // Only move if something changed and the result is valid
+        if ((newStart != origStart || newEnd != origEnd) && newEnd > newStart) {
+            XLEffectSnapshot snapshot;
+            snapshot.effectID = effectId;
+            snapshot.startTimeMS = (CGFloat)origStart;
+            snapshot.endTimeMS = (CGFloat)origEnd;
+            snapshot.row = [info[@"layerIndex"] integerValue];
+            snapshot.layer = [info[@"layerIndex"] integerValue];
+            snapshot.effectTypeIndex = [info[@"effectIndex"] integerValue];
+            snapshot.colorARGB = 0;
+            snapshot.selected = YES;
+            snapshot.locked = NO;
+            snapshot.renderDisabled = [info[@"isRenderDisabled"] boolValue];
+            [_undoController captureEffectToBeMoved:snapshot actionName:typeName];
+
+            [_engineBridge moveEffect:effectId startTimeMS:newStart endTimeMS:newEnd];
+            anyMoved = YES;
+        }
+    }
+
+    [_undoController endUndoGrouping];
+
+    if (anyMoved) {
+        [self reloadSequenceData];
+        [gridView reloadData];
+    }
+}
+
+/// Snap each selected effect's start and end to the nearest timing mark.
+- (void)alignEffectsToClosestTimingMark:(NSArray<NSDictionary *> *)selectedEffects
+                               gridView:(XLEffectsGridView *)gridView
+{
+    NSArray<NSNumber *> *markTimes = [_engineBridge getActiveTimingMarkTimes];
+    if (markTimes.count == 0) {
+        NSLog(@"Align To Closest Timing Mark: no active timing track or no marks");
+        return;
+    }
+
+    // Sort mark times for efficient lookup
+    NSArray<NSNumber *> *sortedMarks = [markTimes sortedArrayUsingSelector:@selector(compare:)];
+
+    [_undoController beginUndoGroupingWithActionName:@"Align To Closest Timing Mark"];
+
+    BOOL anyMoved = NO;
+    for (NSDictionary *info in selectedEffects) {
+        NSInteger effectId = [info[@"id"] integerValue];
+        NSInteger origStart = [info[@"startTimeMS"] integerValue];
+        NSInteger origEnd = [info[@"endTimeMS"] integerValue];
+        BOOL locked = [info[@"isLocked"] boolValue];
+        if (locked) continue;
+
+        NSInteger closestStart = [self findClosestTimingMark:origStart inSortedMarks:sortedMarks];
+        NSInteger closestEnd = [self findClosestTimingMark:origEnd inSortedMarks:sortedMarks];
+
+        // Skip if snapped start equals snapped end (would create zero-length effect)
+        if (closestStart == closestEnd) continue;
+        // Skip if nothing changed
+        if (closestStart == origStart && closestEnd == origEnd) continue;
+        // Ensure valid ordering
+        if (closestEnd <= closestStart) continue;
+
+        XLEffectSnapshot snapshot;
+        snapshot.effectID = effectId;
+        snapshot.startTimeMS = (CGFloat)origStart;
+        snapshot.endTimeMS = (CGFloat)origEnd;
+        snapshot.row = [info[@"layerIndex"] integerValue];
+        snapshot.layer = [info[@"layerIndex"] integerValue];
+        snapshot.effectTypeIndex = [info[@"effectIndex"] integerValue];
+        snapshot.colorARGB = 0;
+        snapshot.selected = YES;
+        snapshot.locked = NO;
+        snapshot.renderDisabled = [info[@"isRenderDisabled"] boolValue];
+        [_undoController captureEffectToBeMoved:snapshot actionName:@"Align To Closest Timing Mark"];
+
+        [_engineBridge moveEffect:effectId startTimeMS:closestStart endTimeMS:closestEnd];
+        anyMoved = YES;
+    }
+
+    [_undoController endUndoGrouping];
+
+    if (anyMoved) {
+        [self reloadSequenceData];
+        [gridView reloadData];
+    }
+}
+
+/// Find the timing mark time closest to a given time value.
+- (NSInteger)findClosestTimingMark:(NSInteger)timeMS inSortedMarks:(NSArray<NSNumber *> *)sortedMarks
+{
+    if (sortedMarks.count == 0) return timeMS;
+
+    // Binary search for the insertion point
+    NSUInteger lo = 0;
+    NSUInteger hi = sortedMarks.count;
+    while (lo < hi) {
+        NSUInteger mid = lo + (hi - lo) / 2;
+        if (sortedMarks[mid].integerValue < timeMS) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    // Compare the candidate at `lo` and `lo-1` to find the closest
+    NSInteger bestTime = timeMS;
+    NSInteger bestDist = NSIntegerMax;
+
+    if (lo < sortedMarks.count) {
+        NSInteger dist = ABS(sortedMarks[lo].integerValue - timeMS);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestTime = sortedMarks[lo].integerValue;
+        }
+    }
+    if (lo > 0) {
+        NSInteger dist = ABS(sortedMarks[lo - 1].integerValue - timeMS);
+        if (dist < bestDist) {
+            bestDist = dist;
+            bestTime = sortedMarks[lo - 1].integerValue;
+        }
+    }
+
+    return bestTime;
+}
+
+/// Remove gaps between consecutive selected effects, collapsing them toward
+/// the primary (first) selected effect.
+- (void)closeGapBetweenEffects:(NSArray<NSDictionary *> *)selectedEffects
+                      gridView:(XLEffectsGridView *)gridView
+{
+    if (selectedEffects.count < 2) return;
+
+    // Sort by start time to process in temporal order
+    NSArray<NSDictionary *> *sorted = [selectedEffects sortedArrayUsingComparator:
+        ^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [@([a[@"startTimeMS"] integerValue]) compare:@([b[@"startTimeMS"] integerValue])];
+        }];
+
+    // Find the index of the primary (first-selected, reference) effect in the sorted list
+    NSInteger refId = [selectedEffects[0][@"id"] integerValue];
+    NSUInteger refSortedIndex = 0;
+    for (NSUInteger i = 0; i < sorted.count; i++) {
+        if ([sorted[i][@"id"] integerValue] == refId) {
+            refSortedIndex = i;
+            break;
+        }
+    }
+
+    NSInteger refStart = [sorted[refSortedIndex][@"startTimeMS"] integerValue];
+    NSInteger refEnd = [sorted[refSortedIndex][@"endTimeMS"] integerValue];
+
+    [_undoController beginUndoGroupingWithActionName:@"Close Gap"];
+
+    BOOL anyMoved = NO;
+
+    // Close gaps for effects BEFORE the reference (shift them rightward to abut)
+    for (NSInteger i = (NSInteger)refSortedIndex - 1; i >= 0; i--) {
+        NSDictionary *info = sorted[(NSUInteger)i];
+        NSInteger effectId = [info[@"id"] integerValue];
+        NSInteger origStart = [info[@"startTimeMS"] integerValue];
+        NSInteger origEnd = [info[@"endTimeMS"] integerValue];
+        BOOL locked = [info[@"isLocked"] boolValue];
+        if (locked) continue;
+
+        // The next effect toward the reference (i+1) provides the target start
+        NSInteger nextStart;
+        if (i == (NSInteger)refSortedIndex - 1) {
+            nextStart = refStart;
+        } else {
+            // Use the already-moved position of the effect at i+1
+            NSDictionary *nextInfo = sorted[(NSUInteger)(i + 1)];
+            NSInteger nextEffectId = [nextInfo[@"id"] integerValue];
+            NSDictionary *updatedNext = [_engineBridge getEffect:nextEffectId];
+            nextStart = updatedNext ? [updatedNext[@"startTimeMS"] integerValue] : [nextInfo[@"startTimeMS"] integerValue];
+        }
+
+        NSInteger gap = nextStart - origEnd;
+        if (gap <= 0) continue;
+
+        NSInteger newStart = origStart + gap;
+        NSInteger newEnd = origEnd + gap;
+
+        XLEffectSnapshot snapshot;
+        snapshot.effectID = effectId;
+        snapshot.startTimeMS = (CGFloat)origStart;
+        snapshot.endTimeMS = (CGFloat)origEnd;
+        snapshot.row = [info[@"layerIndex"] integerValue];
+        snapshot.layer = [info[@"layerIndex"] integerValue];
+        snapshot.effectTypeIndex = [info[@"effectIndex"] integerValue];
+        snapshot.colorARGB = 0;
+        snapshot.selected = YES;
+        snapshot.locked = NO;
+        snapshot.renderDisabled = [info[@"isRenderDisabled"] boolValue];
+        [_undoController captureEffectToBeMoved:snapshot actionName:@"Close Gap"];
+
+        [_engineBridge moveEffect:effectId startTimeMS:newStart endTimeMS:newEnd];
+        anyMoved = YES;
+    }
+
+    // Close gaps for effects AFTER the reference (shift them leftward to abut)
+    NSInteger lastEndTime = refEnd;
+    for (NSUInteger i = refSortedIndex + 1; i < sorted.count; i++) {
+        NSDictionary *info = sorted[i];
+        NSInteger effectId = [info[@"id"] integerValue];
+        NSInteger origStart = [info[@"startTimeMS"] integerValue];
+        NSInteger origEnd = [info[@"endTimeMS"] integerValue];
+        BOOL locked = [info[@"isLocked"] boolValue];
+        if (locked) {
+            lastEndTime = origEnd;
+            continue;
+        }
+
+        NSInteger gap = origStart - lastEndTime;
+        if (gap > 0) {
+            NSInteger newStart = origStart - gap;
+            NSInteger newEnd = origEnd - gap;
+
+            XLEffectSnapshot snapshot;
+            snapshot.effectID = effectId;
+            snapshot.startTimeMS = (CGFloat)origStart;
+            snapshot.endTimeMS = (CGFloat)origEnd;
+            snapshot.row = [info[@"layerIndex"] integerValue];
+            snapshot.layer = [info[@"layerIndex"] integerValue];
+            snapshot.effectTypeIndex = [info[@"effectIndex"] integerValue];
+            snapshot.colorARGB = 0;
+            snapshot.selected = YES;
+            snapshot.locked = NO;
+            snapshot.renderDisabled = [info[@"isRenderDisabled"] boolValue];
+            [_undoController captureEffectToBeMoved:snapshot actionName:@"Close Gap"];
+
+            [_engineBridge moveEffect:effectId startTimeMS:newStart endTimeMS:newEnd];
+            anyMoved = YES;
+
+            lastEndTime = newEnd;
+        } else {
+            lastEndTime = origEnd;
+        }
+    }
+
+    [_undoController endUndoGrouping];
+
+    if (anyMoved) {
+        [self reloadSequenceData];
+        [gridView reloadData];
+    }
 }
 
 #pragma mark - Symbol Library / Presets Helpers
@@ -3435,15 +4345,41 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view breakdownPhrasesAtRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
-    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
-    NSLog(@"XLSequencerViewController: Breakdown phrases for track '%@' (placeholder)", trackName);
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData || !_engineBridge) return;
+    XLRowEntry *rowEntry = &_rowData[row];
+    if (rowEntry->type != XLElementTypeTiming) return;
+
+    NSString *trackName = [NSString stringWithUTF8String:rowEntry->name];
+
+    // Get all phrase marks (layer 0) and break them down into words (layer 1)
+    NSArray<NSDictionary *> *phrases = [_engineBridge getTimingMarks:trackName layer:0];
+    for (NSDictionary *phrase in phrases) {
+        NSInteger phraseId = [phrase[@"id"] integerValue];
+        [self breakdownPhraseWithId:phraseId trackName:trackName];
+    }
+
+    [self reloadSequenceData];
+    [_effectsGridView reloadData];
+    NSLog(@"XLSequencerViewController: Breakdown all phrases for track '%@' completed", trackName);
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view breakdownWordsAtRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
-    NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
-    NSLog(@"XLSequencerViewController: Breakdown words for track '%@' (placeholder)", trackName);
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData || !_engineBridge) return;
+    XLRowEntry *rowEntry = &_rowData[row];
+    if (rowEntry->type != XLElementTypeTiming) return;
+
+    NSString *trackName = [NSString stringWithUTF8String:rowEntry->name];
+
+    // Get all word marks (layer 1) and break them down into phonemes (layer 2)
+    NSArray<NSDictionary *> *words = [_engineBridge getTimingMarks:trackName layer:1];
+    for (NSDictionary *word in words) {
+        NSInteger wordId = [word[@"id"] integerValue];
+        [self breakdownWordWithId:wordId trackName:trackName];
+    }
+
+    [self reloadSequenceData];
+    [_effectsGridView reloadData];
+    NSLog(@"XLSequencerViewController: Breakdown all words for track '%@' completed", trackName);
 }
 
 #pragma mark - Track Height Slider

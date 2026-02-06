@@ -3556,6 +3556,34 @@ static XLEngineBridge *_sharedBridge = nil;
 #endif
 }
 
+- (NSArray<NSString *> *)getPhonemesForWord:(NSString *)word {
+    if (!word || word.length == 0) return @[];
+
+#ifdef XLIGHTS_NATIVE
+    // Native build: return empty (dictionary not available yet)
+    return @[];
+#else
+    xLightsFrame* frame = xLightsApp::GetFrame();
+    if (!frame) return @[];
+
+    @try {
+        frame->dictionary.LoadDictionaries(frame->CurrentDir, frame);
+        wxArrayString phonemes;
+        frame->dictionary.BreakdownWord(wxString([word UTF8String]), phonemes);
+
+        NSMutableArray<NSString *> *result = [NSMutableArray arrayWithCapacity:phonemes.Count()];
+        for (size_t i = 0; i < phonemes.Count(); i++) {
+            [result addObject:[NSString stringWithUTF8String:phonemes[i].ToStdString().c_str()]];
+        }
+        return result;
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception getting phonemes for word '%@': %@ - %@",
+              word, exception.name, exception.reason);
+        return @[];
+    }
+#endif
+}
+
 #pragma mark - Audio Operations
 
 - (NSString *)getMediaFilePath {
