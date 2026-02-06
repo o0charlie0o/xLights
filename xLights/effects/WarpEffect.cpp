@@ -617,6 +617,7 @@ void WarpEffect::RemoveDefaults(const std::string &version, Effect *effect)
     RenderableEffect::RemoveDefaults(version, effect);
 }
 
+#ifndef XLIGHTS_NATIVE
 void WarpEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer)
 {
     float progress = buffer.GetEffectTimeIntervalPosition(1.f);
@@ -722,6 +723,7 @@ void WarpEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffe
         }
     }
 }
+#endif
 
 
 WarpEffect::WarpType WarpEffect::mapWarpType(const std::string &s) {

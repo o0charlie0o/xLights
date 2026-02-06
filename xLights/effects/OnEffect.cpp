@@ -192,6 +192,7 @@ void OnEffect::RemoveDefaults(const std::string &version, Effect *effect) {
     RenderableEffect::RemoveDefaults(version, effect);
 }
 
+#ifndef XLIGHTS_NATIVE
 void OnEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     int start = SettingsMap.GetInt(TEXTCTRL_Eff_On_Start, 100);
     int end = SettingsMap.GetInt(TEXTCTRL_Eff_On_End, 100);
@@ -274,6 +275,7 @@ void OnEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer 
         buffer.Fill(color);
     }
 
+#ifndef XLIGHTS_NATIVE
     if (shimmer || cycles != 1.0 || gradientcolour || spatialcolour) {
         if (eff->IsBackgroundDisplayListEnabled() && buffer.perModelIndex == 0) {
             std::lock_guard<std::recursive_mutex> lock(eff->GetBackgroundDisplayList().lock);
@@ -300,4 +302,6 @@ void OnEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer 
         }
         buffer.needToInit = false;
     }
+#endif
 }
+#endif

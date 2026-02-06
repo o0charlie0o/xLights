@@ -87,6 +87,7 @@ void PlasmaEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void PlasmaEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -159,3 +160,4 @@ void PlasmaEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Render
         }
     });
 }
+#endif

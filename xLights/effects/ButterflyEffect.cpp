@@ -93,6 +93,7 @@ void ButterflyEffect::SetDefaultParameters() {
 #endif
 
 
+#ifndef XLIGHTS_NATIVE
 void ButterflyEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer)
 {
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -164,4 +165,5 @@ void ButterflyEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
         }
     });
 }
+#endif
 

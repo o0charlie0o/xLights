@@ -103,6 +103,7 @@ void StrobeEffect::SetDefaultParameters()
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void StrobeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     int Number_Strobes = SettingsMap.GetInt("SLIDER_Number_Strobes", 3);
     int StrobeDuration = SettingsMap.GetInt("SLIDER_Strobe_Duration", 10);
@@ -230,3 +231,4 @@ void StrobeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Render
     }
 
 }
+#endif

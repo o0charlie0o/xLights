@@ -134,6 +134,7 @@ void BarsEffect::GetSpatialColor(xlColor& color, size_t colorIndex, float x, flo
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void BarsEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float offset = buffer.GetEffectTimeIntervalPosition();
@@ -424,3 +425,4 @@ void BarsEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBu
         }
     }
 }
+#endif

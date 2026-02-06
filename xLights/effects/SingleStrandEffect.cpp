@@ -189,6 +189,7 @@ void SingleStrandEffect::adjustSettings(const std::string& version, Effect* effe
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void SingleStrandEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     double eff_pos = buffer.GetEffectTimeIntervalPosition();
@@ -216,6 +217,7 @@ void SingleStrandEffect::Render(Effect* effect, const SettingsMap& SettingsMap, 
                                 GetValueCurveDouble("Chase_Offset", 0.0, SettingsMap, eff_pos, SINGLESTRAND_OFFSET_MIN, SINGLESTRAND_OFFSET_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS(), SINGLESTRAND_OFFSET_DIVISOR));
     }
 }
+#endif
 
 void SingleStrandEffect::RenderSingleStrandSkips(RenderBuffer &buffer, Effect *eff, int Skips_BandSize, int Skips_SkipSize, int Skips_StartPos,
     const std::string & Skips_Direction, int advances)
@@ -240,11 +242,13 @@ void SingleStrandEffect::RenderSingleStrandSkips(RenderBuffer &buffer, Effect *e
 
     if (buffer.needToInit) {
         buffer.needToInit = false;
+#ifndef XLIGHTS_NATIVE
         if (eff->IsBackgroundDisplayListEnabled() && buffer.perModelIndex == 0) {
             std::lock_guard<std::recursive_mutex> lock(eff->GetBackgroundDisplayList().lock);
             int rects = (Skips_SkipSize + Skips_BandSize) * (buffer.curEffEndPer - buffer.curEffStartPer + 1);
             eff->GetBackgroundDisplayList().resize(rects * 6);
         }
+#endif
     }
 
     int firstX = x;
@@ -309,9 +313,11 @@ void SingleStrandEffect::RenderSingleStrandSkips(RenderBuffer &buffer, Effect *e
     max = Skips_SkipSize + Skips_BandSize - 1;
     if (max >= buffer.BufferWi) max = buffer.BufferWi - 1;
 
+#ifndef XLIGHTS_NATIVE
     if (eff->IsBackgroundDisplayListEnabled() && buffer.perModelIndex == 0) {
         buffer.CopyPixelsToDisplayListX(eff, 0, 0, max);
     }
+#endif
 }
 
 class SingleStrandFXRenderCache : public EffectRenderCache
@@ -419,6 +425,7 @@ void SingleStrandEffect::RenderSingleStrandChase(RenderBuffer& buffer, Effect* e
     int ChaseDirection = (chaseType == 0 || chaseType == 2 || chaseType == 6 ||
                           chaseType == 9 || chaseType == 13 || chaseType == 14);
 
+#ifndef XLIGHTS_NATIVE
     //chasesize is a value curve item and can change throughout the effect and thus
     //the number of rects could change
     int numRects = chaseSize;
@@ -440,6 +447,7 @@ void SingleStrandEffect::RenderSingleStrandChase(RenderBuffer& buffer, Effect* e
             eff->GetBackgroundDisplayList().resize(rects);
         }
     }
+#endif
 
     bool Mirror = false;
     bool AutoReverse = false;
@@ -567,9 +575,11 @@ void SingleStrandEffect::RenderSingleStrandChase(RenderBuffer& buffer, Effect* e
             draw_chase(buffer, DoubleEnd ? x - 1 * scaledChaseWidth : x, Chase_Group_All, ColorScheme, Number_Chases, AutoReverse, width, chaseSize, Fade_Type, bool(ChaseDirection) == DoubleEnd, Mirror);
         }
     }
+#ifndef XLIGHTS_NATIVE
     if (eff->IsBackgroundDisplayListEnabled() && buffer.perModelIndex == 0) {
         buffer.CopyPixelsToDisplayListX(eff, 0, 0, numRects, rectInc);
     }
+#endif
 }
 
 void SingleStrandEffect::draw_chase(RenderBuffer& buffer,

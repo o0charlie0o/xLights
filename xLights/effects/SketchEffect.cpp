@@ -68,6 +68,7 @@ SketchEffect::~SketchEffect()
 }
 
 #ifdef XLIGHTS_NATIVE
+#ifndef XLIGHTS_NATIVE
 void SketchEffect::Render(Effect* /*effect*/, const SettingsMap& settings, RenderBuffer& buffer)
 {
     // TODO: Port sketch rendering to NativePathDrawingContext (CoreGraphics)
@@ -75,7 +76,9 @@ void SketchEffect::Render(Effect* /*effect*/, const SettingsMap& settings, Rende
     // quadCurveTo, curveTo) and wxImage integration. This needs NativePathDrawingContext
     // to support the full path API.
 }
+#endif
 #else // !XLIGHTS_NATIVE
+#ifndef XLIGHTS_NATIVE
 void SketchEffect::Render(Effect* /*effect*/, const SettingsMap& settings, RenderBuffer& buffer)
 {
     double progress = buffer.GetEffectTimeIntervalPosition(1.f);
@@ -138,6 +141,7 @@ void SketchEffect::Render(Effect* /*effect*/, const SettingsMap& settings, Rende
         }
     }
 }
+#endif
 #endif // !XLIGHTS_NATIVE
 
 #ifndef XLIGHTS_NATIVE

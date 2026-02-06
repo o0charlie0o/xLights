@@ -33,7 +33,9 @@ public:
     CirclesEffect(int id);
     virtual ~CirclesEffect();
     virtual void SetDefaultParameters() override;
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     virtual bool AppropriateOnNodes() const override
     {
         return false;

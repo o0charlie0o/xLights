@@ -1046,6 +1046,7 @@ bool ShaderEffect::SetGLContext(ShaderRenderCache *cache) {
 }
 
 
+#ifndef XLIGHTS_NATIVE
 void ShaderEffect::Render(Effect* eff, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
@@ -1311,6 +1312,7 @@ void ShaderEffect::Render(Effect* eff, const SettingsMap& SettingsMap, RenderBuf
     cache->StoreProgramId();
     UnsetGLContext(cache);
 }
+#endif
 
 void ShaderEffect::sizeForRenderBuffer(const RenderBuffer& rb,
     bool& s_shadersInit,
@@ -1980,9 +1982,11 @@ ShaderEffect::~ShaderEffect()
 {
 }
 
+#ifndef XLIGHTS_NATIVE
 void ShaderEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
 {
 }
+#endif
 
 bool ShaderEffect::CanRenderOnBackgroundThread(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
 {

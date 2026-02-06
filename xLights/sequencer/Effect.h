@@ -24,7 +24,9 @@
 class EffectLayer;
 class ValueCurve;
 class RenderCacheItem;
+#ifndef XLIGHTS_NATIVE
 class RenderBuffer;
+#endif
 class RenderCache;
 class Model;
 class RenderableEffect;

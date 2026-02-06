@@ -115,6 +115,7 @@ void ShockwaveEffect::adjustSettings(const std::string& version, Effect* effect,
 
 #define ToRadians(x) ((double)x * PI / (double)180.0)
 
+#ifndef XLIGHTS_NATIVE
 void ShockwaveEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     int cycles = SettingsMap.GetInt("SLIDER_Shockwave_Cycles", 1);
@@ -199,3 +200,4 @@ void ShockwaveEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Ren
         }
     }
 }
+#endif

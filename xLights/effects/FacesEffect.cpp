@@ -76,6 +76,7 @@ FacesEffect::~FacesEffect() {
 }
 
 #ifdef XLIGHTS_NATIVE
+#ifndef XLIGHTS_NATIVE
 void FacesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     // TODO: Port Faces effect rendering for native build
@@ -83,6 +84,7 @@ void FacesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderB
     // on wxString tokenization, wxImage for "Rendered" face type, and PicturesEffect.
     // Basic coro faces and node-based faces could be ported with string utilities.
 }
+#endif
 
 void FacesEffect::RenameTimingTrack(std::string oldname, std::string newname, Effect* effect)
 {
@@ -505,6 +507,7 @@ uint8_t FacesEffect::CalculateAlpha(SequenceElements* elements, int leadFrames, 
     return res;
 }
 
+#ifndef XLIGHTS_NATIVE
 void FacesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     //static log4cpp::Category& logger_base = log4cpp::Category::getInstance(std::string("log_base"));
@@ -545,7 +548,9 @@ void FacesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderB
     //    logger_base.debug("Face effect frame render time: %lldus %s", sw.TimeInMicro(), (const char*)buffer.GetModel()->GetFullName().c_str());
     //}
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void FacesEffect::RenderFaces(RenderBuffer& buffer, const std::string& Phoneme, const std::string& eyes, const std::string& eyeBlinkFreq, const std::string& eyeBlinkDuration, bool outline, uint8_t alpha, bool suppressShimmer) {
     if (alpha == 0)
         return; // 0 alpha means there is nothing to do
@@ -581,6 +586,7 @@ void FacesEffect::RenderFaces(RenderBuffer& buffer, const std::string& Phoneme, 
     drawoutline(buffer, PhonemeInt, outline, eyes, eyeBlinkFreq, eyeBlinkDuration, buffer.BufferHt, buffer.BufferWi);
     mouth(buffer, PhonemeInt, Ht, Wt, shimmer); // draw a mouth syllable
 }
+#endif
 
 bool FacesEffect::ShimmerState(RenderBuffer& buffer) const
 {
@@ -972,6 +978,7 @@ static const std::string &findKey(const std::map<std::string, std::string> &m, c
 }
 
 
+#ifndef XLIGHTS_NATIVE
 void FacesEffect::RenderFaces(RenderBuffer& buffer,
                               SequenceElements* elements, const std::string& faceDef,
                               const std::string& Phoneme, const std::string& trackName,
@@ -1510,4 +1517,5 @@ void FacesEffect::RenderFaces(RenderBuffer& buffer,
         }
     }
 }
+#endif
 #endif // !XLIGHTS_NATIVE

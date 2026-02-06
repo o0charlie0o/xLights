@@ -107,6 +107,7 @@ void MovingHeadEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     if (buffer.cur_model == "") {
         return;
@@ -131,6 +132,7 @@ void MovingHeadEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Re
         }
     }
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::RenderMovingHeads(MovingHeadPanel *p, const Model* model_info, const SettingsMap &SettingsMap, RenderBuffer &buffer)
@@ -562,13 +564,12 @@ void MovingHeadEffect::CalculateColorWheelShutter(DmxColorAbility* mh_color, dou
 
     //vc.SaveXVC(xLightsFrame::CurrentDir.ToStdString() + "//test.xvc");//this changes the point locations for some reason, do after
 }
-#endif
 
 void MovingHeadEffect::WriteCmdToPixel(DmxMotorBase* motor, int value, RenderBuffer &buffer)
 {
     xlColor lsb_c = xlBLACK;
     xlColor msb_c = xlBLACK;
-    
+
     uint8_t lsb = value & 0xFF;
     uint8_t msb = value >> 8;
     lsb_c.red = lsb;
@@ -612,6 +613,7 @@ std::list<const Model*> MovingHeadEffect::GetModels(const Model* model)
 
     return model_list;
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void MovingHeadEffect::SetPanelStatus(Model *cls) {

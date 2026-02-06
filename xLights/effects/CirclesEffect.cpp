@@ -172,6 +172,7 @@ void CirclesEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void CirclesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -288,6 +289,7 @@ void CirclesEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Rende
         }
     }
 }
+#endif
 
 void CirclesEffect::RenderCirclesUpdate(RenderBuffer& buffer, int ballCnt, RgbBalls* effObjs, int circleSpeed)
 {

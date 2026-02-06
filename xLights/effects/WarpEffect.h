@@ -46,7 +46,9 @@ public:
     {
         return false;
     }
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     virtual bool SupportsLinearColorCurves(const SettingsMap& SettingsMap) const override
     {
         return false;

@@ -109,6 +109,7 @@ static void UpdateMarqueeColor(int &position, int &band_color, int colorcnt, int
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void MarqueeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -204,3 +205,4 @@ void MarqueeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Rende
         corner_y2--;
     }
 }
+#endif

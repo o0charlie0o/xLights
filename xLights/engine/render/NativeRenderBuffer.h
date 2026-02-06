@@ -50,6 +50,79 @@ public:
     virtual ~EffectRenderCache() = default;
 };
 
+// Native-compatible PaletteClass replacing the legacy wx-dependent version.
+// Provides the same API surface that effects use (GetColor, GetHSV, Size)
+// without ColorCurve or wx dependencies.
+class PaletteClass {
+    xlColorVector _colors;
+    hsvVector _hsv;
+
+public:
+    PaletteClass() = default;
+
+    void Set(const xlColorVector& colors) {
+        _colors = colors;
+        _hsv.clear();
+        _hsv.reserve(colors.size());
+        for (const auto& c : colors) {
+            _hsv.push_back(c.asHSV());
+        }
+    }
+
+    size_t Size() const {
+        return std::max(1, static_cast<int>(_colors.size()));
+    }
+
+    size_t ExplicitSize() const {
+        return _colors.size();
+    }
+
+    const xlColor& GetColor(size_t idx) const {
+        if (idx >= _colors.size()) return xlWHITE;
+        return _colors[idx];
+    }
+
+    void GetColor(size_t idx, xlColor& c) const {
+        if (idx >= _colors.size()) { c.Set(255, 255, 255); return; }
+        c = _colors[idx];
+    }
+
+    void GetColor(size_t idx, xlColor& c, float /*progress*/) const {
+        // No ColorCurve support in native build — use static color
+        GetColor(idx, c);
+    }
+
+    void GetHSV(size_t idx, HSVValue& hsv) const {
+        if (idx >= _hsv.size()) { hsv = xlWHITE.asHSV(); return; }
+        hsv = _hsv[idx];
+    }
+
+    bool IsSpatial(size_t /*idx*/) const { return false; }
+    bool IsGradient(size_t /*idx*/) const { return false; }
+    bool IsRadial(size_t /*idx*/) const { return false; }
+
+    // Spatial color stubs — IsSpatial always returns false, but effects
+    // still reference these methods so we provide no-op implementations.
+    void GetSpatialColor(size_t idx, float /*x*/, float /*y*/, xlColor& c) const {
+        GetColor(idx, c);
+    }
+    void GetSpatialColor(size_t idx, float /*cx*/, float /*cy*/, float /*ox*/,
+                         float /*oy*/, float /*round*/, float /*radius*/, xlColor& c) const {
+        GetColor(idx, c);
+    }
+
+    // Iterator support — some effects iterate the palette directly
+    const xlColor& operator[](size_t idx) const {
+        return GetColor(idx);
+    }
+
+    // Allow push_back for building palettes
+    void push_back(const xlColor& c) {
+        _colors.push_back(c);
+        _hsv.push_back(c.asHSV());
+    }
+};
+
 class NativeRenderBuffer {
 public:
     // Construct a render buffer with given dimensions and optional context.
@@ -179,10 +252,10 @@ public:
 
     void SetPalette(xlColorVector& colors);
     size_t GetColorCount() const;
+    const PaletteClass& GetPalette() const { return palette; }
 
-    // Palette color vector — effects read this directly
-    xlColorVector palette;
-    hsvVector paletteHSV;
+    // Palette — effects read this directly via buffer.palette.GetColor(), etc.
+    PaletteClass palette;
 
     // Convenience HSV member used by some effects
     HSVValue hsv;
@@ -227,6 +300,10 @@ public:
 
     // GPU render data slot (reserved for future use)
     void* gpuRenderData = nullptr;
+
+    // Display list index — used by legacy UI for timeline rendering.
+    // In native build this is present for API compatibility but unused.
+    uint32_t perModelIndex = 0;
 
 private:
     IRenderContext* _context;

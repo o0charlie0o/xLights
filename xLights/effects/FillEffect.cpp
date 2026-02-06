@@ -172,6 +172,7 @@ static inline int GetDirection(const std::string & DirectionString) {
     return 0;
 }
 
+#ifndef XLIGHTS_NATIVE
 void FillEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     double eff_pos = buffer.GetEffectTimeIntervalPosition();
@@ -369,3 +370,4 @@ void FillEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBu
         break;
     }
 }
+#endif

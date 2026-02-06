@@ -130,6 +130,7 @@ void LightningEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void LightningEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();
     int Number_Bolts = GetValueCurveInt("Number_Bolts", 10, SettingsMap, oset, LIGHTNING_BOLTS_MIN, LIGHTNING_BOLTS_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
@@ -213,6 +214,7 @@ void LightningEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
         y1 = y2;
     }
 }
+#endif
 
 bool LightningEffect::needToAdjustSettings(const std::string& version)
 {

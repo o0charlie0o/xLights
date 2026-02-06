@@ -26,7 +26,9 @@ class StateEffect : public RenderableEffect
         virtual void SetDefaultParameters() override;
         virtual void SetPanelStatus(Model *cls) override;
 #endif
+#ifndef XLIGHTS_NATIVE
         virtual void Render(Effect *effect, const SettingsMap &settings, RenderBuffer &buffer) override;
+#endif
         std::list<std::string> GetStates(Model* cls, std::string model);
         virtual void RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) override;
 #ifndef XLIGHTS_NATIVE

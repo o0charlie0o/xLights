@@ -910,6 +910,7 @@ public:
 // TODO:
 // 4 ENH: There is the matter of colors (around; this is a matter of breaking long segments up)
 
+#ifndef XLIGHTS_NATIVE
 void RippleEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -1153,6 +1154,7 @@ void RippleEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
         break;
     }
 }
+#endif
 
 void RippleEffect::Drawtriangle(RenderBuffer& buffer, int Movement, int xc, int yc, double side, HSVValue& hsv, int Ripple_Thickness, int CheckBox_Ripple3D)
 {

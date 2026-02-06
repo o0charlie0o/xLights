@@ -10,6 +10,16 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
+#ifdef XLIGHTS_NATIVE
+// Native build: RenderBuffer is an alias for NativeRenderBuffer.
+// Effects call the same API (SetPixel, GetMultiColorBlend, etc.) but the
+// underlying implementation is wx-free. Display-list and wx-image methods
+// are not available — guard those code paths with #ifndef XLIGHTS_NATIVE.
+#include "engine/render/NativeRenderBuffer.h"
+using RenderBuffer = xlEngine::NativeRenderBuffer;
+using EffectRenderCache = xlEngine::EffectRenderCache;
+using PaletteClass = xlEngine::PaletteClass;
+#else
 #include <stdint.h>
 #include <cmath>
 #include <map>
@@ -613,3 +623,5 @@ private:
     friend class MetalRenderBufferComputeData;
     friend class ISPCComputeUtilities;
 };
+
+#endif // XLIGHTS_NATIVE

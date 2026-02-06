@@ -141,9 +141,11 @@ void DuplicateEffect::SetPanelStatus(Model* cls)
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void DuplicateEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
 {
     // This should never ever be called as the Render::ProcessFrame should have converted this effect into the effects being duplicated
     assert(false);
 }
+#endif
 

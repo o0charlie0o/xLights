@@ -79,6 +79,7 @@ bool SpiralsEffect::SupportsLinearColorCurves(const SettingsMap &SettingsMap) co
     return !SettingsMap.GetBool("E_CHECKBOX_Spirals_Blend");
 }
 
+#ifndef XLIGHTS_NATIVE
 void SpiralsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float offset = buffer.GetEffectTimeIntervalPosition();
     int PaletteRepeat = GetValueCurveInt("Spirals_Count", 1, SettingsMap, offset, SPIRALS_COUNT_MIN, SPIRALS_COUNT_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
@@ -171,3 +172,4 @@ void SpiralsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Rende
         }
     }
 }
+#endif

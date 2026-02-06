@@ -350,6 +350,7 @@ std::pair<int,int> FireworksEffect::GetFireworkLocation(int width, int height, i
     return { startX, startY };
 }
 
+#ifndef XLIGHTS_NATIVE
 void FireworksEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float offset = buffer.GetEffectTimeIntervalPosition();
 
@@ -521,3 +522,4 @@ void FireworksEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
         }
     }
 }
+#endif

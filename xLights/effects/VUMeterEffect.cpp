@@ -315,6 +315,7 @@ void VUMeterEffect::RenameTimingTrack(std::string oldname, std::string newname, 
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void VUMeterEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -336,6 +337,7 @@ void VUMeterEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Rende
            SettingsMap.GetBool("CHECKBOX_Regex", false),
            SettingsMap.Get("FILEPICKERCTRL_SVGFile", ""));
 }
+#endif
 
 class VUMeterRenderCache : public EffectRenderCache
 {
@@ -535,6 +537,7 @@ int VUMeterEffect::DecodeShape(const std::string& shape)
 	return ShapeType::CIRCLE;
 }
 
+#ifndef XLIGHTS_NATIVE
 void VUMeterEffect::Render(RenderBuffer &buffer, SequenceElements *elements, int bars, const std::string& type, const std::string &timingtrack, int sensitivity, const std::string& shape, bool slowdownfalls, int startnote, int endnote, int xoffset, int yoffset, int gain, bool logarithmicX, const std::string& filter, bool regex, const std::string& svgFile)
 {
     // startnote must be less than or equal to endnote
@@ -746,6 +749,7 @@ void VUMeterEffect::Render(RenderBuffer &buffer, SequenceElements *elements, int
 		//int a = 0;
 	}
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void VUMeterEffect::RenderSpectrogramFrame(RenderBuffer &buffer, int usebars, std::vector<float>& lastvalues, std::vector<float>& lastpeaks, std::list<int>& pauseuntilpeakfall, bool slowdownfalls, int startNote, int endNote, int xoffset, int yoffset, bool peak, int peakhold, bool line, bool logarithmicX, bool circle, int gain, int sensitivity, std::list<std::vector<wxPoint>>& lineHistory) const

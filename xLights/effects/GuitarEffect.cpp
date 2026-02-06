@@ -708,6 +708,7 @@ void GuitarEffect::RenameTimingTrack(std::string oldname, std::string newname, E
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void GuitarEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     RenderGuitar(buffer,
                  effect->GetParentEffectLayer()->GetParentElement()->GetSequenceElements(),
@@ -722,6 +723,7 @@ void GuitarEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Render
                  SettingsMap.GetFloat("SLIDER_BaseWaveFactor", 1.0) / 10.0,
                  SettingsMap.GetBool("CHECKBOX_VaryWaveLengthOnFret", false));
 }
+#endif
 
 bool notesort(const NoteTiming* first, const NoteTiming* second)
 {

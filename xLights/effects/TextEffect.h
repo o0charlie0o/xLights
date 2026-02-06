@@ -27,7 +27,9 @@ class TextEffect : public RenderableEffect
 public:
     TextEffect(int id);
     virtual ~TextEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     virtual bool CanBeRandom() override { return false; }
     virtual bool SupportsRenderCache(const SettingsMap& settings) const override;
 

@@ -86,6 +86,7 @@ void AdjustEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void AdjustEffect::AdjustChannels(bool singleColour, int numChannels, RenderBuffer& buffer, const std::string& action, int value1, int value2, int nth, int starting, int count)
 {
     int channels = std::min(numChannels, buffer.BufferWi * buffer.BufferHt * (singleColour ? 1 : 3));
@@ -190,3 +191,4 @@ void AdjustEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
 
     AdjustChannels(StartsWith(string_type, "Single Color"), num_channels, buffer, action, value1, value2, nth, starting, count);
 }
+#endif

@@ -290,6 +290,7 @@ void SnowflakesEffect::MoveFlakes(RenderBuffer& buffer, int snowflakeType, const
     effectState -= placedFullCount;
 }
 
+#ifndef XLIGHTS_NATIVE
 void SnowflakesEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -704,3 +705,4 @@ void SnowflakesEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Re
         }
     }
 }
+#endif

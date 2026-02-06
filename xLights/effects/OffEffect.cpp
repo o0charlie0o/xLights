@@ -95,6 +95,7 @@ void OffEffect::adjustSettings(const std::string& version, Effect* effect, bool 
 }
 
 
+#ifndef XLIGHTS_NATIVE
 void OffEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer)
 {
     std::string style = settings.Get("CHOICE_Off_Style", "Black");
@@ -119,6 +120,7 @@ void OffEffect::Render(Effect* effect, const SettingsMap& settings, RenderBuffer
     }
 
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 wxString OffEffect::GetEffectString()

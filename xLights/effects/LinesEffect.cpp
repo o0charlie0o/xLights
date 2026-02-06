@@ -68,6 +68,7 @@ void LinesEffect::SetDefaultParameters()
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void LinesEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();
     Render(buffer,
@@ -79,6 +80,7 @@ void LinesEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderB
         SettingsMap.GetBool("CHECKBOX_Lines_FadeTrails", true)
     );
 }
+#endif
 
 #define pi2 6.283185307
 
@@ -220,6 +222,7 @@ public:
     }
 };
 
+#ifndef XLIGHTS_NATIVE
 void LinesEffect::Render(RenderBuffer &buffer, int objects, int points, int thickness, int speed, int trails, bool fadeTrails)
 {
 	// Grab our cache
@@ -253,3 +256,4 @@ void LinesEffect::Render(RenderBuffer &buffer, int objects, int points, int thic
         buffer.AlphaBlend(temp);
     }
 }
+#endif

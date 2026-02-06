@@ -86,6 +86,7 @@ void GarlandsEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void GarlandsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();
     int GarlandType = SettingsMap.GetInt("SLIDER_Garlands_Type", 0);
@@ -199,3 +200,4 @@ void GarlandsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Rend
         }
     }
 }
+#endif

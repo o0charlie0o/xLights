@@ -73,6 +73,7 @@ void SpirographEffect::SetDefaultParameters()
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void SpirographEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -154,3 +155,4 @@ void SpirographEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Re
         }
     }
 }
+#endif

@@ -58,7 +58,9 @@ public:
     RippleEffect(int id);
     virtual ~RippleEffect();
     virtual void SetDefaultParameters() override;
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     //virtual void SetPanelStatus(Model* cls) override;
     //virtual void RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) override;
     virtual bool AppropriateOnNodes() const override

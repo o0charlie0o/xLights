@@ -320,6 +320,7 @@ void DMXEffect::adjustSettings(const std::string &version, Effect *effect, bool 
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 bool DMXEffect::SetDMXSinglColorPixel(int chan, int num_channels, const SettingsMap &SettingsMap, double eff_pos, xlColor& color, RenderBuffer &buffer)
 {
     if( num_channels >= chan ) {
@@ -428,6 +429,7 @@ void DMXEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuf
         }
     }
 }
+#endif
 
 #ifndef XLIGHTS_NATIVE
 void DMXEffect::SetPanelStatus(Model *cls) {

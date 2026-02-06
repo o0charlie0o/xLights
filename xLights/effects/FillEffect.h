@@ -29,7 +29,9 @@ class FillEffect : public RenderableEffect
 public:
     FillEffect(int id);
     virtual ~FillEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
 #ifndef XLIGHTS_NATIVE

@@ -201,6 +201,7 @@ int TwinkleEffect::DrawEffectBackground(const Effect *e, int x1, int y1, int x2,
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 static void place_twinkles(int lights_to_place, int &curIndex, std::vector<StrobeClass>& strobe, RenderBuffer& buffer,
                            int max_modulo, size_t colorcnt) {
     while (lights_to_place > 0 && (curIndex < strobe.size())) {
@@ -435,3 +436,4 @@ void TwinkleEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Rende
         }
     }, 500);
 }
+#endif

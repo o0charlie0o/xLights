@@ -26,7 +26,9 @@ class MusicEffect : public RenderableEffect
 public:
     MusicEffect(int id);
     virtual ~MusicEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     void Render(RenderBuffer& buffer,
                 int bars, const std::string& type, int sensitivity, bool scale, const std::string& scalenotes, int offsetx, int startnote, int endnote, const std::string& colourtreatment, bool fade, bool logarithmicX);
 #ifndef XLIGHTS_NATIVE

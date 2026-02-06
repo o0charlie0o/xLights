@@ -545,6 +545,7 @@ int TendrilEffect::EncodeMovement(std::string movement)
 }
 
 #ifdef XLIGHTS_NATIVE
+#ifndef XLIGHTS_NATIVE
 void TendrilEffect::Render(RenderBuffer& buffer, const std::string& movement,
                            int tunemovement, int movementSpeed, int thickness,
                            float friction, float dampening,
@@ -555,7 +556,9 @@ void TendrilEffect::Render(RenderBuffer& buffer, const std::string& movement,
     // requires NativePathDrawingContext implementation of quad curves.
     // For now, stub out the render.
 }
+#endif
 #else // !XLIGHTS_NATIVE
+#ifndef XLIGHTS_NATIVE
 void TendrilEffect::Render(RenderBuffer& buffer, const std::string& movement,
                            int tunemovement, int movementSpeed, int thickness,
                            float friction, float dampening,
@@ -908,4 +911,5 @@ void TendrilEffect::Render(RenderBuffer& buffer, const std::string& movement,
         }
     }
 }
+#endif
 #endif // !XLIGHTS_NATIVE

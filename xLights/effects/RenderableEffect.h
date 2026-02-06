@@ -36,7 +36,11 @@ class Model;
 class SequenceElements;
 class Effect;
 class SettingsMap;
+#ifdef XLIGHTS_NATIVE
+#include "../RenderBuffer.h"
+#else
 class RenderBuffer;
+#endif
 class AudioManager;
 class EffectManager;
 class EffectLayer;

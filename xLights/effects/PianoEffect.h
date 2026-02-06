@@ -29,7 +29,9 @@ public:
     {
         return false;
     }
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
 #ifndef XLIGHTS_NATIVE
     static std::vector<float> Parse(wxString& l);
 #endif

@@ -165,6 +165,7 @@ void PianoEffect::RenameTimingTrack(std::string oldname, std::string newname, Ef
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void PianoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -179,6 +180,7 @@ void PianoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderB
                 SettingsMap.GetInt("SLIDER_Piano_XOffset", 0),
                 SettingsMap.GetBool("CHECKBOX_Piano_FadeNotes", false));
 }
+#endif
 
 class PianoCache : public EffectRenderCache
 {

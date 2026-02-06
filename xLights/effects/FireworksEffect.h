@@ -43,7 +43,9 @@ public:
     virtual void SetDefaultParameters() override;
     virtual void SetPanelStatus(Model* cls) override;
 #endif
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
 #ifndef XLIGHTS_NATIVE
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
 #endif

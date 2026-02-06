@@ -18,7 +18,9 @@ class OffEffect : public RenderableEffect
         OffEffect(int id);
         virtual ~OffEffect();
         virtual bool CanBeRandom() override {return false;}
+#ifndef XLIGHTS_NATIVE
         virtual void Render(Effect *effect, const SettingsMap &settings, RenderBuffer &buffer) override;
+#endif
 #ifndef XLIGHTS_NATIVE
         virtual wxString GetEffectString() override;
         virtual void SetDefaultParameters() override;

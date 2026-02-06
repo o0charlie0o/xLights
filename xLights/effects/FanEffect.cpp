@@ -143,6 +143,7 @@ void FanEffect::adjustSettings(const std::string& version, Effect* effect, bool 
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void FanEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     double eff_pos = buffer.GetEffectTimeIntervalPosition();
     int center_x = GetValueCurveInt("Fan_CenterX", 50, SettingsMap, eff_pos, FAN_CENTREX_MIN , FAN_CENTREX_MAX, buffer.GetStartTimeMS(), buffer.GetEndTimeMS());
@@ -281,4 +282,5 @@ void FanEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuf
         }
     }
 }
+#endif
 

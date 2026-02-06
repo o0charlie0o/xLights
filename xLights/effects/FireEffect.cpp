@@ -204,6 +204,7 @@ void FireEffect::SetDefaultParameters()
 #endif
 
 // 10 <= HeightPct <= 100
+#ifndef XLIGHTS_NATIVE
 void FireEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float offset = buffer.GetEffectTimeIntervalPosition();
@@ -350,3 +351,4 @@ void FireEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBu
         }
     }
 }
+#endif

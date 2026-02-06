@@ -24,7 +24,9 @@ class LinesEffect : public RenderableEffect
 public:
     LinesEffect(int id);
     virtual ~LinesEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     void Render(RenderBuffer& buffer,
                 int objects, int segments, int thickness, int speed, int trails, bool fadeTrails);
 #ifndef XLIGHTS_NATIVE

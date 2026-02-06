@@ -416,6 +416,7 @@ void TextEffect::SetPanelStatus(Model* cls)
 #ifdef XLIGHTS_NATIVE
 // Native macOS build: Text rendering via NativeTextDrawingContext
 // TODO: Port full text rendering with all positioning modes to CoreText
+#ifndef XLIGHTS_NATIVE
 void TextEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     // For now, the native build does not render text effects.
     // Full text rendering requires porting the OS font path (TextDrawingContext)
@@ -423,6 +424,7 @@ void TextEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBu
     // wxBitmap/wxImage porting.
     // Stub: clear buffer (effect produces no output)
 }
+#endif
 #else // !XLIGHTS_NATIVE
 
 //formatting notes:
@@ -492,6 +494,7 @@ static int TextEffectsIndex(const wxString &st) {
     return 0;
 }
 
+#ifndef XLIGHTS_NATIVE
 void TextEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     // determine if we are rendering an xLights Font
@@ -629,6 +632,7 @@ void TextEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBu
         }
     }
 }
+#endif
 
 wxSize GetMultiLineTextExtent(TextDrawingContext *dc,
                               const wxString& text,

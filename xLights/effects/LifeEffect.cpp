@@ -92,6 +92,7 @@ void LifeEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void LifeEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     int Count = SettingsMap.GetInt("SLIDER_Life_Count", 50);
@@ -199,3 +200,4 @@ void LifeEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBu
     // copy new life state to tempbuf
     buffer.CopyPixelsToTempBuf();
 }
+#endif

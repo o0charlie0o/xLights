@@ -187,6 +187,7 @@ float MeteorsEffect::calcEffectStateOffset(int mSpeed, RenderBuffer& buffer) {
 
 // ColorScheme: 0=rainbow, 1=range, 2=palette
 // MeteorsEffect: 0=down, 1=up, 2=left, 3=right, 4=implode, 5=explode
+#ifndef XLIGHTS_NATIVE
 void MeteorsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -246,6 +247,7 @@ void MeteorsEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Rende
             break;
     }
 }
+#endif
 
 /*
  * *************************************************************

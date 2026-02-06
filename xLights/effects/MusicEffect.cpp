@@ -121,6 +121,7 @@ void MusicEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void MusicEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     float oset = buffer.GetEffectTimeIntervalPosition();
     Render(buffer,
@@ -137,6 +138,7 @@ void MusicEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderB
         SettingsMap.GetBool("CHECKBOX_Music_LogarithmicX", false)
     );
 }
+#endif
 
 // represents a music event for a note
 class MusicEvent
@@ -255,6 +257,7 @@ int MusicEffect::DecodeType(const std::string& type)
     return 1;
 }
 
+#ifndef XLIGHTS_NATIVE
 void MusicEffect::Render(RenderBuffer &buffer,
     int bars, const std::string& type,
     int sensitivity, bool scale,
@@ -619,3 +622,4 @@ void MusicEffect::RenderOn(RenderBuffer &buffer, int x, int bars, int startNote,
         }
     }
 }
+#endif

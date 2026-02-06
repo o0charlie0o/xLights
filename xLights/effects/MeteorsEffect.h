@@ -39,7 +39,9 @@ public:
     virtual void SetDefaultParameters() override;
     virtual std::list<std::string> CheckEffectSettings(const SettingsMap& settings, AudioManager* media, Model* model, Effect* eff, bool renderCache) override;
 #endif
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     virtual bool AppropriateOnNodes() const override
     {
         return false;

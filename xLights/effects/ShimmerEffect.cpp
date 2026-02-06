@@ -85,6 +85,7 @@ void ShimmerEffect::adjustSettings(const std::string &version, Effect *effect, b
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void ShimmerEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -148,3 +149,4 @@ void ShimmerEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Rende
         }
     }
 }
+#endif

@@ -165,6 +165,7 @@ double GetStep(double radius)
     return (0.5 * 360.0 / (2.0 * PI * radius));
 }
 
+#ifndef XLIGHTS_NATIVE
 void GalaxyEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     double eff_pos = buffer.GetEffectTimeIntervalPosition();
@@ -441,4 +442,5 @@ void GalaxyEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
         });
     }
 }
+#endif
 

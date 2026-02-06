@@ -151,6 +151,7 @@ void SnowstormEffect::SetDefaultParameters()
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void SnowstormEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
 
     int Count = SettingsMap.GetInt("SLIDER_Snowstorm_Count", 50);
@@ -252,3 +253,4 @@ void SnowstormEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Ren
         }
     }
 }
+#endif

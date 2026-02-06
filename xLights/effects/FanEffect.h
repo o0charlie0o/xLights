@@ -58,7 +58,9 @@ public:
     virtual ~FanEffect();
     virtual bool needToAdjustSettings(const std::string& version) override;
     virtual void adjustSettings(const std::string& version, Effect* effect, bool removeDefaults = true) override;
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
 #ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
 #endif

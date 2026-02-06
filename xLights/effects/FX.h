@@ -50,7 +50,9 @@
 #define fract16 uint16_t
 #define saccum87 int16_t
 typedef uint16_t accum88;
+#ifndef XLIGHTS_NATIVE
 class RenderBuffer;
+#endif
 #define CRGB xlCRGB
 #define instance _fx
 

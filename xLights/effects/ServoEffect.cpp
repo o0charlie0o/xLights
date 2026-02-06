@@ -165,6 +165,7 @@ void ServoEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void ServoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
     double eff_pos = buffer.GetEffectTimeIntervalPosition();
     std::string sel_chan = SettingsMap["CHOICE_Channel"];
@@ -359,6 +360,7 @@ void ServoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderB
             }
         }
     }
+#ifndef XLIGHTS_NATIVE
     if (effect->IsBackgroundDisplayListEnabled() && buffer.perModelIndex == 0) {
         std::unique_lock<std::recursive_mutex> lock(effect->GetBackgroundDisplayList().lock);
         effect->GetBackgroundDisplayList().resize((buffer.curEffEndPer - buffer.curEffStartPer + 1) * 6);
@@ -369,6 +371,7 @@ void ServoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderB
         float pos = 1.0 - (position / 100.0);
         buffer.SetDisplayListVRect(effect, idx, x1, pos - 0.028, x2, pos + 0.028, xlYELLOW, xlYELLOW);
     }
+#endif
 }
 
 #ifndef XLIGHTS_NATIVE
@@ -463,3 +466,4 @@ int ServoEffect::GetPhonemeValue(RenderBuffer& buffer, SequenceElements* element
     }
     return PhonemeInt;
 }
+#endif

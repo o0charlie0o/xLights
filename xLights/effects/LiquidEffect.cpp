@@ -185,6 +185,7 @@ void LiquidEffect::SetDefaultParameters()
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void LiquidEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -656,7 +657,9 @@ void LiquidEffect::Step(b2World* world, RenderBuffer &buffer, bool enabled[], in
         }
     }
 }
+#endif
 
+#ifndef XLIGHTS_NATIVE
 void LiquidEffect::Render(RenderBuffer &buffer,
     bool top, bool bottom, bool left, bool right,
     int lifetime, bool holdcolor, bool mixcolors, int size, int warmUpFrames,
@@ -769,3 +772,4 @@ void LiquidEffect::Render(RenderBuffer &buffer,
         _world = nullptr;
     }
 }
+#endif

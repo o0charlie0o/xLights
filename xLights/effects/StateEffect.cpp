@@ -191,6 +191,7 @@ void StateEffect::RenameTimingTrack(std::string oldname, std::string newname, Ef
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void StateEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
     RenderState(buffer,
                 effect->GetParentEffectLayer()->GetParentElement()->GetSequenceElements(),
@@ -557,3 +558,4 @@ uint8_t StateEffect::CalculateAlpha(int fadeTime, int currentTime, int startTime
     }         
     return std::max(beforeAlpha, afterAlpha);
 }
+#endif

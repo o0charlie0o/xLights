@@ -64,6 +64,7 @@ void TreeEffect::adjustSettings(const std::string &version, Effect *effect, bool
     }
 }
 
+#ifndef XLIGHTS_NATIVE
 void TreeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     int Branches = SettingsMap.GetInt("SLIDER_Tree_Branches", 1);
     int tspeed = SettingsMap.GetInt("SLIDER_Tree_Speed", 10);
@@ -189,3 +190,4 @@ void TreeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBu
         }
     }
 }
+#endif

@@ -48,7 +48,6 @@ NativeRenderBuffer::NativeRenderBuffer(const NativeRenderBuffer& other)
       pixelVector(other.pixelVector),
       tempbufVector(other.tempbufVector),
       palette(other.palette),
-      paletteHSV(other.paletteHSV),
       hsv(other.hsv),
       allowAlpha(other.allowAlpha),
       BufferHt(other.BufferHt),
@@ -600,12 +599,8 @@ uint8_t NativeRenderBuffer::ChannelBlend(uint8_t c1, uint8_t c2, float ratio) co
 
 void NativeRenderBuffer::Get2ColorBlend(int coloridx1, int coloridx2, float ratio, xlColor& color)
 {
-    if (static_cast<size_t>(coloridx1) < palette.size()) {
-        color = palette[coloridx1];
-    } else {
-        color = xlWHITE;
-    }
-    xlColor c2 = (static_cast<size_t>(coloridx2) < palette.size()) ? palette[coloridx2] : xlWHITE;
+    color = palette.GetColor(coloridx1);
+    xlColor c2 = palette.GetColor(coloridx2);
     Get2ColorBlend(color, c2, ratio);
 }
 
@@ -646,11 +641,7 @@ void NativeRenderBuffer::GetMultiColorBlend(float n, bool circular, xlColor& col
 {
     size_t colorcnt = GetColorCount() - reserveColors;
     if (colorcnt <= 1) {
-        if (!palette.empty()) {
-            color = palette[0];
-        } else {
-            color = xlWHITE;
-        }
+        color = palette.GetColor(0);
         return;
     }
 
@@ -769,16 +760,12 @@ void NativeRenderBuffer::GetEffectPeriods(int& startPer, int& endPer) const
 
 void NativeRenderBuffer::SetPalette(xlColorVector& colors)
 {
-    palette = colors;
-    paletteHSV.clear();
-    for (const auto& c : colors) {
-        paletteHSV.push_back(c.asHSV());
-    }
+    palette.Set(colors);
 }
 
 size_t NativeRenderBuffer::GetColorCount() const
 {
-    return std::max(size_t(1), palette.size());
+    return palette.Size();
 }
 
 // =========================================================================

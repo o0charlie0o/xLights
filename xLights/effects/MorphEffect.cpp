@@ -251,6 +251,7 @@ static int calcPosition(int value, int base)
     return (int)((double)value / band);
 }
 
+#ifndef XLIGHTS_NATIVE
 void MorphEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     double eff_pos = buffer.GetEffectTimeIntervalPosition();
@@ -502,4 +503,5 @@ void MorphEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderB
         }
     }
 }
+#endif
 

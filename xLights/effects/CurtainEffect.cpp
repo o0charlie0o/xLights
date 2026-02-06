@@ -113,6 +113,7 @@ void CurtainEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void CurtainEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -208,6 +209,7 @@ void CurtainEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBu
         break;
     }
 }
+#endif
 
 void CurtainEffect::DrawCurtain(RenderBuffer & buffer, bool LeftEdge, int xlimit, const std::vector<int> &SwagArray)
 {

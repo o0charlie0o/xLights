@@ -140,6 +140,7 @@ void WaveEffect::SetDefaultParameters() {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void WaveEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -375,3 +376,4 @@ void WaveEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBu
         }
     }
 }
+#endif

@@ -171,6 +171,7 @@ void ColorWashEffect::RemoveDefaults(const std::string &version, Effect *effect)
     RenderableEffect::RemoveDefaults(version, effect);
 }
 
+#ifndef XLIGHTS_NATIVE
 void ColorWashEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -257,6 +258,7 @@ void ColorWashEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
     } else {
         orig = xlBLACK;
     }
+#ifndef XLIGHTS_NATIVE
     if (effect->IsBackgroundDisplayListEnabled() && buffer.perModelIndex == 0) {
         std::unique_lock<std::recursive_mutex> lock(effect->GetBackgroundDisplayList().lock);
         if (VertFade || HorizFade) {
@@ -276,4 +278,6 @@ void ColorWashEffect::Render(Effect *effect, const SettingsMap &SettingsMap, Ren
             buffer.CopyPixelsToDisplayListX(effect, midY, midX, midX);
         }
     }
+#endif
 }
+#endif

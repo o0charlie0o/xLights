@@ -23,7 +23,9 @@ public:
 #ifndef XLIGHTS_NATIVE
     virtual void SetDefaultParameters() override;
 #endif
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     virtual bool CanRenderPartialTimeInterval() const override
     {
         return true;

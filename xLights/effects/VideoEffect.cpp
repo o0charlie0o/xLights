@@ -229,6 +229,7 @@ bool VideoEffect::CleanupFileLocations(xLightsFrame* frame, SettingsMap &Setting
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void VideoEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float offset = buffer.GetEffectTimeIntervalPosition();
@@ -607,3 +608,4 @@ void VideoEffect::Render(RenderBuffer &buffer, std::string filename,
         }
     }
 }
+#endif

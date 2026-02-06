@@ -109,6 +109,7 @@ PinwheelEffect::Pinwheel3DType PinwheelEffect::to3dType(const std::string& pinwh
     return PW_3D_NONE;
 }
 
+#ifndef XLIGHTS_NATIVE
 void PinwheelEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer) {
     const std::string& pinwheel_style = SettingsMap["CHOICE_Pinwheel_Style"];
     if (pinwheel_style == "New Render Method") {
@@ -349,3 +350,4 @@ void PinwheelEffect::Draw_arm(RenderBuffer& buffer,
         }
     }
 }
+#endif

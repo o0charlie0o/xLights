@@ -171,6 +171,7 @@ void CandleEffect::Update(wxByte& flameprime, wxByte& flame, wxByte& wind, size_
 }
 
 // 10 <= HeightPct <= 100
+#ifndef XLIGHTS_NATIVE
 void CandleEffect::Render(Effect* effect, const SettingsMap& SettingsMap, RenderBuffer& buffer)
 {
     float oset = buffer.GetEffectTimeIntervalPosition();
@@ -277,3 +278,4 @@ void CandleEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
         }
     }
 }
+#endif

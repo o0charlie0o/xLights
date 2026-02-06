@@ -504,6 +504,7 @@ static int mapSkinTone(const std::string &v) {
 }
 
 #ifdef XLIGHTS_NATIVE
+#ifndef XLIGHTS_NATIVE
 void ShapeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     // TODO: Port Shape effect rendering for native build
     // Most geometric drawing (circle, star, polygon, etc.) uses RenderBuffer directly
@@ -685,7 +686,9 @@ void ShapeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderB
 
     cache->RemoveOld(lifetimeFrames);
 }
+#endif
 #else // !XLIGHTS_NATIVE
+#ifndef XLIGHTS_NATIVE
 void ShapeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
 	float oset = buffer.GetEffectTimeIntervalPosition();
 
@@ -1043,6 +1046,7 @@ void ShapeEffect::Render(Effect *effect, const SettingsMap &SettingsMap, RenderB
 
     cache->RemoveOld(lifetimeFrames);
 }
+#endif
 #endif // !XLIGHTS_NATIVE (legacy Render)
 
 void ShapeEffect::Drawcircle(RenderBuffer &buffer, int xc, int yc, double radius, xlColor color, int thickness) const

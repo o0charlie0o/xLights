@@ -55,7 +55,9 @@ class ShapeEffect : public RenderableEffect
 public:
     ShapeEffect(int id);
     virtual ~ShapeEffect();
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
     virtual void RenameTimingTrack(std::string oldname, std::string newname, Effect* effect) override;
     virtual bool AppropriateOnNodes() const override
     {

@@ -27,7 +27,9 @@ public:
     {
         return false;
     }
+#ifndef XLIGHTS_NATIVE
     virtual void Render(Effect* effect, const SettingsMap& settings, RenderBuffer& buffer) override;
+#endif
 #ifndef XLIGHTS_NATIVE
     virtual void SetPanelStatus(Model* cls) override;
     virtual void SetDefaultParameters() override;

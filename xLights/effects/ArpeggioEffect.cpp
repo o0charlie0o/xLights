@@ -264,6 +264,7 @@ void ArpeggioEffect::SetPanelTimingTracks() const {
 }
 #endif
 
+#ifndef XLIGHTS_NATIVE
 void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderBuffer &buffer) {
     // Get parameters
     std::string timingTrack = SettingsMap.Get(CHOICE_Arpeggio_TimingTrack, "");
@@ -696,3 +697,4 @@ void ArpeggioEffect::Render(Effect *eff, const SettingsMap &SettingsMap, RenderB
         }
     }
 }
+#endif
