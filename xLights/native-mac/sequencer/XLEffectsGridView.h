@@ -209,6 +209,9 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 /// Disable drawing SF Symbol icons on effect blocks (for performance testing). Default: NO.
 @property (nonatomic, assign) BOOL disableIconDrawing;
 
+/// Color index of the active timing track (-1 if none). Set by VC to color grid extension lines.
+@property (nonatomic, assign) NSInteger activeTimingColorIndex;
+
 /// Reload all data from the data source and redraw.
 - (void)reloadData;
 
@@ -235,5 +238,20 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 
 /// Zoom and scroll to fit the currently selected effects in view.
 - (void)zoomToSelection;
+
+/// Return the real effect ID (from NativeEffectProvider) for a flat render index, or -1 if invalid.
+- (NSInteger)effectIdAtRenderIndex:(NSUInteger)index;
+
+/// Show an inline text field editor over a timing mark label for editing.
+/// @param row The grid row of the timing mark
+/// @param startMS Start time of the timing mark in ms
+/// @param endMS End time of the timing mark in ms
+/// @param currentLabel The current label text
+/// @param completion Called with the new label when editing completes, or nil if cancelled
+- (void)beginEditingLabelAtRow:(NSInteger)row
+                       startMS:(CGFloat)startMS
+                         endMS:(CGFloat)endMS
+                  currentLabel:(NSString *)currentLabel
+             completionHandler:(void (^)(NSString * _Nullable newLabel))completion;
 
 @end

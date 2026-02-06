@@ -60,6 +60,8 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
         viewController.engineBridge = engineBridge
         context.coordinator.viewController = viewController
         context.coordinator.startObserving()
+        // Store weak reference for direct access (e.g., house preview toggle)
+        XLSwiftUIWindowHelper.shared.sequencerViewController = viewController
         return viewController
     }
 

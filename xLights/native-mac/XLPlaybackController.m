@@ -483,7 +483,8 @@
                 __strong typeof(weakSelf) strongSelf = weakSelf;
                 if (!strongSelf) return;
 
-                if (strongSelf->_previewView && frameUpdates.count > 0) {
+                XLMetalPreviewView *preview = strongSelf.previewView;
+                if (preview && frameUpdates.count > 0) {
                     for (NSDictionary *fb in frameUpdates) {
                         NSData *pixels = fb[@"pixels"];
                         NSUInteger width = [fb[@"width"] unsignedIntegerValue];
@@ -491,14 +492,14 @@
                         NSString *name = fb[@"modelName"];
 
                         if (pixels && pixels.length > 0 && width > 0 && height > 0) {
-                            [strongSelf->_previewView setRenderedPixels:pixels
-                                                               forModel:name
-                                                                  width:width
-                                                                 height:height];
+                            [preview setRenderedPixels:pixels
+                                              forModel:name
+                                                 width:width
+                                                height:height];
                         }
                     }
 
-                    [strongSelf->_previewView updatePreviewForTime:timeMS];
+                    [preview updatePreviewForTime:timeMS];
                 }
 
                 strongSelf.renderInProgress = NO;

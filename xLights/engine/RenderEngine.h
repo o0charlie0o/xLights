@@ -354,15 +354,28 @@ private:
         int bufferWidth = 0;
         int bufferHeight = 0;
         std::vector<std::pair<int,int>> nodeBufCoords; // (bufX, bufY) per node
+        // Color order offsets within each node's channels.
+        // FSEQ stores data in the controller's native color order (e.g. GRB for WS2812B).
+        // These offsets map back to RGB for display.
+        uint8_t rOffset = 0;
+        uint8_t gOffset = 1;
+        uint8_t bOffset = 2;
     };
     std::map<std::string, ModelChannelInfo> _modelChannelMap;
 
     // Controller name → absolute start channel (1-based, from xlights_networks.xml)
     std::map<std::string, int32_t> _controllerStartChannels;
 
+    // Pre-computed model total channel counts (for resolving >ModelName:offset chains)
+    std::map<std::string, uint32_t> _modelTotalChannels;
+
+    // Memoization cache for resolved start channels
+    std::map<std::string, uint32_t> _resolvedStartChannels;
+
     // Channel resolution helpers
     void buildModelChannelMap();
     void buildControllerChannelMap();
+    void buildModelTotalChannelsMap();
     uint32_t resolveStartChannel(const std::string& startChannelStr);
 #else
     // Owned adapter when constructed with xLightsFrame* (legacy mode)

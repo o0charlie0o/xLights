@@ -12,19 +12,26 @@
 
 @class XLMetalPreviewView;
 @class XLEngineBridge;
+@class XLCameraController;
+@class XLPlaybackController;
 
-/// Floating utility window that displays the house preview during sequence playback.
+/// House preview window with toolbar controls for playback and viewpoint switching.
 ///
 /// Shows all models in their layout positions with real-time effect colors.
 /// The preview view can be wired to XLPlaybackController.previewView to receive
 /// rendered pixel data during playback.
-@interface XLHousePreviewWindowController : NSWindowController <NSWindowDelegate>
+@protocol XLMetalPreviewDelegate;
+
+@interface XLHousePreviewWindowController : NSWindowController <NSWindowDelegate, NSToolbarDelegate, XLMetalPreviewDelegate>
 
 /// The Metal-backed preview view that renders models.
 @property (nonatomic, strong, readonly) XLMetalPreviewView *previewView;
 
 /// Engine bridge for querying model data.
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
+
+/// Playback controller for transport controls (play/pause/stop).
+@property (nonatomic, weak) XLPlaybackController *playbackController;
 
 /// Initialize with an engine bridge.
 - (instancetype)initWithEngineBridge:(XLEngineBridge *)engineBridge;

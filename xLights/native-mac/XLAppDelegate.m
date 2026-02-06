@@ -185,8 +185,13 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)togglePreview:(id)sender {
-    // Find the main window controller and forward to its sequencer view controller.
-    // This acts as a responder chain fallback when no view has first responder status.
+    // Responder chain fallback — use the stored sequencer VC reference directly.
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) {
+        [vc toggleHousePreview];
+        return;
+    }
+    // Legacy path: find XLMainWindowController if the SwiftUI window isn't active.
     for (NSWindow *window in [NSApp windows]) {
         NSWindowController *wc = window.windowController;
         if ([wc isKindOfClass:[XLMainWindowController class]]) {
@@ -410,6 +415,7 @@ void XLSetCommandPaletteVisible(bool visible) {
 
             if (success) {
                 NSLog(@"XLAppDelegate: Sequence loaded successfully");
+                [self addRecentSequence:sequencePath];
                 // Notify SwiftUI to refresh
                 [swiftHelper notifySequenceDataChanged];
             } else {
@@ -423,6 +429,25 @@ void XLSetCommandPaletteVisible(bool visible) {
             }
         }
     }];
+}
+
+#pragma mark - Recent Sequences
+
+- (void)addRecentSequence:(NSString *)path {
+    if (!path || path.length == 0) return;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *recents = [[defaults arrayForKey:@"RecentSequences"] mutableCopy] ?: [NSMutableArray new];
+
+    [recents removeObject:path];
+    [recents insertObject:path atIndex:0];
+
+    if (recents.count > 10) {
+        [recents removeObjectsInRange:NSMakeRange(10, recents.count - 10)];
+    }
+
+    [defaults setObject:recents forKey:@"RecentSequences"];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"XLRecentSequencesDidChange" object:nil];
 }
 
 @end

@@ -19,6 +19,31 @@
 /// Maximum length of effect type name stored in XLEffectRenderInfo
 #define XL_EFFECT_TYPE_NAME_MAX 32
 
+/// Maximum length of timing mark label stored in XLEffectRenderInfo
+#define XL_LABEL_MAX 128
+
+/// Number of distinct timing track colors in the shared palette.
+#define XL_TIMING_COLOR_COUNT 8
+
+/// Shared timing track color palette — single source of truth for row headers,
+/// tick marks, and grid extension lines. Returns RGB components in [0,1].
+static inline void XLTimingTrackColor(NSInteger colorIndex, CGFloat *r, CGFloat *g, CGFloat *b) {
+    static const CGFloat kPalette[XL_TIMING_COLOR_COUNT][3] = {
+        { 1.0,  0.25, 0.25 },  // 0: Red
+        { 0.2,  1.0,  0.2  },  // 1: Neon green
+        { 1.0,  0.95, 0.15 },  // 2: Yellow
+        { 0.2,  0.9,  1.0  },  // 3: Cyan
+        { 1.0,  0.5,  0.1  },  // 4: Orange
+        { 0.7,  0.4,  1.0  },  // 5: Purple
+        { 1.0,  0.45, 0.7  },  // 6: Hot pink
+        { 0.4,  1.0,  0.7  },  // 7: Mint
+    };
+    NSUInteger idx = (NSUInteger)colorIndex % XL_TIMING_COLOR_COUNT;
+    *r = kPalette[idx][0];
+    *g = kPalette[idx][1];
+    *b = kPalette[idx][2];
+}
+
 /// Describes a single effect block for rendering.
 /// IMPORTANT: This struct must NOT contain ObjC object pointers (NSColor *, NSString *, etc.)
 /// because it is stored in NSValue via valueWithBytes:objCType: which bypasses ARC.
@@ -29,11 +54,18 @@ typedef struct {
     NSInteger row;
     NSInteger layer;
     NSInteger effectIndex;
+    NSInteger effectId;       // Real effect ID from NativeEffectProvider (for selection/inspector)
     uint32_t colorARGB;       // 0 means use palette color from effectIndex
     char effectTypeName[XL_EFFECT_TYPE_NAME_MAX];  // Effect type name for icon display
     BOOL selected;
     BOOL locked;
     BOOL renderDisabled;
+    BOOL isTimingMark;        // YES for timing track marks (rendered as vertical ticks, not boxes)
+    NSInteger timingTrackLayerCount; // Number of layers in parent timing track (1=plain timing, 3=lyric)
+    NSInteger timingColorIndex;      // Sequential color index for timing tracks (0, 1, 2...)
+    char label[XL_LABEL_MAX]; // Timing mark label text (phrases, words, phonemes)
+    CGFloat fadeInMS;             // Fade in duration in milliseconds (0 = no fade)
+    CGFloat fadeOutMS;            // Fade out duration in milliseconds (0 = no fade)
 } XLEffectRenderInfo;
 
 /// Manages Metal rendering for the effects grid.
@@ -69,6 +101,7 @@ typedef struct {
  playbackPositionMS:(CGFloat)playbackPositionMS
    timingMarkValues:(const CGFloat *)timingMarkValues
     timingMarkCount:(NSUInteger)timingMarkCount
+activeTimingColorIndex:(NSInteger)activeTimingColorIndex
       dropIndicator:(BOOL)showDropIndicator
             dropRow:(NSInteger)dropRow
         dropStartMS:(CGFloat)dropStartMS

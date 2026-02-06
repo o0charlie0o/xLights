@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLRowHeadingsView.h"
+#import "XLEffectsGridRenderer.h"
 #import <QuartzCore/QuartzCore.h>
 
 static const CGFloat kDisclosureSize = 10.0;
@@ -27,6 +28,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 @property (nonatomic, assign) BOOL isSelected;
 @property (nonatomic, assign) XLElementType elementType;
 @property (nonatomic, assign) NSInteger indentLevel;
+@property (nonatomic, assign) NSInteger timingColorIndex;
 @property (nonatomic, copy) NSString *name;
 @end
 
@@ -189,6 +191,9 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
             cell.expandable = [_dataSource rowHeadings:self isExpandableAtRow:row];
             cell.expanded = [_dataSource rowHeadings:self isExpandedAtRow:row];
             cell.indentLevel = [_dataSource rowHeadings:self indentLevelForRow:row];
+            if ([_dataSource respondsToSelector:@selector(rowHeadings:timingColorIndexForRow:)]) {
+                cell.timingColorIndex = [_dataSource rowHeadings:self timingColorIndexForRow:row];
+            }
         } @catch (NSException *exception) {
             NSLog(@"XLRowHeadingsView: Exception getting data for row %ld: %@ - %@",
                   (long)row, exception.name, exception.reason);
@@ -303,9 +308,14 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     CGFloat w = bounds.size.width;
     CGFloat h = bounds.size.height;
 
-    // Alternating row background
+    // Row background — timing tracks always use their track color (brighter when selected)
     BOOL isEvenRow = (cell.row % 2 == 0);
-    if (cell.isSelected) {
+    if (cell.elementType == XLElementTypeTiming) {
+        CGFloat cr, cg, cb;
+        XLTimingTrackColor(cell.timingColorIndex, &cr, &cg, &cb);
+        CGFloat alpha = cell.isSelected ? 0.7 : 0.45;
+        CGContextSetRGBFillColor(ctx, cr, cg, cb, alpha);
+    } else if (cell.isSelected) {
         CGContextSetRGBFillColor(ctx, 0.22, 0.36, 0.55, 1.0);
     } else if (isEvenRow) {
         CGContextSetRGBFillColor(ctx, 0.15, 0.15, 0.15, 1.0);

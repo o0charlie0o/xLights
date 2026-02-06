@@ -209,9 +209,9 @@ static const float kDefaultMaxElevation = M_PI_2 - 0.01f;
     float dist;
     if (_perspective) {
         dist = (maxExtent * 0.5f) / tanf(_fieldOfView * 0.5f);
-        dist *= 1.5f; // padding
+        dist *= 0.85f; // tight framing
     } else {
-        dist = maxExtent * 2.0f;
+        dist = maxExtent * 1.5f;
     }
 
     [self animateToAzimuth:_azimuth
@@ -235,6 +235,72 @@ static const float kDefaultMaxElevation = M_PI_2 - 0.01f;
                   distance:_distance
                     target:_target
                   duration:0.3];
+}
+
+- (void)setLeftView {
+    [self animateToAzimuth:M_PI_2
+                 elevation:0.0f
+                  distance:_distance
+                    target:_target
+                  duration:0.3];
+}
+
+- (void)setRightView {
+    [self animateToAzimuth:-M_PI_2
+                 elevation:0.0f
+                  distance:_distance
+                    target:_target
+                  duration:0.3];
+}
+
+- (void)setBackView {
+    [self animateToAzimuth:M_PI
+                 elevation:0.0f
+                  distance:_distance
+                    target:_target
+                  duration:0.3];
+}
+
+#pragma mark - Persistence
+
+static NSString * const kCameraAzimuth    = @"XLHousePreviewCamera.azimuth";
+static NSString * const kCameraElevation  = @"XLHousePreviewCamera.elevation";
+static NSString * const kCameraDistance   = @"XLHousePreviewCamera.distance";
+static NSString * const kCameraTargetX    = @"XLHousePreviewCamera.targetX";
+static NSString * const kCameraTargetY    = @"XLHousePreviewCamera.targetY";
+static NSString * const kCameraTargetZ    = @"XLHousePreviewCamera.targetZ";
+static NSString * const kCameraSaved      = @"XLHousePreviewCamera.saved";
+
+- (void)saveCameraState {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setFloat:_azimuth forKey:kCameraAzimuth];
+    [defaults setFloat:_elevation forKey:kCameraElevation];
+    [defaults setFloat:_distance forKey:kCameraDistance];
+    [defaults setFloat:_target.x forKey:kCameraTargetX];
+    [defaults setFloat:_target.y forKey:kCameraTargetY];
+    [defaults setFloat:_target.z forKey:kCameraTargetZ];
+    [defaults setBool:YES forKey:kCameraSaved];
+}
+
+- (BOOL)restoreCameraState {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if (![defaults boolForKey:kCameraSaved]) {
+        return NO;
+    }
+
+    _azimuth = [defaults floatForKey:kCameraAzimuth];
+    _elevation = [defaults floatForKey:kCameraElevation];
+    _distance = [defaults floatForKey:kCameraDistance];
+    _target = (simd_float3){
+        [defaults floatForKey:kCameraTargetX],
+        [defaults floatForKey:kCameraTargetY],
+        [defaults floatForKey:kCameraTargetZ]
+    };
+
+    _elevation = fmaxf(_minElevation, fminf(_maxElevation, _elevation));
+    _distance = fmaxf(_minDistance, fminf(_maxDistance, _distance));
+
+    return YES;
 }
 
 #pragma mark - Matrix Utilities

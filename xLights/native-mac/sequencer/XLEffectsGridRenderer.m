@@ -55,6 +55,7 @@ static const NSUInteger kGridLineBufferSize = kMaxGridLineVertices * sizeof(Simp
 static const NSUInteger kEffectBlockBufferSize = kMaxEffectVertices * sizeof(RoundedRectVertex);
 static const NSUInteger kOutlineBufferSize = 4096 * sizeof(RoundedRectVertex);
 static const NSUInteger kIconBufferSize = kMaxIconVertices * sizeof(TexturedVertex);
+static const NSUInteger kLabelBufferSize = 6 * sizeof(TexturedVertex);  // One full-screen quad
 
 // Triple-buffering to prevent CPU/GPU race conditions during scrolling
 static const NSInteger kMaxInflightFrames = 3;
@@ -71,6 +72,9 @@ typedef struct {
     CGFloat sequenceLengthMS;
     NSInteger selectedEffectID;
     CGFloat playbackPositionMS;
+    NSInteger timingRowCount;  // Number of timing track rows at the top of the grid
+    NSInteger activeTimingColorIndex; // Color index of the active timing track (-1 if none)
+    CGFloat contentsScale;     // Backing scale factor (1.0 or 2.0 for retina)
 } XLGridFrameParams;
 
 @interface XLEffectsGridRenderer () {
@@ -80,9 +84,13 @@ typedef struct {
     id<MTLBuffer> _effectBlockBuffers[kMaxInflightFrames];
     id<MTLBuffer> _outlineBuffers[kMaxInflightFrames];
     id<MTLBuffer> _iconBuffers[kMaxInflightFrames];
+    id<MTLBuffer> _labelBuffers[kMaxInflightFrames];
     NSInteger _currentBufferIndex;
     dispatch_semaphore_t _frameSemaphore;
     NSInteger _nextIconIndex;
+    id<MTLTexture> _labelTexture;
+    NSUInteger _labelTextureWidth;
+    NSUInteger _labelTextureHeight;
 }
 
 @property (nonatomic, strong) id<MTLDevice> device;
@@ -181,6 +189,10 @@ typedef struct {
         _iconBuffers[i] = [_device newBufferWithLength:kIconBufferSize
                                                options:MTLResourceStorageModeShared];
         [_iconBuffers[i] setLabel:[NSString stringWithFormat:@"IconBuffer_%ld", (long)i]];
+
+        _labelBuffers[i] = [_device newBufferWithLength:kLabelBufferSize
+                                                options:MTLResourceStorageModeShared];
+        [_labelBuffers[i] setLabel:[NSString stringWithFormat:@"LabelBuffer_%ld", (long)i]];
     }
 
     // Playback indicator buffer (6 vertices for 2 triangles) - single buffered, small data
@@ -364,7 +376,7 @@ typedef struct {
         vertexDesc.attributes[0].offset = 0;
         vertexDesc.attributes[0].bufferIndex = 0;
         vertexDesc.attributes[1].format = MTLVertexFormatFloat4;
-        vertexDesc.attributes[1].offset = sizeof(simd_float2);
+        vertexDesc.attributes[1].offset = offsetof(SimpleVertex, color);
         vertexDesc.attributes[1].bufferIndex = 0;
         vertexDesc.layouts[0].stride = sizeof(SimpleVertex);
 
@@ -487,6 +499,7 @@ typedef struct {
  playbackPositionMS:(CGFloat)playbackPositionMS
    timingMarkValues:(const CGFloat *)timingMarkValues
     timingMarkCount:(NSUInteger)timingMarkCount
+activeTimingColorIndex:(NSInteger)activeTimingColorIndex
       dropIndicator:(BOOL)showDropIndicator
             dropRow:(NSInteger)dropRow
         dropStartMS:(CGFloat)dropStartMS
@@ -512,6 +525,21 @@ typedef struct {
 
     // All per-frame state lives on the stack — no ivars, no heap pointers
     // that could become stale due to concurrent mutation.
+    // Count timing rows from effect data (timing rows are sorted to top)
+    NSInteger timingRowCount = 0;
+    if (effects && effectCount > 0) {
+        BOOL seenRows[512];
+        memset(seenRows, 0, sizeof(seenRows));
+        for (NSUInteger i = 0; i < effectCount; i++) {
+            if (effects[i].isTimingMark && effects[i].row >= 0 && effects[i].row < 512) {
+                if (!seenRows[effects[i].row]) {
+                    seenRows[effects[i].row] = YES;
+                    timingRowCount++;
+                }
+            }
+        }
+    }
+
     XLGridFrameParams fp = {
         .viewSize = viewSize,
         .scrollOffset = scrollOffset,
@@ -521,6 +549,9 @@ typedef struct {
         .sequenceLengthMS = sequenceLengthMS,
         .selectedEffectID = selectedEffectID,
         .playbackPositionMS = playbackPositionMS,
+        .timingRowCount = timingRowCount,
+        .activeTimingColorIndex = activeTimingColorIndex,
+        .contentsScale = layer.contentsScale,
     };
 
     MTLRenderPassDescriptor *passDesc = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -552,6 +583,11 @@ typedef struct {
     [self drawGridLinesWithEncoder:encoder uniforms:uniforms params:fp
                        bufferIndex:bufferIndex
                   timingMarkValues:timingMarkValues timingMarkCount:timingMarkCount];
+    [self drawTimingTracksWithEncoder:encoder uniforms:uniforms params:fp
+                              effects:effects effectCount:effectCount];
+    [self drawTimingLabelsWithEncoder:encoder uniforms:uniforms params:fp
+                          bufferIndex:bufferIndex
+                              effects:effects effectCount:effectCount];
     [self drawEffectBlocksWithEncoder:encoder uniforms:uniforms params:fp
                           bufferIndex:bufferIndex
                               effects:effects effectCount:effectCount];
@@ -659,17 +695,27 @@ typedef struct {
         vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, viewSize.height), lineColor };
     }
 
-    // Timing mark lines (from active timing track)
-    // Uses a plain C array — no ObjC message sends, no ARC, no isa dereferences.
+    // Timing mark lines (from active timing track) — extend below timing rows
+    // to provide snap-to visual across the effects area.
     if (timingMarkValues && timingMarkCount > 0) {
-        simd_float4 timingColor = simd_make_float4(0.4, 0.6, 0.4, 0.6);
+        // Use active timing track's color from the shared palette
+        simd_float4 timingColor;
+        if (fp.activeTimingColorIndex >= 0) {
+            CGFloat cr, cg, cb;
+            XLTimingTrackColor(fp.activeTimingColorIndex, &cr, &cg, &cb);
+            timingColor = simd_make_float4(cr, cg, cb, 1.0);
+        } else {
+            timingColor = simd_make_float4(0.25, 0.25, 0.25, 0.3);
+        }
+        // Start grid lines below timing track rows (they're always at the top)
+        CGFloat timingGridTop = fp.timingRowCount * rowHeight - scrollOffset.y;
         for (NSUInteger mi = 0; mi < timingMarkCount; mi++) {
             CGFloat t = timingMarkValues[mi];
             CGFloat x = t * zoomLevel - scrollOffset.x;
             if (x < -1 || x > viewSize.width + 1) continue;
             if (vertexCount + 2 > maxVertices) break;
 
-            vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, 0), timingColor };
+            vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, timingGridTop), timingColor };
             vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(x, viewSize.height), timingColor };
         }
     }
@@ -681,6 +727,268 @@ typedef struct {
     [encoder setVertexBuffer:gridLineBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexCount];
+}
+
+#pragma mark - Timing Tracks
+
+- (void)drawTimingTracksWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                           uniforms:(EffectsGridUniforms)uniforms
+                             params:(XLGridFrameParams)fp
+                            effects:(const XLEffectRenderInfo *)effects
+                        effectCount:(NSUInteger)effectCount
+{
+    if (!effects || effectCount == 0) return;
+
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+
+    CGFloat msPerPixel = 1.0 / zoomLevel;
+    CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
+    CGFloat visibleEndMS = visibleStartMS + viewSize.width * msPerPixel;
+    CGFloat visibleStartRow = scrollOffset.y / rowHeight;
+    CGFloat visibleEndRow = (scrollOffset.y + viewSize.height) / rowHeight;
+
+    // Timing tracks need far fewer vertices than the effects grid —
+    // a horizontal line per row + 2 vertices per tick boundary.
+    static const NSUInteger kMaxTimingVertices = 2048;
+    SimpleVertex vertices[kMaxTimingVertices];
+    NSUInteger maxVertices = kMaxTimingVertices;
+    NSUInteger vertexCount = 0;
+
+    // Collect which rows are timing tracks (for horizontal center lines)
+    // and collect all tick positions
+    BOOL rowSeen[512];
+    memset(rowSeen, 0, sizeof(rowSeen));
+
+    for (NSUInteger ei = 0; ei < effectCount; ei++) {
+        XLEffectRenderInfo info = effects[ei];
+        if (!info.isTimingMark) continue;
+
+        // Row visibility culling
+        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
+            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        CGFloat cr, cg, cb;
+        XLTimingTrackColor(info.timingColorIndex, &cr, &cg, &cb);
+        simd_float4 tickColor = simd_make_float4(cr, cg, cb, 0.9);
+        simd_float4 lineColor = simd_make_float4(cr * 0.6, cg * 0.6, cb * 0.6, 0.5);
+
+        CGFloat yTop = info.row * rowHeight - scrollOffset.y;
+        CGFloat yBot = yTop + rowHeight;
+        CGFloat yMid = yTop + rowHeight * 0.5;
+
+        // Draw horizontal center line once per row
+        if (info.row >= 0 && info.row < 512 && !rowSeen[info.row]) {
+            rowSeen[info.row] = YES;
+            if (vertexCount + 2 <= maxVertices) {
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(0, yMid), lineColor };
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(viewSize.width, yMid), lineColor };
+            }
+        }
+
+        // Vertical tick at start time
+        CGFloat xStart = info.startTimeMS * zoomLevel - scrollOffset.x;
+        if (xStart >= -1 && xStart <= viewSize.width + 1) {
+            if (vertexCount + 2 <= maxVertices) {
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(xStart, yTop + 2), tickColor };
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(xStart, yBot - 2), tickColor };
+            }
+        }
+
+        // Vertical tick at end time
+        CGFloat xEnd = info.endTimeMS * zoomLevel - scrollOffset.x;
+        if (xEnd >= -1 && xEnd <= viewSize.width + 1) {
+            if (vertexCount + 2 <= maxVertices) {
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(xEnd, yTop + 2), tickColor };
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(xEnd, yBot - 2), tickColor };
+            }
+        }
+    }
+
+    if (vertexCount == 0) return;
+
+    // Upload and draw using the line pipeline
+    id<MTLBuffer> buffer = [_device newBufferWithBytes:vertices
+                                               length:vertexCount * sizeof(SimpleVertex)
+                                              options:MTLResourceStorageModeShared];
+    [encoder setRenderPipelineState:_linePipeline];
+    [encoder setVertexBuffer:buffer offset:0 atIndex:0];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexCount];
+}
+
+#pragma mark - Timing Labels
+
+- (void)drawTimingLabelsWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                           uniforms:(EffectsGridUniforms)uniforms
+                             params:(XLGridFrameParams)fp
+                        bufferIndex:(NSInteger)bufferIndex
+                            effects:(const XLEffectRenderInfo *)effects
+                        effectCount:(NSUInteger)effectCount
+{
+    // Labels are now drawn via CALayer overlay in XLEffectsGridView -drawTimingLabels
+    return;
+    if (!effects || effectCount == 0 || !_iconPipeline || !_iconSampler) return;
+
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+
+    CGFloat msPerPixel = 1.0 / zoomLevel;
+    CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
+    CGFloat visibleEndMS = visibleStartMS + viewSize.width * msPerPixel;
+    CGFloat visibleStartRow = scrollOffset.y / rowHeight;
+    CGFloat visibleEndRow = (scrollOffset.y + viewSize.height) / rowHeight;
+
+    // Collect visible timing marks with non-empty labels
+    typedef struct {
+        CGFloat x1, x2, yMid;
+        NSInteger layer;
+        const char *label;
+    } LabelEntry;
+
+    static const NSUInteger kMaxLabels = 512;
+    LabelEntry labels[kMaxLabels];
+    NSUInteger labelCount = 0;
+
+    for (NSUInteger ei = 0; ei < effectCount && labelCount < kMaxLabels; ei++) {
+        XLEffectRenderInfo info = effects[ei];
+        if (!info.isTimingMark || info.label[0] == '\0') continue;
+
+        if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
+            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        CGFloat x1 = info.startTimeMS * zoomLevel - scrollOffset.x;
+        CGFloat x2 = info.endTimeMS * zoomLevel - scrollOffset.x;
+        if (x2 - x1 < 8.0) continue;  // Too narrow for text
+
+        CGFloat yMid = info.row * rowHeight - scrollOffset.y + rowHeight * 0.5;
+
+        labels[labelCount++] = (LabelEntry){ x1, x2, yMid, info.layer, info.label };
+    }
+
+    if (labelCount == 0) return;
+
+    // Create bitmap context matching viewport size
+    NSUInteger texW = (NSUInteger)viewSize.width;
+    NSUInteger texH = (NSUInteger)viewSize.height;
+    if (texW == 0 || texH == 0) return;
+
+    NSUInteger bytesPerRow = texW * 4;
+    NSMutableData *bitmapData = [NSMutableData dataWithLength:texH * bytesPerRow];
+    unsigned char *pixels = (unsigned char *)bitmapData.mutableBytes;
+    memset(pixels, 0, bitmapData.length);
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(pixels, texW, texH, 8, bytesPerRow,
+                                              colorSpace, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(colorSpace);
+    if (!ctx) return;
+
+    // Flip for correct text orientation
+    CGContextTranslateCTM(ctx, 0, texH);
+    CGContextScaleCTM(ctx, 1.0, -1.0);
+
+    NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:gc];
+
+    // Scale font size for retina — the bitmap is at pixel resolution
+    CGFloat scale = fp.contentsScale;
+    if (scale < 1.0) scale = 2.0;
+    CGFloat fontSize = 9.0 * scale;
+    NSFont *labelFont = [NSFont systemFontOfSize:fontSize weight:NSFontWeightMedium];
+    NSDictionary *textAttrs = @{
+        NSFontAttributeName: labelFont,
+        NSForegroundColorAttributeName: [NSColor whiteColor],
+    };
+
+    for (NSUInteger i = 0; i < labelCount; i++) {
+        LabelEntry le = labels[i];
+        CGFloat padding = 2.0 * scale;
+        CGFloat availW = le.x2 - le.x1 - padding * 2;
+        if (availW < 4.0 * scale) continue;
+
+        NSString *text = [NSString stringWithUTF8String:le.label];
+        if (!text || text.length == 0) continue;
+
+        NSSize textSize = [text sizeWithAttributes:textAttrs];
+
+        // Background color by layer index
+        // Layer 0 = phrases (green), layer 1 = words (cyan), layer 2 = phonemes (pink/magenta)
+        NSColor *bgColor;
+        if (le.layer == 0) {
+            bgColor = [NSColor colorWithCalibratedRed:0.15 green:0.4 blue:0.15 alpha:0.9];
+        } else if (le.layer == 1) {
+            bgColor = [NSColor colorWithCalibratedRed:0.1 green:0.4 blue:0.5 alpha:0.9];
+        } else if (le.layer == 2) {
+            bgColor = [NSColor colorWithCalibratedRed:0.5 green:0.15 blue:0.45 alpha:0.9];
+        } else {
+            bgColor = [NSColor colorWithCalibratedRed:0.35 green:0.35 blue:0.35 alpha:0.9];
+        }
+
+        // Fill the entire cell area between tick marks
+        CGFloat bgX = le.x1 + 1.0;
+        CGFloat bgW = le.x2 - le.x1 - 2.0;
+        CGFloat bgH = rowHeight - 2.0;
+        CGFloat bgY = le.yMid - bgH * 0.5;
+        NSRect bgRect = NSMakeRect(bgX, bgY, bgW, bgH);
+        CGFloat cornerR = 3.0 * scale;
+        NSBezierPath *bgPath = [NSBezierPath bezierPathWithRoundedRect:bgRect xRadius:cornerR yRadius:cornerR];
+        [bgColor setFill];
+        [bgPath fill];
+
+        // Draw text centered in the cell (clipped to available width)
+        CGFloat textW = MIN(textSize.width, bgW - padding * 2);
+        CGFloat textX = bgX + (bgW - textW) * 0.5;
+        CGFloat textY = le.yMid - textSize.height * 0.5;
+        NSRect textRect = NSMakeRect(textX, textY, textW, textSize.height);
+        [text drawWithRect:textRect options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine
+                attributes:textAttrs context:nil];
+    }
+
+    [NSGraphicsContext restoreGraphicsState];
+    CGContextRelease(ctx);
+
+    // Create/update label texture
+    if (!_labelTexture || _labelTextureWidth != texW || _labelTextureHeight != texH) {
+        MTLTextureDescriptor *texDesc = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:texW height:texH mipmapped:NO];
+        texDesc.usage = MTLTextureUsageShaderRead;
+        _labelTexture = [_device newTextureWithDescriptor:texDesc];
+        [_labelTexture setLabel:@"TimingLabels"];
+        _labelTextureWidth = texW;
+        _labelTextureHeight = texH;
+    }
+
+    MTLRegion region = MTLRegionMake2D(0, 0, texW, texH);
+    [_labelTexture replaceRegion:region mipmapLevel:0 withBytes:pixels bytesPerRow:bytesPerRow];
+
+    // Draw full-screen textured quad
+    id<MTLBuffer> labelBuffer = _labelBuffers[bufferIndex];
+    if (!labelBuffer) return;
+    TexturedVertex *verts = (TexturedVertex *)labelBuffer.contents;
+
+    CGFloat w = viewSize.width;
+    CGFloat h = viewSize.height;
+    verts[0] = (TexturedVertex){ simd_make_float2(0, 0), simd_make_float2(0, 0) };
+    verts[1] = (TexturedVertex){ simd_make_float2(w, 0), simd_make_float2(1, 0) };
+    verts[2] = (TexturedVertex){ simd_make_float2(0, h), simd_make_float2(0, 1) };
+    verts[3] = (TexturedVertex){ simd_make_float2(w, 0), simd_make_float2(1, 0) };
+    verts[4] = (TexturedVertex){ simd_make_float2(w, h), simd_make_float2(1, 1) };
+    verts[5] = (TexturedVertex){ simd_make_float2(0, h), simd_make_float2(0, 1) };
+
+    [encoder setRenderPipelineState:_iconPipeline];
+    [encoder setVertexBuffer:labelBuffer offset:0 atIndex:0];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+    [encoder setFragmentTexture:_labelTexture atIndex:0];
+    [encoder setFragmentSamplerState:_iconSampler atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
 }
 
 #pragma mark - Effect Blocks
@@ -728,6 +1036,12 @@ typedef struct {
         CGFloat y1 = info.row * rowHeight - scrollOffset.y + kEffectBlockInset;
         CGFloat y2 = (info.row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
 
+        // Inset timing mark blocks so tick lines are visible between them
+        if (info.isTimingMark) {
+            x1 += 1.0;
+            x2 -= 1.0;
+        }
+
         // Skip if too narrow to draw
         if (x2 - x1 < 2.0) continue;
 
@@ -735,7 +1049,21 @@ typedef struct {
         if (blockVertexCount + 6 > maxBlockVertices) break;
 
         simd_float4 color;
-        if (info.colorARGB != 0) {
+        if (info.isTimingMark) {
+            // Only draw colored blocks for lyric tracks (multi-layer timing tracks)
+            // Plain timing tracks (1 layer) keep their original tick-only appearance
+            if (info.timingTrackLayerCount <= 1 || info.label[0] == '\0') continue;
+            // Lyric track colors by layer: phrases=emerald, words=electric blue, phonemes=magenta
+            if (info.layer == 0) {
+                color = simd_make_float4(0.1, 0.55, 0.3, 0.85);
+            } else if (info.layer == 1) {
+                color = simd_make_float4(0.15, 0.4, 0.75, 0.85);
+            } else if (info.layer == 2) {
+                color = simd_make_float4(0.7, 0.15, 0.55, 0.85);
+            } else {
+                color = simd_make_float4(0.4, 0.4, 0.4, 0.85);
+            }
+        } else if (info.colorARGB != 0) {
             float a = ((info.colorARGB >> 24) & 0xFF) / 255.0f;
             float r = ((info.colorARGB >> 16) & 0xFF) / 255.0f;
             float g = ((info.colorARGB >>  8) & 0xFF) / 255.0f;
@@ -801,6 +1129,67 @@ typedef struct {
         [encoder setVertexBuffer:effectBlockBuffer offset:0 atIndex:0];
         [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:blockVertexCount];
+    }
+
+    // Draw fade in/out ramp overlays on top of effect blocks.
+    // DAW-style: dark semi-transparent triangles at left (fade in) and right (fade out).
+    {
+        static const NSUInteger kMaxFadeVertices = 4096;
+        SimpleVertex fadeVertices[kMaxFadeVertices];
+        NSUInteger fadeVertexCount = 0;
+
+        simd_float4 fadeColor = simd_make_float4(0.0, 0.0, 0.0, 0.4);
+
+        for (NSUInteger ei = 0; ei < effectCount; ei++) {
+            XLEffectRenderInfo info = effects[ei];
+            if (info.isTimingMark) continue;
+            if (info.fadeInMS <= 0 && info.fadeOutMS <= 0) continue;
+
+            // Frustum culling
+            if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+            if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
+                info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+            CGFloat x1 = info.startTimeMS * zoomLevel - scrollOffset.x;
+            CGFloat x2 = info.endTimeMS * zoomLevel - scrollOffset.x;
+            CGFloat y1 = info.row * rowHeight - scrollOffset.y + kEffectBlockInset;
+            CGFloat y2 = (info.row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
+            CGFloat blockWidth = x2 - x1;
+            if (blockWidth < 2.0) continue;
+
+            CGFloat durationMS = info.endTimeMS - info.startTimeMS;
+            if (durationMS <= 0) continue;
+
+            // Fade in: triangle from bottom-left to top at fade-in end
+            if (info.fadeInMS > 0 && fadeVertexCount + 3 <= kMaxFadeVertices) {
+                CGFloat fadeFrac = MIN(info.fadeInMS / durationMS, 1.0);
+                CGFloat fadeEndX = x1 + blockWidth * fadeFrac;
+                // Triangle: bottom-left, top-left, top at fade end
+                fadeVertices[fadeVertexCount++] = (SimpleVertex){ simd_make_float2(x1, y2), fadeColor };
+                fadeVertices[fadeVertexCount++] = (SimpleVertex){ simd_make_float2(x1, y1), fadeColor };
+                fadeVertices[fadeVertexCount++] = (SimpleVertex){ simd_make_float2(fadeEndX, y1), fadeColor };
+            }
+
+            // Fade out: triangle from top at fade-out start to bottom-right
+            if (info.fadeOutMS > 0 && fadeVertexCount + 3 <= kMaxFadeVertices) {
+                CGFloat fadeFrac = MIN(info.fadeOutMS / durationMS, 1.0);
+                CGFloat fadeStartX = x2 - blockWidth * fadeFrac;
+                // Triangle: top at fade start, top-right, bottom-right
+                fadeVertices[fadeVertexCount++] = (SimpleVertex){ simd_make_float2(fadeStartX, y1), fadeColor };
+                fadeVertices[fadeVertexCount++] = (SimpleVertex){ simd_make_float2(x2, y1), fadeColor };
+                fadeVertices[fadeVertexCount++] = (SimpleVertex){ simd_make_float2(x2, y2), fadeColor };
+            }
+        }
+
+        if (fadeVertexCount > 0) {
+            id<MTLBuffer> fadeBuffer = [_device newBufferWithBytes:fadeVertices
+                                                           length:fadeVertexCount * sizeof(SimpleVertex)
+                                                          options:MTLResourceStorageModeShared];
+            [encoder setRenderPipelineState:_linePipeline];
+            [encoder setVertexBuffer:fadeBuffer offset:0 atIndex:0];
+            [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:fadeVertexCount];
+        }
     }
 
     // Draw selection outlines on top using pre-allocated triple-buffered buffer
@@ -1275,6 +1664,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
     for (NSUInteger ei = 0; ei < effectCount; ei++) {
         XLEffectRenderInfo info = effects[ei];
+
+        // No icons for timing marks
+        if (info.isTimingMark) continue;
 
         // Frustum culling
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;

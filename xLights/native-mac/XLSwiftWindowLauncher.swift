@@ -163,6 +163,10 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
     /// Shared instance for ObjC access
     @objc public static let shared = XLSwiftUIWindowHelper()
 
+    /// Weak reference to the sequencer view controller for direct access
+    /// (avoids responder chain issues when focus is outside the sequencer)
+    @objc public weak var sequencerViewController: XLSequencerViewController?
+
     private override init() {
         super.init()
     }
@@ -213,10 +217,11 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
     /// Toggle the house preview window via the sequencer view controller.
     @objc public func toggleHousePreview() {
         DispatchQueue.main.async {
-            // Send the togglePreview: action through the responder chain.
-            // XLSequencerViewController implements togglePreview: which forwards to toggleHousePreview.
-            let sel = NSSelectorFromString("togglePreview:")
-            NSApp.sendAction(sel, to: nil, from: nil)
+            // Call the sequencer VC directly instead of relying on the responder chain,
+            // which only works when focus is on a view inside the sequencer hierarchy.
+            if let vc = self.sequencerViewController {
+                vc.toggleHousePreview()
+            }
         }
     }
 }

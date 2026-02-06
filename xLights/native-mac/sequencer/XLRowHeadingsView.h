@@ -30,6 +30,8 @@ typedef NS_ENUM(NSInteger, XLElementType) {
 - (BOOL)rowHeadings:(XLRowHeadingsView *)view isExpandableAtRow:(NSInteger)row;
 - (BOOL)rowHeadings:(XLRowHeadingsView *)view isExpandedAtRow:(NSInteger)row;
 - (NSInteger)rowHeadings:(XLRowHeadingsView *)view indentLevelForRow:(NSInteger)row;
+@optional
+- (NSInteger)rowHeadings:(XLRowHeadingsView *)view timingColorIndexForRow:(NSInteger)row;
 @end
 
 @protocol XLRowHeadingsDelegate <NSObject>

@@ -119,4 +119,21 @@
 /// Set camera for front view
 - (void)setFrontView;
 
+/// Set camera for left view
+- (void)setLeftView;
+
+/// Set camera for right view
+- (void)setRightView;
+
+/// Set camera for back view
+- (void)setBackView;
+
+#pragma mark - Persistence
+
+/// Save current camera state to NSUserDefaults
+- (void)saveCameraState;
+
+/// Restore camera state from NSUserDefaults. Returns YES if state was restored.
+- (BOOL)restoreCameraState;
+
 @end

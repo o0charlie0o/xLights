@@ -71,14 +71,10 @@ final class EffectSelectionState {
     }
 
     private func handleEffectSelectionChange(_ notification: Notification) {
-        print("EffectSelectionState: Received selection notification")
         guard let userInfo = notification.userInfo else {
-            print("EffectSelectionState: No userInfo in notification")
             clearSelection()
             return
         }
-
-        print("EffectSelectionState: userInfo = \(userInfo)")
 
         // Extract multi-selection arrays
         let effectIds = (userInfo["selectedEffectIds"] as? [NSNumber])?.map { $0.intValue } ?? []
@@ -91,7 +87,6 @@ final class EffectSelectionState {
         // Extract primary selection
         if let effectIdNumber = userInfo["effectId"] as? NSNumber {
             let effectId = effectIdNumber.intValue
-            print("EffectSelectionState: effectId = \(effectId), total selected = \(selectedEffectIds.count)")
 
             // effectId >= 0 is valid (0 can be a valid effect ID)
             // Use -1 as sentinel for "no selection"
@@ -101,7 +96,6 @@ final class EffectSelectionState {
                 clearSelection()
             }
         } else {
-            print("EffectSelectionState: No effectId in userInfo")
             clearSelection()
         }
     }
@@ -109,7 +103,6 @@ final class EffectSelectionState {
     /// Select an effect by ID and load its data
     func selectEffect(id: Int) {
         guard let bridge = engineBridge else {
-            print("EffectSelectionState: No engine bridge available")
             clearSelection()
             return
         }
@@ -117,15 +110,9 @@ final class EffectSelectionState {
         isLoading = true
 
         // Get effect info from engine
-        guard let effectInfo = bridge.getEffect(id) as? [String: Any] else {
-            print("EffectSelectionState: Effect \(id) not found")
-            clearSelection()
-            isLoading = false
-            return
-        }
-
-        guard let effectType = effectInfo["effectType"] as? String, !effectType.isEmpty else {
-            print("EffectSelectionState: Effect \(id) has no type")
+        guard let rawResult = bridge.getEffect(id),
+              let effectInfo = rawResult as? [String: Any],
+              let effectType = effectInfo["effectType"] as? String, !effectType.isEmpty else {
             clearSelection()
             isLoading = false
             return
@@ -142,7 +129,6 @@ final class EffectSelectionState {
         }
 
         isLoading = false
-        print("EffectSelectionState: Selected effect \(id) (\(effectType)), bulk mode: \(isBulkMode)")
     }
 
     /// Clear the current selection
@@ -160,34 +146,23 @@ final class EffectSelectionState {
         guard let bridge = engineBridge,
               let effectId = selectedEffectId,
               let effectType = effectType else {
-            print("EffectSelectionState.loadParameters: missing bridge, effectId, or effectType")
             return
         }
-
-        print("EffectSelectionState.loadParameters: Getting parameters for effect type '\(effectType)'")
 
         // Get parameter definitions for this effect type
-        let rawParamDefs = bridge.getEffectParameters(effectType)
-        print("EffectSelectionState.loadParameters: getEffectParameters returned: \(String(describing: rawParamDefs))")
-
-        guard let paramDefs = rawParamDefs as? [[String: Any]] else {
-            print("EffectSelectionState.loadParameters: Could not cast to [[String: Any]]")
+        guard let paramDefs = bridge.getEffectParameters(effectType) as? [[String: Any]] else {
             return
         }
-
-        print("EffectSelectionState.loadParameters: Found \(paramDefs.count) parameter definitions")
 
         var newParams: [String: String] = [:]
         for paramDef in paramDefs {
             if let key = paramDef["key"] as? String {
                 if let value = bridge.getEffectParameter(effectId, key: key) {
                     newParams[key] = value
-                    print("EffectSelectionState.loadParameters: \(key) = \(value)")
                 }
             }
         }
         parameters = newParams
-        print("EffectSelectionState.loadParameters: Loaded \(newParams.count) parameters")
     }
 
     /// Update a parameter value for single selection or all selected effects in bulk mode
@@ -490,20 +465,38 @@ struct EffectPropertiesView: View {
             .labelsHidden()
 
         case .choice:
-            if let choices = param.choices {
+            if let choices = param.choices, !choices.isEmpty {
+                // Ensure current value is always in the list
+                let allChoices = choices.contains(currentValue) ? choices : [currentValue] + choices
                 Picker("", selection: Binding(
                     get: { currentValue },
                     set: { newValue in
                         state.setParameter(key: param.key, value: newValue)
                     }
                 )) {
-                    ForEach(choices, id: \.self) { choice in
+                    ForEach(allChoices, id: \.self) { choice in
                         Text(choice).tag(choice)
                     }
                 }
                 .labelsHidden()
                 .frame(maxWidth: 150)
+            } else {
+                // No choices available — show as text field
+                TextField("", text: Binding(
+                    get: { currentValue },
+                    set: { newValue in
+                        state.setParameter(key: param.key, value: newValue)
+                    }
+                ))
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+                .frame(maxWidth: 150)
             }
+
+        case .valueCurve, .colorCurve:
+            Text(currentValue.count > 40 ? String(currentValue.prefix(40)) + "..." : currentValue)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .help(currentValue)
 
         case .string:
             TextField("", text: Binding(
@@ -602,6 +595,8 @@ enum ParameterType: String {
     case string = "string"
     case file = "file"
     case font = "font"
+    case valueCurve = "valueCurve"
+    case colorCurve = "colorCurve"
 }
 
 // MARK: - Preview

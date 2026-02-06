@@ -28,8 +28,29 @@
 namespace xlEngine {
 
 #ifdef XLIGHTS_NATIVE
-// Native build: stub implementation
-// The native build uses NativeEffectProvider instead of the legacy adapter
+// Native build: delegates to IEffectProvider (NativeEffectProvider)
+
+#include <cstdio>
+
+// Helper to convert provider's EffectInstanceInfo to engine's EffectInfo
+static EffectInfo convertEffectInfo(const EffectInstanceInfo& src, const std::string& modelName)
+{
+    EffectInfo info;
+    info.id = static_cast<int>(src.effectId);
+    info.effectType = src.effectType;
+    info.effectIndex = src.effectTypeIndex;
+    info.modelName = modelName;
+    info.layerIndex = static_cast<int>(src.layerIndex);
+    info.startTimeMS = src.startTimeMS;
+    info.endTimeMS = src.endTimeMS;
+    info.isSelected = src.selected;
+    info.isProtected = src.protected_;
+    info.isLocked = src.locked;
+    info.isRenderDisabled = src.renderDisabled;
+    info.settings = src.settings;
+    info.palette = src.palette;
+    return info;
+}
 
 EffectEngine::EffectEngine(IEffectProvider* provider)
     : _provider(provider)
@@ -55,42 +76,397 @@ void EffectEngine::removeListener(EffectEngineListener* listener)
 }
 
 std::vector<EffectTypeInfo> EffectEngine::getEffectTypes() const {
-    if (_provider) {
-        std::vector<std::string> names = _provider->getEffectTypes();
-        std::vector<EffectTypeInfo> result;
-        result.reserve(names.size());
-        for (size_t i = 0; i < names.size(); ++i) {
-            EffectTypeInfo info;
-            info.name = names[i];
-            info.id = static_cast<int>(i);
-            result.push_back(info);
-        }
-        return result;
+    if (!_provider) return {};
+    std::vector<std::string> names = _provider->getEffectTypes();
+    std::vector<EffectTypeInfo> result;
+    result.reserve(names.size());
+    for (size_t i = 0; i < names.size(); ++i) {
+        EffectTypeInfo info;
+        info.name = names[i];
+        info.id = static_cast<int>(i);
+        result.push_back(info);
     }
-    return {};
+    return result;
 }
-bool EffectEngine::getEffectTypeInfo(const std::string& effectType, EffectTypeInfo& outInfo) const { return false; }
-std::vector<ParameterDefinition> EffectEngine::getEffectParameters(const std::string& effectType) const { return {}; }
-int EffectEngine::createEffect(const std::string& modelName, int layer, const std::string& effectType, int startTimeMS, int endTimeMS) { return -1; }
-bool EffectEngine::deleteEffect(int effectId) { return false; }
-bool EffectEngine::getEffect(int effectId, EffectInfo& outInfo) const { return false; }
-bool EffectEngine::setEffectParameter(int effectId, const std::string& key, const std::string& value) { return false; }
-std::string EffectEngine::getEffectParameter(int effectId, const std::string& key) const { return ""; }
-bool EffectEngine::setEffectSettings(int effectId, const std::string& settings) { return false; }
-std::string EffectEngine::getEffectSettings(int effectId) const { return ""; }
-bool EffectEngine::setEffectPalette(int effectId, const std::string& palette) { return false; }
-std::string EffectEngine::getEffectPalette(int effectId) const { return ""; }
-bool EffectEngine::moveEffect(int effectId, int newStartTimeMS, int newEndTimeMS) { return false; }
-std::vector<EffectInfo> EffectEngine::getEffectsForModel(const std::string& modelName) const { return {}; }
-std::vector<EffectInfo> EffectEngine::getEffectsAtTime(const std::string& modelName, int timeMS) const { return {}; }
-std::vector<EffectInfo> EffectEngine::getEffectsForLayer(const std::string& modelName, int layer) const { return {}; }
-int EffectEngine::getLayerCount(const std::string& modelName) const { return 0; }
-int EffectEngine::addLayer(const std::string& modelName) { return -1; }
-bool EffectEngine::removeLayer(const std::string& modelName, int layer) { return false; }
-bool EffectEngine::selectEffect(int effectId) { return false; }
-void EffectEngine::deselectAllEffects() {}
-std::vector<int> EffectEngine::getSelectedEffectIds() const { return {}; }
-bool EffectEngine::convertEffectType(int effectId, const std::string& newEffectType) { return false; }
+
+bool EffectEngine::getEffectTypeInfo(const std::string& effectType, EffectTypeInfo& outInfo) const {
+    if (!_provider) return false;
+    std::vector<std::string> names = _provider->getEffectTypes();
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (names[i] == effectType) {
+            outInfo.id = static_cast<int>(i);
+            outInfo.name = effectType;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<ParameterDefinition> EffectEngine::getEffectParameters(const std::string& effectType) const {
+    return buildDefaultParameters(effectType);
+}
+
+int EffectEngine::createEffect(const std::string& modelName, int layer, const std::string& effectType, int startTimeMS, int endTimeMS) {
+    if (!_provider) return -1;
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return -1;
+    EffectOperationResult result = _provider->createEffect(elemIdx, static_cast<size_t>(layer), effectType, startTimeMS, endTimeMS);
+    if (!result.success) return -1;
+    notifyEffectCreated(static_cast<int>(result.effectId), modelName, layer);
+    return static_cast<int>(result.effectId);
+}
+
+bool EffectEngine::deleteEffect(int effectId) {
+    if (!_provider) return false;
+    // Look up the effect first for notification
+    EffectInstanceInfo src;
+    std::string modelName;
+    int layerIndex = -1;
+    if (_provider->getEffect(static_cast<int64_t>(effectId), src)) {
+        ElementInfo elemInfo;
+        if (_provider->getElement(src.elementIndex, elemInfo)) {
+            modelName = elemInfo.name;
+        }
+        layerIndex = static_cast<int>(src.layerIndex);
+    }
+    EffectOperationResult result = _provider->deleteEffect(static_cast<int64_t>(effectId));
+    if (!result.success) return false;
+    notifyEffectDeleted(effectId, modelName, layerIndex);
+    return true;
+}
+
+bool EffectEngine::getEffect(int effectId, EffectInfo& outInfo) const {
+    if (!_provider) {
+        fprintf(stderr, "[EffectInspector] engine.getEffect(%d): no provider\n", effectId);
+        return false;
+    }
+    EffectInstanceInfo src;
+    bool found = _provider->getEffect(static_cast<int64_t>(effectId), src);
+    if (!found) return false;
+    // Resolve element name
+    std::string modelName;
+    ElementInfo elemInfo;
+    if (_provider->getElement(src.elementIndex, elemInfo)) {
+        modelName = elemInfo.name;
+    }
+    outInfo = convertEffectInfo(src, modelName);
+    return true;
+}
+
+bool EffectEngine::setEffectParameter(int effectId, const std::string& key, const std::string& value) {
+    if (!_provider) return false;
+    // Route C_ keys (palette colors, brightness, etc.) to the palette map
+    if (key.size() >= 2 && key[0] == 'C' && key[1] == '_') {
+        auto palette = _provider->getEffectPalette(static_cast<int64_t>(effectId));
+        palette[key] = value;
+        EffectOperationResult result = _provider->updateEffectPalette(
+            static_cast<int64_t>(effectId), palette);
+        if (!result.success) return false;
+        notifyEffectSettingChanged(effectId, key, value);
+        return true;
+    }
+    EffectOperationResult result = _provider->updateEffectSetting(static_cast<int64_t>(effectId), key, value);
+    if (!result.success) return false;
+    notifyEffectSettingChanged(effectId, key, value);
+    return true;
+}
+
+std::string EffectEngine::getEffectParameter(int effectId, const std::string& key) const {
+    if (!_provider) return "";
+    // Try settings map first
+    std::string value = _provider->getEffectSetting(static_cast<int64_t>(effectId), key);
+    if (!value.empty()) return value;
+    // Fall back to palette map (C_ keys like C_BUTTON_Palette1 are stored there)
+    auto palette = _provider->getEffectPalette(static_cast<int64_t>(effectId));
+    auto it = palette.find(key);
+    if (it != palette.end()) return it->second;
+    return "";
+}
+
+bool EffectEngine::setEffectSettings(int effectId, const std::string& settings) {
+    if (!_provider) return false;
+    // Parse the settings string into a map (comma-separated key=value pairs)
+    std::map<std::string, std::string> settingsMap;
+    std::string remaining = settings;
+    while (!remaining.empty()) {
+        size_t commaPos = remaining.find(',');
+        std::string pair = (commaPos != std::string::npos) ? remaining.substr(0, commaPos) : remaining;
+        size_t eqPos = pair.find('=');
+        if (eqPos != std::string::npos) {
+            settingsMap[pair.substr(0, eqPos)] = pair.substr(eqPos + 1);
+        }
+        if (commaPos == std::string::npos) break;
+        remaining = remaining.substr(commaPos + 1);
+    }
+    EffectOperationResult result = _provider->updateEffectSettings(static_cast<int64_t>(effectId), settingsMap);
+    return result.success;
+}
+
+std::string EffectEngine::getEffectSettings(int effectId) const {
+    if (!_provider) return "";
+    std::map<std::string, std::string> settings = _provider->getEffectSettings(static_cast<int64_t>(effectId));
+    std::string result;
+    for (const auto& kv : settings) {
+        if (!result.empty()) result += ",";
+        result += kv.first + "=" + kv.second;
+    }
+    return result;
+}
+
+bool EffectEngine::setEffectPalette(int effectId, const std::string& palette) {
+    if (!_provider) return false;
+    std::map<std::string, std::string> paletteMap;
+    std::string remaining = palette;
+    while (!remaining.empty()) {
+        size_t commaPos = remaining.find(',');
+        std::string pair = (commaPos != std::string::npos) ? remaining.substr(0, commaPos) : remaining;
+        size_t eqPos = pair.find('=');
+        if (eqPos != std::string::npos) {
+            paletteMap[pair.substr(0, eqPos)] = pair.substr(eqPos + 1);
+        }
+        if (commaPos == std::string::npos) break;
+        remaining = remaining.substr(commaPos + 1);
+    }
+    EffectOperationResult result = _provider->updateEffectPalette(static_cast<int64_t>(effectId), paletteMap);
+    return result.success;
+}
+
+std::string EffectEngine::getEffectPalette(int effectId) const {
+    if (!_provider) return "";
+    std::map<std::string, std::string> palette = _provider->getEffectPalette(static_cast<int64_t>(effectId));
+    std::string result;
+    for (const auto& kv : palette) {
+        if (!result.empty()) result += ",";
+        result += kv.first + "=" + kv.second;
+    }
+    return result;
+}
+
+bool EffectEngine::moveEffect(int effectId, int newStartTimeMS, int newEndTimeMS) {
+    if (!_provider) return false;
+    EffectOperationResult result = _provider->updateEffectTiming(static_cast<int64_t>(effectId), newStartTimeMS, newEndTimeMS);
+    if (!result.success) return false;
+    // Look up model name for notification
+    EffectInstanceInfo src;
+    std::string modelName;
+    if (_provider->getEffect(static_cast<int64_t>(effectId), src)) {
+        ElementInfo elemInfo;
+        if (_provider->getElement(src.elementIndex, elemInfo)) {
+            modelName = elemInfo.name;
+        }
+        notifyEffectMoved(effectId, modelName, static_cast<int>(src.layerIndex));
+    }
+    return true;
+}
+
+std::vector<EffectInfo> EffectEngine::getEffectsForModel(const std::string& modelName) const {
+    if (!_provider) return {};
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return {};
+    std::vector<EffectInstanceInfo> srcEffects = _provider->getAllEffects(elemIdx);
+    std::vector<EffectInfo> result;
+    result.reserve(srcEffects.size());
+    for (const auto& src : srcEffects) {
+        result.push_back(convertEffectInfo(src, modelName));
+    }
+    return result;
+}
+
+std::vector<EffectInfo> EffectEngine::getEffectsAtTime(const std::string& modelName, int timeMS) const {
+    if (!_provider) return {};
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return {};
+    size_t layerCount = _provider->getEffectLayerCount(elemIdx);
+    std::vector<EffectInfo> result;
+    for (size_t li = 0; li < layerCount; ++li) {
+        EffectInstanceInfo src;
+        if (_provider->getEffectAtTime(elemIdx, li, timeMS, src)) {
+            result.push_back(convertEffectInfo(src, modelName));
+        }
+    }
+    return result;
+}
+
+std::vector<EffectInfo> EffectEngine::getEffectsForLayer(const std::string& modelName, int layer) const {
+    if (!_provider) return {};
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return {};
+    std::vector<EffectInstanceInfo> srcEffects = _provider->getEffectsOnLayer(elemIdx, static_cast<size_t>(layer));
+    std::vector<EffectInfo> result;
+    result.reserve(srcEffects.size());
+    for (const auto& src : srcEffects) {
+        result.push_back(convertEffectInfo(src, modelName));
+    }
+    return result;
+}
+
+int EffectEngine::getLayerCount(const std::string& modelName) const {
+    if (!_provider) return 0;
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return 0;
+    return static_cast<int>(_provider->getEffectLayerCount(elemIdx));
+}
+
+int EffectEngine::addLayer(const std::string& modelName) {
+    if (!_provider) return -1;
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return -1;
+    size_t newLayer = _provider->addEffectLayer(elemIdx);
+    if (newLayer == SIZE_MAX) return -1;
+    return static_cast<int>(newLayer);
+}
+
+bool EffectEngine::removeLayer(const std::string& modelName, int layer) {
+    if (!_provider) return false;
+    size_t elemIdx = _provider->getElementIndex(modelName);
+    if (elemIdx == SIZE_MAX) return false;
+    EffectOperationResult result = _provider->removeEffectLayer(elemIdx, static_cast<size_t>(layer));
+    return result.success;
+}
+
+bool EffectEngine::selectEffect(int effectId) {
+    if (!_provider) return false;
+    return _provider->selectEffect(static_cast<int64_t>(effectId));
+}
+
+void EffectEngine::deselectAllEffects() {
+    if (_provider) {
+        _provider->deselectAllEffects();
+    }
+}
+
+std::vector<int> EffectEngine::getSelectedEffectIds() const {
+    if (!_provider) return {};
+    std::vector<int64_t> ids = _provider->getSelectedEffectIds();
+    std::vector<int> result;
+    result.reserve(ids.size());
+    for (int64_t id : ids) {
+        result.push_back(static_cast<int>(id));
+    }
+    return result;
+}
+
+bool EffectEngine::convertEffectType(int effectId, const std::string& newEffectType) {
+    if (!_provider) return false;
+    EffectOperationResult result = _provider->updateEffectType(static_cast<int64_t>(effectId), newEffectType);
+    return result.success;
+}
+
+std::vector<ParameterDefinition> EffectEngine::buildDefaultParameters(const std::string& effectType) const
+{
+    std::vector<ParameterDefinition> params;
+    if (!_provider) {
+        fprintf(stderr, "[EffectInspector] buildDefaultParameters('%s'): no provider\n", effectType.c_str());
+        return params;
+    }
+
+    // Scan all effects of this type to find a sample and collect choice values
+    std::map<std::string, std::string> sampleSettings;
+    // For CHOICE params: collect all unique values seen across all instances
+    std::map<std::string, std::vector<std::string>> choiceValues;
+
+    size_t elemCount = _provider->getElementCount();
+    for (size_t ei = 0; ei < elemCount; ++ei) {
+        size_t layerCount = _provider->getEffectLayerCount(ei);
+        for (size_t li = 0; li < layerCount; ++li) {
+            auto effects = _provider->getEffectsOnLayer(ei, li);
+            for (const auto& eff : effects) {
+                if (eff.effectType != effectType || eff.settings.empty()) continue;
+
+                if (sampleSettings.empty()) {
+                    sampleSettings = eff.settings;
+                }
+
+                // Collect unique choice values from this instance
+                for (const auto& kv : eff.settings) {
+                    if (kv.first.find("CHOICE_") != std::string::npos && !kv.second.empty()) {
+                        auto& vals = choiceValues[kv.first];
+                        if (std::find(vals.begin(), vals.end(), kv.second) == vals.end()) {
+                            vals.push_back(kv.second);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (sampleSettings.empty()) {
+        return params;
+    }
+
+    // Build ParameterDefinition from settings keys using naming conventions
+    for (const auto& kv : sampleSettings) {
+        const std::string& key = kv.first;
+        const std::string& value = kv.second;
+
+        ParameterDefinition pd;
+        pd.key = key;
+        pd.group = "General";
+        pd.sortOrder = static_cast<int>(params.size());
+        pd.lockable = true;
+
+        // Extract display label from key (pattern: E_TYPE_EffectName_ParamName)
+        std::string paramLabel;
+        size_t firstUnderscore = key.find('_');
+        if (firstUnderscore != std::string::npos) {
+            size_t secondUnderscore = key.find('_', firstUnderscore + 1);
+            if (secondUnderscore != std::string::npos) {
+                paramLabel = key.substr(secondUnderscore + 1);
+                // Replace underscores with spaces
+                for (auto& c : paramLabel) {
+                    if (c == '_') c = ' ';
+                }
+            }
+        }
+        if (paramLabel.empty()) paramLabel = key;
+        pd.displayLabel = paramLabel;
+
+        // Determine type from key prefix
+        if (key.find("SLIDER_") != std::string::npos || key.find("SPIN_") != std::string::npos) {
+            pd.type = ParameterType::Int;
+            pd.minValue = 0;
+            pd.maxValue = 100;
+            try { pd.defaultValue = std::stod(value); } catch (...) {}
+        } else if (key.find("CHECKBOX_") != std::string::npos) {
+            pd.type = ParameterType::Bool;
+            pd.defaultString = value;
+        } else if (key.find("CHOICE_") != std::string::npos) {
+            pd.type = ParameterType::Choice;
+            pd.defaultString = value;
+            // Populate choices from values seen across all instances
+            auto it = choiceValues.find(key);
+            if (it != choiceValues.end()) {
+                pd.choices = it->second;
+            }
+        } else if (key.find("TEXTCTRL_") != std::string::npos) {
+            pd.type = ParameterType::String;
+            pd.defaultString = value;
+        } else if (key.find("FILEPICKER_") != std::string::npos) {
+            pd.type = ParameterType::File;
+            pd.defaultString = value;
+        } else if (key.find("VALUECURVE_") != std::string::npos) {
+            pd.type = ParameterType::ValueCurve;
+            pd.defaultString = value;
+        } else if (key.find("FONTPICKER_") != std::string::npos) {
+            pd.type = ParameterType::Font;
+            pd.defaultString = value;
+        } else {
+            pd.type = ParameterType::String;
+            pd.defaultString = value;
+        }
+
+        params.push_back(pd);
+    }
+
+    return params;
+}
+
+// Private helpers not needed in native build
+EffectManager* EffectEngine::getEffectManager() const { return nullptr; }
+SequenceElements* EffectEngine::getSequenceElements() const { return nullptr; }
+SequenceElementsAdapter* EffectEngine::getAdapter() const { return nullptr; }
+EffectInfo EffectEngine::buildEffectInfo(::Effect*, const std::string&, int) const { return {}; }
+::Effect* EffectEngine::findEffectById(int, std::string&, int&) const { return nullptr; }
 
 #else
 // Legacy build: full implementation using EffectManager and SequenceElements
@@ -979,8 +1355,10 @@ EffectInfo EffectEngine::buildEffectInfo(::Effect* effect, const std::string& mo
     return info;
 }
 
+#endif // XLIGHTS_NATIVE
+
 // ---------------------------------------------------------------------------
-// Notification helpers
+// Notification helpers (shared by both native and legacy builds)
 // ---------------------------------------------------------------------------
 
 void EffectEngine::notifyEffectCreated(int effectId, const std::string& modelName, int layerIndex)
@@ -1060,7 +1438,5 @@ void EffectEngine::notifyError(const std::string& message)
         listener->onError(message);
     }
 }
-
-#endif // XLIGHTS_NATIVE
 
 } // namespace xlEngine

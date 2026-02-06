@@ -100,6 +100,9 @@ bool RenderEngine::loadFSEQ(const std::string& fseqPath)
     // Build controller channel map for resolving !ControllerName:offset references
     buildControllerChannelMap();
 
+    // Pre-compute total channel count for each model (needed for >ModelName:offset resolution)
+    buildModelTotalChannelsMap();
+
     // Build model-to-channel mapping
     buildModelChannelMap();
 
@@ -136,11 +139,58 @@ void RenderEngine::buildControllerChannelMap()
     if (!_outputProvider) return;
 
     size_t count = _outputProvider->getControllerCount();
+    printf("RenderEngine: Building controller channel map — %zu controllers\n", count);
     for (size_t i = 0; i < count; i++) {
         auto info = _outputProvider->getController(i);
-        if (info.has_value() && !info->name.empty() && info->startChannel > 0) {
-            _controllerStartChannels[info->name] = info->startChannel;
+        if (info.has_value()) {
+            printf("RenderEngine: Controller[%zu] '%s' — startCh=%d, channels=%d, protocol=%s\n",
+                   i, info->name.c_str(), info->startChannel, info->channels,
+                   info->protocol.c_str());
+            if (!info->name.empty() && info->startChannel > 0) {
+                _controllerStartChannels[info->name] = info->startChannel;
+            }
         }
+    }
+}
+
+// --- Model Total Channels Map ---
+
+void RenderEngine::buildModelTotalChannelsMap()
+{
+    _modelTotalChannels.clear();
+    _resolvedStartChannels.clear();
+    if (!_modelProvider) return;
+
+    ModelEngine tempEngine(_modelProvider);
+    auto modelNames = _modelProvider->getModelNames();
+
+    for (const auto& name : modelNames) {
+        auto attrs = _modelProvider->getModelAttributes(name);
+        if (attrs.empty()) continue;
+
+        // Skip groups
+        auto displayAs = attrs.find("DisplayAs");
+        if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+
+        // Get node count from actual node generation
+        auto nodes = tempEngine.getModelNodes(name);
+        uint32_t nodeCount = static_cast<uint32_t>(nodes.size());
+        if (nodeCount == 0) nodeCount = 1;
+
+        // Determine channels per node from StringType
+        uint32_t chansPerNode = 3; // default RGB
+        auto stIt = attrs.find("StringType");
+        if (stIt != attrs.end()) {
+            const std::string& st = stIt->second;
+            if (st.find("4 Channel") != std::string::npos ||
+                st.find("RGBW") != std::string::npos) {
+                chansPerNode = 4;
+            } else if (st.find("Single Color") != std::string::npos) {
+                chansPerNode = 1;
+            }
+        }
+
+        _modelTotalChannels[name] = nodeCount * chansPerNode;
     }
 }
 
@@ -151,18 +201,64 @@ uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
     std::string sc = trimString(startChannelStr);
     if (sc.empty()) return 0;
 
+    // Check memoization cache to avoid redundant chain resolution
+    auto cacheIt = _resolvedStartChannels.find(sc);
+    if (cacheIt != _resolvedStartChannels.end()) {
+        return cacheIt->second;
+    }
+
+    uint32_t result = 0;
+
     // Format 1: Plain number (e.g., "124123") - 1-based
     if (sc[0] >= '0' && sc[0] <= '9') {
         try {
             int ch = std::stoi(sc);
-            return (ch > 0) ? static_cast<uint32_t>(ch - 1) : 0;
+            result = (ch > 0) ? static_cast<uint32_t>(ch - 1) : 0;
         } catch (...) {
-            return 0;
+            result = 0;
         }
     }
+    // Format 2: IP reference (e.g., "#192.168.1.11:1:1" = #IP:universe:channel)
+    else if (sc[0] == '#' && sc.size() > 1) {
+        // Parse #IP:universe:channel
+        size_t firstColon = sc.find(':', 1);
+        if (firstColon != std::string::npos) {
+            std::string ip = sc.substr(1, firstColon - 1);
+            size_t secondColon = sc.find(':', firstColon + 1);
+            int universe = 1, channel = 1;
+            if (secondColon != std::string::npos) {
+                try { universe = std::stoi(sc.substr(firstColon + 1, secondColon - firstColon - 1)); } catch (...) {}
+                try { channel = std::stoi(sc.substr(secondColon + 1)); } catch (...) {}
+            } else {
+                try { universe = std::stoi(sc.substr(firstColon + 1)); } catch (...) {}
+            }
 
-    // Format 2: Controller reference (e.g., "!FPP-Chance:1")
-    if (sc[0] == '!' && sc.size() > 1) {
+            // Look up child network entry by IP and universe number.
+            // Child entries are named like "E131_IP_universe" or "DDP_IP".
+            bool found = false;
+            for (const auto& [proto, prefix] : std::initializer_list<std::pair<const char*, const char*>>{
+                    {"E131", "E131_"}, {"ArtNet", "ArtNet_"}, {"DDP", "DDP_"}}) {
+                std::string lookupName = std::string(prefix) + ip;
+                if (std::string(proto) != "DDP") {
+                    lookupName += "_" + std::to_string(universe);
+                }
+                auto it = _controllerStartChannels.find(lookupName);
+                if (it != _controllerStartChannels.end()) {
+                    // Controller startChannel is 1-based, channel offset is 1-based
+                    result = static_cast<uint32_t>(it->second - 1) + static_cast<uint32_t>(channel - 1);
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                printf("RenderEngine: WARNING — cannot resolve '%s' (no controller at IP %s universe %d)\n",
+                       sc.c_str(), ip.c_str(), universe);
+            }
+        }
+    }
+    // Format 3: Controller name reference (e.g., "!FPP-Chance:1")
+    else if (sc[0] == '!' && sc.size() > 1) {
         size_t colonPos = sc.find(':');
         if (colonPos != std::string::npos) {
             std::string controllerName = sc.substr(1, colonPos - 1);
@@ -176,14 +272,14 @@ uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
                 // Absolute channel = controllerStart + offset - 1 (still 1-based)
                 // Convert to 0-based: subtract 1 more
                 int32_t absChannel = it->second + offset - 2;
-                return (absChannel >= 0) ? static_cast<uint32_t>(absChannel) : 0;
+                result = (absChannel >= 0) ? static_cast<uint32_t>(absChannel) : 0;
             }
         }
-        return 0;
     }
-
     // Format 3: Model reference (e.g., ">ModelName:1")
-    if (sc[0] == '>' && sc.size() > 1 && _modelProvider) {
+    // In xLights, ">ModelName:N" means "start at channel N after the END of ModelName"
+    // So the absolute start = refModelStart + refModelTotalChannels + (N - 1)
+    else if (sc[0] == '>' && sc.size() > 1 && _modelProvider) {
         size_t colonPos = sc.find(':');
         if (colonPos != std::string::npos) {
             std::string refModelName = sc.substr(1, colonPos - 1);
@@ -191,19 +287,28 @@ uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
             int offset = 1;
             try { offset = std::stoi(offsetStr); } catch (...) {}
 
-            // Look up the referenced model's StartChannel and resolve recursively
+            // Resolve the referenced model's start channel recursively
             auto refAttrs = _modelProvider->getModelAttributes(refModelName);
             auto refIt = refAttrs.find("StartChannel");
             if (refIt != refAttrs.end()) {
                 uint32_t refStart = resolveStartChannel(refIt->second);
-                // Offset is 1-based relative to the referenced model's start
-                return refStart + static_cast<uint32_t>(offset - 1);
+
+                // Look up the referenced model's total channel count from pre-computed map
+                uint32_t refTotalChannels = 0;
+                auto tcIt = _modelTotalChannels.find(refModelName);
+                if (tcIt != _modelTotalChannels.end()) {
+                    refTotalChannels = tcIt->second;
+                }
+
+                // Position after the referenced model's channels
+                result = refStart + refTotalChannels + static_cast<uint32_t>(offset - 1);
             }
         }
-        return 0;
     }
 
-    return 0;
+    // Cache the result for future lookups
+    _resolvedStartChannels[sc] = result;
+    return result;
 }
 
 // --- Model Channel Map ---
@@ -217,26 +322,45 @@ void RenderEngine::buildModelChannelMap()
     // Use a temporary ModelEngine to get node data
     ModelEngine tempEngine(_modelProvider);
 
+    size_t skippedCount = 0;
+
     for (const auto& name : modelNames) {
         auto attrs = _modelProvider->getModelAttributes(name);
-        if (attrs.empty()) continue;
+        if (attrs.empty()) {
+            printf("RenderEngine: Model '%s' skipped — empty attributes\n", name.c_str());
+            skippedCount++;
+            continue;
+        }
 
         // Skip groups
         auto displayAs = attrs.find("DisplayAs");
         if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
 
+        std::string displayAsStr = (displayAs != attrs.end()) ? displayAs->second : "Unknown";
+
         // Get StartChannel
         auto scIt = attrs.find("StartChannel");
-        if (scIt == attrs.end() || scIt->second.empty()) continue;
+        if (scIt == attrs.end() || scIt->second.empty()) {
+            printf("RenderEngine: Model '%s' (%s) skipped — no StartChannel attribute\n",
+                   name.c_str(), displayAsStr.c_str());
+            skippedCount++;
+            continue;
+        }
 
         uint32_t absStart = resolveStartChannel(scIt->second);
 
         // Get node data for buffer mapping
         auto nodes = tempEngine.getModelNodes(name);
-        if (nodes.empty()) continue;
+        if (nodes.empty()) {
+            printf("RenderEngine: Model '%s' (%s) skipped — no nodes generated\n",
+                   name.c_str(), displayAsStr.c_str());
+            skippedCount++;
+            continue;
+        }
 
-        // Determine channels per node from StringType
+        // Determine channels per node and color order from StringType
         uint32_t chansPerNode = 3; // default RGB
+        uint8_t rOff = 0, gOff = 1, bOff = 2; // default RGB order
         auto stIt = attrs.find("StringType");
         if (stIt != attrs.end()) {
             const std::string& st = stIt->second;
@@ -245,6 +369,41 @@ void RenderEngine::buildModelChannelMap()
                 chansPerNode = 4;
             } else if (st.find("Single Color") != std::string::npos) {
                 chansPerNode = 1;
+            }
+            // Parse color order from StringType.
+            // FSEQ stores data in the controller's native color order.
+            // We need to map back to RGB for display.
+            // StringType formats: "RGB Nodes", "GRB Nodes", "RGBW Nodes", "WRGB Nodes",
+            //                     "4 Channel RGBW", "4 Channel WRGB", etc.
+            if (chansPerNode >= 3 && st.size() >= 3) {
+                std::string colorChars;
+                int baseOffset = 0;
+                if (st[0] == 'W' && st.size() >= 4 && st[1] >= 'A' && st[1] <= 'Z') {
+                    // W-prefix: WRGB, WGRB, etc. — W at ch0, color at ch1-3
+                    colorChars = st.substr(1, 3);
+                    baseOffset = 1;
+                } else if (st.compare(0, 10, "4 Channel ") == 0 && st.size() >= 14) {
+                    // "4 Channel RGBW" or "4 Channel WRGB"
+                    std::string suffix = st.substr(10);
+                    if (suffix[0] == 'W') {
+                        colorChars = suffix.substr(1, 3);
+                        baseOffset = 1;
+                    } else {
+                        colorChars = suffix.substr(0, 3);
+                        baseOffset = 0;
+                    }
+                } else if (st[0] >= 'A' && st[0] <= 'Z') {
+                    // Standard: RGB, GRB, BRG, etc. (3-ch or RGBW with W suffix)
+                    colorChars = st.substr(0, 3);
+                    baseOffset = 0;
+                }
+                if (colorChars.size() == 3) {
+                    for (int ci = 0; ci < 3; ci++) {
+                        if (colorChars[ci] == 'R') rOff = static_cast<uint8_t>(ci + baseOffset);
+                        else if (colorChars[ci] == 'G') gOff = static_cast<uint8_t>(ci + baseOffset);
+                        else if (colorChars[ci] == 'B') bOff = static_cast<uint8_t>(ci + baseOffset);
+                    }
+                }
             }
         }
 
@@ -261,14 +420,66 @@ void RenderEngine::buildModelChannelMap()
         info.chansPerNode = chansPerNode;
         info.bufferWidth = maxBufX + 1;
         info.bufferHeight = maxBufY + 1;
+        info.rOffset = rOff;
+        info.gOffset = gOff;
+        info.bOffset = bOff;
 
         info.nodeBufCoords.reserve(nodes.size());
         for (const auto& node : nodes) {
             info.nodeBufCoords.push_back({node.bufX, node.bufY});
         }
 
+        std::string stringTypeStr = (stIt != attrs.end()) ? stIt->second : "default";
+
+        printf("RenderEngine: Model '%s' (%s) mapped — startCh=%u (%s), nodes=%u, buffer=%dx%d, chansPerNode=%u, stringType='%s', rgbOffsets=[%d,%d,%d]\n",
+               name.c_str(), displayAsStr.c_str(), info.absStartChannel,
+               scIt->second.c_str(), info.nodeCount,
+               info.bufferWidth, info.bufferHeight, info.chansPerNode,
+               stringTypeStr.c_str(), info.rOffset, info.gOffset, info.bOffset);
+
+        // Extra diagnostics for matrix models: show zigzag parameters and first node coords
+        if (displayAsStr.find("Matrix") != std::string::npos) {
+            auto dirIt = attrs.find("Dir");
+            auto ssIt = attrs.find("StartSide");
+            auto nzIt = attrs.find("NoZig");
+            auto p1It = attrs.find("parm1");
+            auto p2It = attrs.find("parm2");
+            auto p3It = attrs.find("parm3");
+            int p1v = p1It != attrs.end() ? atoi(p1It->second.c_str()) : 0;
+            int p2v = p2It != attrs.end() ? atoi(p2It->second.c_str()) : 0;
+            int p3v = p3It != attrs.end() ? atoi(p3It->second.c_str()) : 1;
+            printf("RenderEngine:   Matrix params — Dir='%s', StartSide='%s', NoZig='%s', parm1=%d, parm2=%d, parm3=%d\n",
+                   dirIt != attrs.end() ? dirIt->second.c_str() : "(missing)",
+                   ssIt != attrs.end() ? ssIt->second.c_str() : "(missing)",
+                   nzIt != attrs.end() ? nzIt->second.c_str() : "(missing)",
+                   p1v, p2v, p3v);
+            // Show first 5 node buffer coords
+            size_t n = info.nodeBufCoords.size();
+            size_t show = std::min(n, (size_t)5);
+            printf("RenderEngine:   First %zu nodes: ", show);
+            for (size_t j = 0; j < show; j++) {
+                printf("[%d](%d,%d) ", (int)j, info.nodeBufCoords[j].first, info.nodeBufCoords[j].second);
+            }
+            printf("\n");
+            if (n > 10) {
+                // Show nodes at strand boundary (pixelsPerStrand-1, pixelsPerStrand, pixelsPerStrand+1)
+                if (p3v < 1) p3v = 1;
+                int pps = p2v / p3v;
+                if (pps > 0 && (size_t)(pps + 1) < n) {
+                    printf("RenderEngine:   Strand boundary (pps=%d): [%d](%d,%d) [%d](%d,%d) [%d](%d,%d)\n",
+                           pps,
+                           pps-1, info.nodeBufCoords[pps-1].first, info.nodeBufCoords[pps-1].second,
+                           pps, info.nodeBufCoords[pps].first, info.nodeBufCoords[pps].second,
+                           pps+1, info.nodeBufCoords[pps+1].first, info.nodeBufCoords[pps+1].second);
+                }
+            }
+        }
+
         _modelChannelMap[name] = std::move(info);
     }
+
+    printf("RenderEngine: Mapped %zu models out of %zu total (%zu skipped)\n",
+           _modelChannelMap.size(), modelNames.size(), skippedCount);
 }
 
 // --- Frame Rendering ---
@@ -317,11 +528,11 @@ void RenderEngine::renderFrame(int timeMS)
         // Map each node's channel data to the pixel buffer
         for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
             uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
-            if (nodeChannel + 2 >= static_cast<uint32_t>(_currentFrameData.size())) continue;
+            if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
 
-            uint8_t r = _currentFrameData[nodeChannel];
-            uint8_t g = _currentFrameData[nodeChannel + 1];
-            uint8_t b = _currentFrameData[nodeChannel + 2];
+            uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
+            uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
+            uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
 
             int bx = chInfo.nodeBufCoords[i].first;
             int by = chInfo.nodeBufCoords[i].second;

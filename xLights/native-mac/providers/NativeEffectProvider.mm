@@ -214,6 +214,47 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
             }
         }
 
+        // Helper to parse a comma-separated key=value string into a map
+        auto parseKVString = [](NSString* str, std::map<std::string, std::string>& outMap) {
+            if (!str || str.length == 0) return;
+            NSArray* pairs = [str componentsSeparatedByString:@","];
+            for (NSString* pair in pairs) {
+                NSRange eqRange = [pair rangeOfString:@"="];
+                if (eqRange.location == NSNotFound) continue;
+                NSString* key = [pair substringToIndex:eqRange.location];
+                NSString* val = [pair substringFromIndex:eqRange.location + 1];
+                if (key.length == 0) continue;
+                std::string value = std::string([val UTF8String]);
+                // Unescape special characters
+                size_t pos = 0;
+                while ((pos = value.find("&comma;", pos)) != std::string::npos) {
+                    value.replace(pos, 7, ",");
+                    pos += 1;
+                }
+                pos = 0;
+                while ((pos = value.find("&amp;", pos)) != std::string::npos) {
+                    value.replace(pos, 5, "&");
+                    pos += 1;
+                }
+                outMap[std::string([key UTF8String])] = value;
+            }
+        };
+
+        // Parse EffectDB — each entry is "EffectName,key=val,key=val,..."
+        // The ref attribute on Effect elements indexes into this array
+        std::vector<NSString*> effectDBEntries;
+        NSArray* effectDBNodes = [root nodesForXPath:@"//EffectDB/Effect" error:nil];
+        for (NSXMLNode* node in effectDBNodes) {
+            effectDBEntries.push_back(node.stringValue ?: @"");
+        }
+
+        // Parse ColorPalettes — each entry is "key=val,key=val,..."
+        std::vector<NSString*> colorPaletteEntries;
+        NSArray* paletteNodes = [root nodesForXPath:@"//ColorPalettes/ColorPalette" error:nil];
+        for (NSXMLNode* node in paletteNodes) {
+            colorPaletteEntries.push_back(node.stringValue ?: @"");
+        }
+
         // Parse elements from ElementEffects
         NSArray* elementNodes = [root nodesForXPath:@"//ElementEffects/Element" error:nil];
         for (NSXMLElement* elemNode in elementNodes) {
@@ -259,15 +300,31 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
                     auto effect = std::make_unique<NativeEffect>();
                     effect->effectId = _nextEffectId++;
 
-                    NSXMLNode* refAttr = [effectNode attributeForName:@"ref"];
-                    NSString* effectTypeStr = nil;
-                    if (refAttr) {
-                        effectTypeStr = refAttr.stringValue;
+                    // Get effect name from the "name" attribute (regular effects)
+                    // or "label" attribute (timing marks use "label" for their text)
+                    NSXMLNode* nameAttrEff = [effectNode attributeForName:@"name"];
+                    if (nameAttrEff && nameAttrEff.stringValue.length > 0) {
+                        effect->effectType = std::string([nameAttrEff.stringValue UTF8String]);
                     } else {
-                        NSXMLNode* nameAttrEff = [effectNode attributeForName:@"name"];
-                        effectTypeStr = nameAttrEff ? nameAttrEff.stringValue : @"";
+                        NSXMLNode* labelAttrEff = [effectNode attributeForName:@"label"];
+                        if (labelAttrEff && labelAttrEff.stringValue.length > 0) {
+                            effect->effectType = std::string([labelAttrEff.stringValue UTF8String]);
+                        }
                     }
-                    effect->effectType = effectTypeStr ? std::string([effectTypeStr UTF8String]) : "";
+
+                    // The "ref" attribute indexes into EffectDB for settings
+                    // EffectDB entries are JUST settings: "key=val,key=val,..."
+                    // (the effect type name comes from the "name" attribute, not EffectDB)
+                    NSXMLNode* refAttr = [effectNode attributeForName:@"ref"];
+                    if (refAttr) {
+                        int refIdx = [refAttr.stringValue intValue];
+                        if (refIdx >= 0 && (size_t)refIdx < effectDBEntries.size()) {
+                            NSString* dbEntry = effectDBEntries[refIdx];
+                            if (dbEntry.length > 0) {
+                                parseKVString(dbEntry, effect->settings);
+                            }
+                        }
+                    }
 
                     // Find effect type index
                     for (size_t i = 0; i < _effectTypes.size(); ++i) {
@@ -289,54 +346,12 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
                     NSXMLNode* selAttr = [effectNode attributeForName:@"selected"];
                     effect->selected = selAttr ? [selAttr.stringValue boolValue] : NO;
 
-                    // Parse settings
-                    NSXMLNode* settingsAttr = [effectNode attributeForName:@"settings"];
-                    if (settingsAttr) {
-                        NSString* settingsStr = settingsAttr.stringValue;
-                        NSArray* pairs = [settingsStr componentsSeparatedByString:@","];
-                        for (NSString* pair in pairs) {
-                            NSArray* kv = [pair componentsSeparatedByString:@"="];
-                            if (kv.count == 2) {
-                                std::string key = std::string([kv[0] UTF8String]);
-                                std::string value = std::string([kv[1] UTF8String]);
-                                // Unescape special characters
-                                size_t pos = 0;
-                                while ((pos = value.find("&comma;", pos)) != std::string::npos) {
-                                    value.replace(pos, 7, ",");
-                                    pos += 1;
-                                }
-                                pos = 0;
-                                while ((pos = value.find("&amp;", pos)) != std::string::npos) {
-                                    value.replace(pos, 5, "&");
-                                    pos += 1;
-                                }
-                                effect->settings[key] = value;
-                            }
-                        }
-                    }
-
-                    // Parse palette
+                    // The "palette" attribute indexes into ColorPalettes
                     NSXMLNode* paletteAttr = [effectNode attributeForName:@"palette"];
                     if (paletteAttr) {
-                        NSString* paletteStr = paletteAttr.stringValue;
-                        NSArray* pairs = [paletteStr componentsSeparatedByString:@","];
-                        for (NSString* pair in pairs) {
-                            NSArray* kv = [pair componentsSeparatedByString:@"="];
-                            if (kv.count == 2) {
-                                std::string key = std::string([kv[0] UTF8String]);
-                                std::string value = std::string([kv[1] UTF8String]);
-                                size_t pos = 0;
-                                while ((pos = value.find("&comma;", pos)) != std::string::npos) {
-                                    value.replace(pos, 7, ",");
-                                    pos += 1;
-                                }
-                                pos = 0;
-                                while ((pos = value.find("&amp;", pos)) != std::string::npos) {
-                                    value.replace(pos, 5, "&");
-                                    pos += 1;
-                                }
-                                effect->palette[key] = value;
-                            }
+                        int palIdx = [paletteAttr.stringValue intValue];
+                        if (palIdx >= 0 && (size_t)palIdx < colorPaletteEntries.size()) {
+                            parseKVString(colorPaletteEntries[palIdx], effect->palette);
                         }
                     }
 
@@ -360,6 +375,7 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
         _isLoaded = true;
         _isModified = false;
         _changeCount = 0;
+
         return true;
     }
 }
@@ -1218,14 +1234,8 @@ EffectOperationResult NativeEffectProvider::updateEffectType(
         }
     }
 
-    if (newTypeIndex == -1) {
-        result.success = false;
-        result.errorMessage = "Unknown effect type: " + newEffectType;
-        return result;
-    }
-
     effect->effectType = newEffectType;
-    effect->effectTypeIndex = newTypeIndex;
+    effect->effectTypeIndex = (newTypeIndex != -1) ? newTypeIndex : effect->effectTypeIndex;
 
     incrementChangeCount();
 
@@ -1681,6 +1691,34 @@ bool NativeEffectProvider::removeElement(size_t elementIndex)
     incrementChangeCount();
 
     return true;
+}
+
+bool NativeEffectProvider::setTimingTrackActive(const std::string& name)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    bool found = false;
+    for (auto& elem : _elements) {
+        if (elem->type != SequenceElementType::Timing) continue;
+        if (elem->name == name) {
+            elem->isActive = true;
+            found = true;
+        } else {
+            elem->isActive = false;
+        }
+    }
+    return found;
+}
+
+void NativeEffectProvider::deactivateAllTimingTracks()
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    for (auto& elem : _elements) {
+        if (elem->type == SequenceElementType::Timing) {
+            elem->isActive = false;
+        }
+    }
 }
 
 void NativeEffectProvider::setModified(bool modified)

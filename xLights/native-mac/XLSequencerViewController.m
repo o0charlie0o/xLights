@@ -52,6 +52,7 @@ typedef struct {
     NSInteger effectLayerCount;
     NSInteger layerIndex;    // -1 for main element row, 0+ for specific layer rows
     BOOL isLayerRow;         // YES if this is a layer sub-row (not the main element)
+    NSInteger timingColorIndex;  // Sequential color index for timing tracks (0, 1, 2...)
 } XLRowEntry;
 
 // Effect data stored as plain C struct for real sequence effects
@@ -67,6 +68,8 @@ typedef struct {
     BOOL selected;
     BOOL locked;
     BOOL renderDisabled;
+    CGFloat fadeInMS;
+    CGFloat fadeOutMS;
 } XLEffectEntry;
 
 /// Compute a consistent hash for a string (matching Swift's simple hash for color generation)
@@ -240,27 +243,185 @@ static uint32_t XLParseHexColor(NSString *hexString) {
     return (uint32_t)colorValue;
 }
 
-/// Extract the first palette color from a palette string
+/// Extract the first enabled palette color from a palette string.
+/// Checks C_CHECKBOX_PaletteN to find which colors are enabled,
+/// then returns the color value from C_BUTTON_PaletteN for the first enabled one.
 /// Format: "C_BUTTON_Palette1=#FF0000,C_CHECKBOX_Palette1=1,..."
 static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     if (!paletteString || paletteString.length == 0) {
         return nil;
     }
 
-    // Split by comma
+    // Parse all key=value pairs into a dictionary
     NSArray *pairs = [paletteString componentsSeparatedByString:@","];
+    NSMutableDictionary *kvMap = [NSMutableDictionary dictionaryWithCapacity:pairs.count];
     for (NSString *pair in pairs) {
-        // Look for C_BUTTON_Palette1=
-        if ([pair hasPrefix:@"C_BUTTON_Palette1="]) {
-            NSString *value = [pair substringFromIndex:[@"C_BUTTON_Palette1=" length]];
-            // Unescape special characters
-            value = [value stringByReplacingOccurrencesOfString:@"&comma;" withString:@","];
-            value = [value stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
-            return value;
+        NSRange eqRange = [pair rangeOfString:@"="];
+        if (eqRange.location == NSNotFound) continue;
+        NSString *key = [pair substringToIndex:eqRange.location];
+        NSString *val = [pair substringFromIndex:eqRange.location + 1];
+        val = [val stringByReplacingOccurrencesOfString:@"&comma;" withString:@","];
+        val = [val stringByReplacingOccurrencesOfString:@"&amp;" withString:@"&"];
+        kvMap[key] = val;
+    }
+
+    // Find the first enabled palette color (check palettes 1-8)
+    for (int i = 1; i <= 8; i++) {
+        NSString *checkboxKey = [NSString stringWithFormat:@"C_CHECKBOX_Palette%d", i];
+        NSString *checkboxVal = kvMap[checkboxKey];
+        if (checkboxVal && [checkboxVal isEqualToString:@"1"]) {
+            NSString *colorKey = [NSString stringWithFormat:@"C_BUTTON_Palette%d", i];
+            NSString *colorVal = kvMap[colorKey];
+            if (colorVal && colorVal.length > 0) {
+                return colorVal;
+            }
         }
     }
-    return nil;
+
+    // Fallback: return palette 1 color if no checkbox data found
+    return kvMap[@"C_BUTTON_Palette1"];
 }
+
+// MARK: - Recent Sequence Row View
+
+@interface XLRecentSequenceRow : NSView
+@property (nonatomic, copy) NSString *filePath;
+@property (nonatomic, weak) id target;
+@property (nonatomic, assign) SEL action;
+@property (nonatomic, assign) BOOL isHovered;
+@end
+
+@implementation XLRecentSequenceRow {
+    NSTrackingArea *_trackingArea;
+    NSImageView *_iconView;
+    NSTextField *_nameLabel;
+    NSTextField *_pathLabel;
+    CALayer *_backgroundLayer;
+}
+
+- (instancetype)initWithFilePath:(NSString *)path target:(id)target action:(SEL)action {
+    self = [super initWithFrame:NSZeroRect];
+    if (self) {
+        _filePath = [path copy];
+        _target = target;
+        _action = action;
+        _isHovered = NO;
+
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.wantsLayer = YES;
+        self.layer.cornerRadius = 6;
+
+        // Icon
+        _iconView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+        _iconView.translatesAutoresizingMaskIntoConstraints = NO;
+        if (@available(macOS 11.0, *)) {
+            NSImage *img = [NSImage imageWithSystemSymbolName:@"doc.text.fill"
+                                     accessibilityDescription:@"Sequence"];
+            NSImageSymbolConfiguration *config =
+                [NSImageSymbolConfiguration configurationWithPointSize:14 weight:NSFontWeightRegular];
+            _iconView.image = [img imageWithSymbolConfiguration:config];
+        }
+        _iconView.contentTintColor = [NSColor secondaryLabelColor];
+        [self addSubview:_iconView];
+
+        // Filename
+        NSString *filename = [path lastPathComponent];
+        NSString *ext = [filename pathExtension];
+        NSString *nameWithoutExt = [filename stringByDeletingPathExtension];
+
+        _nameLabel = [NSTextField labelWithString:nameWithoutExt];
+        _nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _nameLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+        _nameLabel.textColor = [NSColor labelColor];
+        _nameLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [self addSubview:_nameLabel];
+
+        // Folder path
+        NSString *folder = [[path stringByDeletingLastPathComponent] lastPathComponent];
+        NSString *detail = ext.length > 0 ?
+            [NSString stringWithFormat:@".%@ — %@", ext, folder] :
+            folder;
+
+        _pathLabel = [NSTextField labelWithString:detail];
+        _pathLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        _pathLabel.font = [NSFont systemFontOfSize:11];
+        _pathLabel.textColor = [NSColor tertiaryLabelColor];
+        _pathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [self addSubview:_pathLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [self.heightAnchor constraintEqualToConstant:40],
+
+            [_iconView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:10],
+            [_iconView.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+            [_iconView.widthAnchor constraintEqualToConstant:20],
+            [_iconView.heightAnchor constraintEqualToConstant:20],
+
+            [_nameLabel.leadingAnchor constraintEqualToAnchor:_iconView.trailingAnchor constant:8],
+            [_nameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-10],
+            [_nameLabel.topAnchor constraintEqualToAnchor:self.topAnchor constant:4],
+
+            [_pathLabel.leadingAnchor constraintEqualToAnchor:_nameLabel.leadingAnchor],
+            [_pathLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.trailingAnchor constant:-10],
+            [_pathLabel.topAnchor constraintEqualToAnchor:_nameLabel.bottomAnchor constant:0],
+        ]];
+    }
+    return self;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_trackingArea) {
+        [self removeTrackingArea:_trackingArea];
+    }
+    _trackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+             options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingCursorUpdate)
+               owner:self
+            userInfo:nil];
+    [self addTrackingArea:_trackingArea];
+}
+
+- (void)cursorUpdate:(NSEvent *)event {
+    [[NSCursor pointingHandCursor] set];
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    _isHovered = YES;
+    self.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:0.08] CGColor];
+    _iconView.contentTintColor = [NSColor controlAccentColor];
+    _nameLabel.textColor = [NSColor controlAccentColor];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    _isHovered = NO;
+    self.layer.backgroundColor = nil;
+    _iconView.contentTintColor = [NSColor secondaryLabelColor];
+    _nameLabel.textColor = [NSColor labelColor];
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    self.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:0.12] CGColor];
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    if (NSPointInRect(point, self.bounds)) {
+        if (_isHovered) {
+            self.layer.backgroundColor = [[NSColor colorWithWhite:1.0 alpha:0.08] CGColor];
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        if (_target && _action) {
+            [_target performSelector:_action withObject:self];
+        }
+#pragma clang diagnostic pop
+    } else {
+        self.layer.backgroundColor = nil;
+    }
+}
+
+@end
 
 @interface XLSequencerViewController () <XLTimelineRulerDelegate,
                                           XLEffectsGridDataSource,
@@ -291,6 +452,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Empty state overlay (shown when no sequence is loaded)
     NSView *_emptyStateView;
+    NSTextField *_recentLabel;
+    NSStackView *_recentSequencesStack;
 
     // House preview floating window
     XLHousePreviewWindowController *_housePreviewController;
@@ -618,6 +781,36 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [openSeqButton.widthAnchor constraintEqualToConstant:140],
     ]];
 
+    // Recent sequences section
+    _recentLabel = [NSTextField labelWithString:@"Recent Sequences"];
+    _recentLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _recentLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    _recentLabel.textColor = [NSColor tertiaryLabelColor];
+    _recentLabel.alignment = NSTextAlignmentCenter;
+    [_emptyStateView addSubview:_recentLabel];
+
+    _recentSequencesStack = [[NSStackView alloc] init];
+    _recentSequencesStack.translatesAutoresizingMaskIntoConstraints = NO;
+    _recentSequencesStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    _recentSequencesStack.spacing = 1;
+    _recentSequencesStack.alignment = NSLayoutAttributeLeading;
+    [_emptyStateView addSubview:_recentSequencesStack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_recentLabel.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
+        [_recentLabel.topAnchor constraintEqualToAnchor:newSeqButton.bottomAnchor constant:30],
+
+        [_recentSequencesStack.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
+        [_recentSequencesStack.topAnchor constraintEqualToAnchor:_recentLabel.bottomAnchor constant:8],
+        [_recentSequencesStack.widthAnchor constraintLessThanOrEqualToConstant:400],
+    ]];
+
+    // Observe recent sequences changes
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(recentSequencesDidChange:)
+                                                 name:@"XLRecentSequencesDidChange"
+                                               object:nil];
+
     [view addSubview:_emptyStateView];
 
     // Set up scroll coordinator for synchronized scrolling
@@ -793,10 +986,84 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (void)showEmptyState {
     _emptyStateView.hidden = NO;
+    [self refreshRecentSequences];
 }
 
 - (void)hideEmptyState {
     _emptyStateView.hidden = YES;
+}
+
+- (void)refreshRecentSequences {
+    for (NSView *v in [_recentSequencesStack.arrangedSubviews copy]) {
+        [_recentSequencesStack removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+
+    NSArray *recents = [[NSUserDefaults standardUserDefaults] arrayForKey:@"RecentSequences"];
+    if (!recents || recents.count == 0) {
+        _recentLabel.hidden = YES;
+        _recentSequencesStack.hidden = YES;
+        return;
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSUInteger shown = 0;
+
+    for (NSString *path in recents) {
+        if (![fm fileExistsAtPath:path]) continue;
+        if (shown >= 10) break;
+
+        XLRecentSequenceRow *row = [[XLRecentSequenceRow alloc]
+            initWithFilePath:path
+                      target:self
+                      action:@selector(emptyStateOpenRecentSequence:)];
+        [row.widthAnchor constraintEqualToConstant:340].active = YES;
+        [_recentSequencesStack addArrangedSubview:row];
+        shown++;
+    }
+
+    BOOL hasEntries = (shown > 0);
+    _recentLabel.hidden = !hasEntries;
+    _recentSequencesStack.hidden = !hasEntries;
+}
+
+- (void)emptyStateOpenRecentSequence:(XLRecentSequenceRow *)sender {
+    NSString *path = sender.filePath;
+    if (!path) return;
+
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (!engineBridge) {
+        NSLog(@"XLSequencerViewController: Cannot open recent sequence — engine bridge not available");
+        return;
+    }
+
+    NSLog(@"XLSequencerViewController: Opening recent sequence: %@", path);
+    BOOL success = [engineBridge loadSequence:path];
+    if (success) {
+        // Move to top of recents
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        NSMutableArray *recents = [[defaults arrayForKey:@"RecentSequences"] mutableCopy] ?: [NSMutableArray new];
+        [recents removeObject:path];
+        [recents insertObject:path atIndex:0];
+        [defaults setObject:recents forKey:@"RecentSequences"];
+
+        [swiftHelper notifySequenceDataChanged];
+    } else {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Failed to Open Sequence";
+        alert.informativeText = [NSString stringWithFormat:@"Could not load the sequence file:\n%@", path];
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+    }
+}
+
+- (void)recentSequencesDidChange:(NSNotification *)notification {
+    if (!_emptyStateView.hidden) {
+        [self refreshRecentSequences];
+    }
 }
 
 - (void)clearSequenceData {
@@ -835,6 +1102,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     if (!_housePreviewController) {
         _housePreviewController = [[XLHousePreviewWindowController alloc]
             initWithEngineBridge:self.engineBridge];
+        _housePreviewController.playbackController = _playbackController;
         _playbackController.previewView = _housePreviewController.previewView;
     }
 
@@ -879,6 +1147,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Load saved zoom level for this sequence (if any)
     [self loadZoomLevelForCurrentSequence];
+
+    // Sync active timing track color with grid view
+    [self updateActiveTimingColorIndex];
 }
 
 - (void)updateViewsForSequenceChange {
@@ -1001,6 +1272,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _effectData = (XLEffectEntry *)calloc(_effectCapacity, sizeof(XLEffectEntry));
 
     // Populate row and effect data
+    NSInteger timingTrackColorCounter = 0;
     for (NSUInteger i = 0; i < (NSUInteger)elementCount; i++) {
         NSDictionary *elem = elements[i];
         XLRowEntry *row = &_rowData[i];
@@ -1021,6 +1293,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
         if ([typeStr isEqualToString:@"timing"]) {
             row->type = XLElementTypeTiming;
+            row->timingColorIndex = timingTrackColorCounter++;
         } else if ([typeStr isEqualToString:@"submodel"]) {
             row->type = XLElementTypeSubmodel;
         } else if ([typeStr isEqualToString:@"strand"]) {
@@ -1038,8 +1311,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         row->layerIndex = -1;  // -1 means this is the main element row (not a layer sub-row)
         row->isLayerRow = NO;
 
-        // Elements with multiple layers are expandable (except timing tracks)
-        if (row->type != XLElementTypeTiming && row->effectLayerCount > 1) {
+        // Elements with multiple layers are expandable (including timing tracks)
+        if (row->effectLayerCount > 1) {
             row->expandable = YES;
             row->expanded = NO;  // Start collapsed
         } else {
@@ -1098,6 +1371,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                 entry->selected = [eff[@"selected"] boolValue];
                 entry->locked = [eff[@"protected"] boolValue];
                 entry->renderDisabled = NO;
+                entry->fadeInMS = [eff[@"fadeInMS"] doubleValue];
+                entry->fadeOutMS = [eff[@"fadeOutMS"] doubleValue];
 
                 _effectCount++;
             }
@@ -1137,10 +1412,21 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         for (NSInteger li = 0; li < layersToInsert; li++) {
             XLRowEntry *layerRow = &_rowData[insertPos + li];
             memset(layerRow, 0, sizeof(XLRowEntry));
-            snprintf(layerRow->name, sizeof(layerRow->name), "   [Layer %ld]", (long)(li + 2));
+
+            // Timing tracks with 3 layers use Phrases/Words/Phonemes naming
+            if (mainRow->type == XLElementTypeTiming && mainRow->effectLayerCount == 3) {
+                const char *layerNames[] = { "Words", "Phonemes" };
+                snprintf(layerRow->name, sizeof(layerRow->name), "   %s", layerNames[li < 2 ? li : 1]);
+            } else if (mainRow->type == XLElementTypeTiming) {
+                snprintf(layerRow->name, sizeof(layerRow->name), "   [Layer %ld]", (long)(li + 2));
+            } else {
+                snprintf(layerRow->name, sizeof(layerRow->name), "   [Layer %ld]", (long)(li + 2));
+            }
+
             layerRow->type = mainRow->type;
             layerRow->elementIndex = mainRow->elementIndex;
             layerRow->effectLayerCount = mainRow->effectLayerCount;
+            layerRow->timingColorIndex = mainRow->timingColorIndex;
             layerRow->layerIndex = li + 1;
             layerRow->isLayerRow = YES;
             layerRow->indent = 1;
@@ -1517,9 +1803,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             }
         }
     } else {
-        // Main row when collapsed: show ALL effects from all layers
+        // Main row when collapsed: show only layer 0 (top layer)
         for (NSUInteger i = 0; i < _effectCount; i++) {
-            if (_effectData[i].elementIndex == elementIndex) {
+            if (_effectData[i].elementIndex == elementIndex &&
+                _effectData[i].layerIndex == 0) {
                 count++;
             }
         }
@@ -1550,11 +1837,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         if (rowEntry->isLayerRow) {
             // Layer sub-row: show only effects for this specific layer
             if (_effectData[i].layerIndex != rowEntry->layerIndex) continue;
-        } else if (rowEntry->expanded) {
-            // Main row when expanded: show only layer 0
+        } else {
+            // Main row (expanded or collapsed): show only layer 0
             if (_effectData[i].layerIndex != 0) continue;
         }
-        // else: collapsed main row shows all layers
 
         if (matchIndex == effectIndex) {
             XLEffectEntry *eff = &_effectData[i];
@@ -1563,12 +1849,24 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             info.row = row;
             info.layer = eff->layerIndex;
             info.effectIndex = eff->effectTypeIndex;
+            info.effectId = eff->effectIndex;
             info.colorARGB = eff->colorARGB;
             strncpy(info.effectTypeName, eff->effectTypeName, XL_EFFECT_TYPE_NAME_MAX - 1);
             info.effectTypeName[XL_EFFECT_TYPE_NAME_MAX - 1] = '\0';
             info.selected = eff->selected;
             info.locked = eff->locked;
             info.renderDisabled = eff->renderDisabled;
+            info.fadeInMS = eff->fadeInMS;
+            info.fadeOutMS = eff->fadeOutMS;
+            info.isTimingMark = (rowEntry->type == XLElementTypeTiming);
+            info.timingTrackLayerCount = rowEntry->effectLayerCount;
+            info.timingColorIndex = rowEntry->timingColorIndex;
+            if (info.isTimingMark) {
+                strncpy(info.label, eff->effectTypeName, XL_LABEL_MAX - 1);
+                info.label[XL_LABEL_MAX - 1] = '\0';
+            } else {
+                info.label[0] = '\0';
+            }
             return info;
         }
         matchIndex++;
@@ -1620,38 +1918,16 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     didSelectEffectAtRow:(NSInteger)row
           effectIndex:(NSInteger)effectIndex
 {
-    NSLog(@"Selected effect at row %ld, index %ld", (long)row, (long)effectIndex);
-
-    // Get the actual effect ID from our data
     // Use -1 as sentinel for "no effect" since 0 can be a valid effect ID
     NSInteger effectId = -1;
     NSString *effectType = nil;
 
-    if (row >= 0 && row < (NSInteger)_rowCount && _rowData && _effectData) {
-        // Find effect by matching elementIndex - this works correctly after row reordering
-        NSInteger elementIndex = _rowData[row].elementIndex;
-        NSInteger matchIndex = 0;
-        for (NSUInteger i = 0; i < _effectCount; i++) {
-            if (_effectData[i].elementIndex == elementIndex) {
-                if (matchIndex == effectIndex) {
-                    XLEffectEntry *eff = &_effectData[i];
-                    effectId = eff->effectIndex;
-                    NSLog(@"  Found effect: effectIndex=%ld, startTimeMS=%.0f, endTimeMS=%.0f",
-                          (long)eff->effectIndex, eff->startTimeMS, eff->endTimeMS);
+    // effectIndex is a flat render index — use the grid view's stored effectId
+    effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
 
-                    // Get effect type from engine if available (effectId >= 0 is valid)
-                    if (_engineBridge && effectId >= 0) {
-                        NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
-                        effectType = effectInfo[@"effectType"];
-                        NSLog(@"  effectType from engine: %@", effectType);
-                    }
-                    break;
-                }
-                matchIndex++;
-            }
-        }
-    } else {
-        NSLog(@"  Bounds check failed: row=%ld, _rowCount=%lu", (long)row, (unsigned long)_rowCount);
+    if (_engineBridge && effectId >= 0) {
+        NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+        effectType = effectInfo[@"effectType"];
     }
 
     // Post notification for effect properties panel (single selection)
@@ -1674,6 +1950,41 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
               effectIndex:(NSInteger)effectIndex
 {
     NSLog(@"Double-clicked effect at row %ld, index %ld", (long)row, (long)effectIndex);
+
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+
+    XLRowEntry *rowEntry = &_rowData[row];
+
+    // Only handle inline editing for timing track marks
+    if (rowEntry->type != XLElementTypeTiming) return;
+
+    // Get the effect info to find the effectId and current label
+    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
+    if (effectId < 0) return;
+
+    // Get the current label from the bridge
+    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+    NSString *currentLabel = effectInfo[@"effectType"] ?: @"";
+
+    // Get timing info for positioning the editor
+    CGFloat startMS = [effectInfo[@"startTimeMS"] doubleValue];
+    CGFloat endMS = [effectInfo[@"endTimeMS"] doubleValue];
+
+    // Show inline text editor on the grid view
+    [gridView beginEditingLabelAtRow:row
+                             startMS:startMS
+                               endMS:endMS
+                        currentLabel:currentLabel
+                   completionHandler:^(NSString *newLabel) {
+        if (newLabel && ![newLabel isEqualToString:currentLabel]) {
+            BOOL success = [self->_engineBridge setTimingMarkLabel:effectId label:newLabel];
+            if (success) {
+                NSLog(@"Updated timing mark %ld label to '%@'", (long)effectId, newLabel);
+                [self reloadSequenceData];
+                [gridView reloadData];
+            }
+        }
+    }];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -1697,8 +2008,6 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didChangeSelection:(NSIndexSet *)selectedIndices
 {
-    NSLog(@"Selection changed: %lu effects selected", (unsigned long)selectedIndices.count);
-
     if (selectedIndices.count == 0) {
         // No selection
         NSDictionary *userInfo = @{
@@ -1720,30 +2029,23 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     __block NSString *primaryEffectType = nil;
 
     [selectedIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-        // Find the effect ID for this render index
-        NSInteger effectId = -1;
+        // Use the grid view's stored effectId for this render index
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
         NSString *effectType = nil;
 
-        // Search through effect data to find the effect at this render index
-        if (self->_effectData && idx < self->_effectCount) {
-            XLEffectEntry *eff = &self->_effectData[idx];
-            effectId = eff->effectIndex;
-
-            // Get effect type from engine
-            if (self->_engineBridge && effectId >= 0) {
-                NSDictionary *effectInfo = [self->_engineBridge getEffect:effectId];
-                effectType = effectInfo[@"effectType"];
-            }
-
-            // First effect becomes primary
-            if (primaryEffectId < 0) {
-                primaryEffectId = effectId;
-                primaryEffectType = effectType;
-            }
-
-            [effectIds addObject:@(effectId)];
-            [effectTypes addObject:effectType ?: @""];
+        if (self->_engineBridge && effectId >= 0) {
+            NSDictionary *effectInfo = [self->_engineBridge getEffect:effectId];
+            effectType = effectInfo[@"effectType"];
         }
+
+        // First effect becomes primary
+        if (primaryEffectId < 0) {
+            primaryEffectId = effectId;
+            primaryEffectType = effectType;
+        }
+
+        [effectIds addObject:@(effectId)];
+        [effectTypes addObject:effectType ?: @""];
     }];
 
     NSDictionary *userInfo = @{
@@ -1768,9 +2070,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSMutableArray<NSNumber *> *effectIdsToDelete = [NSMutableArray arrayWithCapacity:effectIndices.count];
 
     [effectIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-        if (self->_effectData && idx < self->_effectCount) {
-            XLEffectEntry *eff = &self->_effectData[idx];
-            [effectIdsToDelete addObject:@(eff->effectIndex)];
+        NSInteger effectId = [gridView effectIdAtRenderIndex:idx];
+        if (effectId >= 0) {
+            [effectIdsToDelete addObject:@(effectId)];
         }
     }];
 
@@ -1897,6 +2199,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     return _rowData[row].indent;
 }
 
+- (NSInteger)rowHeadings:(XLRowHeadingsView *)view timingColorIndexForRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return 0;
+    return _rowData[row].timingColorIndex;
+}
+
 #pragma mark - XLRowHeadingsDelegate
 
 - (void)rowHeadings:(XLRowHeadingsView *)view didToggleExpandAtRow:(NSInteger)row {
@@ -1942,6 +2249,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             layerRow->type = mainRow->type;
             layerRow->elementIndex = mainRow->elementIndex;
             layerRow->effectLayerCount = mainRow->effectLayerCount;
+            layerRow->timingColorIndex = mainRow->timingColorIndex;
             layerRow->layerIndex = i + 1;  // Layer 1, 2, 3, etc.
             layerRow->isLayerRow = YES;
             layerRow->indent = 1;
@@ -2147,6 +2455,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     if (timingTracks.count == 0) {
         [_timingTrackPopup addItemWithTitle:@"(none)"];
     } else {
+        [_timingTrackPopup addItemWithTitle:@"Off"];
         for (NSDictionary *track in timingTracks) {
             NSString *trackName = track[@"name"];
             if (trackName) {
@@ -2155,19 +2464,54 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
     }
 
-    // Select the active timing track
+    // Select the active timing track, or "Off" if none active
     NSString *activeTrack = [self.engineBridge getActiveTimingTrackName];
     if (activeTrack && activeTrack.length > 0) {
         [_timingTrackPopup selectItemWithTitle:activeTrack];
+    } else {
+        [_timingTrackPopup selectItemWithTitle:@"Off"];
     }
 
     // Re-enable action
     _timingTrackPopup.action = originalAction;
 }
 
+- (void)updateActiveTimingColorIndex {
+    NSString *activeTrack = [self.engineBridge getActiveTimingTrackName];
+    if (!activeTrack || activeTrack.length == 0) {
+        _effectsGridView.activeTimingColorIndex = -1;
+        NSLog(@"updateActiveTimingColorIndex: no active track, set to -1");
+        return;
+    }
+    // Find the timing track row that matches the active track name
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].type == XLElementTypeTiming && !_rowData[i].isLayerRow) {
+            NSLog(@"updateActiveTimingColorIndex: checking row %lu '%s' colorIndex=%ld vs active='%@'",
+                  (unsigned long)i, _rowData[i].name, (long)_rowData[i].timingColorIndex, activeTrack);
+            if (strcmp(_rowData[i].name, [activeTrack UTF8String]) == 0) {
+                _effectsGridView.activeTimingColorIndex = _rowData[i].timingColorIndex;
+                NSLog(@"updateActiveTimingColorIndex: matched '%@' → colorIndex=%ld",
+                      activeTrack, (long)_rowData[i].timingColorIndex);
+                return;
+            }
+        }
+    }
+    NSLog(@"updateActiveTimingColorIndex: no match found for '%@', set to -1", activeTrack);
+    _effectsGridView.activeTimingColorIndex = -1;
+}
+
 - (void)timingTrackChanged:(NSPopUpButton *)sender {
     NSString *selectedTrackName = sender.titleOfSelectedItem;
     if (!selectedTrackName || [selectedTrackName isEqualToString:@"(none)"]) {
+        return;
+    }
+
+    // "Off" deactivates all timing tracks
+    if ([selectedTrackName isEqualToString:@"Off"]) {
+        [self.engineBridge deactivateAllTimingTracks];
+        _effectsGridView.activeTimingColorIndex = -1;
+        [self reloadTimingMarksForRuler];
+        [_effectsGridView reloadData];
         return;
     }
 
@@ -2182,6 +2526,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Switch to the selected timing track via engine bridge
     BOOL success = [self.engineBridge setActiveTimingTrack:selectedTrackName];
     if (success) {
+        [self updateActiveTimingColorIndex];
         // Reload timing marks for the ruler
         [self reloadTimingMarksForRuler];
         // Reload effects grid to update snap points

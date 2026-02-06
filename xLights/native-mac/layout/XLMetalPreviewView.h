@@ -40,6 +40,9 @@
 /// Called when handle manipulation ends
 - (void)previewView:(XLMetalPreviewView *)view didEndManipulatingModel:(NSString *)modelName;
 
+/// Called when the preview receives a key event it doesn't handle (e.g. spacebar)
+- (void)previewView:(XLMetalPreviewView *)view didReceiveKeyEvent:(NSEvent *)event;
+
 @end
 
 /// Native NSView subclass backed by CAMetalLayer for the 3D model preview.

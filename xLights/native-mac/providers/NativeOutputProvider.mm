@@ -558,7 +558,9 @@ bool NativeOutputProvider::loadFromXML(const std::string& xmlPath) {
         _controllers.clear();
         _cachedTotalChannels = -1;
 
-        // Parse controllers from <network> or <Controller> elements
+        // Step 1: Parse individual <network> elements (the actual outputs).
+        // These exist as children of <Controller> elements and represent
+        // individual E1.31 universes, DDP connections, etc.
         NSArray* networks = [doc.rootElement nodesForXPath:@"//network" error:nil];
         for (NSXMLElement* node in networks) {
             NativeControllerConfig config;
@@ -567,12 +569,73 @@ bool NativeOutputProvider::loadFromXML(const std::string& xmlPath) {
             }
         }
 
-        // Also check for Controller elements (newer format)
+        // Step 2: Calculate cumulative start channels for network entries only.
+        // These are the actual output channels — no double-counting.
+        int32_t cumulativeChannel = 1;
+        for (size_t i = 0; i < _controllers.size(); i++) {
+            auto& config = _controllers[i];
+            if (config.startChannel <= 1 && i > 0) {
+                config.startChannel = cumulativeChannel;
+            }
+            cumulativeChannel = config.startChannel + config.channels;
+        }
+
+        // Step 3: Parse parent <Controller> elements and create alias entries.
+        // Models reference parent controller names (e.g., "!FPP-Chance:1"),
+        // so we need entries with the parent name pointing to the correct
+        // start channel (the first child network's start channel).
         NSArray* controllers = [doc.rootElement nodesForXPath:@"//Controller" error:nil];
         for (NSXMLElement* node in controllers) {
-            NativeControllerConfig config;
-            if (parseController((__bridge void*)node, config)) {
-                _controllers.push_back(config);
+            NSString* ctrlName = [[node attributeForName:@"Name"] stringValue];
+            NSString* ctrlIP = [[node attributeForName:@"IP"] stringValue];
+            if (!ctrlName || ctrlName.length == 0) continue;
+
+            std::string name = [ctrlName UTF8String];
+            std::string ip = ctrlIP ? [ctrlIP UTF8String] : "";
+
+            // Find the first child network entry with matching IP to get its start channel
+            int32_t firstChildStart = -1;
+            int32_t totalChannels = 0;
+            for (const auto& child : _controllers) {
+                if (!ip.empty() && child.ip == ip) {
+                    if (firstChildStart < 0) {
+                        firstChildStart = child.startChannel;
+                    }
+                    totalChannels += child.channels;
+                }
+            }
+
+            if (firstChildStart > 0) {
+                NativeControllerConfig alias;
+                alias.name = name;
+                alias.ip = ip;
+                alias.startChannel = firstChildStart;
+                alias.channels = totalChannels;
+
+                // Read protocol from parent or first child Connection element
+                NSString* proto = [[node attributeForName:@"Protocol"] stringValue];
+                if (!proto) {
+                    for (NSXMLNode* child in [node children]) {
+                        if ([child isKindOfClass:[NSXMLElement class]]) {
+                            NSXMLElement* childElem = (NSXMLElement*)child;
+                            if ([childElem.name isEqualToString:@"network"] ||
+                                [childElem.name isEqualToString:@"Connection"]) {
+                                proto = [[childElem attributeForName:@"NetworkType"] stringValue];
+                                if (!proto) proto = [[childElem attributeForName:@"Protocol"] stringValue];
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (proto) alias.protocol = [proto UTF8String];
+                alias.type = OutputControllerType::Ethernet;
+
+                NSLog(@"NativeOutputProvider: Controller alias '%s' → startCh=%d, totalCh=%d (from child networks at IP %s)",
+                      name.c_str(), firstChildStart, totalChannels, ip.c_str());
+                _controllers.push_back(alias);
+            } else {
+                NSLog(@"NativeOutputProvider: Controller '%s' has no matching child networks (IP=%s)",
+                      name.c_str(), ip.c_str());
             }
         }
 
@@ -659,6 +722,69 @@ bool NativeOutputProvider::parseController(const void* xmlNode, NativeController
         NSString* enabled = [[node attributeForName:@"Enabled"] stringValue];
         if (enabled) config.active = ([enabled intValue] != 0);
 
+        // Check child elements for newer Controller XML format
+        // In the newer format, Protocol/Channels/etc. are on child <Connection> or <Output> elements
+        NSArray* children = [node children];
+        for (NSXMLNode* child in children) {
+            if (![child isKindOfClass:[NSXMLElement class]]) continue;
+            NSXMLElement* childElem = (NSXMLElement*)child;
+            NSString* childName = childElem.name;
+
+            if ([childName isEqualToString:@"Connection"] ||
+                [childName isEqualToString:@"Output"] ||
+                [childName isEqualToString:@"network"]) {
+                // Read protocol from child (overrides parent defaults)
+                NSString* proto = [[childElem attributeForName:@"Protocol"] stringValue];
+                if (!proto) proto = [[childElem attributeForName:@"NetworkType"] stringValue];
+                if (!proto) proto = [[childElem attributeForName:@"Type"] stringValue];
+                if (proto) {
+                    NSString* protoLower = [proto lowercaseString];
+                    if ([protoLower isEqualToString:@"e131"] || [protoLower isEqualToString:@"e1.31"]) {
+                        config.protocol = "E131";
+                        config.type = OutputControllerType::Ethernet;
+                    } else if ([protoLower isEqualToString:@"artnet"]) {
+                        config.protocol = "ArtNet";
+                        config.type = OutputControllerType::Ethernet;
+                    } else if ([protoLower isEqualToString:@"ddp"]) {
+                        config.protocol = "DDP";
+                        config.type = OutputControllerType::Ethernet;
+                    } else if ([protoLower isEqualToString:@"dmx"]) {
+                        config.protocol = "DMX";
+                        config.type = OutputControllerType::Serial;
+                    } else {
+                        config.protocol = [proto UTF8String];
+                    }
+                }
+
+                // Read channels from child
+                NSString* ch = [[childElem attributeForName:@"Channels"] stringValue];
+                if (!ch) ch = [[childElem attributeForName:@"MaxChannels"] stringValue];
+                if (!ch) ch = [[childElem attributeForName:@"NumChannels"] stringValue];
+                if (ch && [ch intValue] > 0) config.channels = [ch intValue];
+
+                // Read universe from child
+                NSString* uni = [[childElem attributeForName:@"Universe"] stringValue];
+                if (uni) config.universe = [uni intValue];
+
+                // Read channels per packet from child (DDP)
+                NSString* childCpp = [[childElem attributeForName:@"ChannelsPerPacket"] stringValue];
+                if (childCpp) config.channelsPerPacket = [childCpp intValue];
+
+                // Read priority from child (E1.31)
+                NSString* childPri = [[childElem attributeForName:@"Priority"] stringValue];
+                if (childPri) config.priority = [childPri intValue];
+
+                // Read IP from child if not on parent
+                if (config.ip.empty()) {
+                    NSString* childIP = [[childElem attributeForName:@"IP"] stringValue];
+                    if (childIP) config.ip = [childIP UTF8String];
+                }
+
+                // Only use the first connection element
+                break;
+            }
+        }
+
         // Generate a name if not provided
         if (config.name.empty()) {
             if (!config.ip.empty()) {
@@ -675,6 +801,10 @@ bool NativeOutputProvider::parseController(const void* xmlNode, NativeController
         if (config.channels <= 0) {
             config.channels = (config.protocol == "DDP") ? 512 : 512;
         }
+
+        NSLog(@"NativeOutputProvider: Parsed controller '%s' — protocol=%s, ip=%s, channels=%d, startChannel=%d",
+              config.name.c_str(), config.protocol.c_str(), config.ip.c_str(),
+              config.channels, config.startChannel);
 
         return !config.ip.empty() || !config.commPort.empty();
     }

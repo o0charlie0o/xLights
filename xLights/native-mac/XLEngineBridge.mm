@@ -337,6 +337,12 @@ static XLEngineBridge *_sharedBridge = nil;
         NSLog(@"XLEngineBridge: loadSequence(%@) = %s", path, result ? "YES" : "NO");
 
         if (result) {
+            // Load effects into the NativeEffectProvider so the inspector can access them
+            if (_nativeEffectProvider) {
+                bool effectsLoaded = _nativeEffectProvider->loadFromSequenceFile(stdPath);
+                NSLog(@"XLEngineBridge: loadFromSequenceFile = %s", effectsLoaded ? "YES" : "NO");
+            }
+
             // Try to load the corresponding FSEQ file for playback rendering
             [self loadFSEQForSequence:path];
         }
@@ -2193,20 +2199,49 @@ static XLEngineBridge *_sharedBridge = nil;
         return @[];
     }
 #ifdef XLIGHTS_NATIVE
-    // Get effects from native sequence provider
+    // Use NativeEffectProvider so effect IDs are consistent with the EffectEngine
+    if (_nativeEffectProvider) {
+        auto effects = _nativeEffectProvider->getEffectsOnLayer(static_cast<size_t>(index), static_cast<size_t>(layer));
+        NSMutableArray *result = [NSMutableArray arrayWithCapacity:effects.size()];
+        for (const auto& eff : effects) {
+            // Extract fade in/out values (stored in seconds, convert to ms)
+            double fadeInMS = 0.0;
+            double fadeOutMS = 0.0;
+            auto itIn = eff.settings.find("T_TEXTCTRL_Fadein");
+            if (itIn != eff.settings.end()) {
+                fadeInMS = std::atof(itIn->second.c_str()) * 1000.0;
+            }
+            auto itOut = eff.settings.find("T_TEXTCTRL_Fadeout");
+            if (itOut != eff.settings.end()) {
+                fadeOutMS = std::atof(itOut->second.c_str()) * 1000.0;
+            }
+            [result addObject:@{
+                @"id": @(static_cast<long long>(eff.effectId)),
+                @"effectType": [NSString stringWithUTF8String:eff.effectType.c_str()],
+                @"effectIndex": @(eff.effectTypeIndex),
+                @"startTimeMS": @(eff.startTimeMS),
+                @"endTimeMS": @(eff.endTimeMS),
+                @"paletteIndex": @(0),
+                @"selected": @(eff.selected),
+                @"protected": @(eff.protected_),
+                @"fadeInMS": @(fadeInMS),
+                @"fadeOutMS": @(fadeOutMS),
+            }];
+        }
+        return result;
+    }
+
+    // Fallback to sequence provider if effect provider not available
     if (!_nativeSequenceProvider) {
         return @[];
     }
 
     const auto& elements = _nativeSequenceProvider->getElements();
     if (index < 0 || (size_t)index >= elements.size()) {
-        NSLog(@"getEffectsForElementAtIndex: index %ld out of range (size=%zu)", (long)index, elements.size());
         return @[];
     }
 
     const auto& elem = elements[index];
-    NSLog(@"getEffectsForElementAtIndex: index=%ld element='%s' layer=%ld/%zu",
-          (long)index, elem.name.c_str(), (long)layer, elem.layers.size());
     if (layer < 0 || (size_t)layer >= elem.layers.size()) {
         return @[];
     }
@@ -2326,11 +2361,13 @@ static XLEngineBridge *_sharedBridge = nil;
 - (NSDictionary *)getEffect:(NSInteger)effectId {
     [self ensureEngineInitialized];
     if (!_effectEngine) {
+        NSLog(@"[EffectInspector] bridge.getEffect(%ld): no engine", (long)effectId);
         return nil;
     }
 
     xlEngine::EffectInfo info;
-    if (!_effectEngine->getEffect((int)effectId, info)) {
+    bool found = _effectEngine->getEffect((int)effectId, info);
+    if (!found) {
         return nil;
     }
 
@@ -2367,6 +2404,7 @@ static XLEngineBridge *_sharedBridge = nil;
 
     [self ensureEngineInitialized];
     if (!_effectEngine) {
+        NSLog(@"[EffectInspector] bridge.getEffectParameters('%@'): no engine", effectType);
         return @[];
     }
 
@@ -2647,8 +2685,24 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
 
 #ifdef XLIGHTS_NATIVE
-    // TODO: Implement native timing tracks
-    return @[];
+    if (!_nativeEffectProvider) return @[];
+
+    size_t count = _nativeEffectProvider->getElementCount();
+    NSMutableArray *result = [NSMutableArray array];
+    for (size_t i = 0; i < count; i++) {
+        xlEngine::ElementInfo info;
+        if (!_nativeEffectProvider->getElement(i, info)) continue;
+        if (info.type != xlEngine::SequenceElementType::Timing) continue;
+
+        NSMutableDictionary *trackInfo = [NSMutableDictionary dictionary];
+        trackInfo[@"name"] = [NSString stringWithUTF8String:info.name.c_str()];
+        trackInfo[@"layerCount"] = @(info.effectLayerCount);
+        trackInfo[@"isActive"] = @(info.isActive);
+        trackInfo[@"isFixed"] = @(info.fixedTiming > 0);
+        trackInfo[@"fixedInterval"] = @(info.fixedTiming);
+        [result addObject:trackInfo];
+    }
+    return result;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
@@ -2684,7 +2738,17 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
 
 #ifdef XLIGHTS_NATIVE
-    return nil;  // TODO: Implement native timing tracks
+    if (!_nativeEffectProvider) return nil;
+
+    size_t count = _nativeEffectProvider->getElementCount();
+    for (size_t i = 0; i < count; i++) {
+        xlEngine::ElementInfo info;
+        if (!_nativeEffectProvider->getElement(i, info)) continue;
+        if (info.type == xlEngine::SequenceElementType::Timing && info.isActive) {
+            return [NSString stringWithUTF8String:info.name.c_str()];
+        }
+    }
+    return nil;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return nil;
@@ -2714,7 +2778,16 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
 
 #ifdef XLIGHTS_NATIVE
-    return NO;  // TODO: Implement native timing tracks
+    if (!_nativeEffectProvider) return NO;
+
+    std::string stdName = [trackName UTF8String];
+    BOOL success = _nativeEffectProvider->setTimingTrackActive(stdName);
+    if (success) {
+        NSLog(@"XLEngineBridge: Activated timing track: %@", trackName);
+    } else {
+        NSLog(@"XLEngineBridge: Timing track not found: %@", trackName);
+    }
+    return success;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;
@@ -2747,7 +2820,10 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
 
 #ifdef XLIGHTS_NATIVE
-    // TODO: Implement native timing tracks
+    if (_nativeEffectProvider) {
+        _nativeEffectProvider->deactivateAllTimingTracks();
+        NSLog(@"XLEngineBridge: Deactivated all timing tracks");
+    }
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return;
@@ -2820,7 +2896,37 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
 
 #ifdef XLIGHTS_NATIVE
-    return @[];  // TODO: Implement native timing marks
+    if (!_nativeEffectProvider) return @[];
+
+    // Find the active timing track
+    size_t elementCount = _nativeEffectProvider->getElementCount();
+    size_t activeIndex = SIZE_MAX;
+    size_t activeLayerCount = 0;
+    for (size_t i = 0; i < elementCount; i++) {
+        xlEngine::ElementInfo info;
+        if (!_nativeEffectProvider->getElement(i, info)) continue;
+        if (info.type == xlEngine::SequenceElementType::Timing && info.isActive) {
+            activeIndex = i;
+            activeLayerCount = info.effectLayerCount;
+            break;
+        }
+    }
+
+    if (activeIndex == SIZE_MAX) return @[];
+
+    // Use the lowest (most granular) layer for grid lines.
+    // For lyric tracks: layer 0 = phrases, layer 1 = words, layer 2 = phonemes.
+    // The most granular layer provides the finest snap-to grid.
+    size_t targetLayer = (activeLayerCount > 0) ? (activeLayerCount - 1) : 0;
+    auto effects = _nativeEffectProvider->getEffectsOnLayer(activeIndex, targetLayer);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:effects.size() * 2];
+    for (const auto& eff : effects) {
+        [result addObject:@(eff.startTimeMS)];
+        if (eff.endTimeMS != eff.startTimeMS) {
+            [result addObject:@(eff.endTimeMS)];
+        }
+    }
+    return result;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];
@@ -2841,8 +2947,10 @@ static XLEngineBridge *_sharedBridge = nil;
 
         if (!activeTe) return @[];
 
-        // Collect all timing mark start times from layer 0 (the main timing layer)
-        EffectLayer* el = activeTe->GetEffectLayer(0);
+        // Use the lowest (most granular) layer for grid lines
+        int layerCount = activeTe->GetEffectLayerCount();
+        int targetLayer = (layerCount > 0) ? (layerCount - 1) : 0;
+        EffectLayer* el = activeTe->GetEffectLayer(targetLayer);
         if (!el) return @[];
 
         const std::vector<Effect*>& effects = el->GetEffects();
@@ -2932,7 +3040,16 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
 
 #ifdef XLIGHTS_NATIVE
-    return NO;  // TODO: Implement native timing marks
+    if (!_nativeEffectProvider) return NO;
+
+    std::string stdLabel = [label UTF8String];
+    auto result = _nativeEffectProvider->updateEffectType(static_cast<int64_t>(markId), stdLabel);
+    if (result.success) {
+        NSLog(@"XLEngineBridge: Set timing mark %ld label to '%@'", (long)markId, label);
+    } else {
+        NSLog(@"XLEngineBridge: Failed to set timing mark %ld label", (long)markId);
+    }
+    return result.success ? YES : NO;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return NO;

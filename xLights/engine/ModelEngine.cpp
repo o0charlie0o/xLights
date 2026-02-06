@@ -72,8 +72,10 @@ static std::vector<NodeCoord> generateNodesFromAttributes(
 
     int parm1 = attrInt(attrs, "parm1", 1);
     int parm2 = attrInt(attrs, "parm2", 1);
+    int parm3 = attrInt(attrs, "parm3", 1);
     if (parm1 < 1) parm1 = 1;
     if (parm2 < 1) parm2 = 1;
+    if (parm3 < 1) parm3 = 1;
 
     // Two-point models (SingleLine, Arches, etc.) define extent via X2/Y2
     // These are OFFSETS from WorldPos in the legacy code.
@@ -105,17 +107,30 @@ static std::vector<NodeCoord> generateNodesFromAttributes(
     }
     else if (type == "Vert Matrix" || type == "Horiz Matrix" || type == "Matrix") {
         // Grid layout: parm1 strings × parm2 nodes per string
-        // parm3 = strands per string (zig-zag)
+        // parm3 = strands per string (zig-zag segments)
         int parm3 = attrInt(attrs, "parm3", 1);
         if (parm3 < 1) parm3 = 1;
+        if (parm3 > parm2) parm3 = parm2;
 
+        int numStrands = parm1 * parm3;
+        int pixelsPerStrand = (parm3 > 0) ? parm2 / parm3 : parm2;
+
+        // Wiring direction attributes
+        std::string dirAttr = attrStr(attrs, "Dir");
+        bool isLtoR = (dirAttr != "R"); // Dir="L" or missing → true
+        std::string startSideAttr = attrStr(attrs, "StartSide");
+        bool isBotToTop = (startSideAttr == "B"); // StartSide="B" → true
+        std::string noZigStr = attrStr(attrs, "NoZig");
+        bool noZig = (noZigStr == "true" || noZigStr == "1");
+
+        bool isVert = (type == "Vert Matrix");
         int cols, rows;
-        if (type == "Vert Matrix") {
-            cols = parm1 * parm3;
-            rows = parm2 / parm3;
+        if (isVert) {
+            cols = numStrands;       // strands across X
+            rows = pixelsPerStrand;  // pixels along Y
         } else {
-            cols = parm2 / parm3;
-            rows = parm1 * parm3;
+            cols = pixelsPerStrand;  // pixels along X
+            rows = numStrands;       // strands along Y
         }
         if (cols < 1) cols = 1;
         if (rows < 1) rows = 1;
@@ -123,39 +138,53 @@ static std::vector<NodeCoord> generateNodesFromAttributes(
         bool hasThreePoint = (std::abs(x2) > 0.1f || std::abs(y2) > 0.1f ||
                               std::abs(x3) > 0.1f || std::abs(y3) > 0.1f);
 
+        // Pre-read scale for boxed location case
+        float scaleX = attrFloat(attrs, "ScaleX", 1.0f);
+        float scaleY = attrFloat(attrs, "ScaleY", 1.0f);
+        if (std::abs(scaleX) < 0.001f) scaleX = 1.0f;
+        if (std::abs(scaleY) < 0.001f) scaleY = 1.0f;
+
         nodes.reserve(cols * rows);
-        if (hasThreePoint) {
-            // ThreePointScreenLocation: X2/Y2 define one axis, X3/Y3 the other
-            for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < cols; c++) {
-                    float ct = (cols > 1) ? (float)c / (float)(cols - 1) : 0.5f;
-                    float rt = (rows > 1) ? (float)r / (float)(rows - 1) : 0.5f;
-                    NodeCoord nc;
+        for (int r = 0; r < rows; r++) {
+            for (int c = 0; c < cols; c++) {
+                NodeCoord nc;
+
+                // Buffer coordinates with zigzag, direction, and start side
+                // Match xLights MatrixModel InitHMatrix/InitVMatrix logic
+                if (isVert) {
+                    // Vert Matrix: c = strand index (x), r = pixel in strand (y)
+                    int segmentnum = c % parm3;
+                    nc.bufX = isLtoR ? c : numStrands - c - 1;
+                    if (noZig) {
+                        nc.bufY = isBotToTop ? r : pixelsPerStrand - r - 1;
+                    } else {
+                        nc.bufY = (isBotToTop == (segmentnum % 2 == 0)) ? r : pixelsPerStrand - r - 1;
+                    }
+                } else {
+                    // Horiz Matrix: r = strand index (y), c = pixel in strand (x)
+                    int segmentnum = r % parm3;
+                    nc.bufY = isBotToTop ? r : numStrands - r - 1;
+                    if (noZig) {
+                        nc.bufX = isLtoR ? c : pixelsPerStrand - c - 1;
+                    } else {
+                        nc.bufX = (isLtoR != (segmentnum % 2 == 0)) ? pixelsPerStrand - c - 1 : c;
+                    }
+                }
+
+                // Screen position derived from buffer coords so physical layout matches buffer
+                if (hasThreePoint) {
+                    float ct = (cols > 1) ? (float)nc.bufX / (float)(cols - 1) : 0.5f;
+                    float rt = (rows > 1) ? (float)nc.bufY / (float)(rows - 1) : 0.5f;
                     nc.x = wx + x2 * ct + x3 * rt;
                     nc.y = wy + y2 * ct + y3 * rt;
                     nc.z = wz + z2 * ct;
-                    nc.bufX = c;
-                    nc.bufY = r;
-                    nodes.push_back(nc);
-                }
-            }
-        } else {
-            // BoxedScreenLocation: use ScaleX/ScaleY centered at WorldPos
-            float scaleX = attrFloat(attrs, "ScaleX", 1.0f);
-            float scaleY = attrFloat(attrs, "ScaleY", 1.0f);
-            if (std::abs(scaleX) < 0.001f) scaleX = 1.0f;
-            if (std::abs(scaleY) < 0.001f) scaleY = 1.0f;
-
-            for (int r = 0; r < rows; r++) {
-                for (int c = 0; c < cols; c++) {
-                    NodeCoord nc;
-                    nc.x = wx + ((float)c - (float)(cols - 1) / 2.0f) * scaleX;
-                    nc.y = wy + ((float)r - (float)(rows - 1) / 2.0f) * scaleY;
+                } else {
+                    nc.x = wx + ((float)nc.bufX - (float)(cols - 1) / 2.0f) * scaleX;
+                    nc.y = wy + ((float)nc.bufY - (float)(rows - 1) / 2.0f) * scaleY;
                     nc.z = wz;
-                    nc.bufX = c;
-                    nc.bufY = r;
-                    nodes.push_back(nc);
                 }
+
+                nodes.push_back(nc);
             }
         }
     }
@@ -766,6 +795,9 @@ static std::vector<NodeCoord> generateNodesFromAttributes(
         //    Spinner, Sphere, etc.): use ScaleX/ScaleY as per-node
         //    spacing centered at WorldPos.
         // 2. TwoPointScreenLocation fallback: distribute along X2/Y2 line.
+        //
+        // parm3 is included for models like Spinner where it represents
+        // arc/layer count (total nodes = parm1 * parm2 * parm3).
         float scaleX = attrFloat(attrs, "ScaleX", 0.0f);
         float scaleY = attrFloat(attrs, "ScaleY", 0.0f);
 
@@ -774,9 +806,9 @@ static std::vector<NodeCoord> generateNodesFromAttributes(
 
         if (hasScale) {
             // BoxedScreenLocation: grid of nodes centered at WorldPos
-            // Each node is spaced scaleX apart horizontally, scaleY apart vertically
+            // Include parm3 in total node count for multi-layer models (Spinner, etc.)
             int cols = (parm2 > 0) ? parm2 : 1;
-            int rows = (parm1 > 0) ? parm1 : 1;
+            int rows = (parm1 > 0) ? parm1 * parm3 : 1;
             int totalNodes = cols * rows;
             if (totalNodes > 10000) {
                 // Cap to prevent excessive vertex count
@@ -799,9 +831,9 @@ static std::vector<NodeCoord> generateNodesFromAttributes(
             }
         } else if (hasExtent) {
             // TwoPointScreenLocation: distribute along X2/Y2 line
-            int totalNodes = parm1 * parm2;
+            int totalNodes = parm1 * parm2 * parm3;
             if (totalNodes < 1) totalNodes = 1;
-            if (totalNodes > 5000) totalNodes = 5000;
+            if (totalNodes > 10000) totalNodes = 10000;
 
             nodes.reserve(totalNodes);
             for (int i = 0; i < totalNodes; i++) {
@@ -810,17 +842,28 @@ static std::vector<NodeCoord> generateNodesFromAttributes(
                 nc.x = wx + x2 * t;
                 nc.y = wy + y2 * t;
                 nc.z = wz + z2 * t;
-                nc.bufX = i;
-                nc.bufY = 0;
+                nc.bufX = i % parm2;
+                nc.bufY = i / parm2;
                 nodes.push_back(nc);
             }
         } else {
-            // No extent info — place a single representative node
-            NodeCoord nc;
-            nc.x = wx;
-            nc.y = wy;
-            nc.z = wz;
-            nodes.push_back(nc);
+            // No scale or extent info — generate all nodes sequentially
+            // This ensures FSEQ channel data for all nodes is captured
+            int totalNodes = parm1 * parm2 * parm3;
+            if (totalNodes < 1) totalNodes = 1;
+            if (totalNodes > 10000) totalNodes = 10000;
+
+            int cols = (parm2 > 0) ? parm2 : 1;
+            nodes.reserve(totalNodes);
+            for (int i = 0; i < totalNodes; i++) {
+                NodeCoord nc;
+                nc.x = wx;
+                nc.y = wy;
+                nc.z = wz;
+                nc.bufX = i % cols;
+                nc.bufY = i / cols;
+                nodes.push_back(nc);
+            }
         }
     }
 
@@ -911,6 +954,7 @@ uint32_t ModelEngine::getModelNodeCount(const std::string& name) const
 {
     if (!_provider || !_provider->hasModel(name)) return 0;
     auto attrs = _provider->getModelAttributes(name);
+
     int p1 = attrInt(attrs, "parm1", 1);
     int p2 = attrInt(attrs, "parm2", 1);
     uint32_t count = (uint32_t)(p1 * p2);

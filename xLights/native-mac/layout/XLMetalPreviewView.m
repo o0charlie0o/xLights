@@ -138,7 +138,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _needsRenderFlag = YES;
     _lastFrameTime = CFAbsoluteTimeGetCurrent();
 
-    _backgroundColor = [NSColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:1.0];
+    _backgroundColor = [NSColor colorWithRed:0.0 green:0.0 blue:0.0 alpha:1.0];
     _isManipulatingHandle = NO;
     _activeHandleType = XLHandleTypeNone;
 
@@ -1217,12 +1217,29 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             self.showGrid = !self.showGrid;
             break;
         case 0x12: // '1' key - front view
-            [_cameraController setFrontView];
-            _contentDirty = YES;
+            _cameraController.azimuth = 0.0f;
+            _cameraController.elevation = 0.0f;
+            [self frameAllModels];
             break;
         case 0x13: // '2' key - top view
-            [_cameraController setTopDownView];
-            _contentDirty = YES;
+            _cameraController.azimuth = 0.0f;
+            _cameraController.elevation = M_PI_2 - 0.01f;
+            [self frameAllModels];
+            break;
+        case 0x14: // '3' key - left view
+            _cameraController.azimuth = M_PI_2;
+            _cameraController.elevation = 0.0f;
+            [self frameAllModels];
+            break;
+        case 0x15: // '4' key - right view
+            _cameraController.azimuth = -M_PI_2;
+            _cameraController.elevation = 0.0f;
+            [self frameAllModels];
+            break;
+        case 0x17: // '5' key - back view
+            _cameraController.azimuth = M_PI;
+            _cameraController.elevation = 0.0f;
+            [self frameAllModels];
             break;
 
         // Tool mode keys
@@ -1238,8 +1255,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             _handles.toolMode = XLToolModeRotate;
             _contentDirty = YES;
             break;
-        case 0x31: // space key - toggle tool mode
-            [self toggleToolMode];
+        case 0x31: // space key - forward to delegate (play/pause) or toggle tool mode
+            if ([_delegate respondsToSelector:@selector(previewView:didReceiveKeyEvent:)]) {
+                [_delegate previewView:self didReceiveKeyEvent:event];
+            } else {
+                [self toggleToolMode];
+            }
             break;
 
         // Axis constraint keys

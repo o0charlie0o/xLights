@@ -262,6 +262,15 @@ public:
     /// @return true if successful
     bool removeElement(size_t elementIndex);
 
+    /// Set a timing track's active state by name.
+    /// Deactivates all other timing tracks first, then activates the named one.
+    /// @param name Name of the timing track to activate
+    /// @return true if the timing track was found and activated
+    bool setTimingTrackActive(const std::string& name);
+
+    /// Deactivate all timing tracks.
+    void deactivateAllTimingTracks();
+
     /// Mark the sequence as modified.
     void setModified(bool modified);
 

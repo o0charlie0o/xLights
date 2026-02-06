@@ -42,7 +42,7 @@ static const NSInteger kMenuTagEditSettings = 1005;
 // SF Symbol icon mapping for effect types (matching Swift EffectPaletteGridView)
 static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
-@interface XLEffectsGridView () {
+@interface XLEffectsGridView () <NSTextFieldDelegate> {
     dispatch_source_t _displayTimer;
 
     // Render-path snapshot: plain C arrays copied from the ObjC collections.
@@ -61,6 +61,13 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
     // Icon overlay layer for drawing SF Symbols on effect blocks
     CALayer *_iconOverlayLayer;
+
+    // Label overlay layer for drawing timing mark text labels
+    CALayer *_labelOverlayLayer;
+
+    // Inline label editor for timing marks
+    NSTextField *_labelEditor;
+    void (^_labelEditCompletion)(NSString * _Nullable);
 }
 
 @property (nonatomic, strong) CAMetalLayer *metalLayer;
@@ -90,6 +97,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 // Cross-row drag state
 @property (nonatomic, assign) NSInteger dragCurrentRow;
 @property (nonatomic, assign) CGFloat dragCurrentStartMS;
+
+// Slip-drag: adjacent timing mark that moves with the dragged edge
+@property (nonatomic, assign) NSInteger adjacentEffectIndex;
+@property (nonatomic, assign) CGFloat adjacentOriginalStartMS;
+@property (nonatomic, assign) CGFloat adjacentOriginalEndMS;
 
 // Undo state - captured snapshot at drag/resize start
 @property (nonatomic, assign) XLEffectSnapshot undoSnapshot;
@@ -266,6 +278,20 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     };
     [self.layer addSublayer:_iconOverlayLayer];
 
+    // Add label overlay layer for timing mark text (below icon overlay, above Metal)
+    _labelOverlayLayer = [CALayer layer];
+    _labelOverlayLayer.contentsScale = self.window.backingScaleFactor ?: 2.0;
+    _labelOverlayLayer.frame = self.bounds;
+    _labelOverlayLayer.backgroundColor = nil;
+    _labelOverlayLayer.actions = @{
+        @"contents": [NSNull null],
+        @"bounds": [NSNull null],
+        @"position": [NSNull null],
+        @"frame": [NSNull null]
+    };
+    // Insert below icon overlay so icons draw on top
+    [self.layer insertSublayer:_labelOverlayLayer below:_iconOverlayLayer];
+
     // Display timer is created lazily in viewDidMoveToWindow when the view
     // first gets a window. Starting it here (before the view has a window,
     // proper frame, or backing layer) can cause renders with corrupt state.
@@ -402,6 +428,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     if (self.window) {
         _metalLayer.contentsScale = self.window.backingScaleFactor;
         _iconOverlayLayer.contentsScale = self.window.backingScaleFactor;
+        _labelOverlayLayer.contentsScale = self.window.backingScaleFactor;
         if (!_displayTimer) {
             [self setupDisplayTimer];
         }
@@ -420,6 +447,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _metalLayer.drawableSize = CGSizeMake(newSize.width * _metalLayer.contentsScale,
                                            newSize.height * _metalLayer.contentsScale);
     _iconOverlayLayer.frame = CGRectMake(0, 0, newSize.width, newSize.height);
+    _labelOverlayLayer.frame = CGRectMake(0, 0, newSize.width, newSize.height);
 
     [CATransaction commit];
 
@@ -594,12 +622,16 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
        playbackPositionMS:_playbackPositionMS
          timingMarkValues:_timingMarkValues
           timingMarkCount:_timingMarkCount
+  activeTimingColorIndex:_activeTimingColorIndex
             dropIndicator:_isReceivingDrop
                   dropRow:_dropTargetRow
               dropStartMS:_dropTargetStartMS
                 dropEndMS:_dropTargetEndMS
          rubberBandActive:_isRubberBanding
            rubberBandRect:rubberBandRect];
+
+    // Draw timing mark labels on their own overlay layer
+    [self drawTimingLabels];
 
     // Draw effect icons on the overlay layer (can be disabled for performance testing)
     if (!_disableIconDrawing) {
@@ -609,6 +641,107 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     }
 
     _isDrawing = NO;
+}
+
+- (void)drawTimingLabels {
+    if (!_renderEffects || _renderEffectCount == 0) {
+        _labelOverlayLayer.contents = nil;
+        return;
+    }
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    _labelOverlayLayer.frame = self.bounds;
+
+    CGFloat viewHeight = self.bounds.size.height;
+    CGFloat viewWidth = self.bounds.size.width;
+    if (viewWidth < 1 || viewHeight < 1) {
+        _labelOverlayLayer.contents = nil;
+        [CATransaction commit];
+        return;
+    }
+
+    // Calculate visible region
+    CGFloat msPerPixel = 1.0 / _zoomLevel;
+    CGFloat visibleStartMS = _scrollOffset.x * msPerPixel;
+    CGFloat visibleEndMS = visibleStartMS + viewWidth * msPerPixel;
+    CGFloat visibleStartRow = _scrollOffset.y / _rowHeight;
+    CGFloat visibleEndRow = (viewHeight + _scrollOffset.y) / _rowHeight;
+
+    // Check if we have any visible timing labels at all
+    // Only draw labels for lyric tracks (multi-layer timing tracks, not plain timing)
+    BOOL hasLabels = NO;
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        XLEffectRenderInfo info = _renderEffects[i];
+        if (!info.isTimingMark || info.label[0] == '\0') continue;
+        if (info.timingTrackLayerCount <= 1) continue;
+        if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
+            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+        hasLabels = YES;
+        break;
+    }
+
+    if (!hasLabels) {
+        _labelOverlayLayer.contents = nil;
+        [CATransaction commit];
+        return;
+    }
+
+    // Create image for drawing labels (bottom-left origin since view is flipped)
+    NSImage *labelImage = [[NSImage alloc] initWithSize:self.bounds.size];
+    [labelImage lockFocus];
+
+    NSFont *labelFont = [NSFont systemFontOfSize:9.0 weight:NSFontWeightMedium];
+    NSDictionary *textAttrs = @{
+        NSFontAttributeName: labelFont,
+        NSForegroundColorAttributeName: [NSColor whiteColor],
+    };
+
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        XLEffectRenderInfo info = _renderEffects[i];
+        if (!info.isTimingMark || info.label[0] == '\0') continue;
+        if (info.timingTrackLayerCount <= 1) continue; // Skip plain timing tracks
+
+        // Frustum culling
+        if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
+            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        CGFloat x1 = info.startTimeMS * _zoomLevel - _scrollOffset.x;
+        CGFloat x2 = info.endTimeMS * _zoomLevel - _scrollOffset.x;
+        CGFloat blockWidth = x2 - x1;
+        if (blockWidth < 10.0) continue; // Too narrow for text
+
+        NSString *text = [NSString stringWithUTF8String:info.label];
+        if (!text || text.length == 0) continue;
+
+        NSSize textSize = [text sizeWithAttributes:textAttrs];
+
+        // View Y is top-left origin (flipped view), NSImage is bottom-left origin
+        CGFloat viewY = info.row * _rowHeight - _scrollOffset.y;
+        CGFloat viewCenterY = viewY + _rowHeight / 2.0;
+
+        // Convert to image coordinates (bottom-left origin)
+        CGFloat imageY = viewHeight - viewCenterY - textSize.height / 2.0;
+
+        // Center text horizontally, clipped to block width
+        CGFloat padding = 4.0;
+        CGFloat textW = MIN(textSize.width, blockWidth - padding * 2);
+        CGFloat textX = x1 + (blockWidth - textW) / 2.0;
+
+        NSRect textRect = NSMakeRect(textX, imageY, textW, textSize.height);
+        [text drawWithRect:textRect
+                   options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingTruncatesLastVisibleLine
+                attributes:textAttrs context:nil];
+    }
+
+    [labelImage unlockFocus];
+
+    _labelOverlayLayer.contents = labelImage;
+
+    [CATransaction commit];
 }
 
 - (void)drawEffectIcons {
@@ -642,9 +775,10 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     CGFloat visibleStartRow = _scrollOffset.y / _rowHeight;
     CGFloat visibleEndRow = (self.bounds.size.height + _scrollOffset.y) / _rowHeight;
 
-    // Draw icons for visible effects
+    // Draw icons for visible effects (skip timing marks — they have text labels instead)
     for (NSUInteger i = 0; i < _renderEffectCount; i++) {
         XLEffectRenderInfo info = _renderEffects[i];
+        if (info.isTimingMark) continue;
 
         // Skip effects outside visible region
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
@@ -897,6 +1031,13 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     return _renderEffects[effectIndex].row;
 }
 
+- (NSInteger)effectIdAtRenderIndex:(NSUInteger)index {
+    if (index < _renderEffectCount) {
+        return _renderEffects[index].effectId;
+    }
+    return -1;
+}
+
 #pragma mark - Mouse Events
 
 - (void)mouseDown:(NSEvent *)event {
@@ -1010,6 +1151,41 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                 _hasUndoSnapshot = YES;
             }
         }
+        // Find adjacent timing mark for slip-drag
+        _adjacentEffectIndex = -1;
+        if (hitEffectIndex >= 0 && (NSUInteger)hitEffectIndex < _renderEffectCount &&
+            _renderEffects[hitEffectIndex].isTimingMark) {
+            NSInteger dragRow = _renderEffects[hitEffectIndex].row;
+
+            if (hitLoc == XLEffectHitLocationLeftEdge) {
+                CGFloat ourStart = _dragOriginalStartMS;
+                for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+                    if ((NSInteger)i == hitEffectIndex) continue;
+                    if (!_renderEffects[i].isTimingMark) continue;
+                    if (_renderEffects[i].row != dragRow) continue;
+                    if (fabs(_renderEffects[i].endTimeMS - ourStart) < 1.0) {
+                        _adjacentEffectIndex = (NSInteger)i;
+                        _adjacentOriginalStartMS = _renderEffects[i].startTimeMS;
+                        _adjacentOriginalEndMS = _renderEffects[i].endTimeMS;
+                        break;
+                    }
+                }
+            } else if (hitLoc == XLEffectHitLocationRightEdge) {
+                CGFloat ourEnd = _dragOriginalEndMS;
+                for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+                    if ((NSInteger)i == hitEffectIndex) continue;
+                    if (!_renderEffects[i].isTimingMark) continue;
+                    if (_renderEffects[i].row != dragRow) continue;
+                    if (fabs(_renderEffects[i].startTimeMS - ourEnd) < 1.0) {
+                        _adjacentEffectIndex = (NSInteger)i;
+                        _adjacentOriginalStartMS = _renderEffects[i].startTimeMS;
+                        _adjacentOriginalEndMS = _renderEffects[i].endTimeMS;
+                        break;
+                    }
+                }
+            }
+        }
+
         _dragStartTimeMS = timeMS;
     } else {
         // Clicked on empty area
@@ -1066,12 +1242,28 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                 newStart = [self snapTimeMS:newStart];
                 newStart = MIN(newStart, newEnd - kMinimumEffectWidthMS);
             }
+            // Slip-drag: clamp to left neighbor's minimum width and update its right edge
+            if (_adjacentEffectIndex >= 0) {
+                CGFloat neighborMinEnd = _adjacentOriginalStartMS + kMinimumEffectWidthMS;
+                newStart = MAX(newStart, neighborMinEnd);
+                if ((NSUInteger)_adjacentEffectIndex < _renderEffectCount) {
+                    _renderEffects[_adjacentEffectIndex].endTimeMS = newStart;
+                }
+            }
         } else {
             newEnd = _dragOriginalEndMS + deltaMS;
             newEnd = MAX(newStart + kMinimumEffectWidthMS, MIN(newEnd, _sequenceLengthMS));
             if (snapEnabled) {
                 newEnd = [self snapTimeMS:newEnd];
                 newEnd = MAX(newStart + kMinimumEffectWidthMS, newEnd);
+            }
+            // Slip-drag: clamp to right neighbor's minimum width and update its left edge
+            if (_adjacentEffectIndex >= 0) {
+                CGFloat neighborMaxStart = _adjacentOriginalEndMS - kMinimumEffectWidthMS;
+                newEnd = MIN(newEnd, neighborMaxStart);
+                if ((NSUInteger)_adjacentEffectIndex < _renderEffectCount) {
+                    _renderEffects[_adjacentEffectIndex].startTimeMS = newEnd;
+                }
             }
         }
 
@@ -1146,6 +1338,16 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                       effectIndex:_mouseDownEffectIndex
                     newStartTimeMS:info.startTimeMS
                       newEndTimeMS:info.endTimeMS];
+
+            // Also resize the adjacent mark that was slip-dragged
+            if (_adjacentEffectIndex >= 0 && (NSUInteger)_adjacentEffectIndex < _renderEffectCount) {
+                XLEffectRenderInfo adjInfo = _renderEffects[_adjacentEffectIndex];
+                [_delegate effectsGrid:self
+                   didResizeEffectAtRow:adjInfo.row
+                          effectIndex:_adjacentEffectIndex
+                        newStartTimeMS:adjInfo.startTimeMS
+                          newEndTimeMS:adjInfo.endTimeMS];
+            }
         }
     } else if (_isDragging && _mouseDownEffectIndex >= 0 && (NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
         XLEffectRenderInfo info = _renderEffects[_mouseDownEffectIndex];
@@ -1206,6 +1408,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _isResizing = NO;
     _isRubberBanding = NO;
     _dragCurrentRow = -1;
+    _adjacentEffectIndex = -1;
     _hasUndoSnapshot = NO;
     _needsRedraw = YES;
 }
@@ -2087,6 +2290,108 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         [self updateSelectionState];
         _needsRedraw = YES;
     }
+}
+
+#pragma mark - Inline Label Editing
+
+- (void)beginEditingLabelAtRow:(NSInteger)row
+                       startMS:(CGFloat)startMS
+                         endMS:(CGFloat)endMS
+                  currentLabel:(NSString *)currentLabel
+             completionHandler:(void (^)(NSString * _Nullable newLabel))completion
+{
+    // Cancel any existing edit
+    [self cancelLabelEditing];
+
+    // Calculate the editor rect in view coordinates
+    CGFloat x1 = startMS * _zoomLevel - _scrollOffset.x;
+    CGFloat x2 = endMS * _zoomLevel - _scrollOffset.x;
+    CGFloat y = row * _rowHeight - _scrollOffset.y;
+
+    // Ensure minimum width for the editor
+    CGFloat width = MAX(x2 - x1, 60.0);
+    // Inset slightly from the edges
+    CGFloat inset = 2.0;
+    NSRect editorRect = NSMakeRect(x1 + inset, y + 1.0, width - inset * 2, _rowHeight - 2.0);
+
+    // Create the text field
+    _labelEditor = [[NSTextField alloc] initWithFrame:editorRect];
+    _labelEditor.stringValue = currentLabel ?: @"";
+    _labelEditor.font = [NSFont systemFontOfSize:9.0];
+    _labelEditor.alignment = NSTextAlignmentCenter;
+    _labelEditor.bordered = YES;
+    _labelEditor.bezeled = YES;
+    _labelEditor.bezelStyle = NSTextFieldRoundedBezel;
+    _labelEditor.drawsBackground = YES;
+    _labelEditor.backgroundColor = [NSColor colorWithWhite:0.15 alpha:0.95];
+    _labelEditor.textColor = [NSColor whiteColor];
+    _labelEditor.focusRingType = NSFocusRingTypeNone;
+    _labelEditor.editable = YES;
+    _labelEditor.selectable = YES;
+    _labelEditor.delegate = (id<NSTextFieldDelegate>)self;
+    _labelEditor.target = self;
+    _labelEditor.action = @selector(labelEditorDidEndEditing:);
+
+    _labelEditCompletion = [completion copy];
+
+    [self addSubview:_labelEditor];
+    [self.window makeFirstResponder:_labelEditor];
+
+    // Select all text for easy replacement
+    [_labelEditor selectText:nil];
+}
+
+- (void)labelEditorDidEndEditing:(id)sender {
+    [self commitLabelEditing];
+}
+
+- (void)commitLabelEditing {
+    if (!_labelEditor) return;
+
+    NSString *newLabel = [_labelEditor.stringValue copy];
+    void (^completion)(NSString * _Nullable) = _labelEditCompletion;
+
+    [_labelEditor removeFromSuperview];
+    _labelEditor = nil;
+    _labelEditCompletion = nil;
+
+    // Re-focus the grid view
+    [self.window makeFirstResponder:self];
+
+    if (completion) {
+        completion(newLabel);
+    }
+}
+
+- (void)cancelLabelEditing {
+    if (!_labelEditor) return;
+
+    void (^completion)(NSString * _Nullable) = _labelEditCompletion;
+
+    [_labelEditor removeFromSuperview];
+    _labelEditor = nil;
+    _labelEditCompletion = nil;
+
+    [self.window makeFirstResponder:self];
+
+    if (completion) {
+        completion(nil);
+    }
+}
+
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
+    if (control == _labelEditor) {
+        if (commandSelector == @selector(insertNewline:)) {
+            // Enter key: commit
+            [self commitLabelEditing];
+            return YES;
+        } else if (commandSelector == @selector(cancelOperation:)) {
+            // Escape key: cancel
+            [self cancelLabelEditing];
+            return YES;
+        }
+    }
+    return NO;
 }
 
 @end
