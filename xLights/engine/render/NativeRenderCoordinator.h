@@ -159,11 +159,17 @@ private:
 
     // Persistent per-model render state for stateful live preview.
     // Keyed by model name, reused across renderModelFrameStateful() calls.
+    // Protected by _stateMutex (accessed from render queue + main thread).
     std::map<std::string, ModelJob> _persistentJobs;
 
     // Models confirmed to have no effects (and no parent group with effects).
     // Cached to avoid repeating expensive geometry extraction + element lookup.
     std::set<std::string> _skippedModels;
+
+    // Guards _persistentJobs and _skippedModels against concurrent access
+    // from the render queue (renderModelFrameStateful) and main thread
+    // (resetPersistentState called via invalidateCache).
+    mutable std::recursive_mutex _stateMutex;
 };
 
 } // namespace xlEngine

@@ -208,6 +208,8 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
 
     if (!_effectProvider || !_modelProvider || !_context) return result;
 
+    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+
     // Fast path: skip models already known to have no effects
     if (_skippedModels.count(modelName)) return result;
 
@@ -286,11 +288,13 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
 }
 
 void NativeRenderCoordinator::resetPersistentState() {
+    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.clear();
     _skippedModels.clear();
 }
 
 void NativeRenderCoordinator::resetPersistentState(const std::string& modelName) {
+    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.erase(modelName);
     _skippedModels.erase(modelName);
 }
