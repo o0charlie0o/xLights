@@ -56,6 +56,9 @@ typedef void (^XLCustomModelCompletion)(BOOL saved);
 /// Auto-increment mode for painting
 @property (nonatomic, assign) BOOL autoIncrement;
 
+/// Single-click placement mode (place node on single click)
+@property (nonatomic, assign) BOOL singleClickPlace;
+
 /// Next node number to place
 @property (nonatomic, assign) int nextNodeNumber;
 
@@ -102,6 +105,15 @@ typedef void (^XLCustomModelCompletion)(BOOL saved);
 
 /// Shift all node numbers by amount
 - (void)shiftNodeNumbersBy:(int)amount;
+
+/// Auto-wire selected cells horizontally (snake pattern, bottom-up)
+- (void)wireSelectedHorizontal:(BOOL)leftToRight;
+
+/// Auto-wire selected cells vertically (snake pattern, left-to-right)
+- (void)wireSelectedVertical:(BOOL)topToBottom;
+
+/// Resize grid preserving existing data
+- (void)resizeGridToWidth:(NSInteger)width height:(NSInteger)height;
 
 /// Find node by number
 - (NSPoint)findNode:(int)nodeNumber;
@@ -182,6 +194,9 @@ typedef void (^XLCustomModelCompletion)(BOOL saved);
 
 /// Show the window and call completion when closed
 - (void)showWithCompletion:(XLCustomModelCompletion)completion;
+
+/// Load existing model data from the engine bridge
+- (void)loadModelFromBridge;
 
 /// Get the model data after editing
 @property (nonatomic, readonly) NSDictionary<NSString *, id> *modelData;

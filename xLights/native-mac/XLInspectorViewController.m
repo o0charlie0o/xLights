@@ -11,6 +11,7 @@
 #import "XLInspectorViewController.h"
 #import "XLEngineBridge.h"
 #import "layout/XLModelPropertiesView.h"
+#import "dialogs/XLCustomModelWindow.h"
 
 @interface XLInspectorViewController () <XLModelPropertiesDelegate>
 
@@ -204,6 +205,21 @@
                    value:(id)value
                 forModel:(NSString *)modelName {
     [_engineBridge updateModelProperty:modelName key:key value:value];
+}
+
+- (void)modelPropertiesDidRequestEditCustomModel:(XLModelPropertiesView *)view
+                                        forModel:(NSString *)modelName {
+    XLCustomModelWindow *customModelWindow = [[XLCustomModelWindow alloc] initWithModelName:modelName];
+    customModelWindow.engineBridge = _engineBridge;
+
+    [customModelWindow showWithCompletion:^(BOOL saved) {
+        if (saved) {
+            NSDictionary *modelInfo = [self.engineBridge getModelInfo:modelName];
+            if (modelInfo) {
+                [self.modelPropertiesView showPropertiesForModel:modelName info:modelInfo];
+            }
+        }
+    }];
 }
 
 @end

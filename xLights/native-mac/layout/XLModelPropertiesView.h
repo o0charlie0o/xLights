@@ -22,6 +22,8 @@
        didChangeProperty:(NSString *)key
                    value:(id)value
                 forModel:(NSString *)modelName;
+- (void)modelPropertiesDidRequestEditCustomModel:(XLModelPropertiesView *)view
+                                        forModel:(NSString *)modelName;
 @end
 
 /// Displays editable model properties in a vertical stack of disclosure sections.

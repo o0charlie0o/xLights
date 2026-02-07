@@ -276,6 +276,10 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 @property (nonatomic, strong) NSTextField *typeField;
 @property (nonatomic, strong) NSTextField *descriptionField;
 @property (nonatomic, strong) NSPopUpButton *displayAsPopup;
+@property (nonatomic, strong) NSButton *editCustomModelButton;
+@property (nonatomic, strong) NSView *editCustomModelRow;
+@property (nonatomic, strong) NSPopUpButton *shadowModelForPopup;
+@property (nonatomic, strong) NSView *shadowModelForRow;
 
 // Position & Size controls
 @property (nonatomic, strong) XLThreeFieldRow *positionRow;
@@ -293,6 +297,13 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 @property (nonatomic, strong) NSTextField *startChannelField;
 @property (nonatomic, strong) NSTextField *endChannelField;
 @property (nonatomic, strong) NSTextField *channelCountField;
+
+// Smart Remote controls
+@property (nonatomic, strong) NSButton *smartRemoteCheckbox;
+@property (nonatomic, strong) NSPopUpButton *smartRemotePopup;
+@property (nonatomic, strong) NSPopUpButton *smartRemoteTypePopup;
+@property (nonatomic, strong) NSView *smartRemoteRow;
+@property (nonatomic, strong) NSView *smartRemoteTypeRow;
 
 // Appearance controls
 @property (nonatomic, strong) NSPopUpButton *colorOrderPopup;
@@ -420,6 +431,27 @@ static NSString * const kMixedPlaceholder = @"Mixed";
         [stack addArrangedSubview:displayRow];
         [displayRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
         [displayRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
+        // Edit Custom Model button (hidden by default, shown for Custom models)
+        self.editCustomModelButton = [NSButton buttonWithTitle:@"Edit Custom Model..."
+                                                        target:self
+                                                        action:@selector(editCustomModelClicked:)];
+        self.editCustomModelButton.font = [NSFont systemFontOfSize:11];
+        self.editCustomModelRow = [XLPropertyRowBuilder rowWithLabel:@"" control:self.editCustomModelButton];
+        self.editCustomModelRow.hidden = YES;
+        [stack addArrangedSubview:self.editCustomModelRow];
+        [self.editCustomModelRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [self.editCustomModelRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
+        // Shadow Model For
+        self.shadowModelForPopup = [XLPropertyRowBuilder popUpWithItems:@[@"(None)"] selectedTitle:@"(None)"];
+        self.shadowModelForPopup.target = self;
+        self.shadowModelForPopup.action = @selector(shadowModelForChanged:);
+        self.shadowModelForPopup.identifier = @"shadowModelFor";
+        self.shadowModelForRow = [XLPropertyRowBuilder rowWithLabel:@"Shadow For" control:self.shadowModelForPopup];
+        [stack addArrangedSubview:self.shadowModelForRow];
+        [self.shadowModelForRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [self.shadowModelForRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
 
         // Bottom padding
         NSView *pad = [[NSView alloc] initWithFrame:NSZeroRect];
@@ -599,6 +631,42 @@ static NSString * const kMixedPlaceholder = @"Mixed";
         [countRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
         [countRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
 
+        // Smart Remote Enable
+        self.smartRemoteCheckbox = [XLPropertyRowBuilder checkbox];
+        self.smartRemoteCheckbox.target = self;
+        self.smartRemoteCheckbox.action = @selector(smartRemoteCheckboxChanged:);
+        self.smartRemoteCheckbox.identifier = @"useSmartRemote";
+        NSView *srEnableRow = [XLPropertyRowBuilder rowWithLabel:@"Smart Remote" control:self.smartRemoteCheckbox];
+        [stack addArrangedSubview:srEnableRow];
+        [srEnableRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [srEnableRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
+        // Smart Remote Letter (A, B, C, etc.) - hidden until enabled
+        NSMutableArray<NSString *> *srLetters = [[NSMutableArray alloc] init];
+        for (int i = 0; i < 15; i++) {
+            [srLetters addObject:[NSString stringWithFormat:@"%c", (char)('A' + i)]];
+        }
+        self.smartRemotePopup = [XLPropertyRowBuilder popUpWithItems:srLetters selectedTitle:@"A"];
+        self.smartRemotePopup.target = self;
+        self.smartRemotePopup.action = @selector(smartRemotePopupChanged:);
+        self.smartRemotePopup.identifier = @"smartRemote";
+        self.smartRemoteRow = [XLPropertyRowBuilder rowWithLabel:@"Remote" control:self.smartRemotePopup];
+        self.smartRemoteRow.hidden = YES;
+        [stack addArrangedSubview:self.smartRemoteRow];
+        [self.smartRemoteRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [self.smartRemoteRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
+        // Smart Remote Type - hidden until enabled
+        self.smartRemoteTypePopup = [XLPropertyRowBuilder popUpWithItems:@[@""] selectedTitle:@""];
+        self.smartRemoteTypePopup.target = self;
+        self.smartRemoteTypePopup.action = @selector(smartRemoteTypePopupChanged:);
+        self.smartRemoteTypePopup.identifier = @"smartRemoteType";
+        self.smartRemoteTypeRow = [XLPropertyRowBuilder rowWithLabel:@"Remote Type" control:self.smartRemoteTypePopup];
+        self.smartRemoteTypeRow.hidden = YES;
+        [stack addArrangedSubview:self.smartRemoteTypeRow];
+        [self.smartRemoteTypeRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [self.smartRemoteTypeRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
         NSView *pad = [[NSView alloc] initWithFrame:NSZeroRect];
         pad.translatesAutoresizingMaskIntoConstraints = NO;
         [pad.heightAnchor constraintEqualToConstant:8].active = YES;
@@ -754,6 +822,11 @@ static NSString * const kMixedPlaceholder = @"Mixed";
     _endChannelField.stringValue = @"";
     _channelCountField.stringValue = @"";
 
+    _smartRemoteCheckbox.state = NSControlStateValueOff;
+    [_smartRemotePopup selectItemAtIndex:0];
+    _smartRemoteRow.hidden = YES;
+    _smartRemoteTypeRow.hidden = YES;
+
     [_colorOrderPopup selectItemAtIndex:0];
     _brightnessSlider.doubleValue = 100;
     _gammaSlider.doubleValue = 1.0;
@@ -777,6 +850,16 @@ static NSString * const kMixedPlaceholder = @"Mixed";
     } else {
         _nameField.editable = YES;
     }
+
+    // Show/hide Edit Custom Model button
+    NSString *modelType = info[@"type"];
+    BOOL isCustom = [modelType isKindOfClass:[NSString class]] &&
+                    ([modelType isEqualToString:@"Custom"] ||
+                     [modelType containsString:@"Custom"]);
+    _editCustomModelRow.hidden = mixed || !isCustom;
+
+    // Shadow Model For - populate popup with available models
+    [self populateShadowModelForPopup:info isMixed:mixed];
 
     // Position - XLEngineBridge provides WorldPosX/Y/Z
     [self setTextField:_positionRow.field1 fromNumber:info[@"WorldPosX"] mixed:mixed];
@@ -823,6 +906,24 @@ static NSString * const kMixedPlaceholder = @"Mixed";
     [self setTextField:_endChannelField fromNumber:info[@"endChannel"] mixed:mixed];
     [self setTextField:_channelCountField fromNumber:info[@"channelCount"] mixed:mixed];
 
+    // Smart Remote
+    NSNumber *srValue = info[@"smartRemote"];
+    int sr = srValue ? [srValue intValue] : 0;
+    BOOL srEnabled = (sr > 0);
+
+    _smartRemoteCheckbox.state = srEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _smartRemoteRow.hidden = !srEnabled;
+    _smartRemoteTypeRow.hidden = !srEnabled;
+
+    if (srEnabled && sr - 1 >= 0 && sr - 1 < (int)_smartRemotePopup.numberOfItems) {
+        [_smartRemotePopup selectItemAtIndex:sr - 1];
+    }
+
+    NSString *srType = info[@"smartRemoteType"];
+    if (srType && [srType isKindOfClass:[NSString class]] && srType.length > 0 && srEnabled) {
+        [_smartRemoteTypePopup selectItemWithTitle:srType];
+    }
+
     // Appearance - map to actual model properties
     [self setPopUp:_colorOrderPopup value:info[@"ColorOrder"] mixed:mixed];
     [self setSlider:_brightnessSlider fromNumber:info[@"Brightness"] ?: @(100) mixed:mixed];
@@ -831,6 +932,53 @@ static NSString * const kMixedPlaceholder = @"Mixed";
     [self setCheckbox:_reverseCheckbox fromNumber:info[@"Reverse"] mixed:mixed];
     [self setTextField:_groupCountField fromNumber:info[@"GroupCount"] ?: @(1) mixed:mixed];
     [self setTextField:_zigZagField fromNumber:info[@"ZigZag"] ?: @(0) mixed:mixed];
+}
+
+- (void)populateShadowModelForPopup:(NSDictionary *)info isMixed:(BOOL)mixed {
+    [_shadowModelForPopup removeAllItems];
+    [_shadowModelForPopup addItemWithTitle:@"(None)"];
+
+    if (!_engineBridge || mixed) {
+        _shadowModelForPopup.enabled = !mixed;
+        return;
+    }
+
+    NSString *currentModelName = info[@"name"];
+    NSString *currentShadowFor = info[@"ShadowModelFor"];
+
+    // Populate with all non-group models except self
+    NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
+    for (NSString *name in modelNames) {
+        if (![name isEqualToString:currentModelName]) {
+            [_shadowModelForPopup addItemWithTitle:name];
+        }
+    }
+
+    // Select current value
+    if (currentShadowFor && [currentShadowFor isKindOfClass:[NSString class]] && currentShadowFor.length > 0) {
+        NSInteger idx = [_shadowModelForPopup indexOfItemWithTitle:currentShadowFor];
+        if (idx >= 0) {
+            [_shadowModelForPopup selectItemAtIndex:idx];
+        }
+    } else {
+        [_shadowModelForPopup selectItemAtIndex:0]; // (None)
+    }
+
+    _shadowModelForPopup.enabled = YES;
+}
+
+- (void)shadowModelForChanged:(NSPopUpButton *)sender {
+    if (_currentModelNames.count != 1 || !_engineBridge) return;
+
+    NSString *modelName = _currentModelNames.firstObject;
+    NSString *selected = sender.titleOfSelectedItem;
+    NSString *value = [selected isEqualToString:@"(None)"] ? @"" : selected;
+
+    [_engineBridge setShadowModelFor:modelName target:value];
+
+    if ([_delegate respondsToSelector:@selector(modelProperties:didChangeProperty:value:forModel:)]) {
+        [_delegate modelProperties:self didChangeProperty:@"ShadowModelFor" value:value forModel:modelName];
+    }
 }
 
 #pragma mark - Control Value Helpers
@@ -980,6 +1128,51 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 
     NSNumber *value = @(sender.state == NSControlStateValueOn);
     [self notifyPropertyChange:identifier value:value];
+}
+
+- (void)smartRemoteCheckboxChanged:(NSButton *)sender {
+    BOOL enabled = (sender.state == NSControlStateValueOn);
+    _smartRemoteRow.hidden = !enabled;
+    _smartRemoteTypeRow.hidden = !enabled;
+
+    if (!_currentModelNames || _currentModelNames.count == 0) return;
+
+    for (NSString *modelName in _currentModelNames) {
+        if (enabled) {
+            [_engineBridge setSmartRemote:modelName value:1];
+        } else {
+            [_engineBridge setSmartRemote:modelName value:0];
+        }
+    }
+}
+
+- (void)smartRemotePopupChanged:(NSPopUpButton *)sender {
+    if (!_currentModelNames || _currentModelNames.count == 0) return;
+
+    // Popup index is 0-based (A=0, B=1, etc.), smart remote value is 1-based (A=1, B=2, etc.)
+    NSInteger srValue = sender.indexOfSelectedItem + 1;
+    for (NSString *modelName in _currentModelNames) {
+        [_engineBridge setSmartRemote:modelName value:srValue];
+    }
+}
+
+- (void)smartRemoteTypePopupChanged:(NSPopUpButton *)sender {
+    if (!_currentModelNames || _currentModelNames.count == 0) return;
+
+    NSString *typeValue = sender.titleOfSelectedItem;
+    if (!typeValue) return;
+    for (NSString *modelName in _currentModelNames) {
+        [_engineBridge setSmartRemoteType:modelName value:typeValue];
+    }
+}
+
+- (void)editCustomModelClicked:(id)sender {
+    if (_currentModelNames.count == 1) {
+        NSString *modelName = _currentModelNames.firstObject;
+        if ([_delegate respondsToSelector:@selector(modelPropertiesDidRequestEditCustomModel:forModel:)]) {
+            [_delegate modelPropertiesDidRequestEditCustomModel:self forModel:modelName];
+        }
+    }
 }
 
 #pragma mark - Delegate Notification

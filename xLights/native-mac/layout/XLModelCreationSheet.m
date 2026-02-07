@@ -1208,7 +1208,7 @@ static const CGFloat kGridSpacing = 12.0;
     grid.translatesAutoresizingMaskIntoConstraints = NO;
     [view addSubview:grid];
 
-    _infoLabel = [NSTextField wrappingLabelWithString:@"This creates a basic custom model. To define the pixel layout, use the Custom Model Designer after creation."];
+    _infoLabel = [NSTextField wrappingLabelWithString:@"This creates a basic custom model. After creation, select the model and click 'Edit Custom Model...' in the properties panel to define the pixel layout."];
     _infoLabel.translatesAutoresizingMaskIntoConstraints = NO;
     _infoLabel.textColor = [NSColor secondaryLabelColor];
     _infoLabel.font = [NSFont systemFontOfSize:11];

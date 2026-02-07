@@ -546,15 +546,18 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
             [modelInfo[@"RotateZ"] floatValue]
         );
 
-        // Extract render dimensions
-        float renderWidth = [modelInfo[@"RenderWidth"] floatValue] ?: 100.0f;
-        float renderHeight = [modelInfo[@"RenderHeight"] floatValue] ?: 100.0f;
-        float renderDepth = [modelInfo[@"RenderDepth"] floatValue] ?: 100.0f;
+        // Extract render dimensions (computed from buffer dims in dictFromModelInfo)
+        float renderWidth = [modelInfo[@"RenderWidth"] floatValue];
+        float renderHeight = [modelInfo[@"RenderHeight"] floatValue];
+        float renderDepth = [modelInfo[@"RenderDepth"] floatValue];
+        if (renderWidth < 0.001f) renderWidth = 1.0f;
+        if (renderHeight < 0.001f) renderHeight = 1.0f;
+        if (renderDepth < 0.001f) renderDepth = 2.0f;
 
         BOOL isLocked = [modelInfo[@"Locked"] boolValue];
         BOOL supportsZScaling = [modelInfo[@"SupportsZScaling"] boolValue];
 
-        // Bounding box (use render dimensions as approximation)
+        // Bounding box in local space centered at origin, matching legacy BoxedScreenLocation
         simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
         simd_float3 bbMax = simd_make_float3(renderWidth/2, renderHeight/2, renderDepth/2);
 

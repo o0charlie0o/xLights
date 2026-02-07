@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLCustomModelWindow.h"
+#import "../XLEngineBridge.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat kWindowWidth = 1200.0;
@@ -50,6 +51,7 @@ static const CGFloat kMaxCellSize = 80.0;
         _showWiring = NO;
         _showDuplicates = NO;
         _autoIncrement = YES;
+        _singleClickPlace = NO;
         _nextNodeNumber = 1;
         _backgroundAlpha = 0.5;
 
@@ -608,6 +610,114 @@ static const CGFloat kMaxCellSize = 80.0;
     [_delegate customModelGridDidChange:self];
 }
 
+- (void)wireSelectedHorizontal:(BOOL)leftToRight {
+    if (_selection.count == 0) return;
+    [self saveUndoState];
+
+    BOOL goingRight = leftToRight;
+    for (NSInteger y = _gridHeight - 1; y >= 0; y--) {
+        NSMutableArray<NSValue *> *rowCells = [NSMutableArray array];
+        if (goingRight) {
+            for (NSInteger x = 0; x < _gridWidth; x++) {
+                NSValue *val = [NSValue valueWithPoint:NSMakePoint(x, y)];
+                if ([_selection containsObject:val]) {
+                    [rowCells addObject:val];
+                }
+            }
+        } else {
+            for (NSInteger x = _gridWidth - 1; x >= 0; x--) {
+                NSValue *val = [NSValue valueWithPoint:NSMakePoint(x, y)];
+                if ([_selection containsObject:val]) {
+                    [rowCells addObject:val];
+                }
+            }
+        }
+        if (rowCells.count > 0) {
+            for (NSValue *val in rowCells) {
+                NSPoint pt = val.pointValue;
+                XLCustomNode node = {_nextNodeNumber++, 255, 255, 255};
+                [self setNode:node atX:(NSInteger)pt.x y:(NSInteger)pt.y layer:_currentLayer];
+            }
+            goingRight = !goingRight;
+        }
+    }
+    [self setNeedsDisplay:YES];
+    [_delegate customModelGridDidChange:self];
+}
+
+- (void)wireSelectedVertical:(BOOL)topToBottom {
+    if (_selection.count == 0) return;
+    [self saveUndoState];
+
+    BOOL goingDown = topToBottom;
+    for (NSInteger x = 0; x < _gridWidth; x++) {
+        NSMutableArray<NSValue *> *colCells = [NSMutableArray array];
+        if (goingDown) {
+            for (NSInteger y = _gridHeight - 1; y >= 0; y--) {
+                NSValue *val = [NSValue valueWithPoint:NSMakePoint(x, y)];
+                if ([_selection containsObject:val]) {
+                    [colCells addObject:val];
+                }
+            }
+        } else {
+            for (NSInteger y = 0; y < _gridHeight; y++) {
+                NSValue *val = [NSValue valueWithPoint:NSMakePoint(x, y)];
+                if ([_selection containsObject:val]) {
+                    [colCells addObject:val];
+                }
+            }
+        }
+        if (colCells.count > 0) {
+            for (NSValue *val in colCells) {
+                NSPoint pt = val.pointValue;
+                XLCustomNode node = {_nextNodeNumber++, 255, 255, 255};
+                [self setNode:node atX:(NSInteger)pt.x y:(NSInteger)pt.y layer:_currentLayer];
+            }
+            goingDown = !goingDown;
+        }
+    }
+    [self setNeedsDisplay:YES];
+    [_delegate customModelGridDidChange:self];
+}
+
+- (void)resizeGridToWidth:(NSInteger)width height:(NSInteger)height {
+    if (width < 1 || height < 1 || width > XL_CUSTOM_MODEL_MAX_WIDTH || height > XL_CUSTOM_MODEL_MAX_HEIGHT) return;
+    if (width == _gridWidth && height == _gridHeight) return;
+
+    [self saveUndoState];
+
+    NSInteger newDepth = MAX(_dataDepth, 1);
+    size_t newCapacity = width * height * newDepth;
+    XLCustomNode *newData = (XLCustomNode *)calloc(newCapacity, sizeof(XLCustomNode));
+
+    NSInteger copyWidth = MIN(_gridWidth, width);
+    NSInteger copyHeight = MIN(_gridHeight, height);
+    for (NSInteger layer = 0; layer < newDepth; layer++) {
+        for (NSInteger y = 0; y < copyHeight; y++) {
+            for (NSInteger x = 0; x < copyWidth; x++) {
+                NSInteger oldIdx = (layer * _gridWidth * _gridHeight) + (y * _gridWidth) + x;
+                NSInteger newIdx = (layer * width * height) + (y * width) + x;
+                if (oldIdx >= 0 && oldIdx < (NSInteger)_dataCapacity) {
+                    newData[newIdx] = _nodeData[oldIdx];
+                }
+            }
+        }
+    }
+
+    free(_nodeData);
+    _nodeData = newData;
+    _dataCapacity = newCapacity;
+    _dataWidth = width;
+    _dataHeight = height;
+    _dataDepth = newDepth;
+    _gridWidth = width;
+    _gridHeight = height;
+
+    [_selection removeAllObjects];
+    [self setNeedsDisplay:YES];
+    [_delegate customModelGridDidChange:self];
+}
+
 #pragma mark - Search and Analysis
 
 - (NSPoint)findNode:(int)nodeNumber {
@@ -864,11 +974,22 @@ static const CGFloat kMaxCellSize = 80.0;
 
     [self selectCellAtX:x y:y];
 
-    if (event.clickCount == 2) {
+    // Single-click placement mode
+    if (_singleClickPlace && event.clickCount == 1 && _autoIncrement) {
+        XLCustomNode node = [self nodeAtX:x y:y layer:_currentLayer];
+        if (node.nodeNumber == 0) {
+            [self saveUndoState];
+            node.nodeNumber = _nextNodeNumber++;
+            node.red = 255;
+            node.green = 255;
+            node.blue = 255;
+            [self setNode:node atX:x y:y layer:_currentLayer];
+            [_delegate customModelGridDidChange:self];
+        }
+    } else if (event.clickCount == 2) {
         // Double-click: edit node
         XLCustomNode node = [self nodeAtX:x y:y layer:_currentLayer];
         if (node.nodeNumber == 0 && _autoIncrement) {
-            // Place next node
             [self saveUndoState];
             node.nodeNumber = _nextNodeNumber++;
             node.red = 255;
@@ -897,6 +1018,16 @@ static const CGFloat kMaxCellSize = 80.0;
 
 - (void)mouseUp:(NSEvent *)event {
     _isDragging = NO;
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger x = (NSInteger)(point.x / _cellSize);
+    NSInteger y = (NSInteger)(point.y / _cellSize);
+
+    if (x >= 0 && x < _gridWidth && y >= 0 && y < _gridHeight) {
+        [_delegate customModelGrid:self didHoverOverCellAtX:x y:y];
+    }
 }
 
 - (void)keyDown:(NSEvent *)event {
@@ -1137,10 +1268,13 @@ static const CGFloat kMaxCellSize = 80.0;
 @property (nonatomic, strong) NSButton *autoIncrementCheckbox;
 @property (nonatomic, strong) NSButton *showWiringCheckbox;
 @property (nonatomic, strong) NSButton *showDuplicatesCheckbox;
+@property (nonatomic, strong) NSButton *singleClickCheckbox;
 
 @property (nonatomic, strong) NSScrollView *gridScrollView;
 @property (nonatomic, strong) NSSlider *backgroundSlider;
 @property (nonatomic, strong) NSImageView *backgroundImageView;
+@property (nonatomic, strong) NSTextField *statusLabel;
+@property (nonatomic, strong) NSTextField *nodeCountLabel;
 
 @property (nonatomic, copy) XLCustomModelCompletion completion;
 @property (nonatomic, assign) BOOL isNewModel;
@@ -1292,12 +1426,21 @@ static const CGFloat kMaxCellSize = 80.0;
 }
 
 - (void)buildRightPanel:(NSView *)panel {
+    // Scrollable controls area
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollView.hasVerticalScroller = YES;
+    scrollView.autohidesScrollers = YES;
+    scrollView.drawsBackground = NO;
+    [panel addSubview:scrollView];
+
     NSStackView *stack = [[NSStackView alloc] init];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.spacing = 12;
+    stack.spacing = 10;
     stack.alignment = NSLayoutAttributeLeading;
-    [panel addSubview:stack];
+
+    scrollView.documentView = stack;
 
     // 3D Preview
     _previewView = [[XLCustomModel3DPreview alloc] initWithFrame:NSMakeRect(0, 0, 300, 200)];
@@ -1310,7 +1453,8 @@ static const CGFloat kMaxCellSize = 80.0;
     ]];
 
     // Node numbering controls
-    NSTextField *nextLabel = [NSTextField labelWithString:@"Next Node Number:"];
+    NSTextField *nextLabel = [NSTextField labelWithString:@"Next Node #:"];
+    nextLabel.font = [NSFont systemFontOfSize:11];
     _nextNodeField = [[NSTextField alloc] initWithFrame:NSZeroRect];
     _nextNodeField.stringValue = @"1";
     _nextNodeField.translatesAutoresizingMaskIntoConstraints = NO;
@@ -1323,29 +1467,70 @@ static const CGFloat kMaxCellSize = 80.0;
     [stack addArrangedSubview:nodeRow];
 
     // Checkboxes
-    _autoIncrementCheckbox = [NSButton checkboxWithTitle:@"Auto-increment node numbers"
+    _autoIncrementCheckbox = [NSButton checkboxWithTitle:@"Auto-increment"
                                                   target:self action:@selector(optionChanged:)];
     _autoIncrementCheckbox.state = NSControlStateValueOn;
+    _autoIncrementCheckbox.font = [NSFont systemFontOfSize:11];
     [stack addArrangedSubview:_autoIncrementCheckbox];
+
+    _singleClickCheckbox = [NSButton checkboxWithTitle:@"Single-click placement"
+                                                target:self action:@selector(optionChanged:)];
+    _singleClickCheckbox.font = [NSFont systemFontOfSize:11];
+    [stack addArrangedSubview:_singleClickCheckbox];
 
     _showWiringCheckbox = [NSButton checkboxWithTitle:@"Show wiring"
                                                target:self action:@selector(optionChanged:)];
+    _showWiringCheckbox.font = [NSFont systemFontOfSize:11];
     [stack addArrangedSubview:_showWiringCheckbox];
 
     _showDuplicatesCheckbox = [NSButton checkboxWithTitle:@"Highlight duplicates"
                                                    target:self action:@selector(optionChanged:)];
+    _showDuplicatesCheckbox.font = [NSFont systemFontOfSize:11];
     [stack addArrangedSubview:_showDuplicatesCheckbox];
+
+    // Auto-wiring section
+    NSTextField *wireLabel = [NSTextField labelWithString:@"Auto-Wire Selected:"];
+    wireLabel.font = [NSFont boldSystemFontOfSize:11];
+    [stack addArrangedSubview:wireLabel];
+
+    NSButton *wireLR = [NSButton buttonWithTitle:@"Horizontal L-R" target:self action:@selector(wireLRClicked:)];
+    NSButton *wireRL = [NSButton buttonWithTitle:@"Horizontal R-L" target:self action:@selector(wireRLClicked:)];
+    wireLR.font = [NSFont systemFontOfSize:11];
+    wireRL.font = [NSFont systemFontOfSize:11];
+    NSStackView *wireHRow = [NSStackView stackViewWithViews:@[wireLR, wireRL]];
+    wireHRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    wireHRow.spacing = 4;
+    [stack addArrangedSubview:wireHRow];
+
+    NSButton *wireTB = [NSButton buttonWithTitle:@"Vertical T-B" target:self action:@selector(wireTBClicked:)];
+    NSButton *wireBT = [NSButton buttonWithTitle:@"Vertical B-T" target:self action:@selector(wireBTClicked:)];
+    wireTB.font = [NSFont systemFontOfSize:11];
+    wireBT.font = [NSFont systemFontOfSize:11];
+    NSStackView *wireVRow = [NSStackView stackViewWithViews:@[wireTB, wireBT]];
+    wireVRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    wireVRow.spacing = 4;
+    [stack addArrangedSubview:wireVRow];
+
+    // Find node
+    NSButton *findNode = [NSButton buttonWithTitle:@"Find Node..." target:self action:@selector(findNodeClicked:)];
+    findNode.font = [NSFont systemFontOfSize:11];
+    [stack addArrangedSubview:findNode];
 
     // Background image controls
     NSTextField *bgLabel = [NSTextField labelWithString:@"Background Image:"];
+    bgLabel.font = [NSFont boldSystemFontOfSize:11];
     [stack addArrangedSubview:bgLabel];
 
     NSButton *loadBgButton = [NSButton buttonWithTitle:@"Load Image..." target:self action:@selector(loadBackgroundClicked:)];
     NSButton *clearBgButton = [NSButton buttonWithTitle:@"Clear" target:self action:@selector(clearBackgroundClicked:)];
+    loadBgButton.font = [NSFont systemFontOfSize:11];
+    clearBgButton.font = [NSFont systemFontOfSize:11];
     NSStackView *bgRow = [NSStackView stackViewWithViews:@[loadBgButton, clearBgButton]];
+    bgRow.spacing = 4;
     [stack addArrangedSubview:bgRow];
 
-    NSTextField *alphaLabel = [NSTextField labelWithString:@"Background Opacity:"];
+    NSTextField *alphaLabel = [NSTextField labelWithString:@"Opacity:"];
+    alphaLabel.font = [NSFont systemFontOfSize:11];
     _backgroundSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
     _backgroundSlider.minValue = 0;
     _backgroundSlider.maxValue = 100;
@@ -1354,29 +1539,54 @@ static const CGFloat kMaxCellSize = 80.0;
     [_backgroundSlider setAction:@selector(backgroundAlphaChanged:)];
 
     NSStackView *alphaRow = [NSStackView stackViewWithViews:@[alphaLabel, _backgroundSlider]];
+    alphaRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     [stack addArrangedSubview:alphaRow];
 
     // Operation buttons
     NSTextField *opsLabel = [NSTextField labelWithString:@"Operations:"];
-    opsLabel.font = [NSFont boldSystemFontOfSize:12];
+    opsLabel.font = [NSFont boldSystemFontOfSize:11];
     [stack addArrangedSubview:opsLabel];
 
-    NSButton *flipH = [NSButton buttonWithTitle:@"Flip Horizontal" target:self action:@selector(flipHClicked:)];
-    NSButton *flipV = [NSButton buttonWithTitle:@"Flip Vertical" target:self action:@selector(flipVClicked:)];
+    NSButton *flipH = [NSButton buttonWithTitle:@"Flip H" target:self action:@selector(flipHClicked:)];
+    NSButton *flipV = [NSButton buttonWithTitle:@"Flip V" target:self action:@selector(flipVClicked:)];
     NSButton *rotate = [NSButton buttonWithTitle:@"Rotate 90" target:self action:@selector(rotateClicked:)];
+    flipH.font = [NSFont systemFontOfSize:11];
+    flipV.font = [NSFont systemFontOfSize:11];
+    rotate.font = [NSFont systemFontOfSize:11];
+    NSStackView *transformRow = [NSStackView stackViewWithViews:@[flipH, flipV, rotate]];
+    transformRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    transformRow.spacing = 4;
+    [stack addArrangedSubview:transformRow];
+
     NSButton *reverse = [NSButton buttonWithTitle:@"Reverse Numbers" target:self action:@selector(reverseClicked:)];
     NSButton *compress = [NSButton buttonWithTitle:@"Compress Space" target:self action:@selector(compressClicked:)];
-
-    [stack addArrangedSubview:flipH];
-    [stack addArrangedSubview:flipV];
-    [stack addArrangedSubview:rotate];
+    reverse.font = [NSFont systemFontOfSize:11];
+    compress.font = [NSFont systemFontOfSize:11];
     [stack addArrangedSubview:reverse];
     [stack addArrangedSubview:compress];
 
-    // Bottom buttons
-    NSView *spacer = [[NSView alloc] init];
-    [stack addArrangedSubview:spacer];
+    // Node count label
+    _nodeCountLabel = [NSTextField labelWithString:@"Nodes: 0 (max #0)"];
+    _nodeCountLabel.font = [NSFont systemFontOfSize:11];
+    _nodeCountLabel.textColor = [NSColor secondaryLabelColor];
+    [stack addArrangedSubview:_nodeCountLabel];
 
+    // Constrain stack within scroll view
+    NSClipView *clipView = scrollView.contentView;
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:clipView.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:clipView.leadingAnchor constant:12],
+        [stack.trailingAnchor constraintEqualToAnchor:clipView.trailingAnchor constant:-12],
+    ]];
+
+    // Status bar at bottom
+    _statusLabel = [NSTextField labelWithString:@""];
+    _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _statusLabel.font = [NSFont systemFontOfSize:10];
+    _statusLabel.textColor = [NSColor secondaryLabelColor];
+    [panel addSubview:_statusLabel];
+
+    // Bottom buttons
     NSButton *cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancelClicked:)];
     cancelButton.keyEquivalent = @"\033";
 
@@ -1384,19 +1594,30 @@ static const CGFloat kMaxCellSize = 80.0;
     okButton.keyEquivalent = @"\r";
 
     NSStackView *buttonRow = [NSStackView stackViewWithViews:@[cancelButton, okButton]];
+    buttonRow.translatesAutoresizingMaskIntoConstraints = NO;
     buttonRow.spacing = 12;
-    [stack addArrangedSubview:buttonRow];
+    [panel addSubview:buttonRow];
 
     [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:panel.topAnchor constant:12],
-        [stack.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:12],
-        [stack.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-12],
-        [stack.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor constant:-12],
+        [scrollView.topAnchor constraintEqualToAnchor:panel.topAnchor],
+        [scrollView.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
+        [scrollView.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:_statusLabel.topAnchor constant:-4],
+
+        [_statusLabel.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:12],
+        [_statusLabel.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-12],
+        [_statusLabel.bottomAnchor constraintEqualToAnchor:buttonRow.topAnchor constant:-8],
+
+        [buttonRow.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-12],
+        [buttonRow.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor constant:-12],
     ]];
 }
 
 - (void)showWithCompletion:(XLCustomModelCompletion)completion {
     _completion = completion;
+    if (!_isNewModel && _engineBridge) {
+        [self loadModelFromBridge];
+    }
     [self.window center];
     [self showWindow:nil];
 }
@@ -1412,10 +1633,13 @@ static const CGFloat kMaxCellSize = 80.0;
 #pragma mark - Actions
 
 - (void)dimensionsChanged:(id)sender {
-    _gridView.gridWidth = _widthField.integerValue;
-    _gridView.gridHeight = _heightField.integerValue;
-    [_gridView setNeedsDisplay:YES];
-    _hasChanges = YES;
+    NSInteger newWidth = _widthField.integerValue;
+    NSInteger newHeight = _heightField.integerValue;
+    if (newWidth > 0 && newHeight > 0) {
+        [_gridView resizeGridToWidth:newWidth height:newHeight];
+        _hasChanges = YES;
+        [self updateNodeCount];
+    }
 }
 
 - (void)zoomInClicked:(id)sender {
@@ -1434,6 +1658,7 @@ static const CGFloat kMaxCellSize = 80.0;
     _gridView.autoIncrement = (_autoIncrementCheckbox.state == NSControlStateValueOn);
     _gridView.showWiring = (_showWiringCheckbox.state == NSControlStateValueOn);
     _gridView.showDuplicates = (_showDuplicatesCheckbox.state == NSControlStateValueOn);
+    _gridView.singleClickPlace = (_singleClickCheckbox.state == NSControlStateValueOn);
     [_gridView setNeedsDisplay:YES];
 }
 
@@ -1493,6 +1718,18 @@ static const CGFloat kMaxCellSize = 80.0;
 }
 
 - (void)okClicked:(id)sender {
+    if (_hasChanges && _engineBridge && _modelName) {
+        NSString *customData = [_gridView exportToString];
+        [_engineBridge updateModelProperty:_modelName
+                                       key:@"CustomModel"
+                                     value:customData];
+        [_engineBridge updateModelProperty:_modelName
+                                       key:@"parm1"
+                                     value:@(_gridView.gridWidth).stringValue];
+        [_engineBridge updateModelProperty:_modelName
+                                       key:@"parm2"
+                                     value:@(_gridView.gridHeight).stringValue];
+    }
     [self.window close];
     if (_completion) {
         _completion(_hasChanges);
@@ -1504,14 +1741,25 @@ static const CGFloat kMaxCellSize = 80.0;
 - (void)customModelGridDidChange:(XLCustomModelGridView *)grid {
     _hasChanges = YES;
     _nextNodeField.intValue = grid.nextNodeNumber;
+    [self updateNodeCount];
 }
 
 - (void)customModelGrid:(XLCustomModelGridView *)grid didSelectCellAtX:(NSInteger)x y:(NSInteger)y {
-    // Could update status bar
+    XLCustomNode node = [grid nodeAtX:x y:y layer:grid.currentLayer];
+    if (node.nodeNumber > 0) {
+        _statusLabel.stringValue = [NSString stringWithFormat:@"Cell (%ld, %ld) - Node %d", (long)x, (long)y, node.nodeNumber];
+    } else {
+        _statusLabel.stringValue = [NSString stringWithFormat:@"Cell (%ld, %ld) - Empty", (long)x, (long)y];
+    }
 }
 
 - (void)customModelGrid:(XLCustomModelGridView *)grid didHoverOverCellAtX:(NSInteger)x y:(NSInteger)y {
-    // Could update status bar
+    XLCustomNode node = [grid nodeAtX:x y:y layer:grid.currentLayer];
+    if (node.nodeNumber > 0) {
+        _statusLabel.stringValue = [NSString stringWithFormat:@"Cell (%ld, %ld) - Node %d", (long)x, (long)y, node.nodeNumber];
+    } else {
+        _statusLabel.stringValue = [NSString stringWithFormat:@"Cell (%ld, %ld)", (long)x, (long)y];
+    }
 }
 
 #pragma mark - XLCustomModelLayerDelegate
@@ -1527,6 +1775,139 @@ static const CGFloat kMaxCellSize = 80.0;
 
 - (void)layerTabViewDidRemoveLayer:(XLCustomModelLayerTabView *)tabView {
     _hasChanges = YES;
+}
+
+#pragma mark - Load/Save Model Data
+
+- (void)loadModelFromBridge {
+    if (!_engineBridge || !_modelName) return;
+
+    NSDictionary *info = [_engineBridge getModelInfo:_modelName];
+    if (!info) return;
+
+    NSInteger width = 10;
+    NSInteger height = 10;
+
+    id parm1 = info[@"parm1"];
+    if (parm1) {
+        NSInteger val = [parm1 integerValue];
+        if (val > 0) width = val;
+    }
+
+    id parm2 = info[@"parm2"];
+    if (parm2) {
+        NSInteger val = [parm2 integerValue];
+        if (val > 0) height = val;
+    }
+
+    _widthField.stringValue = [NSString stringWithFormat:@"%ld", (long)width];
+    _heightField.stringValue = [NSString stringWithFormat:@"%ld", (long)height];
+    [_gridView resizeGridToWidth:width height:height];
+
+    id depthVal = info[@"Depth"];
+    if (depthVal) {
+        NSInteger depth = [depthVal integerValue];
+        if (depth > 1) {
+            _layerTabs.layerCount = depth;
+        }
+    }
+
+    NSString *customData = info[@"CustomModel"];
+    if ([customData isKindOfClass:[NSString class]] && customData.length > 0) {
+        [_gridView importFromString:customData];
+    }
+
+    int maxNode = 0;
+    for (NSInteger y = 0; y < _gridView.gridHeight; y++) {
+        for (NSInteger x = 0; x < _gridView.gridWidth; x++) {
+            XLCustomNode node = [_gridView nodeAtX:x y:y layer:0];
+            if (node.nodeNumber > maxNode) {
+                maxNode = node.nodeNumber;
+            }
+        }
+    }
+    _gridView.nextNodeNumber = maxNode + 1;
+    _nextNodeField.intValue = maxNode + 1;
+
+    [self updateNodeCount];
+    _hasChanges = NO;
+}
+
+- (void)updateNodeCount {
+    int count = 0;
+    int maxNode = 0;
+    for (NSInteger y = 0; y < _gridView.gridHeight; y++) {
+        for (NSInteger x = 0; x < _gridView.gridWidth; x++) {
+            XLCustomNode node = [_gridView nodeAtX:x y:y layer:_gridView.currentLayer];
+            if (node.nodeNumber > 0) {
+                count++;
+                if (node.nodeNumber > maxNode) {
+                    maxNode = node.nodeNumber;
+                }
+            }
+        }
+    }
+    _nodeCountLabel.stringValue = [NSString stringWithFormat:@"Nodes: %d (max #%d)", count, maxNode];
+}
+
+#pragma mark - Auto-Wiring Actions
+
+- (void)wireLRClicked:(id)sender {
+    [_gridView wireSelectedHorizontal:YES];
+    _hasChanges = YES;
+    _nextNodeField.intValue = _gridView.nextNodeNumber;
+    [self updateNodeCount];
+}
+
+- (void)wireRLClicked:(id)sender {
+    [_gridView wireSelectedHorizontal:NO];
+    _hasChanges = YES;
+    _nextNodeField.intValue = _gridView.nextNodeNumber;
+    [self updateNodeCount];
+}
+
+- (void)wireTBClicked:(id)sender {
+    [_gridView wireSelectedVertical:YES];
+    _hasChanges = YES;
+    _nextNodeField.intValue = _gridView.nextNodeNumber;
+    [self updateNodeCount];
+}
+
+- (void)wireBTClicked:(id)sender {
+    [_gridView wireSelectedVertical:NO];
+    _hasChanges = YES;
+    _nextNodeField.intValue = _gridView.nextNodeNumber;
+    [self updateNodeCount];
+}
+
+- (void)findNodeClicked:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Find Node";
+    alert.informativeText = @"Enter node number to find:";
+    [alert addButtonWithTitle:@"Find"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 100, 24)];
+    input.stringValue = @"1";
+    alert.accessoryView = input;
+
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            int nodeNum = input.intValue;
+            if (nodeNum > 0) {
+                NSPoint pt = [self.gridView findNode:nodeNum];
+                if (pt.x >= 0 && pt.y >= 0) {
+                    [self.gridView clearSelection];
+                    [self.gridView selectCellAtX:(NSInteger)pt.x y:(NSInteger)pt.y];
+                    [self.gridView setNeedsDisplay:YES];
+                    self.statusLabel.stringValue = [NSString stringWithFormat:@"Found node %d at (%d, %d)",
+                                                    nodeNum, (int)pt.x, (int)pt.y];
+                } else {
+                    self.statusLabel.stringValue = [NSString stringWithFormat:@"Node %d not found", nodeNum];
+                }
+            }
+        }
+    }];
 }
 
 @end
