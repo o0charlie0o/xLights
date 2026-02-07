@@ -212,6 +212,21 @@
 /// Set the smart remote type for a model
 - (BOOL)setSmartRemoteType:(NSString *)modelName value:(NSString *)type;
 
+/// Get dimming curve info for a model.
+/// Returns dictionary with keys "all", "red", "green", "blue" containing
+/// sub-dictionaries with "gamma", "brightness", and/or "filename" keys.
+/// Returns empty dictionary if no dimming curve is configured.
+- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)getDimmingInfo:(NSString *)modelName;
+
+/// Set dimming curve info for a model.
+/// Pass an empty dictionary (or nil) to clear the dimming curve.
+/// @param dimmingInfo Dictionary with channel keys ("all", "red", "green", "blue")
+///                     mapping to parameter dictionaries ("gamma", "brightness", "filename")
+/// @param modelName Name of the model to update
+/// @return YES if the dimming info was set successfully
+- (BOOL)setDimmingInfo:(NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)dimmingInfo
+              forModel:(NSString *)modelName;
+
 /// Create a new model with the given type, name, and properties
 - (BOOL)createModel:(NSString *)modelType name:(NSString *)modelName properties:(NSDictionary *)properties;
 
@@ -336,6 +351,66 @@
                oldName:(NSString *)oldName
                newName:(NSString *)newName;
 
+#pragma mark - Model Face Definitions
+
+/// Get face definition names for a model
+- (NSArray<NSString *> *)getFaceNames:(NSString *)modelName;
+
+/// Get a face definition's data
+/// Returns dictionary of key->value pairs (Type, phoneme-to-node mappings, colors, etc.)
+- (NSDictionary *)getFaceDefinition:(NSString *)modelName faceName:(NSString *)faceName;
+
+/// Get all face definitions for a model
+/// Returns dictionary of faceName -> {key -> value}
+- (NSDictionary<NSString *, NSDictionary *> *)getAllFaceDefinitions:(NSString *)modelName;
+
+/// Set a face definition (create or update)
+- (BOOL)setFaceDefinition:(NSString *)modelName
+                  faceName:(NSString *)faceName
+                definition:(NSDictionary *)definition;
+
+/// Set all face definitions for a model (replaces all existing)
+- (BOOL)setAllFaceDefinitions:(NSString *)modelName
+                  definitions:(NSDictionary<NSString *, NSDictionary *> *)definitions;
+
+/// Delete a face definition
+- (BOOL)deleteFaceDefinition:(NSString *)modelName faceName:(NSString *)faceName;
+
+/// Rename a face definition
+- (BOOL)renameFaceDefinition:(NSString *)modelName
+                     oldName:(NSString *)oldName
+                     newName:(NSString *)newName;
+
+#pragma mark - Model State Definitions
+
+/// Get state definition names for a model
+- (NSArray<NSString *> *)getStateNames:(NSString *)modelName;
+
+/// Get a state definition's data
+/// Returns dictionary of key->value pairs (Type, CustomColors, s001, s001-Name, s001-Color, etc.)
+- (NSDictionary *)getStateDefinition:(NSString *)modelName stateName:(NSString *)stateName;
+
+/// Get all state definitions for a model
+/// Returns dictionary of stateName -> {key -> value}
+- (NSDictionary<NSString *, NSDictionary *> *)getAllStateDefinitions:(NSString *)modelName;
+
+/// Set a state definition (create or update)
+- (BOOL)setStateDefinition:(NSString *)modelName
+                  stateName:(NSString *)stateName
+                 definition:(NSDictionary *)definition;
+
+/// Set all state definitions for a model (replaces all existing)
+- (BOOL)setAllStateDefinitions:(NSString *)modelName
+                    definitions:(NSDictionary<NSString *, NSDictionary *> *)definitions;
+
+/// Delete a state definition
+- (BOOL)deleteStateDefinition:(NSString *)modelName stateName:(NSString *)stateName;
+
+/// Rename a state definition
+- (BOOL)renameStateDefinition:(NSString *)modelName
+                      oldName:(NSString *)oldName
+                      newName:(NSString *)newName;
+
 #pragma mark - Model Geometry
 
 /// Get node coordinates for a model (for visualization)
@@ -362,6 +437,22 @@
 
 /// Get list of models contained in a file (for sequence/layout files)
 - (NSArray<NSDictionary *> *)getModelsInFile:(NSString *)filePath;
+
+#pragma mark - LOR S5 Import
+
+/// Get available preview names from an LOR S5 preview file.
+/// @param filePath Path to the LOR S5 preview file (.lorprev, LORPreviews.xml)
+/// @return Array of preview names, or nil on error
+- (nullable NSArray<NSString *> *)getLORS5PreviewNames:(NSString *)filePath;
+
+/// Import all models and groups from an LOR S5 preview file.
+/// @param filePath Path to the LOR S5 preview file
+/// @param previewName Name of the preview to import (nil for first/only preview)
+/// @param layoutGroup Layout group to assign imported models to
+/// @return Array of imported model names, or nil on error
+- (nullable NSArray<NSString *> *)importModelsFromLORS5File:(NSString *)filePath
+                                                previewName:(nullable NSString *)previewName
+                                                layoutGroup:(NSString *)layoutGroup;
 
 #pragma mark - RGB Effects File Import
 

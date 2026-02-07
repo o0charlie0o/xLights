@@ -10,6 +10,7 @@
 
 #import "XLEngineBridge.h"
 #import "effects/XLEffectPanelDefinitions.h"
+#import "layout/XLORS5Parser.h"
 
 // Include C++ engine headers
 // During transition period, these will delegate to the existing xLightsFrame
@@ -1664,6 +1665,56 @@ static XLEngineBridge *_sharedBridge = nil;
     return result.success ? YES : NO;
 }
 
+#pragma mark - Dimming Curves
+
+- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)getDimmingInfo:(NSString *)modelName {
+    if (!modelName) return @{};
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return @{};
+
+    std::string stdName = [modelName UTF8String];
+    auto dimmingInfo = _modelEngine->getDimmingInfo(stdName);
+    if (dimmingInfo.empty()) return @{};
+
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:dimmingInfo.size()];
+    for (const auto& channel : dimmingInfo) {
+        NSMutableDictionary *params = [NSMutableDictionary dictionaryWithCapacity:channel.second.size()];
+        for (const auto& param : channel.second) {
+            params[[NSString stringWithUTF8String:param.first.c_str()]] =
+                [NSString stringWithUTF8String:param.second.c_str()];
+        }
+        result[[NSString stringWithUTF8String:channel.first.c_str()]] = params;
+    }
+    return result;
+}
+
+- (BOOL)setDimmingInfo:(NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)dimmingInfo
+              forModel:(NSString *)modelName {
+    if (!modelName) return NO;
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return NO;
+
+    std::string stdName = [modelName UTF8String];
+    std::map<std::string, std::map<std::string, std::string>> stdInfo;
+
+    if (dimmingInfo) {
+        for (NSString *channelKey in dimmingInfo) {
+            NSDictionary<NSString *, NSString *> *params = dimmingInfo[channelKey];
+            std::map<std::string, std::string> stdParams;
+            for (NSString *paramKey in params) {
+                stdParams[[paramKey UTF8String]] = [params[paramKey] UTF8String];
+            }
+            stdInfo[[channelKey UTF8String]] = std::move(stdParams);
+        }
+    }
+
+    xlEngine::OperationResult result = _modelEngine->setDimmingInfo(stdName, stdInfo);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to set dimming info: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
 #pragma mark - Model Groups
 
 - (NSArray<NSDictionary *> *)getModelGroups {
@@ -1964,6 +2015,196 @@ static XLEngineBridge *_sharedBridge = nil;
         NSLog(@"XLEngineBridge: renameSubmodel failed: %s", result.message.c_str());
     }
     return result.success ? YES : NO;
+}
+
+#pragma mark - Model Face Definitions
+
+- (NSArray<NSString *> *)getFaceNames:(NSString *)modelName {
+    if (!modelName) return @[];
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return @[];
+    std::string stdName = [modelName UTF8String];
+    std::vector<std::string> names = _nativeModelProvider->getFaceNames(stdName);
+    return [self arrayFromVector:names];
+}
+
+- (NSDictionary *)getFaceDefinition:(NSString *)modelName faceName:(NSString *)faceName {
+    if (!modelName || !faceName) return @{};
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return @{};
+    std::string stdModel = [modelName UTF8String];
+    std::string stdFace = [faceName UTF8String];
+    std::map<std::string, std::string> def = _nativeModelProvider->getFaceDefinition(stdModel, stdFace);
+    return [self dictFromMap:def];
+}
+
+- (NSDictionary<NSString *, NSDictionary *> *)getAllFaceDefinitions:(NSString *)modelName {
+    if (!modelName) return @{};
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return @{};
+    std::string stdName = [modelName UTF8String];
+    auto allDefs = _nativeModelProvider->getAllFaceDefinitions(stdName);
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:allDefs.size()];
+    for (const auto& pair : allDefs) {
+        NSString *key = [NSString stringWithUTF8String:pair.first.c_str()];
+        result[key] = [self dictFromMap:pair.second];
+    }
+    return result;
+}
+
+- (BOOL)setFaceDefinition:(NSString *)modelName
+                  faceName:(NSString *)faceName
+                definition:(NSDictionary *)definition {
+    if (!modelName || !faceName || !definition) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::string stdFace = [faceName UTF8String];
+    std::map<std::string, std::string> stdDef;
+    for (NSString *key in definition) {
+        NSString *value = [definition[key] description];
+        if (value) {
+            stdDef[[key UTF8String]] = [value UTF8String];
+        }
+    }
+    return _nativeModelProvider->setFaceDefinition(stdModel, stdFace, stdDef) ? YES : NO;
+}
+
+- (BOOL)setAllFaceDefinitions:(NSString *)modelName
+                  definitions:(NSDictionary<NSString *, NSDictionary *> *)definitions {
+    if (!modelName || !definitions) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::map<std::string, std::map<std::string, std::string>> stdDefs;
+    for (NSString *faceName in definitions) {
+        NSDictionary *def = definitions[faceName];
+        std::map<std::string, std::string> stdDef;
+        for (NSString *key in def) {
+            NSString *value = [def[key] description];
+            if (value) {
+                stdDef[[key UTF8String]] = [value UTF8String];
+            }
+        }
+        stdDefs[[faceName UTF8String]] = std::move(stdDef);
+    }
+    return _nativeModelProvider->setAllFaceDefinitions(stdModel, stdDefs) ? YES : NO;
+}
+
+- (BOOL)deleteFaceDefinition:(NSString *)modelName faceName:(NSString *)faceName {
+    if (!modelName || !faceName) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::string stdFace = [faceName UTF8String];
+    return _nativeModelProvider->deleteFaceDefinition(stdModel, stdFace) ? YES : NO;
+}
+
+- (BOOL)renameFaceDefinition:(NSString *)modelName
+                     oldName:(NSString *)oldName
+                     newName:(NSString *)newName {
+    if (!modelName || !oldName || !newName) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::string stdOld = [oldName UTF8String];
+    std::string stdNew = [newName UTF8String];
+    return _nativeModelProvider->renameFaceDefinition(stdModel, stdOld, stdNew) ? YES : NO;
+}
+
+#pragma mark - Model State Definitions
+
+- (NSArray<NSString *> *)getStateNames:(NSString *)modelName {
+    if (!modelName) return @[];
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return @[];
+    std::string stdName = [modelName UTF8String];
+    std::vector<std::string> names = _nativeModelProvider->getStateNames(stdName);
+    return [self arrayFromVector:names];
+}
+
+- (NSDictionary *)getStateDefinition:(NSString *)modelName stateName:(NSString *)stateName {
+    if (!modelName || !stateName) return @{};
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return @{};
+    std::string stdModel = [modelName UTF8String];
+    std::string stdState = [stateName UTF8String];
+    std::map<std::string, std::string> def = _nativeModelProvider->getStateDefinition(stdModel, stdState);
+    return [self dictFromMap:def];
+}
+
+- (NSDictionary<NSString *, NSDictionary *> *)getAllStateDefinitions:(NSString *)modelName {
+    if (!modelName) return @{};
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return @{};
+    std::string stdName = [modelName UTF8String];
+    auto allDefs = _nativeModelProvider->getAllStateDefinitions(stdName);
+    NSMutableDictionary *result = [NSMutableDictionary dictionaryWithCapacity:allDefs.size()];
+    for (const auto& pair : allDefs) {
+        NSString *key = [NSString stringWithUTF8String:pair.first.c_str()];
+        result[key] = [self dictFromMap:pair.second];
+    }
+    return result;
+}
+
+- (BOOL)setStateDefinition:(NSString *)modelName
+                  stateName:(NSString *)stateName
+                 definition:(NSDictionary *)definition {
+    if (!modelName || !stateName || !definition) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::string stdState = [stateName UTF8String];
+    std::map<std::string, std::string> stdDef;
+    for (NSString *key in definition) {
+        NSString *value = definition[key];
+        if (value) {
+            stdDef[[key UTF8String]] = [value UTF8String];
+        }
+    }
+    return _nativeModelProvider->setStateDefinition(stdModel, stdState, stdDef) ? YES : NO;
+}
+
+- (BOOL)setAllStateDefinitions:(NSString *)modelName
+                    definitions:(NSDictionary<NSString *, NSDictionary *> *)definitions {
+    if (!modelName || !definitions) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::map<std::string, std::map<std::string, std::string>> stdDefs;
+    for (NSString *stateName in definitions) {
+        NSDictionary *def = definitions[stateName];
+        std::map<std::string, std::string> stdDef;
+        for (NSString *key in def) {
+            NSString *value = def[key];
+            if (value) {
+                stdDef[[key UTF8String]] = [value UTF8String];
+            }
+        }
+        stdDefs[[stateName UTF8String]] = std::move(stdDef);
+    }
+    return _nativeModelProvider->setAllStateDefinitions(stdModel, stdDefs) ? YES : NO;
+}
+
+- (BOOL)deleteStateDefinition:(NSString *)modelName stateName:(NSString *)stateName {
+    if (!modelName || !stateName) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::string stdState = [stateName UTF8String];
+    return _nativeModelProvider->deleteStateDefinition(stdModel, stdState) ? YES : NO;
+}
+
+- (BOOL)renameStateDefinition:(NSString *)modelName
+                      oldName:(NSString *)oldName
+                      newName:(NSString *)newName {
+    if (!modelName || !oldName || !newName) return NO;
+    [self ensureEngineInitialized];
+    if (!_nativeModelProvider) return NO;
+    std::string stdModel = [modelName UTF8String];
+    std::string stdOld = [oldName UTF8String];
+    std::string stdNew = [newName UTF8String];
+    return _nativeModelProvider->renameStateDefinition(stdModel, stdOld, stdNew) ? YES : NO;
 }
 
 #pragma mark - Model Geometry
@@ -2441,6 +2682,365 @@ static XLEngineBridge *_sharedBridge = nil;
         models = [self parseXModelFile:filePath];
     }
     return models;
+}
+
+#pragma mark - LOR S5 Import
+
+- (nullable NSArray<NSString *> *)getLORS5PreviewNames:(NSString *)filePath {
+    if (!filePath) return nil;
+    return [XLORS5Parser previewNamesInFile:filePath];
+}
+
+- (nullable NSArray<NSString *> *)importModelsFromLORS5File:(NSString *)filePath
+                                                previewName:(nullable NSString *)previewName
+                                                layoutGroup:(NSString *)layoutGroup {
+    if (!filePath) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot import LOR S5 models - engine not available");
+        return nil;
+    }
+
+    int previewWidth = 1280;
+    int previewHeight = 720;
+
+    NSArray<XLORS5ModelInfo *> *models = nil;
+    NSArray<XLORS5GroupInfo *> *groups = nil;
+
+    BOOL parseResult = [XLORS5Parser parseFile:filePath
+                                   previewName:previewName
+                                  previewWidth:previewWidth
+                                 previewHeight:previewHeight
+                                        models:&models
+                                        groups:&groups];
+
+    if (!parseResult || !models) {
+        NSLog(@"XLEngineBridge: Failed to parse LOR S5 file: %@", filePath);
+        return nil;
+    }
+
+    NSLog(@"XLEngineBridge: Parsed %lu models and %lu groups from LOR S5 file",
+          (unsigned long)models.count, (unsigned long)(groups ? groups.count : 0));
+
+    // Import each model
+    NSMutableArray<NSString *> *importedNames = [NSMutableArray array];
+    for (XLORS5ModelInfo *modelInfo in models) {
+        NSString *modelType = modelInfo.xlightsModelType;
+        NSString *originalName = modelInfo.name;
+        NSDictionary *properties = modelInfo.properties;
+
+        if (!modelType || !originalName || !properties) continue;
+
+        // Generate unique name
+        std::string baseName = [originalName UTF8String];
+        std::string finalName = baseName;
+        int suffix = 2;
+        while (_modelEngine->hasModel(finalName)) {
+            finalName = baseName + "-" + std::to_string(suffix);
+            suffix++;
+        }
+
+        // Merge in layout group
+        NSMutableDictionary *mergedProps = [properties mutableCopy];
+        if (layoutGroup.length > 0) {
+            mergedProps[@"LayoutGroup"] = layoutGroup;
+        }
+
+        std::map<std::string, std::string> stdProps;
+        for (NSString *key in mergedProps) {
+            stdProps[[key UTF8String]] = [[mergedProps[key] description] UTF8String];
+        }
+
+        xlEngine::OperationResult result = _modelEngine->createModel([modelType UTF8String], finalName, stdProps);
+        if (result.success) {
+            NSString *importedName = [NSString stringWithUTF8String:finalName.c_str()];
+            [importedNames addObject:importedName];
+            NSLog(@"XLEngineBridge: Imported LOR S5 model '%s' (type: %@)", finalName.c_str(), modelType);
+        } else {
+            NSLog(@"XLEngineBridge: Failed to import LOR S5 model '%s': %s",
+                  finalName.c_str(), result.message.c_str());
+        }
+    }
+
+    // Import groups
+    if (groups) {
+        for (XLORS5GroupInfo *groupObj in groups) {
+            NSString *groupName = groupObj.name;
+            NSArray<NSString *> *memberIds = groupObj.memberIds;
+
+            if (!groupName || !memberIds) continue;
+
+            // Resolve member IDs to model names
+            NSMutableArray<NSString *> *memberNames = [NSMutableArray array];
+            for (NSString *memberId in memberIds) {
+                for (XLORS5ModelInfo *modelInfo in models) {
+                    if ([modelInfo.modelId isEqualToString:memberId] && modelInfo.name) {
+                        [memberNames addObject:modelInfo.name];
+                        break;
+                    }
+                }
+            }
+
+            if (memberNames.count == 0) continue;
+
+            // Generate unique group name
+            std::string baseGroupName = [groupName UTF8String];
+            std::string finalGroupName = baseGroupName;
+            int gsuffix = 2;
+            while (_modelEngine->hasModel(finalGroupName)) {
+                finalGroupName = baseGroupName + "-" + std::to_string(gsuffix);
+                gsuffix++;
+            }
+
+            std::vector<std::string> stdMembers;
+            for (NSString *name in memberNames) {
+                stdMembers.push_back([name UTF8String]);
+            }
+
+            xlEngine::OperationResult groupResult = _modelEngine->createModelGroup(finalGroupName, stdMembers);
+            if (groupResult.success) {
+                NSLog(@"XLEngineBridge: Created LOR S5 group '%s' with %lu members",
+                      finalGroupName.c_str(), (unsigned long)memberNames.count);
+            }
+        }
+    }
+
+    return importedNames;
+}
+
+#pragma mark - RGB Effects File Import
+
+- (NSDictionary *)parseRGBEffectsFile:(NSString *)filePath {
+    if (!filePath) return @{@"layoutGroups": @[], @"models": @[]};
+
+    NSData *xmlData = [NSData dataWithContentsOfFile:filePath];
+    if (!xmlData) {
+        NSLog(@"XLEngineBridge: Cannot read RGB Effects file: %@", filePath);
+        return @{@"layoutGroups": @[], @"models": @[]};
+    }
+
+    NSError *error = nil;
+    NSXMLDocument *xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (!xmlDoc || error) {
+        NSLog(@"XLEngineBridge: Failed to parse RGB Effects XML from %@: %@", filePath, error.localizedDescription);
+        return @{@"layoutGroups": @[], @"models": @[]};
+    }
+
+    NSXMLElement *root = [xmlDoc rootElement];
+    if (!root) return @{@"layoutGroups": @[], @"models": @[]};
+
+    NSMutableArray<NSDictionary *> *allModels = [NSMutableArray array];
+    NSMutableOrderedSet<NSString *> *layoutGroups = [NSMutableOrderedSet orderedSet];
+
+    // Always include Default and Unassigned
+    [layoutGroups addObject:@"Default"];
+    [layoutGroups addObject:@"Unassigned"];
+
+    // Find <models> node and parse model children
+    NSArray<NSXMLNode *> *modelsNodes = [root nodesForXPath:@"models" error:nil];
+    NSXMLElement *modelsElement = nil;
+    for (NSXMLNode *node in modelsNodes) {
+        if ([node isKindOfClass:[NSXMLElement class]]) {
+            modelsElement = (NSXMLElement *)node;
+            break;
+        }
+    }
+
+    if (modelsElement) {
+        for (NSXMLElement *child in [modelsElement children]) {
+            if (![[child name] isEqualToString:@"model"]) continue;
+
+            NSString *name = [[child attributeForName:@"name"] stringValue];
+            if (!name) continue;
+
+            NSString *displayAs = [[child attributeForName:@"DisplayAs"] stringValue] ?: @"Unknown";
+            NSString *layoutGroup = [[child attributeForName:@"LayoutGroup"] stringValue] ?: @"Default";
+            NSDictionary *attrs = [XLEngineBridge attributesFromXMLElement:child];
+            NSInteger channels = [XLEngineBridge estimateChannelCountFromAttributes:attrs];
+
+            if (layoutGroup.length > 0 && ![layoutGroup isEqualToString:@"Default"] && ![layoutGroup isEqualToString:@"Unassigned"]) {
+                [layoutGroups addObject:layoutGroup];
+            }
+
+            [allModels addObject:@{
+                @"name": name,
+                @"type": displayAs,
+                @"channels": @(channels),
+                @"layoutGroup": layoutGroup,
+                @"isModelGroup": @NO,
+            }];
+        }
+    }
+
+    // Find <modelGroups> node and parse model group children
+    NSArray<NSXMLNode *> *groupsNodes = [root nodesForXPath:@"modelGroups" error:nil];
+    NSXMLElement *modelGroupsElement = nil;
+    for (NSXMLNode *node in groupsNodes) {
+        if ([node isKindOfClass:[NSXMLElement class]]) {
+            modelGroupsElement = (NSXMLElement *)node;
+            break;
+        }
+    }
+
+    if (modelGroupsElement) {
+        for (NSXMLElement *child in [modelGroupsElement children]) {
+            if (![[child name] isEqualToString:@"modelGroup"]) continue;
+
+            NSString *name = [[child attributeForName:@"name"] stringValue];
+            if (!name) continue;
+
+            NSString *layoutGroup = [[child attributeForName:@"LayoutGroup"] stringValue] ?: @"Default";
+            NSString *memberModels = [[child attributeForName:@"models"] stringValue] ?: @"";
+
+            if (layoutGroup.length > 0 && ![layoutGroup isEqualToString:@"Default"] && ![layoutGroup isEqualToString:@"Unassigned"]) {
+                [layoutGroups addObject:layoutGroup];
+            }
+
+            [allModels addObject:@{
+                @"name": name,
+                @"type": @"ModelGroup",
+                @"channels": @(0),
+                @"layoutGroup": layoutGroup,
+                @"isModelGroup": @YES,
+                @"models": memberModels,
+            }];
+        }
+    }
+
+    // Collect layout groups from <layoutGroups> node as well
+    NSArray<NSXMLNode *> *lgNodes = [root nodesForXPath:@"layoutGroups/layoutGroup" error:nil];
+    for (NSXMLNode *node in lgNodes) {
+        if (![node isKindOfClass:[NSXMLElement class]]) continue;
+        NSXMLElement *elem = (NSXMLElement *)node;
+        NSString *lgName = [[elem attributeForName:@"name"] stringValue];
+        if (lgName.length > 0) {
+            [layoutGroups addObject:lgName];
+        }
+    }
+
+    return @{
+        @"layoutGroups": [layoutGroups array],
+        @"models": allModels,
+    };
+}
+
+- (NSArray<NSString *> *)importModelsFromRGBEffectsFile:(NSString *)filePath
+                                             modelNames:(NSArray<NSString *> *)modelNames
+                                      targetLayoutGroup:(NSString *)targetLayoutGroup {
+    if (!filePath || !modelNames || modelNames.count == 0) return @[];
+
+    NSData *xmlData = [NSData dataWithContentsOfFile:filePath];
+    if (!xmlData) {
+        NSLog(@"XLEngineBridge: Cannot read RGB Effects file for import: %@", filePath);
+        return @[];
+    }
+
+    NSError *error = nil;
+    NSXMLDocument *xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (!xmlDoc || error) {
+        NSLog(@"XLEngineBridge: Failed to parse RGB Effects XML for import: %@", error.localizedDescription);
+        return @[];
+    }
+
+    NSXMLElement *root = [xmlDoc rootElement];
+    if (!root) return @[];
+
+    NSSet<NSString *> *selectedNames = [NSSet setWithArray:modelNames];
+    NSMutableArray<NSString *> *importedNames = [NSMutableArray array];
+
+    // First pass: import regular models (not model groups)
+    NSArray<NSXMLNode *> *modelNodes = [root nodesForXPath:@"models/model" error:nil];
+    for (NSXMLNode *node in modelNodes) {
+        if (![node isKindOfClass:[NSXMLElement class]]) continue;
+        NSXMLElement *elem = (NSXMLElement *)node;
+
+        NSString *name = [[elem attributeForName:@"name"] stringValue];
+        if (!name || ![selectedNames containsObject:name]) continue;
+
+        NSString *displayAs = [[elem attributeForName:@"DisplayAs"] stringValue] ?: @"Custom";
+
+        // Override layout group if a target is specified
+        if (targetLayoutGroup) {
+            NSXMLNode *lgAttr = [elem attributeForName:@"LayoutGroup"];
+            if (lgAttr) {
+                [elem removeAttributeForName:@"LayoutGroup"];
+            }
+            [elem addAttribute:[NSXMLNode attributeWithName:@"LayoutGroup" stringValue:targetLayoutGroup]];
+        }
+
+        if ([self importModelFromXMLElement:elem modelType:displayAs originalName:name]) {
+            [importedNames addObject:name];
+        }
+    }
+
+    // Second pass: import model groups (after models exist)
+    NSArray<NSXMLNode *> *groupNodes = [root nodesForXPath:@"modelGroups/modelGroup" error:nil];
+    for (NSXMLNode *node in groupNodes) {
+        if (![node isKindOfClass:[NSXMLElement class]]) continue;
+        NSXMLElement *elem = (NSXMLElement *)node;
+
+        NSString *name = [[elem attributeForName:@"name"] stringValue];
+        if (!name || ![selectedNames containsObject:name]) continue;
+
+        NSString *memberModelsStr = [[elem attributeForName:@"models"] stringValue] ?: @"";
+        NSArray<NSString *> *memberModels = [memberModelsStr componentsSeparatedByString:@","];
+
+        // Filter member models to only include those that exist (were imported or already exist)
+        NSMutableArray<NSString *> *validMembers = [NSMutableArray array];
+        for (NSString *member in memberModels) {
+            NSString *trimmed = [member stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (trimmed.length == 0) continue;
+            if ([self hasModel:trimmed]) {
+                [validMembers addObject:trimmed];
+            }
+        }
+
+        // Create the model group
+        if ([self createModelGroupFromImport:name members:validMembers targetLayoutGroup:targetLayoutGroup]) {
+            [importedNames addObject:name];
+        }
+    }
+
+    return importedNames;
+}
+
+/// Internal helper: create a model group during import
+- (BOOL)createModelGroupFromImport:(NSString *)groupName
+                           members:(NSArray<NSString *> *)members
+                 targetLayoutGroup:(NSString *)targetLayoutGroup {
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return NO;
+
+    std::string stdGroupName = [groupName UTF8String];
+
+    // Generate unique name if group already exists
+    std::string finalName = stdGroupName;
+    int suffix = 2;
+    while (_modelEngine->hasModel(finalName)) {
+        finalName = stdGroupName + "-" + std::to_string(suffix);
+        suffix++;
+    }
+
+    std::vector<std::string> stdMembers;
+    for (NSString *m in members) {
+        stdMembers.push_back([m UTF8String]);
+    }
+
+    auto result = _modelEngine->createModelGroup(finalName, stdMembers);
+    if (result.success) {
+        NSLog(@"XLEngineBridge: Imported model group '%s' with %lu members", finalName.c_str(), (unsigned long)members.count);
+
+        // Set the layout group on the newly created group
+        if (targetLayoutGroup) {
+            std::map<std::string, std::string> props;
+            props["LayoutGroup"] = [targetLayoutGroup UTF8String];
+            _modelEngine->updateModelProperty(finalName, "LayoutGroup", [targetLayoutGroup UTF8String]);
+        }
+    } else {
+        NSLog(@"XLEngineBridge: Failed to import model group '%s': %s", finalName.c_str(), result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 #pragma mark - Output Operations

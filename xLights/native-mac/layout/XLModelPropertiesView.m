@@ -10,6 +10,7 @@
 
 #import "XLModelPropertiesView.h"
 #import "../XLEngineBridge.h"
+#import "../dialogs/XLModelDialogs.h"
 
 #pragma mark - Section Header View
 
@@ -281,6 +282,18 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 @property (nonatomic, strong) NSPopUpButton *shadowModelForPopup;
 @property (nonatomic, strong) NSView *shadowModelForRow;
 
+// Model Type section (dynamic content)
+@property (nonatomic, strong) NSView *typePropertiesContainer;
+@property (nonatomic, strong) XLPropertySectionHeader *typeSectionHeader;
+@property (nonatomic, strong) NSView *typeSectionContent;
+@property (nonatomic, strong) NSBox *typeSectionSeparator;
+@property (nonatomic, copy) NSString *currentModelType;
+
+// String Properties section
+@property (nonatomic, strong) NSPopUpButton *stringTypePopup;
+@property (nonatomic, strong) NSPopUpButton *rgbwHandlingPopup;
+@property (nonatomic, strong) NSView *rgbwHandlingRow;
+
 // Position & Size controls
 @property (nonatomic, strong) XLThreeFieldRow *positionRow;
 @property (nonatomic, strong) XLThreeFieldRow *sizeRow;
@@ -313,6 +326,7 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 @property (nonatomic, strong) NSButton *reverseCheckbox;
 @property (nonatomic, strong) NSTextField *groupCountField;
 @property (nonatomic, strong) NSTextField *zigZagField;
+@property (nonatomic, strong) NSButton *dimmingCurvesButton;
 
 @end
 
@@ -353,6 +367,8 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 
 - (void)buildSections {
     [self buildGeneralSection];
+    [self buildTypePropertiesSection];
+    [self buildStringPropertiesSection];
     [self buildPositionSection];
     [self buildControllerSection];
     [self buildAppearanceSection];
@@ -461,6 +477,506 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 
         return stack;
     }];
+}
+
+- (void)buildTypePropertiesSection {
+    // Create an initially empty section that will be populated dynamically
+    _typeSectionHeader = [[XLPropertySectionHeader alloc] initWithTitle:@"Model Type"];
+
+    _typeSectionContent = [[NSView alloc] initWithFrame:NSZeroRect];
+    _typeSectionContent.translatesAutoresizingMaskIntoConstraints = NO;
+    [_typeSectionHeader setContentView:_typeSectionContent];
+
+    [_stackView addArrangedSubview:_typeSectionHeader];
+    [_stackView addArrangedSubview:_typeSectionContent];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_typeSectionHeader.leadingAnchor constraintEqualToAnchor:_stackView.leadingAnchor],
+        [_typeSectionHeader.trailingAnchor constraintEqualToAnchor:_stackView.trailingAnchor],
+        [_typeSectionContent.leadingAnchor constraintEqualToAnchor:_stackView.leadingAnchor],
+        [_typeSectionContent.trailingAnchor constraintEqualToAnchor:_stackView.trailingAnchor],
+    ]];
+
+    _typeSectionSeparator = [[NSBox alloc] initWithFrame:NSZeroRect];
+    _typeSectionSeparator.translatesAutoresizingMaskIntoConstraints = NO;
+    _typeSectionSeparator.boxType = NSBoxSeparator;
+    [_stackView addArrangedSubview:_typeSectionSeparator];
+    [NSLayoutConstraint activateConstraints:@[
+        [_typeSectionSeparator.leadingAnchor constraintEqualToAnchor:_stackView.leadingAnchor constant:8],
+        [_typeSectionSeparator.trailingAnchor constraintEqualToAnchor:_stackView.trailingAnchor constant:-8],
+    ]];
+
+    // Initially hidden until a model is selected
+    _typeSectionHeader.hidden = YES;
+    _typeSectionContent.hidden = YES;
+    _typeSectionSeparator.hidden = YES;
+}
+
+- (void)buildStringPropertiesSection {
+    [self addSection:@"String Properties" contentBuilder:^NSView *{
+        NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+        stack.translatesAutoresizingMaskIntoConstraints = NO;
+        stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+        stack.alignment = NSLayoutAttributeLeading;
+        stack.spacing = 4;
+
+        // String Type
+        self.stringTypePopup = [XLPropertyRowBuilder popUpWithItems:@[
+            @"RGB Nodes", @"RBG Nodes", @"GBR Nodes", @"GRB Nodes",
+            @"BRG Nodes", @"BGR Nodes", @"Node Single Color",
+            @"3 Channel RGB", @"4 Channel RGBW", @"4 Channel WRGB",
+            @"Strobes", @"Single Color", @"Single Color Intensity",
+            @"Superstring", @"WRGB Nodes", @"WRBG Nodes",
+            @"WGBR Nodes", @"WGRB Nodes", @"WBRG Nodes", @"WBGR Nodes",
+            @"RGBW Nodes", @"RBGW Nodes", @"GBRW Nodes", @"GRBW Nodes",
+            @"BRGW Nodes", @"BGRW Nodes", @"RGBWW Nodes"
+        ] selectedTitle:@"RGB Nodes"];
+        self.stringTypePopup.target = self;
+        self.stringTypePopup.action = @selector(stringTypePopupChanged:);
+        self.stringTypePopup.identifier = @"stringType";
+        NSView *stRow = [XLPropertyRowBuilder rowWithLabel:@"String Type" control:self.stringTypePopup];
+        [stack addArrangedSubview:stRow];
+        [stRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [stRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
+        // RGBW Handling (visible only for 4+ channel string types)
+        self.rgbwHandlingPopup = [XLPropertyRowBuilder popUpWithItems:@[
+            @"R=G=B -> W", @"RGB Only", @"White Only", @"Advanced", @"White On All"
+        ] selectedTitle:@"R=G=B -> W"];
+        self.rgbwHandlingPopup.target = self;
+        self.rgbwHandlingPopup.action = @selector(popupChanged:);
+        self.rgbwHandlingPopup.identifier = @"rgbwHandling";
+        self.rgbwHandlingRow = [XLPropertyRowBuilder rowWithLabel:@"RGBW Handling" control:self.rgbwHandlingPopup];
+        self.rgbwHandlingRow.hidden = YES;
+        [stack addArrangedSubview:self.rgbwHandlingRow];
+        [self.rgbwHandlingRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [self.rgbwHandlingRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
+        NSView *pad = [[NSView alloc] initWithFrame:NSZeroRect];
+        pad.translatesAutoresizingMaskIntoConstraints = NO;
+        [pad.heightAnchor constraintEqualToConstant:8].active = YES;
+        [stack addArrangedSubview:pad];
+
+        return stack;
+    }];
+}
+
+#pragma mark - Dynamic Type Properties
+
+- (void)rebuildTypePropertiesForType:(NSString *)modelType info:(NSDictionary *)info isMixed:(BOOL)mixed {
+    // Remove all existing subviews from the content container
+    for (NSView *subview in [_typeSectionContent.subviews copy]) {
+        [subview removeFromSuperview];
+    }
+    // Remove existing height constraints
+    for (NSLayoutConstraint *c in [_typeSectionContent.constraints copy]) {
+        if (c.firstAttribute == NSLayoutAttributeHeight) {
+            [_typeSectionContent removeConstraint:c];
+        }
+    }
+
+    if (!modelType || modelType.length == 0 || mixed) {
+        _typeSectionHeader.hidden = YES;
+        _typeSectionContent.hidden = YES;
+        _typeSectionSeparator.hidden = YES;
+        _currentModelType = nil;
+        return;
+    }
+
+    _currentModelType = modelType;
+
+    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 4;
+
+    // Determine properties based on the model type
+    NSString *normalizedType = [self normalizeModelType:modelType];
+
+    if ([normalizedType isEqualToString:@"Matrix"] || [normalizedType isEqualToString:@"Tree"]) {
+        [self addMatrixPropertiesToStack:stack info:info isTree:[normalizedType isEqualToString:@"Tree"]];
+    } else if ([normalizedType isEqualToString:@"Arches"]) {
+        [self addArchesPropertiesToStack:stack info:info];
+    } else if ([normalizedType isEqualToString:@"SingleLine"]) {
+        [self addSingleLinePropertiesToStack:stack info:info];
+    } else if ([normalizedType isEqualToString:@"Star"]) {
+        [self addStarPropertiesToStack:stack info:info];
+    } else if ([normalizedType isEqualToString:@"Circle"]) {
+        [self addCirclePropertiesToStack:stack info:info];
+    } else if ([normalizedType isEqualToString:@"Icicles"]) {
+        [self addIciclesPropertiesToStack:stack info:info];
+    } else if ([normalizedType isEqualToString:@"Custom"]) {
+        [self addCustomPropertiesToStack:stack info:info];
+    } else if ([normalizedType isEqualToString:@"PolyLine"]) {
+        [self addPolyLinePropertiesToStack:stack info:info];
+    } else {
+        // Unknown type - show parm1/parm2/parm3 as generic properties if present
+        [self addGenericPropertiesToStack:stack info:info];
+    }
+
+    // Bottom padding
+    NSView *pad = [[NSView alloc] initWithFrame:NSZeroRect];
+    pad.translatesAutoresizingMaskIntoConstraints = NO;
+    [pad.heightAnchor constraintEqualToConstant:8].active = YES;
+    [stack addArrangedSubview:pad];
+
+    [_typeSectionContent addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:_typeSectionContent.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:_typeSectionContent.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:_typeSectionContent.trailingAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:_typeSectionContent.bottomAnchor],
+    ]];
+
+    _typeSectionHeader.hidden = NO;
+    _typeSectionContent.hidden = !_typeSectionHeader.expanded;
+    _typeSectionSeparator.hidden = NO;
+
+    [_typeSectionHeader.titleLabel setStringValue:[NSString stringWithFormat:@"%@ Properties", modelType]];
+}
+
+- (NSString *)normalizeModelType:(NSString *)modelType {
+    if (!modelType) return @"";
+
+    // Tree types: "Tree 360", "Tree 270", "Tree 180", "Tree Flat", "Tree Ribbon"
+    if ([modelType hasPrefix:@"Tree"]) return @"Tree";
+
+    // Matrix types: "Vert Matrix", "Horiz Matrix", "Matrix"
+    if ([modelType containsString:@"Matrix"]) return @"Matrix";
+
+    // Single Line
+    if ([modelType isEqualToString:@"Single Line"]) return @"SingleLine";
+
+    // Arches
+    if ([modelType isEqualToString:@"Arches"]) return @"Arches";
+
+    // Star
+    if ([modelType isEqualToString:@"Star"]) return @"Star";
+
+    // Circle
+    if ([modelType isEqualToString:@"Circle"]) return @"Circle";
+
+    // Icicles
+    if ([modelType isEqualToString:@"Icicles"]) return @"Icicles";
+
+    // Custom
+    if ([modelType isEqualToString:@"Custom"]) return @"Custom";
+
+    // Poly Line
+    if ([modelType isEqualToString:@"Poly Line"]) return @"PolyLine";
+
+    return modelType;
+}
+
+- (NSTextField *)typeNumericFieldWithIdentifier:(NSString *)ident value:(NSString *)value min:(int)min max:(int)max {
+    NSTextField *field = [XLPropertyRowBuilder numericTextField];
+    field.identifier = ident;
+    field.delegate = self;
+    if (value) {
+        field.stringValue = value;
+    }
+    NSNumberFormatter *fmt = [[NSNumberFormatter alloc] init];
+    fmt.numberStyle = NSNumberFormatterNoStyle;
+    fmt.minimum = @(min);
+    fmt.maximum = @(max);
+    fmt.allowsFloats = NO;
+    field.formatter = fmt;
+    return field;
+}
+
+- (void)addRow:(NSView *)row toStack:(NSStackView *)stack {
+    [stack addArrangedSubview:row];
+    [row.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+    [row.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+}
+
+#pragma mark - Matrix / Tree Properties
+
+- (void)addMatrixPropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info isTree:(BOOL)isTree {
+    NSString *p1 = info[@"parm1"] ?: @"1";
+    NSString *p2 = info[@"parm2"] ?: @"50";
+    NSString *p3 = info[@"parm3"] ?: @"1";
+
+    // # Strings
+    NSTextField *stringsField = [self typeNumericFieldWithIdentifier:@"parm1" value:p1 min:1 max:10000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"# Strings" control:stringsField] toStack:stack];
+
+    // Nodes/String
+    NSTextField *nodesField = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:1 max:10000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Nodes/String" control:nodesField] toStack:stack];
+
+    // Strands/String
+    NSTextField *strandsField = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:1 max:2500];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Strands/String" control:strandsField] toStack:stack];
+
+    // Starting Location
+    NSString *dir = info[@"Dir"] ?: @"L";
+    NSString *startSide = info[@"StartSide"] ?: @"T";
+    int startIdx = 0;
+    if ([dir isEqualToString:@"L"]) {
+        startIdx = [startSide isEqualToString:@"T"] ? 0 : 2;
+    } else {
+        startIdx = [startSide isEqualToString:@"T"] ? 1 : 3;
+    }
+    NSPopUpButton *startPopup = [XLPropertyRowBuilder popUpWithItems:@[
+        @"Top Left", @"Top Right", @"Bottom Left", @"Bottom Right"
+    ] selectedTitle:nil];
+    if (startIdx >= 0 && startIdx < (int)startPopup.numberOfItems) {
+        [startPopup selectItemAtIndex:startIdx];
+    }
+    startPopup.target = self;
+    startPopup.action = @selector(startingLocationChanged:);
+    startPopup.identifier = @"startingLocation";
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Starting Location" control:startPopup] toStack:stack];
+
+    if (!isTree) {
+        // Direction (Horizontal / Vertical)
+        NSString *displayAs = info[@"DisplayAs"] ?: info[@"type"] ?: @"";
+        BOOL isVert = [displayAs containsString:@"Vert"];
+        NSPopUpButton *dirPopup = [XLPropertyRowBuilder popUpWithItems:@[@"Horizontal", @"Vertical"] selectedTitle:nil];
+        [dirPopup selectItemAtIndex:isVert ? 1 : 0];
+        dirPopup.target = self;
+        dirPopup.action = @selector(matrixDirectionChanged:);
+        dirPopup.identifier = @"matrixDirection";
+        [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Direction" control:dirPopup] toStack:stack];
+    }
+
+    if (isTree) {
+        // Tree Degrees
+        NSString *displayAs = info[@"DisplayAs"] ?: info[@"type"] ?: @"";
+        NSString *degrees = @"180";
+        if ([displayAs hasPrefix:@"Tree "]) {
+            NSString *suffix = [displayAs substringFromIndex:5];
+            if (![suffix isEqualToString:@"Flat"] && ![suffix isEqualToString:@"Ribbon"]) {
+                degrees = suffix;
+            }
+        }
+        NSTextField *degreesField = [self typeNumericFieldWithIdentifier:@"treeDegrees" value:degrees min:1 max:360];
+        [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Degrees" control:degreesField] toStack:stack];
+    }
+}
+
+#pragma mark - Arches Properties
+
+- (void)addArchesPropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    NSString *p1 = info[@"parm1"] ?: @"1";
+    NSString *p2 = info[@"parm2"] ?: @"25";
+    NSString *p3 = info[@"parm3"] ?: @"1";
+
+    // # Arches
+    NSTextField *archesField = [self typeNumericFieldWithIdentifier:@"parm1" value:p1 min:1 max:100];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"# Arches" control:archesField] toStack:stack];
+
+    // Nodes Per Arch
+    NSTextField *nodesField = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:1 max:1000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Nodes/Arch" control:nodesField] toStack:stack];
+
+    // Lights Per Node
+    NSTextField *lightsField = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:1 max:250];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Lights/Node" control:lightsField] toStack:stack];
+
+    // Arc Degrees
+    NSString *arc = info[@"arc"] ?: @"180";
+    NSTextField *arcField = [self typeNumericFieldWithIdentifier:@"arc" value:arc min:1 max:180];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Arc Degrees" control:arcField] toStack:stack];
+}
+
+#pragma mark - Single Line Properties
+
+- (void)addSingleLinePropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    NSString *p1 = info[@"parm1"] ?: @"1";
+    NSString *p2 = info[@"parm2"] ?: @"50";
+    NSString *p3 = info[@"parm3"] ?: @"1";
+
+    // # Strings
+    NSTextField *stringsField = [self typeNumericFieldWithIdentifier:@"parm1" value:p1 min:1 max:100];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"# Strings" control:stringsField] toStack:stack];
+
+    // Nodes/String
+    NSTextField *nodesField = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:1 max:10000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Nodes/String" control:nodesField] toStack:stack];
+
+    // Lights/Node
+    NSTextField *lightsField = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:1 max:300];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Lights/Node" control:lightsField] toStack:stack];
+
+    // Starting Location
+    NSString *dir = info[@"Dir"] ?: @"L";
+    NSPopUpButton *startPopup = [XLPropertyRowBuilder popUpWithItems:@[@"Left", @"Right"]
+                                                       selectedTitle:[dir isEqualToString:@"L"] ? @"Left" : @"Right"];
+    startPopup.target = self;
+    startPopup.action = @selector(singleLineStartChanged:);
+    startPopup.identifier = @"singleLineStart";
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Starting Location" control:startPopup] toStack:stack];
+}
+
+#pragma mark - Star Properties
+
+- (void)addStarPropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    NSString *p1 = info[@"parm1"] ?: @"1";
+    NSString *p2 = info[@"parm2"] ?: @"18";
+    NSString *p3 = info[@"parm3"] ?: @"5";
+
+    // # Strings
+    NSTextField *stringsField = [self typeNumericFieldWithIdentifier:@"parm1" value:p1 min:1 max:640];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"# Strings" control:stringsField] toStack:stack];
+
+    // Nodes/String
+    NSTextField *nodesField = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:1 max:10000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Nodes/String" control:nodesField] toStack:stack];
+
+    // # Points
+    NSTextField *pointsField = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:1 max:250];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"# Points" control:pointsField] toStack:stack];
+}
+
+#pragma mark - Circle Properties
+
+- (void)addCirclePropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    NSString *p1 = info[@"parm1"] ?: @"1";
+    NSString *p2 = info[@"parm2"] ?: @"50";
+    NSString *p3 = info[@"parm3"] ?: @"0";
+
+    // # Strings
+    NSTextField *stringsField = [self typeNumericFieldWithIdentifier:@"parm1" value:p1 min:1 max:100];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"# Strings" control:stringsField] toStack:stack];
+
+    // Nodes/String
+    NSTextField *nodesField = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:1 max:2000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Nodes/String" control:nodesField] toStack:stack];
+
+    // Center %
+    NSTextField *centerField = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:0 max:100];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Center %" control:centerField] toStack:stack];
+}
+
+#pragma mark - Icicles Properties
+
+- (void)addIciclesPropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    NSString *p1 = info[@"parm1"] ?: @"1";
+    NSString *p2 = info[@"parm2"] ?: @"80";
+
+    // # Strings
+    NSTextField *stringsField = [self typeNumericFieldWithIdentifier:@"parm1" value:p1 min:1 max:100];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"# Strings" control:stringsField] toStack:stack];
+
+    // Nodes/String
+    NSTextField *nodesField = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:1 max:2000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Nodes/String" control:nodesField] toStack:stack];
+
+    // Drop Pattern
+    NSString *dp = info[@"DropPattern"] ?: @"3,4,5,4";
+    NSTextField *dpField = [XLPropertyRowBuilder editableTextField];
+    dpField.identifier = @"DropPattern";
+    dpField.delegate = self;
+    dpField.stringValue = dp;
+    dpField.placeholderString = @"3,4,5,4";
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Drop Pattern" control:dpField] toStack:stack];
+}
+
+#pragma mark - Custom Model Properties
+
+- (void)addCustomPropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    // Custom models primarily use the custom data grid editor.
+    // Show node count (read-only) and lights per node.
+    NSString *p3 = info[@"parm3"] ?: @"1";
+
+    NSTextField *nodeCountField = [XLPropertyRowBuilder readOnlyTextField];
+    NSString *nodeCount = info[@"nodeCount"] ? [NSString stringWithFormat:@"%@", info[@"nodeCount"]] : @"0";
+    nodeCountField.stringValue = nodeCount;
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Node Count" control:nodeCountField] toStack:stack];
+
+    // Lights/Node
+    NSTextField *lightsField = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:1 max:300];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Lights/Node" control:lightsField] toStack:stack];
+}
+
+#pragma mark - Poly Line Properties
+
+- (void)addPolyLinePropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    NSString *p2 = info[@"parm2"] ?: @"50";
+    NSString *p3 = info[@"parm3"] ?: @"1";
+
+    // Nodes
+    NSTextField *nodesField = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:1 max:10000];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Nodes" control:nodesField] toStack:stack];
+
+    // Lights/Node
+    NSTextField *lightsField = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:1 max:300];
+    [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Lights/Node" control:lightsField] toStack:stack];
+}
+
+#pragma mark - Generic Properties
+
+- (void)addGenericPropertiesToStack:(NSStackView *)stack info:(NSDictionary *)info {
+    // Show parm1/parm2/parm3 as generic properties when type is unknown
+    NSString *p1 = info[@"parm1"];
+    NSString *p2 = info[@"parm2"];
+    NSString *p3 = info[@"parm3"];
+
+    if (p1) {
+        NSTextField *f = [self typeNumericFieldWithIdentifier:@"parm1" value:p1 min:0 max:100000];
+        [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Parm 1" control:f] toStack:stack];
+    }
+    if (p2) {
+        NSTextField *f = [self typeNumericFieldWithIdentifier:@"parm2" value:p2 min:0 max:100000];
+        [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Parm 2" control:f] toStack:stack];
+    }
+    if (p3) {
+        NSTextField *f = [self typeNumericFieldWithIdentifier:@"parm3" value:p3 min:0 max:100000];
+        [self addRow:[XLPropertyRowBuilder rowWithLabel:@"Parm 3" control:f] toStack:stack];
+    }
+}
+
+#pragma mark - Type-specific Actions
+
+- (void)startingLocationChanged:(NSPopUpButton *)sender {
+    // Matrix/Tree starting location: Top Left=0, Top Right=1, Bottom Left=2, Bottom Right=3
+    NSInteger idx = sender.indexOfSelectedItem;
+    NSString *dir = (idx == 0 || idx == 2) ? @"L" : @"R";
+    NSString *startSide = (idx == 0 || idx == 1) ? @"T" : @"B";
+
+    [self notifyTypePropertyChange:@"Dir" value:dir];
+    [self notifyTypePropertyChange:@"StartSide" value:startSide];
+}
+
+- (void)singleLineStartChanged:(NSPopUpButton *)sender {
+    NSString *dir = (sender.indexOfSelectedItem == 0) ? @"L" : @"R";
+    [self notifyTypePropertyChange:@"Dir" value:dir];
+}
+
+- (void)matrixDirectionChanged:(NSPopUpButton *)sender {
+    // This changes the DisplayAs attribute between "Horiz Matrix" and "Vert Matrix"
+    NSString *newType = (sender.indexOfSelectedItem == 0) ? @"Horiz Matrix" : @"Vert Matrix";
+    [self notifyTypePropertyChange:@"DisplayAs" value:newType];
+}
+
+- (void)stringTypePopupChanged:(NSPopUpButton *)sender {
+    NSString *value = sender.titleOfSelectedItem;
+    if (!value || [value isEqualToString:kMixedPlaceholder]) return;
+
+    [self notifyTypePropertyChange:@"StringType" value:value];
+
+    // Show/hide RGBW handling based on string type
+    BOOL is4Channel = [value containsString:@"RGBW"] || [value containsString:@"WRGB"]
+                   || [value containsString:@"WRBG"] || [value containsString:@"WGBR"]
+                   || [value containsString:@"WGRB"] || [value containsString:@"WBRG"]
+                   || [value containsString:@"WBGR"] || [value containsString:@"RBGW"]
+                   || [value containsString:@"GBRW"] || [value containsString:@"GRBW"]
+                   || [value containsString:@"BRGW"] || [value containsString:@"BGRW"]
+                   || [value containsString:@"RGBWW"];
+    self.rgbwHandlingRow.hidden = !is4Channel;
+}
+
+- (void)notifyTypePropertyChange:(NSString *)key value:(NSString *)value {
+    if (!_currentModelNames || _currentModelNames.count == 0) return;
+
+    if ([_delegate respondsToSelector:@selector(modelProperties:didChangeProperty:value:forModel:)]) {
+        for (NSString *modelName in _currentModelNames) {
+            [_delegate modelProperties:self didChangeProperty:key value:value forModel:modelName];
+        }
+    }
 }
 
 - (void)buildPositionSection {
@@ -759,6 +1275,16 @@ static NSString * const kMixedPlaceholder = @"Mixed";
         [zzRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
         [zzRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
 
+        // Dimming Curves
+        self.dimmingCurvesButton = [NSButton buttonWithTitle:@"Dimming Curves..."
+                                                      target:self
+                                                      action:@selector(dimmingCurvesClicked:)];
+        self.dimmingCurvesButton.font = [NSFont systemFontOfSize:11];
+        NSView *dcRow = [XLPropertyRowBuilder rowWithLabel:@"" control:self.dimmingCurvesButton];
+        [stack addArrangedSubview:dcRow];
+        [dcRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+        [dcRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+
         NSView *pad = [[NSView alloc] initWithFrame:NSZeroRect];
         pad.translatesAutoresizingMaskIntoConstraints = NO;
         [pad.heightAnchor constraintEqualToConstant:8].active = YES;
@@ -834,6 +1360,19 @@ static NSString * const kMixedPlaceholder = @"Mixed";
     _reverseCheckbox.state = NSControlStateValueOff;
     _groupCountField.stringValue = @"";
     _zigZagField.stringValue = @"";
+
+    // Clear type-specific section
+    _typeSectionHeader.hidden = YES;
+    _typeSectionContent.hidden = YES;
+    _typeSectionSeparator.hidden = YES;
+    _currentModelType = nil;
+    for (NSView *subview in [_typeSectionContent.subviews copy]) {
+        [subview removeFromSuperview];
+    }
+
+    // Clear string properties
+    [_stringTypePopup selectItemWithTitle:@"RGB Nodes"];
+    _rgbwHandlingRow.hidden = YES;
 }
 
 #pragma mark - Population
@@ -932,6 +1471,26 @@ static NSString * const kMixedPlaceholder = @"Mixed";
     [self setCheckbox:_reverseCheckbox fromNumber:info[@"Reverse"] mixed:mixed];
     [self setTextField:_groupCountField fromNumber:info[@"GroupCount"] ?: @(1) mixed:mixed];
     [self setTextField:_zigZagField fromNumber:info[@"ZigZag"] ?: @(0) mixed:mixed];
+
+    // Dynamic type-specific properties
+    [self rebuildTypePropertiesForType:modelType info:info isMixed:mixed];
+
+    // String Properties
+    NSString *stringType = info[@"StringType"] ?: @"RGB Nodes";
+    [self setPopUp:_stringTypePopup value:stringType mixed:mixed];
+
+    NSString *rgbwHandling = info[@"RGBWHandling"];
+    BOOL is4Channel = [stringType containsString:@"RGBW"] || [stringType containsString:@"WRGB"]
+                   || [stringType containsString:@"WRBG"] || [stringType containsString:@"WGBR"]
+                   || [stringType containsString:@"WGRB"] || [stringType containsString:@"WBRG"]
+                   || [stringType containsString:@"WBGR"] || [stringType containsString:@"RBGW"]
+                   || [stringType containsString:@"GBRW"] || [stringType containsString:@"GRBW"]
+                   || [stringType containsString:@"BRGW"] || [stringType containsString:@"BGRW"]
+                   || [stringType containsString:@"RGBWW"];
+    _rgbwHandlingRow.hidden = !is4Channel;
+    if (rgbwHandling) {
+        [self setPopUp:_rgbwHandlingPopup value:rgbwHandling mixed:mixed];
+    }
 }
 
 - (void)populateShadowModelForPopup:(NSDictionary *)info isMixed:(BOOL)mixed {
@@ -1175,6 +1734,40 @@ static NSString * const kMixedPlaceholder = @"Mixed";
     }
 }
 
+- (void)dimmingCurvesClicked:(id)sender {
+    if (!_currentModelNames || _currentModelNames.count == 0 || !_engineBridge) return;
+
+    NSString *modelName = _currentModelNames.firstObject;
+    NSDictionary *dimmingInfo = [_engineBridge getDimmingInfo:modelName];
+
+    // If no dimming info exists, create default with single gamma mode
+    if (!dimmingInfo || dimmingInfo.count == 0) {
+        NSString *brightness = [_engineBridge getModelProperty:modelName key:@"ModelBrightness" defaultValue:@"0"];
+        dimmingInfo = @{
+            @"all": @{
+                @"gamma": @"1.0",
+                @"brightness": brightness ?: @"0"
+            }
+        };
+    }
+
+    XLModelDimmingCurveDialog *dialog = [[XLModelDimmingCurveDialog alloc] init];
+    dialog.modelName = modelName;
+    [dialog initFromDimmingInfo:dimmingInfo];
+
+    NSWindow *parentWindow = self.window;
+    if (!parentWindow) return;
+
+    [dialog presentAsSheetForWindow:parentWindow completion:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            NSDictionary *newInfo = [dialog exportDimmingInfo];
+            for (NSString *name in self->_currentModelNames) {
+                [self->_engineBridge setDimmingInfo:newInfo forModel:name];
+            }
+        }
+    }];
+}
+
 #pragma mark - Delegate Notification
 
 - (NSString *)engineKeyForUIKey:(NSString *)uiKey {
@@ -1206,6 +1799,8 @@ static NSString * const kMixedPlaceholder = @"Mixed";
             @"reverse": @"Reverse",
             @"groupCount": @"GroupCount",
             @"zigZag": @"ZigZag",
+            @"stringType": @"StringType",
+            @"rgbwHandling": @"RGBWHandling",
         };
     });
     return keyMap[uiKey] ?: uiKey;
@@ -1213,6 +1808,17 @@ static NSString * const kMixedPlaceholder = @"Mixed";
 
 - (void)notifyPropertyChange:(NSString *)key value:(id)value {
     if (!_currentModelNames || _currentModelNames.count == 0) return;
+
+    // Handle special keys that require complex updates
+    if ([key isEqualToString:@"treeDegrees"]) {
+        NSString *degrees = [NSString stringWithFormat:@"Tree %@", value];
+        if ([_delegate respondsToSelector:@selector(modelProperties:didChangeProperty:value:forModel:)]) {
+            for (NSString *modelName in _currentModelNames) {
+                [_delegate modelProperties:self didChangeProperty:@"DisplayAs" value:degrees forModel:modelName];
+            }
+        }
+        return;
+    }
 
     // Map the UI key to the engine bridge key
     NSString *engineKey = [self engineKeyForUIKey:key];
@@ -1235,6 +1841,8 @@ static NSString * const kMixedPlaceholder = @"Mixed";
             @"width", @"height", @"depth",
             @"startChannel",
             @"nullPixels", @"groupCount", @"zigZag",
+            @"parm1", @"parm2", @"parm3",
+            @"arc", @"treeDegrees",
         ]];
     });
     return [numericKeys containsObject:key];

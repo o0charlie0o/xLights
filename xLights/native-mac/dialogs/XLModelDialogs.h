@@ -268,6 +268,7 @@ typedef NS_ENUM(NSInteger, XLPixelTestPattern) {
 /// Generation source type for custom model generation
 typedef NS_ENUM(NSInteger, XLCustomModelGenerationSource) {
     XLCustomModelGenerationSourceImage = 0,    // From image file
+    XLCustomModelGenerationSourceVideo,         // From video of physical display
     XLCustomModelGenerationSourceSVGPath,       // From SVG path (placeholder)
     XLCustomModelGenerationSourceMathFunction,  // From math function (placeholder)
     XLCustomModelGenerationSourceGrid,          // Grid with custom spacing
@@ -343,6 +344,20 @@ typedef NS_ENUM(NSInteger, XLCustomModelGenerationSource) {
 
 /// Starting corner for grid numbering: @"topleft", @"topright", @"bottomleft", @"bottomright"
 @property (nonatomic, copy) NSString *gridStartCorner;
+
+#pragma mark - Video Source Parameters
+
+/// Video file path (for video source)
+@property (nonatomic, copy, nullable) NSString *videoFilePath;
+
+/// Expected node count for video detection
+@property (nonatomic, assign) NSInteger videoExpectedNodes;
+
+/// Whether camera is stationary (enables background subtraction)
+@property (nonatomic, assign) BOOL videoSteadyCamera;
+
+/// Load a video file for model generation
+- (BOOL)loadVideoFromPath:(NSString *)path;
 
 #pragma mark - SVG Path Parameters (Placeholder)
 

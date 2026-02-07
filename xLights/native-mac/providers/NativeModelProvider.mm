@@ -320,6 +320,9 @@ void NativeModelProvider::clearModels()
     _modelNames.clear();
     _groupAttributes.clear();
     _submodelAttributes.clear();
+    _faceDefinitions.clear();
+    _stateDefinitions.clear();
+    _dimmingCurveInfo.clear();
     _showFolderPath.clear();
 }
 
@@ -685,6 +688,79 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
                     _submodelAttributes[name] = std::move(submodels);
                 }
             }
+
+            // Parse faceInfo child elements
+            NSArray<NSXMLElement*>* faceElements = [elem elementsForName:@"faceInfo"];
+            if (faceElements.count > 0) {
+                std::map<std::string, std::map<std::string, std::string>> faces;
+                for (NSXMLElement* faceElem in faceElements) {
+                    NSXMLNode* faceNameAttr = [faceElem attributeForName:@"Name"];
+                    if (faceNameAttr && faceNameAttr.stringValue) {
+                        std::string faceName = [faceNameAttr.stringValue UTF8String];
+                        std::map<std::string, std::string> faceAttrs;
+                        for (NSXMLNode* faceAttr in [faceElem attributes]) {
+                            if (faceAttr.name && faceAttr.stringValue) {
+                                std::string attrName = [faceAttr.name UTF8String];
+                                if (attrName != "Name") {
+                                    faceAttrs[attrName] = [faceAttr.stringValue UTF8String];
+                                }
+                            }
+                        }
+                        faces[faceName] = std::move(faceAttrs);
+                    }
+                }
+                if (!faces.empty()) {
+                    _faceDefinitions[name] = std::move(faces);
+                }
+            }
+
+            // Parse stateInfo child elements
+            NSArray<NSXMLElement*>* stateElements = [elem elementsForName:@"stateInfo"];
+            if (stateElements.count > 0) {
+                std::map<std::string, std::map<std::string, std::string>> states;
+                for (NSXMLElement* stateElem in stateElements) {
+                    NSXMLNode* stateNameAttr = [stateElem attributeForName:@"Name"];
+                    if (stateNameAttr && stateNameAttr.stringValue) {
+                        std::string stateName = [stateNameAttr.stringValue UTF8String];
+                        std::map<std::string, std::string> stateAttrs;
+                        for (NSXMLNode* stateAttr in [stateElem attributes]) {
+                            if (stateAttr.name && stateAttr.stringValue) {
+                                std::string attrName = [stateAttr.name UTF8String];
+                                if (attrName != "Name") {
+                                    stateAttrs[attrName] = [stateAttr.stringValue UTF8String];
+                                }
+                            }
+                        }
+                        states[stateName] = std::move(stateAttrs);
+                    }
+                }
+                if (!states.empty()) {
+                    _stateDefinitions[name] = std::move(states);
+                }
+            }
+
+            // Parse dimmingCurve child element
+            NSArray<NSXMLElement*>* dimmingElements = [elem elementsForName:@"dimmingCurve"];
+            if (dimmingElements.count > 0) {
+                NSXMLElement* dimmingElem = dimmingElements.firstObject;
+                std::map<std::string, std::map<std::string, std::string>> dimInfo;
+                for (NSXMLElement* channelElem in [dimmingElem children]) {
+                    if (![channelElem isKindOfClass:[NSXMLElement class]]) continue;
+                    std::string channelName = [channelElem.name UTF8String];
+                    std::map<std::string, std::string> channelAttrs;
+                    for (NSXMLNode* attr in [channelElem attributes]) {
+                        if (attr.name && attr.stringValue) {
+                            channelAttrs[[attr.name UTF8String]] = [attr.stringValue UTF8String];
+                        }
+                    }
+                    if (!channelAttrs.empty()) {
+                        dimInfo[channelName] = std::move(channelAttrs);
+                    }
+                }
+                if (!dimInfo.empty()) {
+                    _dimmingCurveInfo[name] = std::move(dimInfo);
+                }
+            }
         }
     }
 
@@ -730,6 +806,9 @@ void NativeModelProvider::clearModels() {
     _modelAttributes.clear();
     _groupAttributes.clear();
     _submodelAttributes.clear();
+    _faceDefinitions.clear();
+    _stateDefinitions.clear();
+    _dimmingCurveInfo.clear();
     _views.clear();
     _layoutGroups.clear();
     _showFolderPath.clear();
@@ -1164,6 +1243,188 @@ std::vector<std::string> NativeModelProvider::getModelsForLayoutGroup(const std:
     }
 
     return result;
+}
+
+// MARK: - Face Definition Management
+
+std::vector<std::string> NativeModelProvider::getFaceNames(const std::string& modelName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::vector<std::string> names;
+    auto it = _faceDefinitions.find(modelName);
+    if (it != _faceDefinitions.end()) {
+        for (const auto& face : it->second) {
+            names.push_back(face.first);
+        }
+    }
+    return names;
+}
+
+std::map<std::string, std::string> NativeModelProvider::getFaceDefinition(
+    const std::string& modelName, const std::string& faceName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _faceDefinitions.find(modelName);
+    if (modelIt != _faceDefinitions.end()) {
+        auto faceIt = modelIt->second.find(faceName);
+        if (faceIt != modelIt->second.end()) {
+            return faceIt->second;
+        }
+    }
+    return {};
+}
+
+std::map<std::string, std::map<std::string, std::string>> NativeModelProvider::getAllFaceDefinitions(
+    const std::string& modelName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _faceDefinitions.find(modelName);
+    if (it != _faceDefinitions.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+bool NativeModelProvider::setFaceDefinition(const std::string& modelName, const std::string& faceName,
+                                            const std::map<std::string, std::string>& definition) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _faceDefinitions[modelName][faceName] = definition;
+    return true;
+}
+
+bool NativeModelProvider::setAllFaceDefinitions(const std::string& modelName,
+    const std::map<std::string, std::map<std::string, std::string>>& definitions) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _faceDefinitions[modelName] = definitions;
+    return true;
+}
+
+bool NativeModelProvider::deleteFaceDefinition(const std::string& modelName, const std::string& faceName) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _faceDefinitions.find(modelName);
+    if (modelIt == _faceDefinitions.end()) return false;
+    auto faceIt = modelIt->second.find(faceName);
+    if (faceIt == modelIt->second.end()) return false;
+    modelIt->second.erase(faceIt);
+    if (modelIt->second.empty()) {
+        _faceDefinitions.erase(modelIt);
+    }
+    return true;
+}
+
+bool NativeModelProvider::renameFaceDefinition(const std::string& modelName,
+                                               const std::string& oldName, const std::string& newName) {
+    if (oldName.empty() || newName.empty() || oldName == newName) return false;
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _faceDefinitions.find(modelName);
+    if (modelIt == _faceDefinitions.end()) return false;
+    auto faceIt = modelIt->second.find(oldName);
+    if (faceIt == modelIt->second.end()) return false;
+    if (modelIt->second.find(newName) != modelIt->second.end()) return false;
+    auto data = std::move(faceIt->second);
+    modelIt->second.erase(faceIt);
+    modelIt->second[newName] = std::move(data);
+    return true;
+}
+
+// MARK: - State Definition Management
+
+std::vector<std::string> NativeModelProvider::getStateNames(const std::string& modelName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::vector<std::string> names;
+    auto it = _stateDefinitions.find(modelName);
+    if (it != _stateDefinitions.end()) {
+        for (const auto& state : it->second) {
+            names.push_back(state.first);
+        }
+    }
+    return names;
+}
+
+std::map<std::string, std::string> NativeModelProvider::getStateDefinition(
+    const std::string& modelName, const std::string& stateName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _stateDefinitions.find(modelName);
+    if (modelIt != _stateDefinitions.end()) {
+        auto stateIt = modelIt->second.find(stateName);
+        if (stateIt != modelIt->second.end()) {
+            return stateIt->second;
+        }
+    }
+    return {};
+}
+
+std::map<std::string, std::map<std::string, std::string>> NativeModelProvider::getAllStateDefinitions(
+    const std::string& modelName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _stateDefinitions.find(modelName);
+    if (it != _stateDefinitions.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+bool NativeModelProvider::setStateDefinition(const std::string& modelName, const std::string& stateName,
+                                             const std::map<std::string, std::string>& definition) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _stateDefinitions[modelName][stateName] = definition;
+    return true;
+}
+
+bool NativeModelProvider::setAllStateDefinitions(const std::string& modelName,
+    const std::map<std::string, std::map<std::string, std::string>>& definitions) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _stateDefinitions[modelName] = definitions;
+    return true;
+}
+
+bool NativeModelProvider::deleteStateDefinition(const std::string& modelName, const std::string& stateName) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _stateDefinitions.find(modelName);
+    if (modelIt == _stateDefinitions.end()) return false;
+    auto stateIt = modelIt->second.find(stateName);
+    if (stateIt == modelIt->second.end()) return false;
+    modelIt->second.erase(stateIt);
+    if (modelIt->second.empty()) {
+        _stateDefinitions.erase(modelIt);
+    }
+    return true;
+}
+
+bool NativeModelProvider::renameStateDefinition(const std::string& modelName,
+                                                const std::string& oldName, const std::string& newName) {
+    if (oldName.empty() || newName.empty() || oldName == newName) return false;
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _stateDefinitions.find(modelName);
+    if (modelIt == _stateDefinitions.end()) return false;
+    auto stateIt = modelIt->second.find(oldName);
+    if (stateIt == modelIt->second.end()) return false;
+    if (modelIt->second.find(newName) != modelIt->second.end()) return false;
+    auto data = std::move(stateIt->second);
+    modelIt->second.erase(stateIt);
+    modelIt->second[newName] = std::move(data);
+    return true;
+}
+
+// --- Dimming Curve Management ---
+
+std::map<std::string, std::map<std::string, std::string>> NativeModelProvider::getDimmingInfo(
+    const std::string& modelName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _dimmingCurveInfo.find(modelName);
+    if (it != _dimmingCurveInfo.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+bool NativeModelProvider::setDimmingInfo(const std::string& modelName,
+    const std::map<std::string, std::map<std::string, std::string>>& dimmingInfo) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_modelAttributes.find(modelName) == _modelAttributes.end()) return false;
+    if (dimmingInfo.empty()) {
+        _dimmingCurveInfo.erase(modelName);
+    } else {
+        _dimmingCurveInfo[modelName] = dimmingInfo;
+    }
+    return true;
 }
 
 void NativeModelProvider::parseLayoutGroupsFromXML(const std::string& xmlContent) {

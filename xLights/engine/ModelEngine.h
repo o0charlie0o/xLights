@@ -229,6 +229,34 @@ public:
     OperationResult addModelToGroup(const std::string& groupName, const std::string& modelName);
     OperationResult removeModelFromGroup(const std::string& groupName, const std::string& modelName);
 
+    // --- Face Definitions ---
+
+    std::vector<std::string> getFaceNames(const std::string& modelName) const;
+    std::map<std::string, std::string> getFaceDefinition(const std::string& modelName,
+                                                          const std::string& faceName) const;
+    std::map<std::string, std::map<std::string, std::string>> getAllFaceDefinitions(
+        const std::string& modelName) const;
+    OperationResult setFaceDefinition(const std::string& modelName, const std::string& faceName,
+                                      const std::map<std::string, std::string>& definition);
+    OperationResult setAllFaceDefinitions(const std::string& modelName,
+                                          const std::map<std::string, std::map<std::string, std::string>>& definitions);
+    OperationResult deleteFaceDefinition(const std::string& modelName, const std::string& faceName);
+    OperationResult renameFaceDefinition(const std::string& modelName, const std::string& oldName,
+                                         const std::string& newName);
+
+    // --- Dimming Curves ---
+
+    /// Get dimming curve info for a model.
+    /// Returns map with keys "all", "red", "green", "blue" containing
+    /// sub-maps with "gamma", "brightness", and/or "filename" keys.
+    std::map<std::string, std::map<std::string, std::string>> getDimmingInfo(
+        const std::string& modelName) const;
+
+    /// Set dimming curve info for a model.
+    /// Pass an empty map to clear the dimming curve.
+    OperationResult setDimmingInfo(const std::string& modelName,
+                                    const std::map<std::string, std::map<std::string, std::string>>& dimmingInfo);
+
     // --- Position & Geometry ---
 
     struct BoundingBox {

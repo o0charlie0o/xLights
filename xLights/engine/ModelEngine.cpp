@@ -1077,7 +1077,24 @@ OperationResult ModelEngine::renameModel(const std::string& oldName, const std::
 
 OperationResult ModelEngine::updateModelProperty(const std::string& name, const std::string& key, const std::string& value)
 {
-    return {false, "Native build: property update not yet implemented"};
+    if (!_provider) return {false, "No provider available"};
+    if (!_provider->hasModel(name)) return {false, "Model '" + name + "' not found"};
+
+    auto* nativeProvider = dynamic_cast<NativeModelProvider*>(_provider);
+    if (!nativeProvider) return {false, "Provider does not support property updates"};
+
+    bool ok = nativeProvider->setModelAttribute(name, key, value);
+    if (!ok) return {false, "Failed to set attribute '" + key + "' on model '" + name + "'"};
+
+    // Notify listeners
+    ModelChangeEvent event;
+    event.type = ModelChangeType::PropertyChanged;
+    event.modelName = name;
+    event.propertyKey = key;
+    event.propertyValue = value;
+    notifyModelChanged(event);
+
+    return {true, ""};
 }
 
 // --- Smart Remote (Native Build) ---
@@ -1441,6 +1458,78 @@ ModelEngine::BoundingBox ModelEngine::getModelBounds(const std::string& name) co
     bb.minY -= pad;  bb.maxY += pad;
     bb.minZ -= pad;  bb.maxZ += pad;
     return bb;
+}
+
+// --- Face Definitions (native) ---
+
+std::vector<std::string> ModelEngine::getFaceNames(const std::string& modelName) const {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (nmp) return nmp->getFaceNames(modelName);
+    return {};
+}
+
+std::map<std::string, std::string> ModelEngine::getFaceDefinition(
+    const std::string& modelName, const std::string& faceName) const {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (nmp) return nmp->getFaceDefinition(modelName, faceName);
+    return {};
+}
+
+std::map<std::string, std::map<std::string, std::string>> ModelEngine::getAllFaceDefinitions(
+    const std::string& modelName) const {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (nmp) return nmp->getAllFaceDefinitions(modelName);
+    return {};
+}
+
+OperationResult ModelEngine::setFaceDefinition(const std::string& modelName, const std::string& faceName,
+                                               const std::map<std::string, std::string>& definition) {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (!nmp) return {false, "Provider does not support face definitions"};
+    return {nmp->setFaceDefinition(modelName, faceName, definition), ""};
+}
+
+OperationResult ModelEngine::setAllFaceDefinitions(const std::string& modelName,
+    const std::map<std::string, std::map<std::string, std::string>>& definitions) {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (!nmp) return {false, "Provider does not support face definitions"};
+    return {nmp->setAllFaceDefinitions(modelName, definitions), ""};
+}
+
+OperationResult ModelEngine::deleteFaceDefinition(const std::string& modelName, const std::string& faceName) {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (!nmp) return {false, "Provider does not support face definitions"};
+    return {nmp->deleteFaceDefinition(modelName, faceName), ""};
+}
+
+OperationResult ModelEngine::renameFaceDefinition(const std::string& modelName,
+                                                  const std::string& oldName, const std::string& newName) {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (!nmp) return {false, "Provider does not support face definitions"};
+    return {nmp->renameFaceDefinition(modelName, oldName, newName), ""};
+}
+
+// --- Dimming Curves (native build) ---
+
+std::map<std::string, std::map<std::string, std::string>> ModelEngine::getDimmingInfo(
+    const std::string& modelName) const {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (nmp) return nmp->getDimmingInfo(modelName);
+    return {};
+}
+
+OperationResult ModelEngine::setDimmingInfo(const std::string& modelName,
+    const std::map<std::string, std::map<std::string, std::string>>& dimmingInfo) {
+    auto* nmp = dynamic_cast<NativeModelProvider*>(_provider);
+    if (!nmp) return {false, "Provider does not support dimming curves"};
+    bool ok = nmp->setDimmingInfo(modelName, dimmingInfo);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::PropertyChanged;
+        event.modelName = modelName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to set dimming info"};
 }
 
 void ModelEngine::addListener(ModelEngineListener* listener)
@@ -2173,6 +2262,53 @@ OperationResult ModelEngine::removeModelFromGroup(const std::string& groupName, 
     return {true, ""};
 }
 
+// --- Dimming Curves (legacy build) ---
+
+std::map<std::string, std::map<std::string, std::string>> ModelEngine::getDimmingInfo(
+    const std::string& modelName) const {
+    Model* m = findModel(modelName);
+    if (!m) return {};
+    return m->GetDimmingInfo();
+}
+
+OperationResult ModelEngine::setDimmingInfo(const std::string& modelName,
+    const std::map<std::string, std::map<std::string, std::string>>& dimmingInfo) {
+    Model* m = findModel(modelName);
+    if (!m) return {false, "Model '" + modelName + "' not found"};
+
+    // Remove existing dimmingCurve XML node
+    wxXmlNode* f = m->GetModelXml()->GetChildren();
+    while (f != nullptr) {
+        if ("dimmingCurve" == f->GetName()) {
+            m->GetModelXml()->RemoveChild(f);
+            delete f;
+            f = m->GetModelXml()->GetChildren();
+        } else {
+            f = f->GetNext();
+        }
+    }
+
+    // Write new dimmingCurve node if info is not empty
+    if (!dimmingInfo.empty()) {
+        wxXmlNode* dcNode = new wxXmlNode(wxXML_ELEMENT_NODE, "dimmingCurve");
+        m->GetModelXml()->AddChild(dcNode);
+        for (const auto& channel : dimmingInfo) {
+            wxXmlNode* chNode = new wxXmlNode(wxXML_ELEMENT_NODE, channel.first);
+            dcNode->AddChild(chNode);
+            for (const auto& param : channel.second) {
+                chNode->AddAttribute(param.first, param.second);
+            }
+        }
+    }
+
+    ModelChangeEvent event;
+    event.type = ModelChangeType::PropertyChanged;
+    event.modelName = modelName;
+    notifyModelChanged(event);
+
+    return {true, ""};
+}
+
 // --- Position & Geometry ---
 
 ModelEngine::BoundingBox ModelEngine::getModelBounds(const std::string& name) const
@@ -2192,6 +2328,79 @@ ModelEngine::BoundingBox ModelEngine::getModelBounds(const std::string& name) co
     box.maxZ = loc.GetBack();
 
     return box;
+}
+
+// --- Face Definitions (legacy) ---
+
+std::vector<std::string> ModelEngine::getFaceNames(const std::string& modelName) const {
+    Model* m = findModel(modelName);
+    if (!m) return {};
+    std::vector<std::string> names;
+    for (const auto& face : m->GetFaceInfo()) {
+        names.push_back(face.first);
+    }
+    return names;
+}
+
+std::map<std::string, std::string> ModelEngine::getFaceDefinition(
+    const std::string& modelName, const std::string& faceName) const {
+    Model* m = findModel(modelName);
+    if (!m) return {};
+    const auto& faceInfo = m->GetFaceInfo();
+    auto it = faceInfo.find(faceName);
+    if (it != faceInfo.end()) return it->second;
+    return {};
+}
+
+std::map<std::string, std::map<std::string, std::string>> ModelEngine::getAllFaceDefinitions(
+    const std::string& modelName) const {
+    Model* m = findModel(modelName);
+    if (!m) return {};
+    return m->GetFaceInfo();
+}
+
+OperationResult ModelEngine::setFaceDefinition(const std::string& modelName, const std::string& faceName,
+                                               const std::map<std::string, std::string>& definition) {
+    Model* m = findModel(modelName);
+    if (!m) return {false, "Model not found"};
+    auto faceInfo = m->GetFaceInfo();
+    faceInfo[faceName] = definition;
+    m->SetFaceInfo(faceInfo);
+    return {true, ""};
+}
+
+OperationResult ModelEngine::setAllFaceDefinitions(const std::string& modelName,
+    const std::map<std::string, std::map<std::string, std::string>>& definitions) {
+    Model* m = findModel(modelName);
+    if (!m) return {false, "Model not found"};
+    m->SetFaceInfo(definitions);
+    return {true, ""};
+}
+
+OperationResult ModelEngine::deleteFaceDefinition(const std::string& modelName, const std::string& faceName) {
+    Model* m = findModel(modelName);
+    if (!m) return {false, "Model not found"};
+    auto faceInfo = m->GetFaceInfo();
+    auto it = faceInfo.find(faceName);
+    if (it == faceInfo.end()) return {false, "Face definition not found"};
+    faceInfo.erase(it);
+    m->SetFaceInfo(faceInfo);
+    return {true, ""};
+}
+
+OperationResult ModelEngine::renameFaceDefinition(const std::string& modelName,
+                                                  const std::string& oldName, const std::string& newName) {
+    Model* m = findModel(modelName);
+    if (!m) return {false, "Model not found"};
+    auto faceInfo = m->GetFaceInfo();
+    auto it = faceInfo.find(oldName);
+    if (it == faceInfo.end()) return {false, "Face definition not found"};
+    if (faceInfo.find(newName) != faceInfo.end()) return {false, "Name already exists"};
+    auto data = std::move(it->second);
+    faceInfo.erase(it);
+    faceInfo[newName] = std::move(data);
+    m->SetFaceInfo(faceInfo);
+    return {true, ""};
 }
 
 // --- Listener Management ---

@@ -10,8 +10,10 @@
 
 #import "XLModelDialogs.h"
 #import "XLWiringDiagramView.h"
+#import "XLVideoModelGenerator.h"
 #import "../XLEngineBridge.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <AVFoundation/AVFoundation.h>
 
 static const CGFloat kLabelWidth = 130.0;
 
@@ -283,22 +285,132 @@ static const CGFloat kLabelWidth = 130.0;
 
 @end
 
-#pragma mark - XLModelDimmingCurveDialog
+#pragma mark - Dimming Curve Preview View
 
-@interface XLModelDimmingCurveDialog () {
-    NSString *_curveType;
-    double _gammaValue;
-    NSInteger _brightness;
-    BOOL _applyToAllChannels;
+@interface XLDimmingCurvePreviewView : NSView
+@property (nonatomic, strong) NSColor *curveColor;
+- (void)updateWithBrightness:(NSInteger)brightness gamma:(double)gamma;
+- (void)updateFromFile:(NSString *)filePath;
+- (void)resetToIdentity;
+@end
+
+@implementation XLDimmingCurvePreviewView {
+    unsigned char _curveData[256];
 }
 
-@property (nonatomic, strong) NSPopUpButton *curveTypePopup;
-@property (nonatomic, strong) NSSlider *gammaSlider;
-@property (nonatomic, strong) NSTextField *gammaLabel;
-@property (nonatomic, strong) NSSlider *brightnessSlider;
-@property (nonatomic, strong) NSTextField *brightnessLabel;
-@property (nonatomic, strong) NSButton *allChannelsCheckbox;
+- (instancetype)initWithFrame:(NSRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _curveColor = [NSColor yellowColor];
+        [self resetToIdentity];
+    }
+    return self;
+}
 
+- (void)resetToIdentity {
+    for (int i = 0; i < 256; i++) _curveData[i] = i;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)updateWithBrightness:(NSInteger)brightness gamma:(double)gamma {
+    if (gamma > 50.0) gamma = 50.0;
+    if (gamma < 0.0) gamma = 0.0;
+    double maxB = (brightness + 100) / 100.0 * 255.0;
+    for (int x = 0; x < 256; x++) {
+        double i = (maxB == 0.0) ? 0.0 : maxB * pow((double)x / 255.0, gamma);
+        if (i > 255) i = 255;
+        if (i < 0) i = 0;
+        if (isnan(i)) i = 0;
+        _curveData[x] = (unsigned char)i;
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)updateFromFile:(NSString *)filePath {
+    [self resetToIdentity];
+    if (!filePath || filePath.length == 0) return;
+    NSString *contents = [NSString stringWithContentsOfFile:filePath
+                                                  encoding:NSUTF8StringEncoding error:nil];
+    if (!contents) return;
+    NSArray<NSString *> *lines = [contents componentsSeparatedByCharactersInSet:
+                                  [NSCharacterSet newlineCharacterSet]];
+    int count = 0;
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length > 0) {
+            int val = [trimmed intValue];
+            if (val < 0) val = 0;
+            if (val > 255) val = 255;
+            _curveData[count] = (unsigned char)val;
+            if (++count >= 256) break;
+        }
+    }
+    [self setNeedsDisplay:YES];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+    NSRect bounds = self.bounds;
+    CGFloat w = bounds.size.width, h = bounds.size.height, pad = 2.0;
+
+    [[NSColor colorWithWhite:0.1 alpha:1.0] setFill];
+    NSRectFill(bounds);
+
+    [[NSColor grayColor] setStroke];
+    [[NSBezierPath bezierPathWithRect:NSInsetRect(bounds, 0.5, 0.5)] stroke];
+
+    [[NSColor colorWithWhite:0.3 alpha:1.0] setStroke];
+    NSBezierPath *identity = [NSBezierPath bezierPath];
+    [identity moveToPoint:NSMakePoint(pad, h - pad)];
+    [identity lineToPoint:NSMakePoint(w - pad, pad)];
+    identity.lineWidth = 0.5;
+    [identity stroke];
+
+    [_curveColor setStroke];
+    NSBezierPath *curvePath = [NSBezierPath bezierPath];
+    curvePath.lineWidth = 1.5;
+    for (int x = 0; x < 256; x++) {
+        CGFloat xpos = (CGFloat)x * (w - 2 * pad) / 255.0 + pad;
+        CGFloat ypos = h - pad - (CGFloat)_curveData[x] * (h - 2 * pad) / 255.0;
+        if (x == 0) [curvePath moveToPoint:NSMakePoint(xpos, ypos)];
+        else [curvePath lineToPoint:NSMakePoint(xpos, ypos)];
+    }
+    [curvePath stroke];
+}
+
+@end
+
+#pragma mark - XLModelDimmingCurveDialog
+
+@interface XLModelDimmingCurveDialog ()
+@property (nonatomic, strong) NSPopUpButton *modePopup;
+@property (nonatomic, strong) NSView *singleGammaContainer;
+@property (nonatomic, strong) NSView *singleFileContainer;
+@property (nonatomic, strong) NSView *rgbGammaContainer;
+@property (nonatomic, strong) NSView *rgbFileContainer;
+@property (nonatomic, strong) NSTextField *singleGammaField;
+@property (nonatomic, strong) NSSlider *singleBrightnessSlider;
+@property (nonatomic, strong) NSTextField *singleBrightnessField;
+@property (nonatomic, strong) NSTextField *singleFileField;
+@property (nonatomic, strong) NSButton *singleFileBrowseButton;
+@property (nonatomic, strong) NSTextField *redGammaField;
+@property (nonatomic, strong) NSSlider *redBrightnessSlider;
+@property (nonatomic, strong) NSTextField *redBrightnessField;
+@property (nonatomic, strong) NSTextField *greenGammaField;
+@property (nonatomic, strong) NSSlider *greenBrightnessSlider;
+@property (nonatomic, strong) NSTextField *greenBrightnessField;
+@property (nonatomic, strong) NSTextField *blueGammaField;
+@property (nonatomic, strong) NSSlider *blueBrightnessSlider;
+@property (nonatomic, strong) NSTextField *blueBrightnessField;
+@property (nonatomic, strong) NSTextField *redFileField;
+@property (nonatomic, strong) NSButton *redFileBrowseButton;
+@property (nonatomic, strong) NSTextField *greenFileField;
+@property (nonatomic, strong) NSButton *greenFileBrowseButton;
+@property (nonatomic, strong) NSTextField *blueFileField;
+@property (nonatomic, strong) NSButton *blueFileBrowseButton;
+@property (nonatomic, strong) XLDimmingCurvePreviewView *redPreview;
+@property (nonatomic, strong) XLDimmingCurvePreviewView *greenPreview;
+@property (nonatomic, strong) XLDimmingCurvePreviewView *bluePreview;
 @end
 
 @implementation XLModelDimmingCurveDialog
@@ -307,120 +419,471 @@ static const CGFloat kLabelWidth = 130.0;
     self = [super init];
     if (self) {
         self.title = @"Dimming Curve";
-        self.minWidth = 400;
-        self.minHeight = 280;
-        _curveType = @"gamma";
-        _gammaValue = 2.2;
-        _brightness = 100;
-        _applyToAllChannels = YES;
+        self.minWidth = 580;
+        self.minHeight = 480;
+        _mode = XLDimmingCurveModeSingleGamma;
+        _singleGamma = 1.0;
+        _singleBrightness = 0;
+        _redGamma = 1.0;
+        _greenGamma = 1.0;
+        _blueGamma = 1.0;
+        _redBrightness = 0;
+        _greenBrightness = 0;
+        _blueBrightness = 0;
     }
     return self;
 }
 
+- (void)initFromDimmingInfo:(NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)dimmingInfo {
+    if (!dimmingInfo || dimmingInfo.count == 0) {
+        _mode = XLDimmingCurveModeSingleGamma;
+        _singleGamma = 1.0;
+        _singleBrightness = 0;
+        return;
+    }
+    NSDictionary *allInfo = dimmingInfo[@"all"];
+    if (allInfo) {
+        if (allInfo[@"filename"]) {
+            _mode = XLDimmingCurveModeSingleFile;
+            _singleFilePath = allInfo[@"filename"];
+        } else {
+            _mode = XLDimmingCurveModeSingleGamma;
+            _singleGamma = [allInfo[@"gamma"] ?: @"1.0" doubleValue];
+            if (_singleGamma > 50.0) _singleGamma = 50.0;
+            _singleBrightness = [allInfo[@"brightness"] ?: @"0" integerValue];
+        }
+    } else {
+        NSDictionary *redInfo = dimmingInfo[@"red"];
+        NSDictionary *greenInfo = dimmingInfo[@"green"];
+        NSDictionary *blueInfo = dimmingInfo[@"blue"];
+        if (redInfo[@"filename"]) {
+            _mode = XLDimmingCurveModeRGBFile;
+            _redFilePath = redInfo[@"filename"];
+            _greenFilePath = greenInfo[@"filename"];
+            _blueFilePath = blueInfo[@"filename"];
+        } else {
+            _mode = XLDimmingCurveModeRGBGamma;
+            _redGamma = [redInfo[@"gamma"] ?: @"1.0" doubleValue];
+            _redBrightness = [redInfo[@"brightness"] ?: @"0" integerValue];
+            _greenGamma = [greenInfo[@"gamma"] ?: @"1.0" doubleValue];
+            _greenBrightness = [greenInfo[@"brightness"] ?: @"0" integerValue];
+            _blueGamma = [blueInfo[@"gamma"] ?: @"1.0" doubleValue];
+            _blueBrightness = [blueInfo[@"brightness"] ?: @"0" integerValue];
+        }
+    }
+}
+
+- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)exportDimmingInfo {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    switch (_mode) {
+        case XLDimmingCurveModeSingleGamma:
+            result[@"all"] = @{
+                @"brightness": [NSString stringWithFormat:@"%ld", (long)_singleBrightness],
+                @"gamma": [NSString stringWithFormat:@"%.1f", _singleGamma],
+            };
+            break;
+        case XLDimmingCurveModeSingleFile:
+            if (_singleFilePath.length > 0)
+                result[@"all"] = @{ @"filename": _singleFilePath };
+            break;
+        case XLDimmingCurveModeRGBGamma:
+            result[@"red"] = @{
+                @"brightness": [NSString stringWithFormat:@"%ld", (long)_redBrightness],
+                @"gamma": [NSString stringWithFormat:@"%.1f", _redGamma],
+            };
+            result[@"green"] = @{
+                @"brightness": [NSString stringWithFormat:@"%ld", (long)_greenBrightness],
+                @"gamma": [NSString stringWithFormat:@"%.1f", _greenGamma],
+            };
+            result[@"blue"] = @{
+                @"brightness": [NSString stringWithFormat:@"%ld", (long)_blueBrightness],
+                @"gamma": [NSString stringWithFormat:@"%.1f", _blueGamma],
+            };
+            break;
+        case XLDimmingCurveModeRGBFile:
+            result[@"red"] = @{ @"filename": _redFilePath ?: @"" };
+            result[@"green"] = @{ @"filename": _greenFilePath ?: @"" };
+            result[@"blue"] = @{ @"filename": _blueFilePath ?: @"" };
+            break;
+    }
+    return result;
+}
+
 - (NSView *)buildContentView {
+    NSStackView *mainStack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    mainStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    mainStack.alignment = NSLayoutAttributeLeading;
+    mainStack.spacing = 12;
+
+    _modePopup = [XLBaseSheetController createPopUpButton];
+    [_modePopup addItemWithTitle:@"Single Brightness/Gamma"];
+    [_modePopup addItemWithTitle:@"Single Curve From File"];
+    [_modePopup addItemWithTitle:@"RGB Brightness/Gamma"];
+    [_modePopup addItemWithTitle:@"RGB From File"];
+    [_modePopup selectItemAtIndex:_mode];
+    [_modePopup setTarget:self];
+    [_modePopup setAction:@selector(modeChanged:)];
+    NSStackView *modeRow = [XLBaseSheetController formRowWithLabel:@"Mode:" control:_modePopup labelWidth:kLabelWidth];
+    [mainStack addArrangedSubview:modeRow];
+    [modeRow.leadingAnchor constraintEqualToAnchor:mainStack.leadingAnchor].active = YES;
+    [modeRow.trailingAnchor constraintEqualToAnchor:mainStack.trailingAnchor].active = YES;
+
+    [self buildSingleGammaContainer];
+    [self buildSingleFileContainer];
+    [self buildRGBGammaContainer];
+    [self buildRGBFileContainer];
+    for (NSView *c in @[_singleGammaContainer, _singleFileContainer, _rgbGammaContainer, _rgbFileContainer]) {
+        [mainStack addArrangedSubview:c];
+        [c.leadingAnchor constraintEqualToAnchor:mainStack.leadingAnchor].active = YES;
+        [c.trailingAnchor constraintEqualToAnchor:mainStack.trailingAnchor].active = YES;
+    }
+
+    NSStackView *previewRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    previewRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    previewRow.distribution = NSStackViewDistributionFillEqually;
+    previewRow.spacing = 8;
+    _redPreview = [self createPreviewWithTitle:@"Red" color:[NSColor redColor] container:previewRow];
+    _greenPreview = [self createPreviewWithTitle:@"Green" color:[NSColor greenColor] container:previewRow];
+    _bluePreview = [self createPreviewWithTitle:@"Blue" color:[NSColor blueColor] container:previewRow];
+    [mainStack addArrangedSubview:previewRow];
+    [previewRow.leadingAnchor constraintEqualToAnchor:mainStack.leadingAnchor].active = YES;
+    [previewRow.trailingAnchor constraintEqualToAnchor:mainStack.trailingAnchor].active = YES;
+    [previewRow.heightAnchor constraintEqualToConstant:130].active = YES;
+
+    [self updateModeVisibility];
+    [self updatePreviews];
+    return mainStack;
+}
+
+- (XLDimmingCurvePreviewView *)createPreviewWithTitle:(NSString *)title color:(NSColor *)color container:(NSStackView *)container {
+    NSStackView *wrapper = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    wrapper.orientation = NSUserInterfaceLayoutOrientationVertical;
+    wrapper.alignment = NSLayoutAttributeCenterX;
+    wrapper.spacing = 2;
+    NSTextField *label = [NSTextField labelWithString:title];
+    label.font = [NSFont boldSystemFontOfSize:10];
+    label.textColor = color;
+    label.alignment = NSTextAlignmentCenter;
+    [wrapper addArrangedSubview:label];
+    XLDimmingCurvePreviewView *preview = [[XLDimmingCurvePreviewView alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
+    preview.curveColor = color;
+    preview.translatesAutoresizingMaskIntoConstraints = NO;
+    [preview.heightAnchor constraintEqualToConstant:110].active = YES;
+    [wrapper addArrangedSubview:preview];
+    [container addArrangedSubview:wrapper];
+    return preview;
+}
+
+- (void)buildSingleGammaContainer {
     NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 12;
-
-    // Model name
-    NSTextField *modelLabel = [NSTextField labelWithString:
-        [NSString stringWithFormat:@"Model: %@", _modelName ?: @"(none)"]];
-    [stack addArrangedSubview:modelLabel];
-
-    // Curve type
-    _curveTypePopup = [XLBaseSheetController createPopUpButton];
-    [_curveTypePopup addItemWithTitle:@"Linear"];
-    [_curveTypePopup addItemWithTitle:@"Gamma"];
-    [_curveTypePopup addItemWithTitle:@"Logarithmic"];
-    [_curveTypePopup addItemWithTitle:@"Exponential"];
-    [_curveTypePopup addItemWithTitle:@"Custom"];
-    [_curveTypePopup selectItemWithTitle:[_curveType capitalizedString]];
-    [_curveTypePopup setTarget:self];
-    [_curveTypePopup setAction:@selector(curveTypeChanged:)];
-
-    NSStackView *typeRow = [XLBaseSheetController formRowWithLabel:@"Curve Type:"
-                                                           control:_curveTypePopup
-                                                        labelWidth:kLabelWidth];
-    [stack addArrangedSubview:typeRow];
-
-    // Gamma slider
-    NSStackView *gammaRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
-    gammaRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    gammaRow.spacing = 8;
-
-    NSTextField *gammaTitle = [NSTextField labelWithString:@"Gamma:"];
-    gammaTitle.alignment = NSTextAlignmentRight;
-    [gammaTitle.widthAnchor constraintEqualToConstant:kLabelWidth].active = YES;
-
-    _gammaSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
-    _gammaSlider.minValue = 0.5;
-    _gammaSlider.maxValue = 4.0;
-    _gammaSlider.doubleValue = _gammaValue;
-    [_gammaSlider setTarget:self];
-    [_gammaSlider setAction:@selector(gammaChanged:)];
-    [_gammaSlider.widthAnchor constraintEqualToConstant:180].active = YES;
-
-    _gammaLabel = [NSTextField labelWithString:[NSString stringWithFormat:@"%.2f", _gammaValue]];
-    [_gammaLabel.widthAnchor constraintEqualToConstant:50].active = YES;
-
-    [gammaRow addArrangedSubview:gammaTitle];
-    [gammaRow addArrangedSubview:_gammaSlider];
-    [gammaRow addArrangedSubview:_gammaLabel];
+    stack.spacing = 8;
+    _singleGammaField = [XLBaseSheetController createTextField];
+    _singleGammaField.stringValue = [NSString stringWithFormat:@"%.1f", _singleGamma];
+    _singleGammaField.target = self;
+    _singleGammaField.action = @selector(singleGammaChanged:);
+    [_singleGammaField.widthAnchor constraintEqualToConstant:80].active = YES;
+    NSStackView *gammaRow = [XLBaseSheetController formRowWithLabel:@"Gamma:" control:_singleGammaField labelWidth:kLabelWidth];
     [stack addArrangedSubview:gammaRow];
+    [gammaRow.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+    [gammaRow.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
 
-    // Brightness slider
     NSStackView *brightRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    brightRow.translatesAutoresizingMaskIntoConstraints = NO;
     brightRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     brightRow.spacing = 8;
-
-    NSTextField *brightTitle = [NSTextField labelWithString:@"Brightness:"];
-    brightTitle.alignment = NSTextAlignmentRight;
-    [brightTitle.widthAnchor constraintEqualToConstant:kLabelWidth].active = YES;
-
-    _brightnessSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
-    _brightnessSlider.minValue = 0;
-    _brightnessSlider.maxValue = 100;
-    _brightnessSlider.integerValue = _brightness;
-    [_brightnessSlider setTarget:self];
-    [_brightnessSlider setAction:@selector(brightnessChanged:)];
-    [_brightnessSlider.widthAnchor constraintEqualToConstant:180].active = YES;
-
-    _brightnessLabel = [NSTextField labelWithString:[NSString stringWithFormat:@"%ld%%", (long)_brightness]];
-    [_brightnessLabel.widthAnchor constraintEqualToConstant:50].active = YES;
-
-    [brightRow addArrangedSubview:brightTitle];
-    [brightRow addArrangedSubview:_brightnessSlider];
-    [brightRow addArrangedSubview:_brightnessLabel];
+    NSTextField *brightLabel = [NSTextField labelWithString:@"Brightness:"];
+    brightLabel.alignment = NSTextAlignmentRight;
+    [brightLabel.widthAnchor constraintEqualToConstant:kLabelWidth].active = YES;
+    _singleBrightnessSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    _singleBrightnessSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    _singleBrightnessSlider.minValue = -100;
+    _singleBrightnessSlider.maxValue = 100;
+    _singleBrightnessSlider.integerValue = _singleBrightness;
+    _singleBrightnessSlider.target = self;
+    _singleBrightnessSlider.action = @selector(singleBrightnessSliderChanged:);
+    [_singleBrightnessSlider.widthAnchor constraintEqualToConstant:200].active = YES;
+    _singleBrightnessField = [XLBaseSheetController createTextField];
+    _singleBrightnessField.stringValue = [NSString stringWithFormat:@"%ld", (long)_singleBrightness];
+    _singleBrightnessField.target = self;
+    _singleBrightnessField.action = @selector(singleBrightnessFieldChanged:);
+    [_singleBrightnessField.widthAnchor constraintEqualToConstant:50].active = YES;
+    [brightRow addArrangedSubview:brightLabel];
+    [brightRow addArrangedSubview:_singleBrightnessSlider];
+    [brightRow addArrangedSubview:_singleBrightnessField];
     [stack addArrangedSubview:brightRow];
-
-    // Apply to all channels
-    _allChannelsCheckbox = [XLBaseSheetController createCheckboxWithTitle:@"Apply to all channels (R, G, B)"];
-    _allChannelsCheckbox.state = _applyToAllChannels ? NSControlStateValueOn : NSControlStateValueOff;
-    [stack addArrangedSubview:_allChannelsCheckbox];
-
-    return stack;
+    _singleGammaContainer = stack;
 }
 
-- (void)curveTypeChanged:(id)sender {
-    BOOL isGamma = [[_curveTypePopup.selectedItem.title lowercaseString] isEqualToString:@"gamma"];
-    _gammaSlider.enabled = isGamma;
+- (void)buildSingleFileContainer {
+    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 8;
+    NSStackView *fileRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    fileRow.translatesAutoresizingMaskIntoConstraints = NO;
+    fileRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    fileRow.spacing = 8;
+    _singleFileField = [XLBaseSheetController createTextField];
+    _singleFileField.stringValue = _singleFilePath ?: @"";
+    _singleFileField.placeholderString = @"Select dimming curve file...";
+    _singleFileField.editable = NO;
+    _singleFileBrowseButton = [NSButton buttonWithTitle:@"Browse..." target:self action:@selector(browseSingleFile:)];
+    [fileRow addArrangedSubview:_singleFileField];
+    [fileRow addArrangedSubview:_singleFileBrowseButton];
+    NSStackView *row = [XLBaseSheetController formRowWithLabel:@"File:" control:fileRow labelWidth:kLabelWidth];
+    [stack addArrangedSubview:row];
+    [row.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+    [row.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+    _singleFileContainer = stack;
 }
 
-- (void)gammaChanged:(id)sender {
-    _gammaLabel.stringValue = [NSString stringWithFormat:@"%.2f", _gammaSlider.doubleValue];
+- (void)buildRGBGammaContainer {
+    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 4;
+    [self addChannelGammaControlsTo:stack title:@"Red" gammaField:&_redGammaField brightnessSlider:&_redBrightnessSlider brightnessField:&_redBrightnessField gamma:_redGamma brightness:_redBrightness];
+    [self addChannelGammaControlsTo:stack title:@"Green" gammaField:&_greenGammaField brightnessSlider:&_greenBrightnessSlider brightnessField:&_greenBrightnessField gamma:_greenGamma brightness:_greenBrightness];
+    [self addChannelGammaControlsTo:stack title:@"Blue" gammaField:&_blueGammaField brightnessSlider:&_blueBrightnessSlider brightnessField:&_blueBrightnessField gamma:_blueGamma brightness:_blueBrightness];
+    _rgbGammaContainer = stack;
 }
 
-- (void)brightnessChanged:(id)sender {
-    _brightnessLabel.stringValue = [NSString stringWithFormat:@"%ld%%", (long)_brightnessSlider.integerValue];
+- (void)addChannelGammaControlsTo:(NSStackView *)stack title:(NSString *)title gammaField:(NSTextField *__strong *)gammaField brightnessSlider:(NSSlider *__strong *)brightnessSlider brightnessField:(NSTextField *__strong *)brightnessField gamma:(double)gamma brightness:(NSInteger)brightness {
+    NSBox *box = [[NSBox alloc] initWithFrame:NSZeroRect];
+    box.translatesAutoresizingMaskIntoConstraints = NO;
+    box.title = title;
+    box.titlePosition = NSAtTop;
+    box.boxType = NSBoxPrimary;
+    NSStackView *inner = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    inner.translatesAutoresizingMaskIntoConstraints = NO;
+    inner.orientation = NSUserInterfaceLayoutOrientationVertical;
+    inner.alignment = NSLayoutAttributeLeading;
+    inner.spacing = 4;
+    *gammaField = [XLBaseSheetController createTextField];
+    (*gammaField).stringValue = [NSString stringWithFormat:@"%.1f", gamma];
+    (*gammaField).target = self;
+    (*gammaField).action = @selector(rgbGammaChanged:);
+    (*gammaField).identifier = title;
+    [(*gammaField).widthAnchor constraintEqualToConstant:60].active = YES;
+    [inner addArrangedSubview:[XLBaseSheetController formRowWithLabel:@"Gamma:" control:*gammaField labelWidth:80]];
+
+    NSStackView *bRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    bRow.translatesAutoresizingMaskIntoConstraints = NO;
+    bRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    bRow.spacing = 4;
+    NSTextField *bLabel = [NSTextField labelWithString:@"Brightness:"];
+    bLabel.alignment = NSTextAlignmentRight;
+    [bLabel.widthAnchor constraintEqualToConstant:80].active = YES;
+    *brightnessSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    (*brightnessSlider).translatesAutoresizingMaskIntoConstraints = NO;
+    (*brightnessSlider).minValue = -100;
+    (*brightnessSlider).maxValue = 100;
+    (*brightnessSlider).integerValue = brightness;
+    (*brightnessSlider).target = self;
+    (*brightnessSlider).action = @selector(rgbBrightnessSliderChanged:);
+    (*brightnessSlider).identifier = title;
+    [(*brightnessSlider).widthAnchor constraintEqualToConstant:150].active = YES;
+    *brightnessField = [XLBaseSheetController createTextField];
+    (*brightnessField).stringValue = [NSString stringWithFormat:@"%ld", (long)brightness];
+    (*brightnessField).target = self;
+    (*brightnessField).action = @selector(rgbBrightnessFieldChanged:);
+    (*brightnessField).identifier = title;
+    [(*brightnessField).widthAnchor constraintEqualToConstant:50].active = YES;
+    [bRow addArrangedSubview:bLabel];
+    [bRow addArrangedSubview:*brightnessSlider];
+    [bRow addArrangedSubview:*brightnessField];
+    [inner addArrangedSubview:bRow];
+    box.contentView = inner;
+    [stack addArrangedSubview:box];
+    [box.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+    [box.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+}
+
+- (void)buildRGBFileContainer {
+    NSStackView *stack = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 8;
+    [self addFileRowTo:stack label:@"Red:" field:&_redFileField browseButton:&_redFileBrowseButton action:@selector(browseRedFile:) path:_redFilePath];
+    [self addFileRowTo:stack label:@"Green:" field:&_greenFileField browseButton:&_greenFileBrowseButton action:@selector(browseGreenFile:) path:_greenFilePath];
+    [self addFileRowTo:stack label:@"Blue:" field:&_blueFileField browseButton:&_blueFileBrowseButton action:@selector(browseBlueFile:) path:_blueFilePath];
+    _rgbFileContainer = stack;
+}
+
+- (void)addFileRowTo:(NSStackView *)stack label:(NSString *)label field:(NSTextField *__strong *)field browseButton:(NSButton *__strong *)button action:(SEL)action path:(NSString *)path {
+    NSStackView *fileRow = [[NSStackView alloc] initWithFrame:NSZeroRect];
+    fileRow.translatesAutoresizingMaskIntoConstraints = NO;
+    fileRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    fileRow.spacing = 4;
+    *field = [XLBaseSheetController createTextField];
+    (*field).stringValue = path ?: @"";
+    (*field).placeholderString = @"Select file...";
+    (*field).editable = NO;
+    *button = [NSButton buttonWithTitle:@"Browse..." target:self action:action];
+    [fileRow addArrangedSubview:*field];
+    [fileRow addArrangedSubview:*button];
+    NSStackView *row = [XLBaseSheetController formRowWithLabel:label control:fileRow labelWidth:kLabelWidth];
+    [stack addArrangedSubview:row];
+    [row.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor].active = YES;
+    [row.trailingAnchor constraintEqualToAnchor:stack.trailingAnchor].active = YES;
+}
+
+- (void)modeChanged:(id)sender {
+    _mode = (XLDimmingCurveMode)_modePopup.indexOfSelectedItem;
+    [self updateModeVisibility];
+    [self updatePreviews];
+}
+
+- (void)updateModeVisibility {
+    _singleGammaContainer.hidden = (_mode != XLDimmingCurveModeSingleGamma);
+    _singleFileContainer.hidden = (_mode != XLDimmingCurveModeSingleFile);
+    _rgbGammaContainer.hidden = (_mode != XLDimmingCurveModeRGBGamma);
+    _rgbFileContainer.hidden = (_mode != XLDimmingCurveModeRGBFile);
+}
+
+- (void)singleGammaChanged:(id)sender {
+    _singleGamma = _singleGammaField.doubleValue;
+    if (_singleGamma > 50.0) _singleGamma = 50.0;
+    if (_singleGamma < 0.0) _singleGamma = 0.0;
+    [self updatePreviews];
+}
+
+- (void)singleBrightnessSliderChanged:(id)sender {
+    _singleBrightness = _singleBrightnessSlider.integerValue;
+    _singleBrightnessField.stringValue = [NSString stringWithFormat:@"%ld", (long)_singleBrightness];
+    [self updatePreviews];
+}
+
+- (void)singleBrightnessFieldChanged:(id)sender {
+    NSInteger val = _singleBrightnessField.integerValue;
+    if (val < -100) val = -100;
+    if (val > 100) val = 100;
+    _singleBrightness = val;
+    _singleBrightnessSlider.integerValue = val;
+    _singleBrightnessField.stringValue = [NSString stringWithFormat:@"%ld", (long)val];
+    [self updatePreviews];
+}
+
+- (void)rgbGammaChanged:(id)sender {
+    _redGamma = _redGammaField.doubleValue;
+    _greenGamma = _greenGammaField.doubleValue;
+    _blueGamma = _blueGammaField.doubleValue;
+    [self updatePreviews];
+}
+
+- (void)rgbBrightnessSliderChanged:(id)sender {
+    NSSlider *slider = (NSSlider *)sender;
+    NSString *channel = slider.identifier;
+    NSInteger val = slider.integerValue;
+    if ([channel isEqualToString:@"Red"]) { _redBrightness = val; _redBrightnessField.stringValue = [NSString stringWithFormat:@"%ld", (long)val]; }
+    else if ([channel isEqualToString:@"Green"]) { _greenBrightness = val; _greenBrightnessField.stringValue = [NSString stringWithFormat:@"%ld", (long)val]; }
+    else if ([channel isEqualToString:@"Blue"]) { _blueBrightness = val; _blueBrightnessField.stringValue = [NSString stringWithFormat:@"%ld", (long)val]; }
+    [self updatePreviews];
+}
+
+- (void)rgbBrightnessFieldChanged:(id)sender {
+    NSTextField *field = (NSTextField *)sender;
+    NSString *channel = field.identifier;
+    NSInteger val = field.integerValue;
+    if (val < -100) val = -100;
+    if (val > 100) val = 100;
+    field.stringValue = [NSString stringWithFormat:@"%ld", (long)val];
+    if ([channel isEqualToString:@"Red"]) { _redBrightness = val; _redBrightnessSlider.integerValue = val; }
+    else if ([channel isEqualToString:@"Green"]) { _greenBrightness = val; _greenBrightnessSlider.integerValue = val; }
+    else if ([channel isEqualToString:@"Blue"]) { _blueBrightness = val; _blueBrightnessSlider.integerValue = val; }
+    [self updatePreviews];
+}
+
+- (void)browseSingleFile:(id)sender {
+    [self browseFileWithCompletion:^(NSString *path) { self.singleFilePath = path; self.singleFileField.stringValue = path; [self updatePreviews]; }];
+}
+- (void)browseRedFile:(id)sender {
+    [self browseFileWithCompletion:^(NSString *path) { self.redFilePath = path; self.redFileField.stringValue = path; [self updatePreviews]; }];
+}
+- (void)browseGreenFile:(id)sender {
+    [self browseFileWithCompletion:^(NSString *path) { self.greenFilePath = path; self.greenFileField.stringValue = path; [self updatePreviews]; }];
+}
+- (void)browseBlueFile:(id)sender {
+    [self browseFileWithCompletion:^(NSString *path) { self.blueFilePath = path; self.blueFileField.stringValue = path; [self updatePreviews]; }];
+}
+
+- (void)browseFileWithCompletion:(void (^)(NSString *path))completion {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.message = @"Select a dimming curve file (256 lines, one value per line)";
+    [panel beginSheetModalForWindow:self.sheet completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URL) completion(panel.URL.path);
+    }];
+}
+
+- (void)updatePreviews {
+    switch (_mode) {
+        case XLDimmingCurveModeSingleGamma:
+            [_redPreview updateWithBrightness:_singleBrightness gamma:_singleGamma];
+            [_greenPreview updateWithBrightness:_singleBrightness gamma:_singleGamma];
+            [_bluePreview updateWithBrightness:_singleBrightness gamma:_singleGamma];
+            break;
+        case XLDimmingCurveModeSingleFile:
+            [_redPreview updateFromFile:_singleFilePath];
+            [_greenPreview updateFromFile:_singleFilePath];
+            [_bluePreview updateFromFile:_singleFilePath];
+            break;
+        case XLDimmingCurveModeRGBGamma:
+            [_redPreview updateWithBrightness:_redBrightness gamma:_redGamma];
+            [_greenPreview updateWithBrightness:_greenBrightness gamma:_greenGamma];
+            [_bluePreview updateWithBrightness:_blueBrightness gamma:_blueGamma];
+            break;
+        case XLDimmingCurveModeRGBFile:
+            [_redPreview updateFromFile:_redFilePath];
+            [_greenPreview updateFromFile:_greenFilePath];
+            [_bluePreview updateFromFile:_blueFilePath];
+            break;
+    }
 }
 
 - (void)okClicked:(id)sender {
-    _curveType = [_curveTypePopup.selectedItem.title lowercaseString];
-    _gammaValue = _gammaSlider.doubleValue;
-    _brightness = _brightnessSlider.integerValue;
-    _applyToAllChannels = (_allChannelsCheckbox.state == NSControlStateValueOn);
+    switch (_mode) {
+        case XLDimmingCurveModeSingleGamma:
+            _singleGamma = _singleGammaField.doubleValue;
+            _singleBrightness = _singleBrightnessSlider.integerValue;
+            break;
+        case XLDimmingCurveModeSingleFile:
+            _singleFilePath = _singleFileField.stringValue;
+            break;
+        case XLDimmingCurveModeRGBGamma:
+            _redGamma = _redGammaField.doubleValue;
+            _redBrightness = _redBrightnessSlider.integerValue;
+            _greenGamma = _greenGammaField.doubleValue;
+            _greenBrightness = _greenBrightnessSlider.integerValue;
+            _blueGamma = _blueGammaField.doubleValue;
+            _blueBrightness = _blueBrightnessSlider.integerValue;
+            break;
+        case XLDimmingCurveModeRGBFile:
+            _redFilePath = _redFileField.stringValue;
+            _greenFilePath = _greenFileField.stringValue;
+            _blueFilePath = _blueFileField.stringValue;
+            break;
+    }
     [super okClicked:sender];
+}
+
+- (NSString *)validate {
+    if (_mode == XLDimmingCurveModeSingleGamma) {
+        double g = _singleGammaField.doubleValue;
+        if (g < 0.0 || g > 50.0) return @"Gamma must be between 0.0 and 50.0";
+    } else if (_mode == XLDimmingCurveModeRGBGamma) {
+        double rg = _redGammaField.doubleValue, gg = _greenGammaField.doubleValue, bg = _blueGammaField.doubleValue;
+        if (rg < 0 || rg > 50 || gg < 0 || gg > 50 || bg < 0 || bg > 50) return @"Gamma values must be between 0.0 and 50.0";
+    }
+    return nil;
 }
 
 @end
@@ -1895,6 +2358,27 @@ static const CGFloat kPTSpacing = 12.0;
 @property (nonatomic, copy) void (^completionHandler)(BOOL);
 @property (nonatomic, strong) NSMutableArray<NSValue *> *detectedPixels;
 
+// Video source properties
+@property (nonatomic, strong) XLVideoModelGenerator *videoGenerator;
+@property (nonatomic, strong) NSImageView *videoPreviewImageView;
+@property (nonatomic, strong) NSTextField *videoFileLabel;
+@property (nonatomic, strong) NSTextField *videoNodeCountField;
+@property (nonatomic, strong) NSButton *videoSteadyCheckbox;
+@property (nonatomic, strong) NSSlider *videoSensitivitySlider;
+@property (nonatomic, strong) NSTextField *videoSensitivityLabel;
+@property (nonatomic, strong) NSSlider *videoContrastSlider;
+@property (nonatomic, strong) NSTextField *videoContrastLabel;
+@property (nonatomic, strong) NSSlider *videoBlurSlider;
+@property (nonatomic, strong) NSTextField *videoBlurLabel;
+@property (nonatomic, strong) NSSlider *videoGammaSlider;
+@property (nonatomic, strong) NSTextField *videoGammaLabel;
+@property (nonatomic, strong) NSSlider *videoMinSepSlider;
+@property (nonatomic, strong) NSTextField *videoMinSepLabel;
+@property (nonatomic, strong) NSProgressIndicator *videoProgressBar;
+@property (nonatomic, strong) NSTextField *videoStatusLabel;
+@property (nonatomic, strong) NSTextField *videoStatsLabel;
+@property (nonatomic, strong) NSButton *videoProcessButton;
+
 @end
 
 @implementation XLGenerateCustomModelDialog
@@ -1937,6 +2421,9 @@ static const CGFloat kGenLabelWidth = 120.0;
         _mathYMax = 1.0;
         _mathResolution = 50;
         _detectedPixels = [NSMutableArray array];
+        _videoExpectedNodes = 100;
+        _videoSteadyCamera = YES;
+        _videoGenerator = [[XLVideoModelGenerator alloc] init];
 
         [self buildGenUI];
     }
@@ -2004,6 +2491,11 @@ static const CGFloat kGenLabelWidth = 120.0;
     imageTab.label = @"Image";
     imageTab.view = [self buildGenImageSourceView];
     [_sourceTabView addTabViewItem:imageTab];
+
+    NSTabViewItem *videoTab = [[NSTabViewItem alloc] initWithIdentifier:@"video"];
+    videoTab.label = @"Video";
+    videoTab.view = [self buildGenVideoSourceView];
+    [_sourceTabView addTabViewItem:videoTab];
 
     NSTabViewItem *gridTab = [[NSTabViewItem alloc] initWithIdentifier:@"grid"];
     gridTab.label = @"Grid";
@@ -2115,6 +2607,371 @@ static const CGFloat kGenLabelWidth = 120.0;
     [row addArrangedSubview:slider];
     [row addArrangedSubview:valueLabel];
     return row;
+}
+
+- (NSView *)buildGenVideoSourceView {
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    scrollView.hasVerticalScroller = YES;
+    scrollView.autohidesScrollers = YES;
+    scrollView.drawsBackground = NO;
+
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 10;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.edgeInsets = NSEdgeInsetsMake(12, 12, 12, 12);
+
+    // Description
+    NSTextField *descLabel = [NSTextField wrappingLabelWithString:
+        @"Generate a custom model from a video recording of your physical display. "
+        @"Record a video while xLights runs the identification sequence, then load the video here to detect pixel positions."];
+    descLabel.textColor = [NSColor secondaryLabelColor];
+    descLabel.font = [NSFont systemFontOfSize:11];
+    [stack addArrangedSubview:descLabel];
+
+    // Load video button and file label
+    NSButton *loadButton = [NSButton buttonWithTitle:@"Load Video..." target:self action:@selector(genVideoLoadClicked:)];
+    _videoFileLabel = [NSTextField labelWithString:@"No video loaded"];
+    _videoFileLabel.textColor = [NSColor secondaryLabelColor];
+    _videoFileLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    NSStackView *loadRow = [NSStackView stackViewWithViews:@[loadButton, _videoFileLabel]];
+    loadRow.spacing = 8;
+    [stack addArrangedSubview:loadRow];
+
+    // Video preview
+    _videoPreviewImageView = [[NSImageView alloc] initWithFrame:NSMakeRect(0, 0, 340, 200)];
+    _videoPreviewImageView.translatesAutoresizingMaskIntoConstraints = NO;
+    _videoPreviewImageView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    _videoPreviewImageView.wantsLayer = YES;
+    _videoPreviewImageView.layer.borderWidth = 1;
+    _videoPreviewImageView.layer.borderColor = [[NSColor gridColor] CGColor];
+    _videoPreviewImageView.layer.backgroundColor = [[NSColor windowBackgroundColor] CGColor];
+    [_videoPreviewImageView.widthAnchor constraintEqualToConstant:340].active = YES;
+    [_videoPreviewImageView.heightAnchor constraintEqualToConstant:200].active = YES;
+    [stack addArrangedSubview:_videoPreviewImageView];
+
+    // Expected node count
+    _videoNodeCountField = [XLBaseSheetController createNumericField];
+    _videoNodeCountField.integerValue = _videoExpectedNodes;
+    [_videoNodeCountField.widthAnchor constraintEqualToConstant:80].active = YES;
+    [stack addArrangedSubview:[XLBaseSheetController formRowWithLabel:@"Expected Nodes:" control:_videoNodeCountField labelWidth:kGenLabelWidth]];
+
+    // Steady camera checkbox
+    _videoSteadyCheckbox = [NSButton checkboxWithTitle:@"Camera is stationary (enables background subtraction)" target:nil action:nil];
+    _videoSteadyCheckbox.state = _videoSteadyCamera ? NSControlStateValueOn : NSControlStateValueOff;
+    [stack addArrangedSubview:_videoSteadyCheckbox];
+
+    // Separator
+    NSBox *sep1 = [[NSBox alloc] init];
+    sep1.boxType = NSBoxSeparator;
+    [sep1.widthAnchor constraintGreaterThanOrEqualToConstant:300].active = YES;
+    [stack addArrangedSubview:sep1];
+
+    // Processing parameters header
+    NSTextField *paramsHeader = [NSTextField labelWithString:@"Processing Parameters"];
+    paramsHeader.font = [NSFont boldSystemFontOfSize:12];
+    [stack addArrangedSubview:paramsHeader];
+
+    // Sensitivity (threshold)
+    _videoSensitivitySlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    _videoSensitivitySlider.minValue = 1;
+    _videoSensitivitySlider.maxValue = 255;
+    _videoSensitivitySlider.integerValue = 128;
+    [_videoSensitivitySlider setTarget:self];
+    [_videoSensitivitySlider setAction:@selector(genVideoSensitivityChanged:)];
+    [_videoSensitivitySlider.widthAnchor constraintEqualToConstant:140].active = YES;
+    _videoSensitivityLabel = [NSTextField labelWithString:@"128"];
+    [_videoSensitivityLabel.widthAnchor constraintEqualToConstant:35].active = YES;
+    [stack addArrangedSubview:[self genSliderRowWithLabel:@"Sensitivity:" slider:_videoSensitivitySlider valueLabel:_videoSensitivityLabel]];
+
+    // Contrast
+    _videoContrastSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    _videoContrastSlider.minValue = -100;
+    _videoContrastSlider.maxValue = 100;
+    _videoContrastSlider.integerValue = 0;
+    [_videoContrastSlider setTarget:self];
+    [_videoContrastSlider setAction:@selector(genVideoContrastChanged:)];
+    [_videoContrastSlider.widthAnchor constraintEqualToConstant:140].active = YES;
+    _videoContrastLabel = [NSTextField labelWithString:@"0"];
+    [_videoContrastLabel.widthAnchor constraintEqualToConstant:35].active = YES;
+    [stack addArrangedSubview:[self genSliderRowWithLabel:@"Contrast:" slider:_videoContrastSlider valueLabel:_videoContrastLabel]];
+
+    // Blur
+    _videoBlurSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    _videoBlurSlider.minValue = 0;
+    _videoBlurSlider.maxValue = 20;
+    _videoBlurSlider.integerValue = 1;
+    [_videoBlurSlider setTarget:self];
+    [_videoBlurSlider setAction:@selector(genVideoBlurChanged:)];
+    [_videoBlurSlider.widthAnchor constraintEqualToConstant:140].active = YES;
+    _videoBlurLabel = [NSTextField labelWithString:@"1"];
+    [_videoBlurLabel.widthAnchor constraintEqualToConstant:35].active = YES;
+    [stack addArrangedSubview:[self genSliderRowWithLabel:@"Blur:" slider:_videoBlurSlider valueLabel:_videoBlurLabel]];
+
+    // Gamma
+    _videoGammaSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    _videoGammaSlider.minValue = 1;
+    _videoGammaSlider.maxValue = 50;
+    _videoGammaSlider.integerValue = 10;
+    [_videoGammaSlider setTarget:self];
+    [_videoGammaSlider setAction:@selector(genVideoGammaChanged:)];
+    [_videoGammaSlider.widthAnchor constraintEqualToConstant:140].active = YES;
+    _videoGammaLabel = [NSTextField labelWithString:@"1.0"];
+    [_videoGammaLabel.widthAnchor constraintEqualToConstant:35].active = YES;
+    [stack addArrangedSubview:[self genSliderRowWithLabel:@"Gamma:" slider:_videoGammaSlider valueLabel:_videoGammaLabel]];
+
+    // Min separation
+    _videoMinSepSlider = [[NSSlider alloc] initWithFrame:NSZeroRect];
+    _videoMinSepSlider.minValue = 1;
+    _videoMinSepSlider.maxValue = 50;
+    _videoMinSepSlider.integerValue = 5;
+    [_videoMinSepSlider setTarget:self];
+    [_videoMinSepSlider setAction:@selector(genVideoMinSepChanged:)];
+    [_videoMinSepSlider.widthAnchor constraintEqualToConstant:140].active = YES;
+    _videoMinSepLabel = [NSTextField labelWithString:@"5"];
+    [_videoMinSepLabel.widthAnchor constraintEqualToConstant:35].active = YES;
+    [stack addArrangedSubview:[self genSliderRowWithLabel:@"Min Separation:" slider:_videoMinSepSlider valueLabel:_videoMinSepLabel]];
+
+    // Separator
+    NSBox *sep2 = [[NSBox alloc] init];
+    sep2.boxType = NSBoxSeparator;
+    [sep2.widthAnchor constraintGreaterThanOrEqualToConstant:300].active = YES;
+    [stack addArrangedSubview:sep2];
+
+    // Progress bar
+    _videoProgressBar = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
+    _videoProgressBar.translatesAutoresizingMaskIntoConstraints = NO;
+    _videoProgressBar.style = NSProgressIndicatorStyleBar;
+    _videoProgressBar.minValue = 0;
+    _videoProgressBar.maxValue = 1.0;
+    _videoProgressBar.doubleValue = 0;
+    [_videoProgressBar.widthAnchor constraintEqualToConstant:340].active = YES;
+    _videoProgressBar.hidden = YES;
+    [stack addArrangedSubview:_videoProgressBar];
+
+    // Status label
+    _videoStatusLabel = [NSTextField labelWithString:@""];
+    _videoStatusLabel.textColor = [NSColor secondaryLabelColor];
+    _videoStatusLabel.font = [NSFont systemFontOfSize:11];
+    [stack addArrangedSubview:_videoStatusLabel];
+
+    // Process button
+    _videoProcessButton = [NSButton buttonWithTitle:@"Detect Pixels from Video" target:self action:@selector(genVideoProcessClicked:)];
+    _videoProcessButton.bezelStyle = NSBezelStyleRounded;
+    [stack addArrangedSubview:_videoProcessButton];
+
+    // Stats label
+    _videoStatsLabel = [NSTextField wrappingLabelWithString:@""];
+    _videoStatsLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    [stack addArrangedSubview:_videoStatsLabel];
+
+    // Instructions
+    NSTextField *infoLabel = [NSTextField wrappingLabelWithString:
+        @"Workflow:\n"
+        @"1. In xLights, run the Generate Custom Model sequence on your physical display\n"
+        @"2. Record a video of the display during the sequence\n"
+        @"3. Load the video above and click 'Detect Pixels'\n"
+        @"4. Adjust parameters if needed and re-detect\n"
+        @"5. Click 'Generate Model' to create the custom model"];
+    infoLabel.textColor = [NSColor tertiaryLabelColor];
+    infoLabel.font = [NSFont systemFontOfSize:10];
+    [stack addArrangedSubview:infoLabel];
+
+    scrollView.documentView = stack;
+
+    // Size the stack within the scroll view
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:scrollView.contentView.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:scrollView.contentView.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:scrollView.contentView.trailingAnchor],
+    ]];
+
+    return scrollView;
+}
+
+#pragma mark - Video Actions
+
+- (void)genVideoLoadClicked:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.allowedContentTypes = @[
+        [UTType typeWithIdentifier:@"public.movie"],
+        [UTType typeWithIdentifier:@"public.mpeg-4"],
+        [UTType typeWithIdentifier:@"com.apple.quicktime-movie"],
+    ];
+    panel.allowsMultipleSelection = NO;
+
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URL) {
+            [self loadVideoFromPath:panel.URL.path];
+        }
+    }];
+}
+
+- (BOOL)loadVideoFromPath:(NSString *)path {
+    NSError *error = nil;
+    BOOL success = [_videoGenerator loadVideoFromURL:[NSURL fileURLWithPath:path] error:&error];
+
+    if (!success) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Failed to load video";
+        alert.informativeText = error.localizedDescription ?: @"Unknown error";
+        [alert runModal];
+        return NO;
+    }
+
+    _videoFilePath = path;
+    _videoFileLabel.stringValue = [path lastPathComponent];
+    _videoPreviewImageView.image = _videoGenerator.firstFrameImage;
+
+    _videoStatusLabel.stringValue = [NSString stringWithFormat:@"Video loaded: %.1fs, %.0fx%.0f, %.1f fps",
+        _videoGenerator.videoDuration,
+        _videoGenerator.videoDimensions.width,
+        _videoGenerator.videoDimensions.height,
+        _videoGenerator.videoFrameRate];
+
+    return YES;
+}
+
+- (void)genVideoSensitivityChanged:(id)sender {
+    _videoSensitivityLabel.stringValue = [NSString stringWithFormat:@"%ld", (long)_videoSensitivitySlider.integerValue];
+}
+
+- (void)genVideoContrastChanged:(id)sender {
+    _videoContrastLabel.stringValue = [NSString stringWithFormat:@"%ld", (long)_videoContrastSlider.integerValue];
+}
+
+- (void)genVideoBlurChanged:(id)sender {
+    _videoBlurLabel.stringValue = [NSString stringWithFormat:@"%ld", (long)_videoBlurSlider.integerValue];
+}
+
+- (void)genVideoGammaChanged:(id)sender {
+    float gamma = _videoGammaSlider.integerValue / 10.0;
+    _videoGammaLabel.stringValue = [NSString stringWithFormat:@"%.1f", gamma];
+}
+
+- (void)genVideoMinSepChanged:(id)sender {
+    _videoMinSepLabel.stringValue = [NSString stringWithFormat:@"%ld", (long)_videoMinSepSlider.integerValue];
+}
+
+- (void)genVideoProcessClicked:(id)sender {
+    if (!_videoGenerator.videoURL) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No video loaded";
+        alert.informativeText = @"Please load a video file first.";
+        [alert runModal];
+        return;
+    }
+
+    // Read parameters from UI
+    _videoGenerator.expectedNodeCount = _videoNodeCountField.integerValue;
+    _videoGenerator.isSteadyCamera = (_videoSteadyCheckbox.state == NSControlStateValueOn);
+    _videoGenerator.sensitivity = _videoSensitivitySlider.integerValue;
+    _videoGenerator.contrast = _videoContrastSlider.integerValue;
+    _videoGenerator.blur = _videoBlurSlider.integerValue;
+    _videoGenerator.gamma = _videoGammaSlider.integerValue / 10.0;
+    _videoGenerator.minSeparation = _videoMinSepSlider.integerValue;
+
+    // Disable UI during processing
+    _videoProcessButton.enabled = NO;
+    _videoProgressBar.hidden = NO;
+    _videoProgressBar.doubleValue = 0;
+
+    __weak typeof(self) weakSelf = self;
+
+    _videoGenerator.progressCallback = ^(float progress) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            weakSelf.videoProgressBar.doubleValue = progress;
+        });
+    };
+
+    _videoGenerator.statusCallback = ^(NSString *status) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            weakSelf.videoStatusLabel.stringValue = status;
+        });
+    };
+
+    _videoGenerator.frameDisplayCallback = ^(NSImage *frame) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            weakSelf.videoPreviewImageView.image = frame;
+        });
+    };
+
+    // Run processing on background thread
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // Step 1: Find start frame
+        BOOL startFound = [self->_videoGenerator findStartFrame];
+
+        if (!startFound) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.videoProcessButton.enabled = YES;
+                weakSelf.videoProgressBar.hidden = YES;
+                NSAlert *alert = [[NSAlert alloc] init];
+                alert.messageText = @"Start pattern not found";
+                alert.informativeText = @"Could not detect the start flash pattern in the video. "
+                    @"Make sure the video was recorded during the xLights identification sequence, "
+                    @"and that the camera can clearly see the display.";
+                [alert runModal];
+            });
+            return;
+        }
+
+        // Step 2: Read node frames
+        BOOL framesRead = [self->_videoGenerator readNodeFrames];
+
+        if (!framesRead) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.videoProcessButton.enabled = YES;
+                weakSelf.videoProgressBar.hidden = YES;
+                weakSelf.videoStatusLabel.stringValue = @"Failed to read all expected frames from video.";
+            });
+            return;
+        }
+
+        // Step 3: Identify nodes
+        NSInteger found = [self->_videoGenerator identifyNodes];
+
+        // Step 4: Generate model data
+        NSString *modelData = [self->_videoGenerator generateModelData];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            weakSelf.videoProcessButton.enabled = YES;
+            weakSelf.videoProgressBar.hidden = YES;
+
+            if (found > 0 && modelData) {
+                // Update the shared model data
+                NSRect bounds = [self->_videoGenerator detectedNodesBounds];
+                NSInteger gridPadding = 4; // extra rows/columns for spacing
+                NSInteger gridW = (NSInteger)(bounds.size.width / MAX(1, self->_videoGenerator.minSeparation)) + 1 + gridPadding;
+                NSInteger gridH = (NSInteger)(bounds.size.height / MAX(1, self->_videoGenerator.minSeparation)) + 1 + gridPadding;
+
+                weakSelf.internalGridWidth = gridW;
+                weakSelf.internalGridHeight = gridH;
+                weakSelf.internalNodeCount = found;
+                weakSelf.internalModelData = modelData;
+
+                // Update preview
+                NSImage *preview = [self->_videoGenerator detectionPreviewImage];
+                if (preview) {
+                    weakSelf.previewImageView.image = preview;
+                    weakSelf.videoPreviewImageView.image = preview;
+                }
+
+                weakSelf.nodeCountLabel.stringValue = [NSString stringWithFormat:@"Nodes: %ld", (long)found];
+                weakSelf.dimensionsLabel.stringValue = [NSString stringWithFormat:@"Dimensions: %ld x %ld", (long)gridW, (long)gridH];
+
+                // Update stats
+                NSDictionary *stats = [self->_videoGenerator detectionStatistics];
+                weakSelf.videoStatsLabel.stringValue = [NSString stringWithFormat:
+                    @"Found: %@/%@ nodes\nMissing: %@\nGrid: %@ x %@",
+                    stats[@"totalFound"], stats[@"totalExpected"],
+                    stats[@"missingNodes"],
+                    @(gridW), @(gridH)];
+            } else {
+                weakSelf.videoStatsLabel.stringValue = @"No nodes detected. Try adjusting parameters.";
+            }
+        });
+    });
 }
 
 - (NSView *)buildGenGridSourceView {

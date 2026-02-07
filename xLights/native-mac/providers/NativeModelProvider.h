@@ -229,6 +229,79 @@ public:
     /// Remove a model from a group.
     bool removeModelFromGroup(const std::string& groupName, const std::string& modelName);
 
+    // --- Face Definition Management ---
+
+    /// Get all face definition names for a model.
+    std::vector<std::string> getFaceNames(const std::string& modelName) const;
+
+    /// Get a face definition's attributes.
+    /// Returns a map of key->value for the face definition (Type, phoneme mappings, etc.)
+    std::map<std::string, std::string> getFaceDefinition(const std::string& modelName,
+                                                          const std::string& faceName) const;
+
+    /// Get all face definitions for a model.
+    /// Returns map of faceName -> {key -> value}.
+    std::map<std::string, std::map<std::string, std::string>> getAllFaceDefinitions(
+        const std::string& modelName) const;
+
+    /// Set a face definition (create or update).
+    bool setFaceDefinition(const std::string& modelName, const std::string& faceName,
+                           const std::map<std::string, std::string>& definition);
+
+    /// Set all face definitions for a model (replaces all existing).
+    bool setAllFaceDefinitions(const std::string& modelName,
+                               const std::map<std::string, std::map<std::string, std::string>>& definitions);
+
+    /// Delete a face definition.
+    bool deleteFaceDefinition(const std::string& modelName, const std::string& faceName);
+
+    /// Rename a face definition.
+    bool renameFaceDefinition(const std::string& modelName, const std::string& oldName,
+                              const std::string& newName);
+
+    // --- State Definition Management ---
+
+    /// Get all state definition names for a model.
+    std::vector<std::string> getStateNames(const std::string& modelName) const;
+
+    /// Get a state definition's attributes.
+    /// Returns a map of key->value for the state definition (Type, node mappings, etc.)
+    std::map<std::string, std::string> getStateDefinition(const std::string& modelName,
+                                                           const std::string& stateName) const;
+
+    /// Get all state definitions for a model.
+    /// Returns map of stateName -> {key -> value}.
+    std::map<std::string, std::map<std::string, std::string>> getAllStateDefinitions(
+        const std::string& modelName) const;
+
+    /// Set a state definition (create or update).
+    bool setStateDefinition(const std::string& modelName, const std::string& stateName,
+                            const std::map<std::string, std::string>& definition);
+
+    /// Set all state definitions for a model (replaces all existing).
+    bool setAllStateDefinitions(const std::string& modelName,
+                                const std::map<std::string, std::map<std::string, std::string>>& definitions);
+
+    /// Delete a state definition.
+    bool deleteStateDefinition(const std::string& modelName, const std::string& stateName);
+
+    /// Rename a state definition.
+    bool renameStateDefinition(const std::string& modelName, const std::string& oldName,
+                               const std::string& newName);
+
+    // --- Dimming Curve Management ---
+
+    /// Get dimming curve info for a model.
+    /// Returns map with keys like "all", "red", "green", "blue" containing
+    /// sub-maps with "gamma", "brightness", and/or "filename" keys.
+    std::map<std::string, std::map<std::string, std::string>> getDimmingInfo(
+        const std::string& modelName) const;
+
+    /// Set dimming curve info for a model (replaces existing).
+    /// Pass an empty map to clear the dimming curve.
+    bool setDimmingInfo(const std::string& modelName,
+                        const std::map<std::string, std::map<std::string, std::string>>& dimmingInfo);
+
 private:
 #ifndef XLIGHTS_NATIVE
     // Internal model storage for standalone operation (uses Model class)
@@ -249,6 +322,16 @@ private:
 
     // Parsed submodel definitions per model (modelName -> {submodelName -> {attr -> value}})
     std::map<std::string, std::map<std::string, std::map<std::string, std::string>>> _submodelAttributes;
+
+    // Parsed face definitions per model (modelName -> {faceName -> {attr -> value}})
+    std::map<std::string, std::map<std::string, std::map<std::string, std::string>>> _faceDefinitions;
+
+    // Parsed state definitions per model (modelName -> {stateName -> {attr -> value}})
+    std::map<std::string, std::map<std::string, std::map<std::string, std::string>>> _stateDefinitions;
+
+    // Parsed dimming curve info per model (modelName -> {channel -> {param -> value}})
+    // Channels: "all", "red", "green", "blue"; Params: "gamma", "brightness", "filename"
+    std::map<std::string, std::map<std::string, std::map<std::string, std::string>>> _dimmingCurveInfo;
 
 #ifndef XLIGHTS_NATIVE
     // External ModelManager for transition period (not owned)

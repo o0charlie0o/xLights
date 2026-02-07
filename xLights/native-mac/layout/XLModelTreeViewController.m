@@ -12,6 +12,9 @@
 #import "XLModelTreeNode.h"
 #import "../XLEngineBridge.h"
 #import "../dialogs/XLSubModelsWindow.h"
+#import "../dialogs/XLModelStateWindow.h"
+#import "../dialogs/XLModelDialogs.h"
+#import "XLModelFaceDialogController.h"
 
 static NSString * const kXLModelTreeDragType = @"com.xlights.modelTreeNode";
 
@@ -34,6 +37,8 @@ static NSString * const kColumnController = @"ControllerColumn";
 @property (nonatomic, assign) BOOL suppressSelectionNotification;
 
 @property (nonatomic, strong) XLSubModelsWindow *subModelsWindow;
+@property (nonatomic, strong) XLModelStateWindow *stateDialog;
+@property (nonatomic, strong) XLModelFaceDialogController *faceDialog;
 
 @end
 
@@ -809,6 +814,20 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         subModelsItem.target = self;
         [menu addItem:subModelsItem];
 
+        // Edit States
+        NSMenuItem *statesItem = [[NSMenuItem alloc] initWithTitle:@"Edit States..."
+                                                             action:@selector(contextEditStates:)
+                                                      keyEquivalent:@""];
+        statesItem.target = self;
+        [menu addItem:statesItem];
+
+        // Edit Faces
+        NSMenuItem *facesItem = [[NSMenuItem alloc] initWithTitle:@"Edit Faces..."
+                                                            action:@selector(contextEditFaces:)
+                                                     keyEquivalent:@""];
+        facesItem.target = self;
+        [menu addItem:facesItem];
+
         // Wiring View (placeholder)
         NSMenuItem *wiringItem = [[NSMenuItem alloc] initWithTitle:@"Wiring View"
                                                             action:@selector(contextWiringView:)
@@ -1394,6 +1413,47 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     }];
 }
 
+- (void)contextEditStates:(id)sender {
+    NSString *name = [self selectedModelName];
+    if (!name || !_engineBridge) return;
+
+    _stateDialog = [[XLModelStateWindow alloc] initWithModelName:name];
+    _stateDialog.engineBridge = _engineBridge;
+
+    // Load state definitions from bridge
+    NSDictionary *stateData = [_engineBridge getAllStateDefinitions:name];
+    if (stateData) {
+        [_stateDialog setStateInfo:stateData];
+    }
+
+    [_stateDialog showWithCompletion:^(BOOL saved) {
+        if (saved) {
+            // Save state definitions back through bridge
+            NSDictionary *updatedStates = [self->_stateDialog stateInfo];
+            if (updatedStates) {
+                [self->_engineBridge setAllStateDefinitions:name definitions:updatedStates];
+            }
+            [self reloadData];
+        }
+        self->_stateDialog = nil;
+    }];
+}
+
+- (void)contextEditFaces:(id)sender {
+    NSString *name = [self selectedModelName];
+    if (!name || !_engineBridge) return;
+
+    _faceDialog = [[XLModelFaceDialogController alloc] init];
+    _faceDialog.modelName = name;
+    _faceDialog.engineBridge = _engineBridge;
+    [_faceDialog showWithCompletion:^(BOOL saved) {
+        self->_faceDialog = nil;
+        if (saved) {
+            [self reloadData];
+        }
+    }];
+}
+
 - (void)contextWiringView:(id)sender {
     [self showNotImplementedAlert:@"Wiring View"
                           detail:@"The Wiring View dialog will show the physical wiring order and connections for the model."];
@@ -1541,8 +1601,7 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
             [self bulkEditControllerProtocolForModels:names];
             break;
         case XLContextTagBulkDimmingCurves:
-            [self showNotImplementedAlert:@"Bulk Edit: Dimming Curves"
-                                  detail:@"Bulk dimming curve editing requires the dimming curve dialog."];
+            [self bulkEditDimmingCurvesForModels:names];
             break;
         default:
             break;
@@ -1554,6 +1613,41 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         [_engineBridge updateModelProperty:name key:key value:value];
     }
     [self reloadData];
+}
+
+- (void)bulkEditDimmingCurvesForModels:(NSArray<NSString *> *)modelNames {
+    if (!modelNames || modelNames.count == 0 || !_engineBridge) return;
+
+    // Use the first model's dimming info as initial values
+    NSString *firstModel = modelNames.firstObject;
+    NSDictionary *dimmingInfo = [_engineBridge getDimmingInfo:firstModel];
+
+    if (!dimmingInfo || dimmingInfo.count == 0) {
+        NSString *brightness = [_engineBridge getModelProperty:firstModel key:@"ModelBrightness" defaultValue:@"0"];
+        dimmingInfo = @{
+            @"all": @{
+                @"gamma": @"1.0",
+                @"brightness": brightness ?: @"0"
+            }
+        };
+    }
+
+    XLModelDimmingCurveDialog *dialog = [[XLModelDimmingCurveDialog alloc] init];
+    dialog.modelName = [NSString stringWithFormat:@"%lu models", (unsigned long)modelNames.count];
+    [dialog initFromDimmingInfo:dimmingInfo];
+
+    NSWindow *parentWindow = self.view.window;
+    if (!parentWindow) return;
+
+    [dialog presentAsSheetForWindow:parentWindow completion:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            NSDictionary *newInfo = [dialog exportDimmingInfo];
+            for (NSString *name in modelNames) {
+                [self->_engineBridge setDimmingInfo:newInfo forModel:name];
+            }
+            [self reloadData];
+        }
+    }];
 }
 
 - (void)bulkEditTagColorForModels:(NSArray<NSString *> *)modelNames {
