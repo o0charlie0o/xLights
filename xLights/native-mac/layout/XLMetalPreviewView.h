@@ -296,4 +296,13 @@
 /// Remove the background image
 - (void)removeBackgroundImage;
 
+#pragma mark - 2D Scrollbars
+
+/// Whether scrollbars are enabled (default: YES, only visible in 2D mode)
+@property (nonatomic, assign) BOOL scrollbarsEnabled;
+
+/// Update scrollbar visibility and position based on current camera state.
+/// Called automatically when camera changes; can be called manually after layout changes.
+- (void)updateScrollbars;
+
 @end

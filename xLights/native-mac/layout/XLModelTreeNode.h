@@ -40,6 +40,12 @@
 /// Whether this node is a submodel
 @property (nonatomic, assign) BOOL isSubmodel;
 
+/// Whether this node is a shadow model
+@property (nonatomic, assign) BOOL isShadowModel;
+
+/// Name of the model this shadow model mirrors (empty string if not a shadow)
+@property (nonatomic, copy) NSString *shadowModelFor;
+
 /// SF Symbol name for this node's model type (computed from modelType)
 @property (nonatomic, readonly) NSString *iconName;
 

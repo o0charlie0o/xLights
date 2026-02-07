@@ -37,4 +37,7 @@
 /// Controller inspector view controller (right panel).
 @property (nonatomic, strong, readonly) XLControllerInspectorViewController *inspectorViewController;
 
+/// Present the multi-controller bulk upload dialog as a sheet.
+- (void)presentMultiControllerUploadDialog;
+
 @end

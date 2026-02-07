@@ -64,6 +64,9 @@ typedef NS_ENUM(NSInteger, XLControllerStatus) {
 - (void)controllersView:(XLControllersViewController *)controllersView
     didRequestUploadControllersAtIndices:(NSIndexSet *)indices;
 
+/// Called when the user requests the bulk multi-controller upload dialog.
+- (void)controllersViewDidRequestBulkUpload:(XLControllersViewController *)controllersView;
+
 /// Called when the user requests activating/deactivating controllers.
 - (void)controllersView:(XLControllersViewController *)controllersView
     didRequestSetActive:(NSString *)activeState

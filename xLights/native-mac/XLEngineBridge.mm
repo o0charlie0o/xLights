@@ -1329,6 +1329,177 @@ static XLEngineBridge *_sharedBridge = nil;
     return [NSString stringWithUTF8String:newName.c_str()];
 }
 
+#pragma mark - Replace Model
+
+- (BOOL)replaceModel:(NSString *)targetModelName
+            withModel:(NSString *)replacementModelName
+              options:(NSDictionary *)options {
+    if (!targetModelName || !replacementModelName) return NO;
+    if ([targetModelName isEqualToString:replacementModelName]) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot replace model - engine not available");
+        return NO;
+    }
+
+    std::string stdTarget = [targetModelName UTF8String];
+    std::string stdReplacement = [replacementModelName UTF8String];
+
+    if (!_modelEngine->hasModel(stdTarget) || !_modelEngine->hasModel(stdReplacement)) {
+        NSLog(@"XLEngineBridge: replaceModel - one or both models not found");
+        return NO;
+    }
+
+    BOOL copyStartChannel = [options[@"copyStartChannel"] boolValue];
+    BOOL copyPosition = [options[@"copyPosition"] boolValue];
+    BOOL mergeSubmodels = [options[@"mergeSubmodels"] boolValue];
+
+    // 1. Copy start channel and controller assignment from target to replacement
+    if (copyStartChannel) {
+        NSString *startChannel = [self getModelProperty:targetModelName key:@"ModelStartChannel" defaultValue:@""];
+        if (startChannel.length > 0) {
+            [self updateModelProperty:replacementModelName key:@"ModelStartChannel" value:startChannel];
+        }
+        NSString *controllerName = [self getModelProperty:targetModelName key:@"Controller" defaultValue:@""];
+        [self updateModelProperty:replacementModelName key:@"Controller" value:controllerName];
+        NSString *controllerPort = [self getModelProperty:targetModelName key:@"ControllerPort" defaultValue:@""];
+        [self updateModelProperty:replacementModelName key:@"ControllerPort" value:controllerPort];
+        NSString *protocol = [self getModelProperty:targetModelName key:@"Protocol" defaultValue:@""];
+        [self updateModelProperty:replacementModelName key:@"Protocol" value:protocol];
+
+        NSInteger smartRemote = [self getSmartRemote:targetModelName];
+        [self setSmartRemote:replacementModelName value:smartRemote];
+        NSString *smartRemoteType = [self getSmartRemoteType:targetModelName];
+        if (smartRemoteType.length > 0) {
+            [self setSmartRemoteType:replacementModelName value:smartRemoteType];
+        }
+    }
+
+    // 2. Copy position, size, and rotation from target to replacement
+    if (copyPosition) {
+        NSArray *positionKeys = @[@"WorldPosX", @"WorldPosY", @"WorldPosZ",
+                                   @"ScaleX", @"ScaleY", @"ScaleZ",
+                                   @"RotateX", @"RotateY", @"RotateZ"];
+        for (NSString *key in positionKeys) {
+            NSString *value = [self getModelProperty:targetModelName key:key defaultValue:@""];
+            if (value.length > 0) {
+                [self updateModelProperty:replacementModelName key:key value:value];
+            }
+        }
+    }
+
+    // 3. Merge submodels from target into replacement
+    if (mergeSubmodels) {
+        NSArray<NSDictionary *> *targetSubmodels = [self getSubmodels:targetModelName];
+        for (NSDictionary *subInfo in targetSubmodels) {
+            NSString *subName = subInfo[@"name"];
+            if (!subName) continue;
+            // Skip if replacement already has a submodel with this name
+            if ([self hasSubmodel:replacementModelName submodelName:subName]) continue;
+
+            NSDictionary *subDef = [self getSubmodelDefinition:targetModelName submodelName:subName];
+            if (subDef) {
+                [self setSubmodel:replacementModelName submodelName:subName definition:subDef];
+            }
+        }
+    }
+
+    // 4. Update group memberships: replace target with replacement in all groups
+    NSArray<NSString *> *groups = [self getGroupsContainingModel:targetModelName];
+    for (NSString *groupName in groups) {
+        [self addModel:replacementModelName toGroup:groupName];
+        [self removeModel:targetModelName fromGroup:groupName];
+    }
+
+    // 5. Rename: replacement takes the target's name
+    //    First rename target to a temporary name, then rename replacement to target's name
+    NSString *tempName = @"__xlights_replace_temp__";
+    [self renameModel:targetModelName toName:tempName];
+    [self renameModel:replacementModelName toName:targetModelName];
+
+    // 6. Delete the old target model (now named tempName)
+    [self deleteModel:tempName];
+
+    NSLog(@"XLEngineBridge: Replaced model '%@' with '%@'", targetModelName, replacementModelName);
+    return YES;
+}
+
+#pragma mark - Shadow Model Operations (stubs)
+
+- (NSString *)createShadowModel:(NSString *)sourceModelName {
+    if (!sourceModelName) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot create shadow model - engine not available");
+        return nil;
+    }
+
+    std::string stdName = [sourceModelName UTF8String];
+    if (!_modelEngine->hasModel(stdName)) {
+        return nil;
+    }
+
+    xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+
+    std::string newName = info.name + " Shadow";
+    int counter = 1;
+    while (_modelEngine->hasModel(newName)) {
+        newName = info.name + " Shadow " + std::to_string(++counter);
+    }
+
+    std::map<std::string, std::string> props = info.properties;
+    props["ShadowModelFor"] = info.name;
+
+    auto itX = props.find("WorldPosX");
+    if (itX != props.end()) {
+        try {
+            double x = std::stod(itX->second);
+            props["WorldPosX"] = std::to_string(x + 50.0);
+        } catch (...) {}
+    }
+
+    xlEngine::OperationResult result = _modelEngine->createModel(info.type, newName, props);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to create shadow model: %s", result.message.c_str());
+        return nil;
+    }
+    return [NSString stringWithUTF8String:newName.c_str()];
+}
+
+- (BOOL)isShadowModel:(NSString *)modelName {
+    if (!modelName) return NO;
+    NSDictionary *props = [self getModelProperties:modelName];
+    NSString *shadowFor = props[@"ShadowModelFor"];
+    return (shadowFor && shadowFor.length > 0);
+}
+
+- (NSString *)getShadowModelFor:(NSString *)modelName {
+    if (!modelName) return @"";
+    NSDictionary *props = [self getModelProperties:modelName];
+    NSString *shadowFor = props[@"ShadowModelFor"];
+    return shadowFor ?: @"";
+}
+
+- (BOOL)setShadowModelFor:(NSString *)modelName target:(NSString *)targetModelName {
+    if (!modelName) return NO;
+    return [self updateModelProperty:modelName key:@"ShadowModelFor" value:(targetModelName ?: @"")];
+}
+
+- (NSArray<NSString *> *)getModelsShadowing:(NSString *)modelName {
+    if (!modelName) return @[];
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    NSArray<NSString *> *allModels = [self getModelNames];
+    for (NSString *name in allModels) {
+        NSString *target = [self getShadowModelFor:name];
+        if ([target isEqualToString:modelName]) {
+            [result addObject:name];
+        }
+    }
+    return result;
+}
+
 - (NSDictionary *)getModelData:(NSString *)modelName {
     if (!modelName) return @{};
 
@@ -1449,6 +1620,48 @@ static XLEngineBridge *_sharedBridge = nil;
     std::string stdName = [modelName UTF8String];
     std::map<std::string, std::string> props = _modelEngine->getModelProperties(stdName);
     return [self dictFromMap:props];
+}
+
+- (NSInteger)getSmartRemote:(NSString *)modelName {
+    if (!modelName) return 0;
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return 0;
+    std::string stdName = [modelName UTF8String];
+    return _modelEngine->getSmartRemote(stdName);
+}
+
+- (NSString *)getSmartRemoteType:(NSString *)modelName {
+    if (!modelName) return @"";
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return @"";
+    std::string stdName = [modelName UTF8String];
+    std::string type = _modelEngine->getSmartRemoteType(stdName);
+    return [NSString stringWithUTF8String:type.c_str()];
+}
+
+- (BOOL)setSmartRemote:(NSString *)modelName value:(NSInteger)smartRemote {
+    if (!modelName) return NO;
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return NO;
+    std::string stdName = [modelName UTF8String];
+    xlEngine::OperationResult result = _modelEngine->setSmartRemote(stdName, (int)smartRemote);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to set smart remote: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (BOOL)setSmartRemoteType:(NSString *)modelName value:(NSString *)type {
+    if (!modelName || !type) return NO;
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return NO;
+    std::string stdName = [modelName UTF8String];
+    std::string stdType = [type UTF8String];
+    xlEngine::OperationResult result = _modelEngine->setSmartRemoteType(stdName, stdType);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to set smart remote type: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 #pragma mark - Model Groups
@@ -5060,8 +5273,22 @@ static XLEngineBridge *_sharedBridge = nil;
     result[@"controllerName"] = [NSString stringWithUTF8String:info.controllerName.c_str()];
     result[@"protocol"] = [NSString stringWithUTF8String:info.controllerProtocol.c_str()];
     result[@"port"] = @(info.controllerPort);
+    result[@"smartRemote"] = @(info.smartRemote);
+    result[@"smartRemoteType"] = [NSString stringWithUTF8String:info.smartRemoteType.c_str()];
     result[@"isActive"] = @(info.isActive);
     result[@"isGroupModel"] = @(info.isGroupModel);
+
+    // Compute RenderWidth/RenderHeight/RenderDepth from buffer dimensions.
+    // These match what the legacy BoxedScreenLocation::SetRenderSize receives
+    // during InitModel (e.g. MatrixModel sets RenderWi=BufferWi, RenderHt=BufferHt).
+    // defaultBufferWi/Ht already mirror the legacy RenderWi/RenderHt for all
+    // model types that call CopyBufCoord2ScreenCoord.
+    float renderW = (info.defaultBufferWi > 0) ? (float)info.defaultBufferWi : 1.0f;
+    float renderH = (info.defaultBufferHt > 0) ? (float)info.defaultBufferHt : 1.0f;
+    float renderD = 2.0f;  // legacy default depth for most boxed models
+    result[@"RenderWidth"] = @(renderW);
+    result[@"RenderHeight"] = @(renderH);
+    result[@"RenderDepth"] = @(renderD);
 
     // Include all XML properties
     for (const auto &pair : info.properties) {
@@ -5650,6 +5877,552 @@ static XLEngineBridge *_sharedBridge = nil;
     return result;
 #else
     return @[];
+#endif
+}
+
+
+#pragma mark - Polyline Point Editing
+
+- (BOOL)isPolylineModel:(NSString *)modelName {
+    if (!modelName) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+    auto it = attrs.find("DisplayAs");
+    if (it != attrs.end()) {
+        return (it->second == "Poly Line" || it->second == "MultiPoint");
+    }
+    return NO;
+#else
+    return NO;
+#endif
+}
+
+- (NSArray<NSDictionary *> *)getPolylinePoints:(NSString *)modelName {
+    if (!modelName) return nil;
+    if (![self isPolylineModel:modelName]) return nil;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return nil;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+
+    // Parse world transform
+    float worldX = 0, worldY = 0, worldZ = 0;
+    float scaleX = 1, scaleY = 1, scaleZ = 1;
+
+    auto itWX = attrs.find("WorldPosX"); if (itWX != attrs.end()) worldX = std::stof(itWX->second);
+    auto itWY = attrs.find("WorldPosY"); if (itWY != attrs.end()) worldY = std::stof(itWY->second);
+    auto itWZ = attrs.find("WorldPosZ"); if (itWZ != attrs.end()) worldZ = std::stof(itWZ->second);
+    auto itSX = attrs.find("ScaleX"); if (itSX != attrs.end()) scaleX = std::stof(itSX->second);
+    auto itSY = attrs.find("ScaleY"); if (itSY != attrs.end()) scaleY = std::stof(itSY->second);
+    auto itSZ = attrs.find("ScaleZ"); if (itSZ != attrs.end()) scaleZ = std::stof(itSZ->second);
+
+    // Parse number of points
+    int numPoints = 2;
+    auto itNP = attrs.find("NumPoints"); if (itNP != attrs.end()) numPoints = std::stoi(itNP->second);
+    if (numPoints < 2) numPoints = 2;
+
+    // Parse PointData (comma-separated x,y,z triples in local coords)
+    std::vector<float> localCoords;
+    auto itPD = attrs.find("PointData");
+    if (itPD != attrs.end()) {
+        std::stringstream ss(itPD->second);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { localCoords.push_back(std::stof(token)); }
+            catch (...) { localCoords.push_back(0.0f); }
+        }
+    }
+
+    // Ensure we have enough coordinate data
+    while ((int)localCoords.size() < numPoints * 3) {
+        localCoords.push_back(0.0f);
+    }
+
+    // Parse cPointData (curve control points: seg_num,cp0x,cp0y,cp0z,cp1x,cp1y,cp1z)
+    std::map<int, std::vector<float>> curveData;
+    auto itCD = attrs.find("cPointData");
+    if (itCD != attrs.end() && !itCD->second.empty()) {
+        std::stringstream ss(itCD->second);
+        std::string token;
+        std::vector<float> values;
+        while (std::getline(ss, token, ',')) {
+            try { values.push_back(std::stof(token)); }
+            catch (...) { values.push_back(0.0f); }
+        }
+        // Each curve is 7 values: seg_num, cp0x, cp0y, cp0z, cp1x, cp1y, cp1z
+        for (size_t i = 0; i + 6 < values.size(); i += 7) {
+            int segNum = (int)values[i];
+            curveData[segNum] = {values[i+1], values[i+2], values[i+3],
+                                 values[i+4], values[i+5], values[i+6]};
+        }
+    }
+
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:numPoints];
+    for (int i = 0; i < numPoints; i++) {
+        float lx = localCoords[i * 3];
+        float ly = localCoords[i * 3 + 1];
+        float lz = localCoords[i * 3 + 2];
+
+        // Convert local to world space
+        float wx = lx * scaleX + worldX;
+        float wy = ly * scaleY + worldY;
+        float wz = lz * scaleZ + worldZ;
+
+        NSMutableDictionary *pt = [NSMutableDictionary dictionary];
+        pt[@"x"] = @(wx);
+        pt[@"y"] = @(wy);
+        pt[@"z"] = @(wz);
+
+        auto curveIt = curveData.find(i);
+        if (curveIt != curveData.end() && curveIt->second.size() >= 6) {
+            pt[@"hasCurve"] = @YES;
+            // Curve control points are in local coords, convert to world
+            pt[@"cp0x"] = @(curveIt->second[0] * scaleX + worldX);
+            pt[@"cp0y"] = @(curveIt->second[1] * scaleY + worldY);
+            pt[@"cp0z"] = @(curveIt->second[2] * scaleZ + worldZ);
+            pt[@"cp1x"] = @(curveIt->second[3] * scaleX + worldX);
+            pt[@"cp1y"] = @(curveIt->second[4] * scaleY + worldY);
+            pt[@"cp1z"] = @(curveIt->second[5] * scaleZ + worldZ);
+        } else {
+            pt[@"hasCurve"] = @NO;
+            pt[@"cp0x"] = @(0.0f);
+            pt[@"cp0y"] = @(0.0f);
+            pt[@"cp0z"] = @(0.0f);
+            pt[@"cp1x"] = @(0.0f);
+            pt[@"cp1y"] = @(0.0f);
+            pt[@"cp1z"] = @(0.0f);
+        }
+
+        [result addObject:pt];
+    }
+
+    return result;
+#else
+    return nil;
+#endif
+}
+
+- (NSInteger)getPolylinePointCount:(NSString *)modelName {
+    if (!modelName) return 0;
+    if (![self isPolylineModel:modelName]) return 0;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return 0;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+    auto it = attrs.find("NumPoints");
+    if (it != attrs.end()) {
+        return std::stoi(it->second);
+    }
+    return 2;
+#else
+    return 0;
+#endif
+}
+
+- (BOOL)movePolylinePoint:(NSString *)modelName index:(NSInteger)pointIndex
+                        x:(float)worldX y:(float)worldY z:(float)worldZ {
+    if (!modelName) return NO;
+    if (![self isPolylineModel:modelName]) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+
+    float wx = 0, wy = 0, wz = 0;
+    float sx = 1, sy = 1, sz = 1;
+    auto itWX = attrs.find("WorldPosX"); if (itWX != attrs.end()) wx = std::stof(itWX->second);
+    auto itWY = attrs.find("WorldPosY"); if (itWY != attrs.end()) wy = std::stof(itWY->second);
+    auto itWZ = attrs.find("WorldPosZ"); if (itWZ != attrs.end()) wz = std::stof(itWZ->second);
+    auto itSX = attrs.find("ScaleX"); if (itSX != attrs.end()) sx = std::stof(itSX->second);
+    auto itSY = attrs.find("ScaleY"); if (itSY != attrs.end()) sy = std::stof(itSY->second);
+    auto itSZ = attrs.find("ScaleZ"); if (itSZ != attrs.end()) sz = std::stof(itSZ->second);
+
+    // Convert world to local
+    float lx = (sx != 0) ? (worldX - wx) / sx : 0;
+    float ly = (sy != 0) ? (worldY - wy) / sy : 0;
+    float lz = (sz != 0) ? (worldZ - wz) / sz : 0;
+
+    // Parse existing PointData
+    int numPoints = 2;
+    auto itNP = attrs.find("NumPoints"); if (itNP != attrs.end()) numPoints = std::stoi(itNP->second);
+
+    std::vector<float> coords;
+    auto itPD = attrs.find("PointData");
+    if (itPD != attrs.end()) {
+        std::stringstream ss(itPD->second);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { coords.push_back(std::stof(token)); }
+            catch (...) { coords.push_back(0.0f); }
+        }
+    }
+    while ((int)coords.size() < numPoints * 3) coords.push_back(0.0f);
+
+    if (pointIndex < 0 || pointIndex >= numPoints) return NO;
+
+    coords[pointIndex * 3] = lx;
+    coords[pointIndex * 3 + 1] = ly;
+    coords[pointIndex * 3 + 2] = lz;
+
+    // Rebuild PointData string
+    std::ostringstream oss;
+    for (size_t i = 0; i < coords.size(); i++) {
+        if (i > 0) oss << ",";
+        oss << coords[i];
+    }
+
+    _nativeModelProvider->setModelAttribute([modelName UTF8String], "PointData", oss.str());
+    return YES;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)movePolylineCurvePoint:(NSString *)modelName segmentIndex:(NSInteger)segmentIndex
+                  controlPoint:(NSInteger)cpIndex
+                             x:(float)worldX y:(float)worldY z:(float)worldZ {
+    if (!modelName) return NO;
+    if (![self isPolylineModel:modelName]) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+
+    float wx = 0, wy = 0, wz = 0;
+    float sx = 1, sy = 1, sz = 1;
+    auto itWX = attrs.find("WorldPosX"); if (itWX != attrs.end()) wx = std::stof(itWX->second);
+    auto itWY = attrs.find("WorldPosY"); if (itWY != attrs.end()) wy = std::stof(itWY->second);
+    auto itWZ = attrs.find("WorldPosZ"); if (itWZ != attrs.end()) wz = std::stof(itWZ->second);
+    auto itSX = attrs.find("ScaleX"); if (itSX != attrs.end()) sx = std::stof(itSX->second);
+    auto itSY = attrs.find("ScaleY"); if (itSY != attrs.end()) sy = std::stof(itSY->second);
+    auto itSZ = attrs.find("ScaleZ"); if (itSZ != attrs.end()) sz = std::stof(itSZ->second);
+
+    float lx = (sx != 0) ? (worldX - wx) / sx : 0;
+    float ly = (sy != 0) ? (worldY - wy) / sy : 0;
+    float lz = (sz != 0) ? (worldZ - wz) / sz : 0;
+
+    // Parse cPointData
+    auto itCD = attrs.find("cPointData");
+    if (itCD == attrs.end()) return NO;
+
+    std::vector<float> values;
+    {
+        std::stringstream ss(itCD->second);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { values.push_back(std::stof(token)); }
+            catch (...) { values.push_back(0.0f); }
+        }
+    }
+
+    // Find the curve entry for this segment
+    for (size_t i = 0; i + 6 < values.size(); i += 7) {
+        if ((int)values[i] == segmentIndex) {
+            if (cpIndex == 0) {
+                values[i+1] = lx;
+                values[i+2] = ly;
+                values[i+3] = lz;
+            } else {
+                values[i+4] = lx;
+                values[i+5] = ly;
+                values[i+6] = lz;
+            }
+
+            std::ostringstream oss;
+            for (size_t j = 0; j < values.size(); j++) {
+                if (j > 0) oss << ",";
+                oss << values[j];
+            }
+            _nativeModelProvider->setModelAttribute([modelName UTF8String], "cPointData", oss.str());
+            return YES;
+        }
+    }
+    return NO;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)insertPolylinePoint:(NSString *)modelName afterSegment:(NSInteger)afterSegment {
+    if (!modelName) return NO;
+    if (![self isPolylineModel:modelName]) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+
+    int numPoints = 2;
+    auto itNP = attrs.find("NumPoints"); if (itNP != attrs.end()) numPoints = std::stoi(itNP->second);
+
+    if (afterSegment < 0 || afterSegment >= numPoints - 1) return NO;
+
+    std::vector<float> coords;
+    auto itPD = attrs.find("PointData");
+    if (itPD != attrs.end()) {
+        std::stringstream ss(itPD->second);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { coords.push_back(std::stof(token)); }
+            catch (...) { coords.push_back(0.0f); }
+        }
+    }
+    while ((int)coords.size() < numPoints * 3) coords.push_back(0.0f);
+
+    // Calculate midpoint between afterSegment and afterSegment+1
+    int idx1 = (int)afterSegment * 3;
+    int idx2 = ((int)afterSegment + 1) * 3;
+    float mx = (coords[idx1] + coords[idx2]) / 2.0f;
+    float my = (coords[idx1+1] + coords[idx2+1]) / 2.0f;
+    float mz = (coords[idx1+2] + coords[idx2+2]) / 2.0f;
+
+    // Insert at position afterSegment+1
+    int insertIdx = ((int)afterSegment + 1) * 3;
+    coords.insert(coords.begin() + insertIdx, {mx, my, mz});
+
+    numPoints++;
+
+    // Rebuild PointData
+    std::ostringstream oss;
+    for (size_t i = 0; i < coords.size(); i++) {
+        if (i > 0) oss << ",";
+        oss << coords[i];
+    }
+
+    // Update cPointData: increment segment indices for curves after the insertion point
+    auto itCD = attrs.find("cPointData");
+    if (itCD != attrs.end() && !itCD->second.empty()) {
+        std::vector<float> cvals;
+        std::stringstream css(itCD->second);
+        std::string token;
+        while (std::getline(css, token, ',')) {
+            try { cvals.push_back(std::stof(token)); }
+            catch (...) { cvals.push_back(0.0f); }
+        }
+        for (size_t i = 0; i + 6 < cvals.size(); i += 7) {
+            if ((int)cvals[i] > afterSegment) {
+                cvals[i] += 1;
+            }
+        }
+        std::ostringstream coss;
+        for (size_t i = 0; i < cvals.size(); i++) {
+            if (i > 0) coss << ",";
+            coss << cvals[i];
+        }
+        _nativeModelProvider->setModelAttribute([modelName UTF8String], "cPointData", coss.str());
+    }
+
+    _nativeModelProvider->setModelAttribute([modelName UTF8String], "PointData", oss.str());
+    _nativeModelProvider->setModelAttribute([modelName UTF8String], "NumPoints", std::to_string(numPoints));
+    return YES;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)deletePolylinePoint:(NSString *)modelName index:(NSInteger)pointIndex {
+    if (!modelName) return NO;
+    if (![self isPolylineModel:modelName]) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+
+    int numPoints = 2;
+    auto itNP = attrs.find("NumPoints"); if (itNP != attrs.end()) numPoints = std::stoi(itNP->second);
+
+    if (pointIndex < 0 || pointIndex >= numPoints || numPoints <= 2) return NO;
+
+    std::vector<float> coords;
+    auto itPD = attrs.find("PointData");
+    if (itPD != attrs.end()) {
+        std::stringstream ss(itPD->second);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { coords.push_back(std::stof(token)); }
+            catch (...) { coords.push_back(0.0f); }
+        }
+    }
+    while ((int)coords.size() < numPoints * 3) coords.push_back(0.0f);
+
+    // Remove the point
+    int removeIdx = (int)pointIndex * 3;
+    if (removeIdx + 2 < (int)coords.size()) {
+        coords.erase(coords.begin() + removeIdx, coords.begin() + removeIdx + 3);
+    }
+    numPoints--;
+
+    // Rebuild PointData
+    std::ostringstream oss;
+    for (size_t i = 0; i < coords.size(); i++) {
+        if (i > 0) oss << ",";
+        oss << coords[i];
+    }
+
+    // Update cPointData: remove curves referencing deleted point, adjust indices
+    auto itCD = attrs.find("cPointData");
+    if (itCD != attrs.end() && !itCD->second.empty()) {
+        std::vector<float> cvals;
+        std::stringstream css(itCD->second);
+        std::string token;
+        while (std::getline(css, token, ',')) {
+            try { cvals.push_back(std::stof(token)); }
+            catch (...) { cvals.push_back(0.0f); }
+        }
+
+        std::vector<float> newCvals;
+        for (size_t i = 0; i + 6 < cvals.size(); i += 7) {
+            int segNum = (int)cvals[i];
+            // Remove curves that start at or end at the deleted point
+            if (segNum == pointIndex || segNum == pointIndex - 1) continue;
+            if (segNum > pointIndex) segNum--;
+            if (segNum >= 0 && segNum < numPoints - 1) {
+                newCvals.push_back((float)segNum);
+                for (int j = 1; j <= 6; j++) newCvals.push_back(cvals[i+j]);
+            }
+        }
+
+        std::ostringstream coss;
+        for (size_t i = 0; i < newCvals.size(); i++) {
+            if (i > 0) coss << ",";
+            coss << newCvals[i];
+        }
+        _nativeModelProvider->setModelAttribute([modelName UTF8String], "cPointData", coss.str());
+    }
+
+    _nativeModelProvider->setModelAttribute([modelName UTF8String], "PointData", oss.str());
+    _nativeModelProvider->setModelAttribute([modelName UTF8String], "NumPoints", std::to_string(numPoints));
+    return YES;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)setPolylineCurve:(NSString *)modelName segment:(NSInteger)segmentIndex create:(BOOL)create {
+    if (!modelName) return NO;
+    if (![self isPolylineModel:modelName]) return NO;
+    if (![self polylineModelSupportsCurves:modelName]) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+
+    int numPoints = 2;
+    auto itNP = attrs.find("NumPoints"); if (itNP != attrs.end()) numPoints = std::stoi(itNP->second);
+    if (segmentIndex < 0 || segmentIndex >= numPoints - 1) return NO;
+
+    // Parse existing cPointData
+    std::vector<float> cvals;
+    auto itCD = attrs.find("cPointData");
+    if (itCD != attrs.end() && !itCD->second.empty()) {
+        std::stringstream ss(itCD->second);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try { cvals.push_back(std::stof(token)); }
+            catch (...) { cvals.push_back(0.0f); }
+        }
+    }
+
+    if (create) {
+        // Check if curve already exists for this segment
+        for (size_t i = 0; i + 6 < cvals.size(); i += 7) {
+            if ((int)cvals[i] == segmentIndex) return YES; // Already exists
+        }
+
+        // Parse PointData to get segment endpoints for default control points
+        std::vector<float> coords;
+        auto itPD = attrs.find("PointData");
+        if (itPD != attrs.end()) {
+            std::stringstream ss(itPD->second);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                try { coords.push_back(std::stof(token)); }
+                catch (...) { coords.push_back(0.0f); }
+            }
+        }
+        while ((int)coords.size() < numPoints * 3) coords.push_back(0.0f);
+
+        // Default control points: 1/3 and 2/3 along the segment
+        int i1 = (int)segmentIndex * 3;
+        int i2 = ((int)segmentIndex + 1) * 3;
+        float dx = coords[i2] - coords[i1];
+        float dy = coords[i2+1] - coords[i1+1];
+        float dz = coords[i2+2] - coords[i1+2];
+
+        float cp0x = coords[i1] + dx * 0.333f;
+        float cp0y = coords[i1+1] + dy * 0.333f;
+        float cp0z = coords[i1+2] + dz * 0.333f;
+        float cp1x = coords[i1] + dx * 0.667f;
+        float cp1y = coords[i1+1] + dy * 0.667f;
+        float cp1z = coords[i1+2] + dz * 0.667f;
+
+        cvals.push_back((float)segmentIndex);
+        cvals.push_back(cp0x); cvals.push_back(cp0y); cvals.push_back(cp0z);
+        cvals.push_back(cp1x); cvals.push_back(cp1y); cvals.push_back(cp1z);
+    } else {
+        // Remove curve for this segment
+        std::vector<float> newCvals;
+        for (size_t i = 0; i + 6 < cvals.size(); i += 7) {
+            if ((int)cvals[i] != segmentIndex) {
+                for (int j = 0; j < 7; j++) newCvals.push_back(cvals[i+j]);
+            }
+        }
+        cvals = newCvals;
+    }
+
+    std::ostringstream oss;
+    for (size_t i = 0; i < cvals.size(); i++) {
+        if (i > 0) oss << ",";
+        oss << cvals[i];
+    }
+    _nativeModelProvider->setModelAttribute([modelName UTF8String], "cPointData", oss.str());
+    return YES;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)polylineModelSupportsCurves:(NSString *)modelName {
+    if (!modelName) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto attrs = _nativeModelProvider->getModelAttributes([modelName UTF8String]);
+    auto it = attrs.find("DisplayAs");
+    if (it != attrs.end()) {
+        return (it->second == "Poly Line");
+    }
+    return NO;
+#else
+    return NO;
 #endif
 }
 

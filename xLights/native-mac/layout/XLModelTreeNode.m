@@ -21,6 +21,7 @@
         _modelType = @"";
         _name = @"";
         _channelCount = 0;
+        _shadowModelFor = @"";
     }
     return self;
 }
@@ -60,6 +61,9 @@
     }
     if (_isSubmodel) {
         return @"square.on.square";
+    }
+    if (_isShadowModel) {
+        return @"rectangle.on.rectangle";
     }
 
     static NSDictionary<NSString *, NSString *> *iconMap = nil;

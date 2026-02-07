@@ -11,6 +11,7 @@
 #import "XLModelTreeViewController.h"
 #import "XLModelTreeNode.h"
 #import "../XLEngineBridge.h"
+#import "../dialogs/XLSubModelsWindow.h"
 
 static NSString * const kXLModelTreeDragType = @"com.xlights.modelTreeNode";
 
@@ -31,6 +32,8 @@ static NSString * const kColumnController = @"ControllerColumn";
 @property (nonatomic, copy) NSString *searchText;
 
 @property (nonatomic, assign) BOOL suppressSelectionNotification;
+
+@property (nonatomic, strong) XLSubModelsWindow *subModelsWindow;
 
 @end
 
@@ -251,6 +254,7 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
             XLModelTreeNode *childNode = [XLModelTreeNode nodeWithName:memberName type:modelType];
             childNode.channelCount = [memberInfo[@"channelCount"] integerValue];
             childNode.controllerName = memberInfo[@"controllerName"];
+            [self populateShadowInfoForNode:childNode];
             [self loadSubmodelsForNode:childNode modelName:memberName];
             [groupNode addChild:childNode];
         }
@@ -271,12 +275,22 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         XLModelTreeNode *node = [XLModelTreeNode nodeWithName:modelName type:modelType];
         node.channelCount = [info[@"channelCount"] integerValue];
         node.controllerName = info[@"controllerName"];
+        [self populateShadowInfoForNode:node];
         [self loadSubmodelsForNode:node modelName:modelName];
 
         [nodes addObject:node];
     }
 
     _allNodes = [nodes copy];
+}
+
+- (void)populateShadowInfoForNode:(XLModelTreeNode *)node {
+    if (!_engineBridge || !node.name) return;
+    NSString *shadowFor = [_engineBridge getShadowModelFor:node.name];
+    if (shadowFor && shadowFor.length > 0) {
+        node.isShadowModel = YES;
+        node.shadowModelFor = shadowFor;
+    }
 }
 
 - (void)loadSubmodelsForNode:(XLModelTreeNode *)node modelName:(NSString *)modelName {
@@ -395,8 +409,18 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         return [self nameCellForNode:node inOutlineView:outlineView];
     }
     else if ([columnId isEqualToString:kColumnType]) {
+        NSString *typeText;
+        if (node.isGroup) {
+            typeText = @"Group";
+        } else if (node.isSubmodel) {
+            typeText = @"Submodel";
+        } else if (node.isShadowModel) {
+            typeText = [NSString stringWithFormat:@"Shadow (%@)", node.modelType];
+        } else {
+            typeText = node.modelType;
+        }
         return [self textCellWithIdentifier:kColumnType
-                                      text:node.isGroup ? @"Group" : (node.isSubmodel ? @"Submodel" : node.modelType)
+                                      text:typeText
                               inOutlineView:outlineView];
     }
     else if ([columnId isEqualToString:kColumnChannels]) {
@@ -452,14 +476,25 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     if (icon) {
         NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration configurationWithPointSize:12 weight:NSFontWeightRegular];
         cell.imageView.image = [icon imageWithSymbolConfiguration:config];
-        cell.imageView.contentTintColor = node.isGroup ? [NSColor systemOrangeColor] : [NSColor secondaryLabelColor];
+        if (node.isGroup) {
+            cell.imageView.contentTintColor = [NSColor systemOrangeColor];
+        } else if (node.isShadowModel) {
+            cell.imageView.contentTintColor = [NSColor systemPurpleColor];
+        } else {
+            cell.imageView.contentTintColor = [NSColor secondaryLabelColor];
+        }
     }
 
     cell.textField.stringValue = node.name ?: @"";
     if (node.isGroup) {
         cell.textField.font = [NSFont boldSystemFontOfSize:12];
+        cell.textField.textColor = [NSColor labelColor];
+    } else if (node.isShadowModel) {
+        cell.textField.font = [NSFont systemFontOfSize:12];
+        cell.textField.textColor = [NSColor systemPurpleColor];
     } else {
         cell.textField.font = [NSFont systemFontOfSize:12];
+        cell.textField.textColor = [NSColor labelColor];
     }
 
     return cell;
@@ -702,6 +737,14 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     duplicateItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     [menu addItem:duplicateItem];
 
+    if (!node.isGroup) {
+        NSMenuItem *shadowItem = [[NSMenuItem alloc] initWithTitle:@"Create Shadow Model"
+                                                            action:@selector(contextCreateShadowModel:)
+                                                     keyEquivalent:@""];
+        shadowItem.target = self;
+        [menu addItem:shadowItem];
+    }
+
     // Delete
     NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete"
                                                        action:@selector(contextDelete:)
@@ -759,6 +802,13 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         nodeLayoutItem.target = self;
         [menu addItem:nodeLayoutItem];
 
+        // Edit Submodels
+        NSMenuItem *subModelsItem = [[NSMenuItem alloc] initWithTitle:@"Edit Submodels..."
+                                                               action:@selector(contextEditSubmodels:)
+                                                        keyEquivalent:@""];
+        subModelsItem.target = self;
+        [menu addItem:subModelsItem];
+
         // Wiring View (placeholder)
         NSMenuItem *wiringItem = [[NSMenuItem alloc] initWithTitle:@"Wiring View"
                                                             action:@selector(contextWiringView:)
@@ -796,6 +846,18 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
                                                     keyEquivalent:@""];
         flipVItem.target = self;
         [menu addItem:flipVItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Replace Model (only if there are other models to replace)
+        NSArray<NSString *> *allModelNames = [_engineBridge getModelNamesExcludingGroups];
+        if (allModelNames.count > 1) {
+            NSMenuItem *replaceItem = [[NSMenuItem alloc] initWithTitle:@"Replace A Model With This Model"
+                                                                action:@selector(contextReplaceModel:)
+                                                         keyEquivalent:@""];
+            replaceItem.target = self;
+            [menu addItem:replaceItem];
+        }
 
         [menu addItem:[NSMenuItem separatorItem]];
 
@@ -1079,6 +1141,28 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     }
 }
 
+- (void)contextCreateShadowModel:(id)sender {
+    NSString *name = [self selectedModelName];
+    if (!name || !_engineBridge) return;
+
+    NSString *shadowName = [_engineBridge createShadowModel:name];
+    if (!shadowName) {
+        NSLog(@"XLModelTreeViewController: Failed to create shadow model for %@", name);
+        return;
+    }
+
+    [self loadModelTreeFromEngine];
+    _filteredNodes = _allNodes;
+    _rootNodes = _filteredNodes;
+    [_outlineView reloadData];
+
+    [self selectModelWithName:shadowName];
+
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"XLModelListDidChangeNotification"
+                      object:self];
+}
+
 - (void)contextDelete:(id)sender {
     NSArray<NSString *> *names = [self selectedModelNames];
     if (names.count == 0) return;
@@ -1189,11 +1273,125 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     }
 }
 
+#pragma mark - Context Menu Actions (Replace Model)
+
+- (void)contextReplaceModel:(id)sender {
+    NSString *replacementModelName = [self selectedModelName];
+    if (!replacementModelName || !_engineBridge) return;
+
+    // Build list of models that can be replaced (all models except the selected one)
+    NSArray<NSString *> *allModelNames = [_engineBridge getModelNamesExcludingGroups];
+    NSMutableArray<NSString *> *choices = [[NSMutableArray alloc] init];
+    for (NSString *name in allModelNames) {
+        if (![name isEqualToString:replacementModelName]) {
+            [choices addObject:name];
+        }
+    }
+
+    if (choices.count == 0) return;
+
+    // Show picker to select the model to replace
+    NSAlert *pickerAlert = [[NSAlert alloc] init];
+    pickerAlert.messageText = @"Replace Model";
+    pickerAlert.informativeText = [NSString stringWithFormat:@"Select the model to replace with \"%@\".", replacementModelName];
+    [pickerAlert addButtonWithTitle:@"Replace"];
+    [pickerAlert addButtonWithTitle:@"Cancel"];
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 300, 25) pullsDown:NO];
+    [popup addItemsWithTitles:choices];
+    pickerAlert.accessoryView = popup;
+
+    [pickerAlert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode != NSAlertFirstButtonReturn) return;
+
+        NSString *targetModelName = popup.titleOfSelectedItem;
+        if (!targetModelName) return;
+
+        // Ask about start channel
+        BOOL copyStartChannel = NO;
+        NSString *targetStartChannel = [self->_engineBridge getModelProperty:targetModelName key:@"ModelStartChannel" defaultValue:@""];
+        NSString *replacementStartChannel = [self->_engineBridge getModelProperty:replacementModelName key:@"ModelStartChannel" defaultValue:@""];
+        NSString *targetController = [self->_engineBridge getModelProperty:targetModelName key:@"Controller" defaultValue:@""];
+        NSString *replacementController = [self->_engineBridge getModelProperty:replacementModelName key:@"Controller" defaultValue:@""];
+
+        BOOL channelsDiffer = ![targetStartChannel isEqualToString:replacementStartChannel];
+        BOOL controllersDiffer = ![targetController isEqualToString:replacementController] &&
+            (replacementController.length == 0 || [replacementController isEqualToString:@"No Controller"]);
+
+        if (channelsDiffer || controllersDiffer) {
+            NSString *msg = [NSString stringWithFormat:
+                @"Should I copy the replaced model's start channel '%@' to the replacement model whose start channel is currently '%@'?",
+                targetStartChannel, replacementStartChannel];
+            NSAlert *channelAlert = [[NSAlert alloc] init];
+            channelAlert.messageText = @"Update Start Channel";
+            channelAlert.informativeText = msg;
+            [channelAlert addButtonWithTitle:@"Yes"];
+            [channelAlert addButtonWithTitle:@"No"];
+            copyStartChannel = ([channelAlert runModal] == NSAlertFirstButtonReturn);
+        }
+
+        // Ask about submodels
+        BOOL mergeSubmodels = NO;
+        NSArray<NSDictionary *> *targetSubmodels = [self->_engineBridge getSubmodels:targetModelName];
+        if (targetSubmodels.count > 0) {
+            NSAlert *subAlert = [[NSAlert alloc] init];
+            subAlert.messageText = @"Merge Submodels";
+            subAlert.informativeText = [NSString stringWithFormat:
+                @"The model being replaced has %lu submodel(s). Merge them into the replacement?",
+                (unsigned long)targetSubmodels.count];
+            [subAlert addButtonWithTitle:@"Yes"];
+            [subAlert addButtonWithTitle:@"No"];
+            mergeSubmodels = ([subAlert runModal] == NSAlertFirstButtonReturn);
+        }
+
+        // Ask about position
+        BOOL copyPosition = NO;
+        {
+            NSString *msg = [NSString stringWithFormat:
+                @"Use original size and position of \"%@\"?", targetModelName];
+            NSAlert *posAlert = [[NSAlert alloc] init];
+            posAlert.messageText = @"Use Original Position";
+            posAlert.informativeText = msg;
+            [posAlert addButtonWithTitle:@"Yes"];
+            [posAlert addButtonWithTitle:@"No"];
+            copyPosition = ([posAlert runModal] == NSAlertFirstButtonReturn);
+        }
+
+        // Perform the replacement
+        NSDictionary *options = @{
+            @"copyStartChannel": @(copyStartChannel),
+            @"copyPosition": @(copyPosition),
+            @"mergeSubmodels": @(mergeSubmodels),
+        };
+
+        if ([self.delegate respondsToSelector:@selector(modelTree:didRequestReplaceModel:withModel:options:)]) {
+            [self.delegate modelTree:self
+              didRequestReplaceModel:targetModelName
+                           withModel:replacementModelName
+                             options:options];
+        }
+    }];
+}
+
 #pragma mark - Context Menu Actions (Placeholder Dialogs)
 
 - (void)contextNodeLayout:(id)sender {
     [self showNotImplementedAlert:@"Node Layout"
                           detail:@"The Node Layout dialog will allow visual editing of individual node positions within the model."];
+}
+
+- (void)contextEditSubmodels:(id)sender {
+    NSString *name = [self selectedModelName];
+    if (!name || !_engineBridge) return;
+
+    _subModelsWindow = [[XLSubModelsWindow alloc] initWithModelName:name];
+    _subModelsWindow.engineBridge = _engineBridge;
+    [_subModelsWindow showWithCompletion:^(BOOL saved) {
+        self->_subModelsWindow = nil;
+        if (saved) {
+            [self reloadData];
+        }
+    }];
 }
 
 - (void)contextWiringView:(id)sender {

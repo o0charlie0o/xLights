@@ -68,6 +68,8 @@ struct ModelInfo {
     std::string controllerName;
     std::string controllerProtocol;
     int controllerPort = 0;
+    int smartRemote = 0;        // 0=None, 1=A, 2=B, 3=C, etc.
+    std::string smartRemoteType;
     bool isActive = true;
     bool isGroupModel = false;
     std::map<std::string, std::string> properties;
@@ -193,6 +195,13 @@ public:
     OperationResult deleteModel(const std::string& name);
     OperationResult renameModel(const std::string& oldName, const std::string& newName);
     OperationResult updateModelProperty(const std::string& name, const std::string& key, const std::string& value);
+
+    // --- Smart Remote ---
+
+    int getSmartRemote(const std::string& name) const;
+    std::string getSmartRemoteType(const std::string& name) const;
+    OperationResult setSmartRemote(const std::string& name, int smartRemote);
+    OperationResult setSmartRemoteType(const std::string& name, const std::string& type);
 
     // --- Submodels ---
 

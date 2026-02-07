@@ -414,6 +414,7 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Upload Configuration" action:@selector(contextUploadConfig:) keyEquivalent:@""];
     [menu addItemWithTitle:@"Upload to Selected Controllers" action:@selector(contextUploadSelectedConfigs:) keyEquivalent:@""];
+    [menu addItemWithTitle:@"Bulk Upload All Controllers..." action:@selector(contextBulkUploadAll:) keyEquivalent:@""];
 
     NSMenu *sortMenu = [[NSMenu alloc] initWithTitle:@"Sort"];
     [sortMenu addItemWithTitle:@"by Name" action:@selector(sortByName:) keyEquivalent:@""];
@@ -886,6 +887,12 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
         if ([_delegate respondsToSelector:@selector(controllersView:didRequestUploadControllersAtIndices:)]) {
             [_delegate controllersView:self didRequestUploadControllersAtIndices:selectedIndices];
         }
+    }
+}
+
+- (void)contextBulkUploadAll:(id)sender {
+    if ([_delegate respondsToSelector:@selector(controllersViewDidRequestBulkUpload:)]) {
+        [_delegate controllersViewDidRequestBulkUpload:self];
     }
 }
 

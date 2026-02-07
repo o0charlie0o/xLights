@@ -1080,6 +1080,40 @@ OperationResult ModelEngine::updateModelProperty(const std::string& name, const 
     return {false, "Native build: property update not yet implemented"};
 }
 
+// --- Smart Remote (Native Build) ---
+
+int ModelEngine::getSmartRemote(const std::string& name) const
+{
+    if (!_provider) return 0;
+    auto attrs = _provider->getModelAttributes(name);
+    auto it = attrs.find("ControllerConnection.SmartRemote");
+    if (it != attrs.end()) {
+        try { return std::stoi(it->second); } catch (...) {}
+    }
+    return 0;
+}
+
+std::string ModelEngine::getSmartRemoteType(const std::string& name) const
+{
+    if (!_provider) return "";
+    auto attrs = _provider->getModelAttributes(name);
+    auto it = attrs.find("ControllerConnection.SmartRemoteType");
+    if (it != attrs.end()) {
+        return it->second;
+    }
+    return "";
+}
+
+OperationResult ModelEngine::setSmartRemote(const std::string& name, int smartRemote)
+{
+    return {false, "Native build: smart remote update not yet implemented"};
+}
+
+OperationResult ModelEngine::setSmartRemoteType(const std::string& name, const std::string& type)
+{
+    return {false, "Native build: smart remote type update not yet implemented"};
+}
+
 std::vector<SubmodelInfo> ModelEngine::getSubmodels(const std::string& modelName) const
 {
     if (!_provider) return {};
@@ -1504,6 +1538,8 @@ ModelInfo ModelEngine::buildModelInfo(const Model* model) const
     info.controllerName = model->GetControllerName();
     info.controllerProtocol = model->GetControllerProtocol();
     info.controllerPort = model->GetControllerPort();
+    info.smartRemote = model->GetSmartRemote();
+    info.smartRemoteType = model->GetSmartRemoteType();
     info.isActive = model->IsActive();
     info.isGroupModel = (info.type == "ModelGroup");
 
@@ -1760,6 +1796,58 @@ OperationResult ModelEngine::updateModelProperty(const std::string& name, const 
     event.modelName = name;
     event.propertyKey = key;
     event.propertyValue = value;
+    notifyModelChanged(event);
+
+    return {true, ""};
+}
+
+// --- Smart Remote (Legacy Build) ---
+
+int ModelEngine::getSmartRemote(const std::string& name) const
+{
+    Model* m = findModel(name);
+    if (m == nullptr) return 0;
+    return m->GetSmartRemote();
+}
+
+std::string ModelEngine::getSmartRemoteType(const std::string& name) const
+{
+    Model* m = findModel(name);
+    if (m == nullptr) return "";
+    return m->GetSmartRemoteType();
+}
+
+OperationResult ModelEngine::setSmartRemote(const std::string& name, int smartRemote)
+{
+    Model* m = findModel(name);
+    if (m == nullptr)
+        return {false, "Model '" + name + "' not found"};
+
+    m->SetSmartRemote(smartRemote);
+
+    ModelChangeEvent event;
+    event.type = ModelChangeType::PropertyChanged;
+    event.modelName = name;
+    event.propertyKey = "SmartRemote";
+    event.propertyValue = std::to_string(smartRemote);
+    notifyModelChanged(event);
+
+    return {true, ""};
+}
+
+OperationResult ModelEngine::setSmartRemoteType(const std::string& name, const std::string& type)
+{
+    Model* m = findModel(name);
+    if (m == nullptr)
+        return {false, "Model '" + name + "' not found"};
+
+    m->SetSmartRemoteType(type);
+
+    ModelChangeEvent event;
+    event.type = ModelChangeType::PropertyChanged;
+    event.modelName = name;
+    event.propertyKey = "SmartRemoteType";
+    event.propertyValue = type;
     notifyModelChanged(event);
 
     return {true, ""};

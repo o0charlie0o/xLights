@@ -68,6 +68,16 @@
 /// User requested cloning a group
 - (void)modelTree:(XLModelTreeViewController *)controller didRequestCloneGroup:(NSString *)groupName;
 
+/// User requested replacing a model with another model.
+/// The replacement model takes the target's name and (optionally) its position, controller, and submodels.
+/// @param targetModelName The model being replaced (will be deleted)
+/// @param replacementModelName The model replacing the target (will be renamed to target's name)
+/// @param options Dictionary with keys: copyStartChannel, copyPosition, mergeSubmodels (all BOOL)
+- (void)modelTree:(XLModelTreeViewController *)controller
+  didRequestReplaceModel:(NSString *)targetModelName
+               withModel:(NSString *)replacementModelName
+                 options:(NSDictionary *)options;
+
 /// User requested opening the model group management window
 - (void)modelTreeDidRequestManageGroups:(XLModelTreeViewController *)controller;
 

@@ -189,6 +189,26 @@ static const float kDefaultMaxElevation = M_PI_2 - 0.01f;
     _distance = fmaxf(_minDistance, fminf(_maxDistance, _distance));
 }
 
+#pragma mark - Visible Rect (2D Orthographic)
+
+- (CGRect)visibleRectForAspect:(float)aspect {
+    float halfHeight = _distance * tanf(_fieldOfView * 0.5f);
+    float halfWidth = halfHeight * aspect;
+    float minX = _target.x - halfWidth;
+    float minY = _target.y - halfHeight;
+    return CGRectMake(minX, minY, halfWidth * 2.0f, halfHeight * 2.0f);
+}
+
+- (void)setTargetX:(float)x {
+    [self cancelAnimation];
+    _target = (simd_float3){x, _target.y, _target.z};
+}
+
+- (void)setTargetY:(float)y {
+    [self cancelAnimation];
+    _target = (simd_float3){_target.x, y, _target.z};
+}
+
 #pragma mark - Presets
 
 - (void)reset {

@@ -74,6 +74,17 @@
 /// Projection matrix for the given aspect ratio
 - (simd_float4x4)projectionMatrixForAspect:(float)aspect;
 
+/// Returns the visible world-space rectangle in orthographic mode.
+/// The rect origin is the bottom-left corner (minX, minY), and size is (width, height).
+/// Only meaningful when perspective == NO.
+- (CGRect)visibleRectForAspect:(float)aspect;
+
+/// Set the camera target X directly (for scrollbar-driven panning)
+- (void)setTargetX:(float)x;
+
+/// Set the camera target Y directly (for scrollbar-driven panning)
+- (void)setTargetY:(float)y;
+
 #pragma mark - Animation
 
 /// Whether the camera is currently animating

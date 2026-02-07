@@ -13,6 +13,9 @@
 #import "XLKeyBindingsWindowController.h"
 #import "XLFPPConnectWindowController.h"
 #import "XLScriptRunnerWindowController.h"
+#import "XLSetupViewController.h"
+#import "setup/XLMultiControllerUploadDialogController.h"
+#import "layout/XLModelImportSheet.h"
 
 // Import Swift generated header for XLSwiftUIWindowHelper
 // The header name depends on the target product name
@@ -42,6 +45,8 @@ void XLSetCommandPaletteVisible(bool visible) {
 @property (nonatomic, strong) XLDownloadSequencesDialog *downloadDialog;
 @property (nonatomic, strong) XLPrepareAudioDialog *prepareAudioDialog;
 @property (nonatomic, strong) XLConvertDialog *convertDialog;
+@property (nonatomic, strong) XLModelImportSheet *activeImportSheet;
+@property (nonatomic, strong) XLMultiControllerUploadDialogController *multiUploadDialog;
 
 @end
 
@@ -510,6 +515,29 @@ void XLSetCommandPaletteVisible(bool visible) {
     [alert runModal];
 }
 
+- (IBAction)importModels:(id)sender {
+    NSWindow *window = [NSApp mainWindow];
+    if (!window) return;
+
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+    if (!engineBridge) return;
+
+    _activeImportSheet = [[XLModelImportSheet alloc] init];
+    _activeImportSheet.engineBridge = engineBridge;
+
+    __weak typeof(self) weakSelf = self;
+    [_activeImportSheet showAsSheetForWindow:window
+                                 completion:^(BOOL imported, NSArray<NSString *> *importedModelNames) {
+        if (imported && importedModelNames.count > 0) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"XLModelsDidChangeNotification"
+                                                                object:nil
+                                                              userInfo:@{@"importedModels": importedModelNames}];
+        }
+        weakSelf.activeImportSheet = nil;
+    }];
+}
+
 #pragma mark - Audio Menu Actions
 
 - (IBAction)setPlaybackSpeed:(id)sender {
@@ -698,12 +726,28 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)bulkControllerUpload:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Bulk Controller Upload";
-    alert.informativeText = @"Not yet implemented.";
-    alert.alertStyle = NSAlertStyleInformational;
-    [alert addButtonWithTitle:@"OK"];
-    [alert runModal];
+    XLEngineBridge *engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+    if (!engineBridge) return;
+
+    NSWindow *parentWindow = [NSApp keyWindow];
+    if (!parentWindow) parentWindow = [NSApp mainWindow];
+    if (!parentWindow) return;
+
+    // Try to use the setup view controller's sheet presentation if available
+    for (NSWindow *window in [NSApp windows]) {
+        NSWindowController *wc = window.windowController;
+        if ([wc isKindOfClass:[XLMainWindowController class]]) {
+            XLMainWindowController *mainController = (XLMainWindowController *)wc;
+            if (mainController.setupViewController) {
+                [mainController.setupViewController presentMultiControllerUploadDialog];
+                return;
+            }
+        }
+    }
+
+    // Fallback: present as sheet on current window
+    _multiUploadDialog = [[XLMultiControllerUploadDialogController alloc] initWithEngineBridge:engineBridge];
+    [_multiUploadDialog presentAsSheetOnWindow:parentWindow];
 }
 
 - (IBAction)runScripts:(id)sender {

@@ -11,6 +11,7 @@
 #import "XLMetalPreviewView.h"
 #import "XLCameraController.h"
 #import "XLManipulationHandlesRenderer.h"
+#import "XLPolylinePointRenderer.h"
 #import "../XLEngineBridge.h"
 #import <QuartzCore/CVDisplayLink.h>
 
@@ -112,12 +113,27 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 @property (nonatomic, strong) XLManipulationHandlesRenderer *handles;
 
+// Polyline point editing
+@property (nonatomic, strong) XLPolylinePointRenderer *polylineRenderer;
+@property (nonatomic, assign) BOOL isManipulatingPolylinePoint;
+@property (nonatomic, assign) XLPolylineHitType polylineHitType;
+@property (nonatomic, assign) NSInteger polylineHitIndex;
+@property (nonatomic, assign) XLPolylineHitType contextMenuPolylineHitType;
+@property (nonatomic, assign) NSInteger contextMenuPolylineHitIndex;
+
 // Background image rendering
 @property (nonatomic, strong) id<MTLTexture> backgroundTexture;
 @property (nonatomic, strong) id<MTLRenderPipelineState> backgroundPipelineState;
 @property (nonatomic, strong) id<MTLBuffer> backgroundVertexBuffer;
 @property (nonatomic, strong) id<MTLSamplerState> backgroundSamplerState;
 @property (nonatomic, assign) CGSize backgroundImageSize;
+
+// 2D Scrollbars
+@property (nonatomic, strong) NSScroller *horizontalScroller;
+@property (nonatomic, strong) NSScroller *verticalScroller;
+@property (nonatomic, assign) CGRect contentBoundingBox;
+@property (nonatomic, assign) BOOL scrollbarsDirty;
+@property (nonatomic, strong) NSTimer *scrollbarFadeTimer;
 
 @end
 
@@ -208,6 +224,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _handles = [[XLManipulationHandlesRenderer alloc] initWithDevice:_device];
     _handles.is3D = _show3D;
 
+    // Initialize polyline point renderer
+    _polylineRenderer = [[XLPolylinePointRenderer alloc] initWithDevice:_device];
+
     // Accept mouse events
     NSTrackingArea *trackingArea = [[NSTrackingArea alloc]
         initWithRect:self.bounds
@@ -215,9 +234,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                owner:self
             userInfo:nil];
     [self addTrackingArea:trackingArea];
+
+    // 2D Scrollbars
+    _scrollbarsEnabled = YES;
+    _contentBoundingBox = CGRectZero;
+    _scrollbarsDirty = YES;
+    [self setupScrollbars];
 }
 
 - (void)dealloc {
+    [_scrollbarFadeTimer invalidate];
     [self stopRenderLoop];
 }
 
@@ -264,11 +290,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     CGFloat scale = self.window.backingScaleFactor ?: 1.0;
     _mlayer.drawableSize = CGSizeMake(newSize.width * scale, newSize.height * scale);
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 }
 
 - (void)setBoundsSize:(NSSize)newSize {
     [super setBoundsSize:newSize];
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 }
 
 #pragma mark - Depth / Stencil
@@ -677,11 +705,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         BOOL stillAnimating = [_cameraController updateAnimation:dt];
         if (stillAnimating) {
             _contentDirty = YES;
+            _scrollbarsDirty = YES;
         }
     }
 
     dispatch_async(dispatch_get_main_queue(), ^{
         [self renderFrame];
+        if (self->_scrollbarsDirty) {
+            self->_scrollbarsDirty = NO;
+            [self updateScrollbars];
+        }
     });
 }
 
@@ -839,6 +872,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                                   scale:1];
         }
 
+        // Render polyline point handles
+        if (_polylineRenderer && _polylineRenderer.active && _selectedModelName) {
+            [_polylineRenderer renderWithEncoder:encoder
+                                 viewProjection:viewProjection
+                                           zoom:(float)_cameraController.distance
+                                          scale:1];
+        }
+
         [encoder endEncoding];
 
         [commandBuffer presentDrawable:drawable];
@@ -879,6 +920,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)setZoomLevel:(CGFloat)zoomLevel {
     _cameraController.distance = (float)zoomLevel;
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 }
 
 - (void)setShowGrid:(BOOL)showGrid {
@@ -1025,6 +1067,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSLog(@"[HousePreview] reloadModels: done — modelVertexCount=%lu",
           (unsigned long)_modelVertexCount);
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 }
 
 - (void)selectModel:(NSString *)modelName {
@@ -1037,9 +1080,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     // Get model info and set up manipulation handles
     NSDictionary *info = [_engineBridge getModelInfo:modelName];
-    NSDictionary *bounds = [_engineBridge getModelBounds:modelName];
 
-    if (!info || !bounds) {
+    if (!info) {
         [self clearModelSelection];
         return;
     }
@@ -1062,35 +1104,38 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     float rotY = [info[@"RotateY"] floatValue];
     float rotZ = [info[@"RotateZ"] floatValue];
 
-    // Extract bounds
-    float minX = [bounds[@"minX"] floatValue];
-    float maxX = [bounds[@"maxX"] floatValue];
-    float minY = [bounds[@"minY"] floatValue];
-    float maxY = [bounds[@"maxY"] floatValue];
-    float minZ = [bounds[@"minZ"] floatValue];
-    float maxZ = [bounds[@"maxZ"] floatValue];
+    // Use model-space render dimensions from buffer dims (matches legacy RenderWi/RenderHt).
+    // These are the intrinsic model size before scale is applied.
+    float renderWidth = [info[@"RenderWidth"] floatValue];
+    float renderHeight = [info[@"RenderHeight"] floatValue];
+    float renderDepth = [info[@"RenderDepth"] floatValue];
+    if (renderWidth < 0.001f) renderWidth = 1.0f;
+    if (renderHeight < 0.001f) renderHeight = 1.0f;
+    if (renderDepth < 0.001f) renderDepth = 2.0f;
 
-    // Calculate render dimensions
-    float renderWidth = maxX - minX;
-    float renderHeight = maxY - minY;
-    float renderDepth = maxZ - minZ;
+    // Bounding box in local space, centered at origin
+    simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
+    simd_float3 bbMax = simd_make_float3(renderWidth/2, renderHeight/2, renderDepth/2);
 
     // Check if locked
     BOOL isLocked = [info[@"Locked"] boolValue];
 
     // Check if supports Z scaling (3D models)
-    BOOL supportsZScaling = _show3D && (renderDepth > 0.1f);
+    BOOL supportsZScaling = _show3D && (renderDepth > 2.1f);
 
     [self setModelTransformWithPosition:(simd_float3){posX, posY, posZ}
                                   scale:(simd_float3){scaleX, scaleY, scaleZ}
                                rotation:(simd_float3){rotX, rotY, rotZ}
-                         boundingBoxMin:(simd_float3){minX, minY, minZ}
-                         boundingBoxMax:(simd_float3){maxX, maxY, maxZ}
+                         boundingBoxMin:bbMin
+                         boundingBoxMax:bbMax
                             renderWidth:renderWidth
                            renderHeight:renderHeight
                             renderDepth:renderDepth
                                isLocked:isLocked
                        supportsZScaling:supportsZScaling];
+
+    // Load polyline points if this is a polyline model
+    [self loadPolylinePointsForModel:modelName];
 
     _contentDirty = YES;
 
@@ -1131,11 +1176,23 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         NSArray<NSDictionary *> *nodes = modelData[@"nodes"];
         NSString *modelName = modelData[@"name"];
 
-        // Check for rendered pixel data for this model
+        // Check for rendered pixel data for this model.
+        // Shadow models mirror their source model's pixel data during playback.
         [_pixelDataLock lock];
         NSData *pixelData = useEffectColors ? _renderedPixelData[modelName] : nil;
         NSUInteger pixelWidth = [_renderedPixelWidths[modelName] unsignedIntegerValue];
         NSUInteger pixelHeight = [_renderedPixelHeights[modelName] unsignedIntegerValue];
+        if (pixelData == nil && useEffectColors) {
+            NSDictionary *mInfo = modelData[@"info"];
+            if (mInfo != nil) {
+                NSString *shadowFor = mInfo[@"ShadowModelFor"];
+                if (shadowFor != nil && [shadowFor isKindOfClass:[NSString class]] && shadowFor.length > 0) {
+                    pixelData = _renderedPixelData[shadowFor];
+                    pixelWidth = [_renderedPixelWidths[shadowFor] unsignedIntegerValue];
+                    pixelHeight = [_renderedPixelHeights[shadowFor] unsignedIntegerValue];
+                }
+            }
+        }
         [_pixelDataLock unlock];
 
         const uint8_t *pixels = (const uint8_t *)pixelData.bytes;
@@ -1348,6 +1405,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // Right drag = pan
     [_cameraController panByDeltaX:dx deltaY:dy sensitivity:0.002f];
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 
     if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
         [_delegate previewView:self didChangeCamera:_cameraController];
@@ -1376,6 +1434,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         float sensitivity = event.hasPreciseScrollingDeltas ? 0.01f : 0.05f;
         [_cameraController zoomByDelta:-delta sensitivity:sensitivity];
         _contentDirty = YES;
+        _scrollbarsDirty = YES;
         if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
             [_delegate previewView:self didChangeCamera:_cameraController];
         }
@@ -1399,6 +1458,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 
     if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
         [_delegate previewView:self didChangeCamera:_cameraController];
@@ -1410,6 +1470,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     float delta = (float)event.magnification;
     [_cameraController zoomByDelta:-delta sensitivity:2.0f];
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 
     if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
         [_delegate previewView:self didChangeCamera:_cameraController];
@@ -1600,6 +1661,45 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _isDragging = NO;
     _isRightDragging = NO;
     _isManipulatingHandle = NO;
+    _isManipulatingPolylinePoint = NO;
+
+    // Check polyline points first (higher priority than bounding box handles)
+    if (_selectedModelName && _polylineRenderer && _polylineRenderer.active) {
+        simd_float3 rayOrigin, rayDir;
+        [self rayFromScreenPoint:_lastDragPoint rayOrigin:&rayOrigin rayDirection:&rayDir];
+
+        NSInteger hitIndex = -1;
+        XLPolylineHitType hitType = [_polylineRenderer hitTestWithRayOrigin:rayOrigin
+                                                              rayDirection:rayDir
+                                                                      zoom:(float)_cameraController.distance
+                                                                  hitIndex:&hitIndex];
+
+        if (hitType == XLPolylineHitPoint || hitType == XLPolylineHitCP0 || hitType == XLPolylineHitCP1) {
+            _isManipulatingPolylinePoint = YES;
+            _polylineHitType = hitType;
+            _polylineHitIndex = hitIndex;
+
+            if (hitType == XLPolylineHitPoint) {
+                _polylineRenderer.selectedPoint = hitIndex;
+            }
+
+            simd_float3 planePoint = [_polylineRenderer positionForPoint:
+                (hitType == XLPolylineHitPoint) ? hitIndex : 0];
+            simd_float3 worldPoint = [self worldPointFromScreenPoint:_lastDragPoint onPlane:planePoint];
+            [_polylineRenderer beginDragAtPoint:worldPoint pointIndex:hitIndex hitType:hitType];
+
+            if ([_delegate respondsToSelector:@selector(previewView:didBeginManipulatingModel:)]) {
+                [_delegate previewView:self didBeginManipulatingModel:_selectedModelName];
+            }
+
+            _contentDirty = YES;
+            return;
+        } else if (hitType == XLPolylineHitSegment) {
+            _polylineRenderer.selectedSegment = hitIndex;
+            _contentDirty = YES;
+            // Fall through to allow other interactions
+        }
+    }
 
     // Check if clicking on a manipulation handle
     if (_selectedModelName && _handles) {
@@ -1636,6 +1736,34 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     float dy = (float)(current.y - _lastDragPoint.y);
     _lastDragPoint = current;
 
+    if (_isManipulatingPolylinePoint && _polylineRenderer) {
+        simd_float3 planePoint = [_polylineRenderer positionForPoint:
+            (_polylineHitType == XLPolylineHitPoint) ? _polylineHitIndex : 0];
+        simd_float3 worldPoint = [self worldPointFromScreenPoint:current onPlane:planePoint];
+        simd_float3 newPos = [_polylineRenderer updateDragToPoint:worldPoint];
+
+        if (_engineBridge && _selectedModelName) {
+            if (_polylineHitType == XLPolylineHitPoint) {
+                [_engineBridge movePolylinePoint:_selectedModelName
+                                          index:_polylineHitIndex
+                                              x:newPos.x y:newPos.y z:newPos.z];
+            } else if (_polylineHitType == XLPolylineHitCP0) {
+                [_engineBridge movePolylineCurvePoint:_selectedModelName
+                                        segmentIndex:_polylineHitIndex
+                                        controlPoint:0
+                                                   x:newPos.x y:newPos.y z:newPos.z];
+            } else if (_polylineHitType == XLPolylineHitCP1) {
+                [_engineBridge movePolylineCurvePoint:_selectedModelName
+                                        segmentIndex:_polylineHitIndex
+                                        controlPoint:1
+                                                   x:newPos.x y:newPos.y z:newPos.z];
+            }
+        }
+
+        _contentDirty = YES;
+        return;
+    }
+
     if (_isManipulatingHandle && _handles) {
         // Handle manipulation mode
         simd_float3 worldPoint = [self worldPointFromScreenPoint:current onPlane:_handles.modelTransform.position];
@@ -1668,6 +1796,21 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)mouseUp:(NSEvent *)event {
+    if (_isManipulatingPolylinePoint) {
+        [_polylineRenderer endDrag];
+        _isManipulatingPolylinePoint = NO;
+
+        [self refreshPolylinePoints];
+        [self reloadModels];
+
+        if ([_delegate respondsToSelector:@selector(previewView:didEndManipulatingModel:)]) {
+            [_delegate previewView:self didEndManipulatingModel:_selectedModelName];
+        }
+
+        _contentDirty = YES;
+        return;
+    }
+
     if (_isManipulatingHandle) {
         [_handles endDrag];
         _isManipulatingHandle = NO;
@@ -1688,12 +1831,45 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)mouseMoved:(NSEvent *)event {
+    NSPoint localPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    simd_float3 rayOrigin, rayDir;
+    [self rayFromScreenPoint:localPoint rayOrigin:&rayOrigin rayDirection:&rayDir];
+
+    // Check polyline points first
+    if (_selectedModelName && _polylineRenderer && _polylineRenderer.active) {
+        NSInteger hitIndex = -1;
+        XLPolylineHitType hitType = [_polylineRenderer hitTestWithRayOrigin:rayOrigin
+                                                              rayDirection:rayDir
+                                                                      zoom:(float)_cameraController.distance
+                                                                  hitIndex:&hitIndex];
+
+        if (hitType == XLPolylineHitPoint) {
+            if (hitIndex != _polylineRenderer.highlightedPoint) {
+                _polylineRenderer.highlightedPoint = hitIndex;
+                _contentDirty = YES;
+            }
+            [[NSCursor pointingHandCursor] set];
+            return;
+        } else {
+            if (_polylineRenderer.highlightedPoint != -1) {
+                _polylineRenderer.highlightedPoint = -1;
+                _contentDirty = YES;
+            }
+        }
+
+        if (hitType == XLPolylineHitCP0 || hitType == XLPolylineHitCP1) {
+            [[NSCursor pointingHandCursor] set];
+            return;
+        }
+
+        if (hitType == XLPolylineHitSegment) {
+            [[NSCursor crosshairCursor] set];
+            return;
+        }
+    }
+
     // Update highlighted handle on mouse move
     if (_selectedModelName && _handles) {
-        NSPoint localPoint = [self convertPoint:event.locationInWindow fromView:nil];
-        simd_float3 rayOrigin, rayDir;
-        [self rayFromScreenPoint:localPoint rayOrigin:&rayOrigin rayDirection:&rayDir];
-
         XLHandleType hitHandle = [_handles hitTestWithRayOrigin:rayOrigin
                                                    rayDirection:rayDir
                                                            zoom:(float)_cameraController.distance
@@ -1711,6 +1887,58 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                 [[NSCursor arrowCursor] set];
             }
         }
+    }
+}
+
+#pragma mark - Polyline Point Support
+
+- (void)loadPolylinePointsForModel:(NSString *)modelName {
+    if (!_engineBridge || !modelName) {
+        [_polylineRenderer clearPoints];
+        return;
+    }
+
+    if (![_engineBridge isPolylineModel:modelName]) {
+        [_polylineRenderer clearPoints];
+        return;
+    }
+
+    NSArray<NSDictionary *> *pointData = [_engineBridge getPolylinePoints:modelName];
+    if (!pointData || pointData.count < 2) {
+        [_polylineRenderer clearPoints];
+        return;
+    }
+
+    XLPolylinePoint points[XL_MAX_POLYLINE_POINTS];
+    NSInteger count = MIN((NSInteger)pointData.count, (NSInteger)XL_MAX_POLYLINE_POINTS);
+
+    for (NSInteger i = 0; i < count; i++) {
+        NSDictionary *pt = pointData[i];
+        points[i].position = simd_make_float3(
+            [pt[@"x"] floatValue],
+            [pt[@"y"] floatValue],
+            [pt[@"z"] floatValue]
+        );
+        points[i].hasCurve = [pt[@"hasCurve"] boolValue];
+        points[i].cp0 = simd_make_float3(
+            [pt[@"cp0x"] floatValue],
+            [pt[@"cp0y"] floatValue],
+            [pt[@"cp0z"] floatValue]
+        );
+        points[i].cp1 = simd_make_float3(
+            [pt[@"cp1x"] floatValue],
+            [pt[@"cp1y"] floatValue],
+            [pt[@"cp1z"] floatValue]
+        );
+    }
+
+    [_polylineRenderer setPoints:points count:count];
+}
+
+- (void)refreshPolylinePoints {
+    if (_selectedModelName && _polylineRenderer.active) {
+        [self loadPolylinePointsForModel:_selectedModelName];
+        _contentDirty = YES;
     }
 }
 
@@ -1900,6 +2128,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         deleteItem.enabled = !isLocked;
         [menu addItem:deleteItem];
 
+        // Create Shadow Model
+        NSMenuItem *shadowItem = [[NSMenuItem alloc] initWithTitle:@"Create Shadow Model"
+                                                            action:@selector(contextMenuCreateShadow:)
+                                                     keyEquivalent:@""];
+        shadowItem.target = self;
+        shadowItem.representedObject = _selectedModelName;
+        [menu addItem:shadowItem];
+
         [menu addItem:[NSMenuItem separatorItem]];
 
         // Flip
@@ -1997,6 +2233,80 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         NSMenuItem *bulkEditItem = [[NSMenuItem alloc] initWithTitle:@"Bulk Edit" action:nil keyEquivalent:@""];
         [menu setSubmenu:bulkEditMenu forItem:bulkEditItem];
         [menu addItem:bulkEditItem];
+
+        // Polyline point editing items
+        if (_engineBridge && [_engineBridge isPolylineModel:_selectedModelName]) {
+            [menu addItem:[NSMenuItem separatorItem]];
+
+            NSPoint eventPoint = [self convertPoint:event.locationInWindow fromView:nil];
+            simd_float3 rayOrigin, rayDir;
+            [self rayFromScreenPoint:eventPoint rayOrigin:&rayOrigin rayDirection:&rayDir];
+
+            _contextMenuPolylineHitType = XLPolylineHitNone;
+            _contextMenuPolylineHitIndex = -1;
+
+            if (_polylineRenderer && _polylineRenderer.active) {
+                NSInteger hitIdx = -1;
+                XLPolylineHitType hitType = [_polylineRenderer hitTestWithRayOrigin:rayOrigin
+                                                                      rayDirection:rayDir
+                                                                              zoom:(float)_cameraController.distance
+                                                                          hitIndex:&hitIdx];
+                _contextMenuPolylineHitType = hitType;
+                _contextMenuPolylineHitIndex = hitIdx;
+            }
+
+            if (_contextMenuPolylineHitType == XLPolylineHitSegment && _contextMenuPolylineHitIndex >= 0) {
+                NSMenuItem *addPointItem = [[NSMenuItem alloc] initWithTitle:@"Add Point"
+                                                                     action:@selector(contextMenuAddPolylinePoint:)
+                                                              keyEquivalent:@""];
+                addPointItem.target = self;
+                addPointItem.enabled = !isLocked;
+                [menu addItem:addPointItem];
+            }
+
+            NSInteger pointCount = [_engineBridge getPolylinePointCount:_selectedModelName];
+            if (_polylineRenderer.selectedPoint >= 0 && pointCount > 2) {
+                NSMenuItem *deletePointItem = [[NSMenuItem alloc] initWithTitle:@"Delete Point"
+                                                                        action:@selector(contextMenuDeletePolylinePoint:)
+                                                                 keyEquivalent:@""];
+                deletePointItem.target = self;
+                deletePointItem.enabled = !isLocked;
+                [menu addItem:deletePointItem];
+            }
+
+            if ([_engineBridge polylineModelSupportsCurves:_selectedModelName]) {
+                NSInteger segIndex = -1;
+                if (_contextMenuPolylineHitType == XLPolylineHitSegment) {
+                    segIndex = _contextMenuPolylineHitIndex;
+                } else if (_polylineRenderer.selectedSegment >= 0) {
+                    segIndex = _polylineRenderer.selectedSegment;
+                }
+
+                if (segIndex >= 0 && segIndex < _polylineRenderer.pointCount - 1) {
+                    NSArray<NSDictionary *> *pts = [_engineBridge getPolylinePoints:_selectedModelName];
+                    BOOL hasCurve = NO;
+                    if (segIndex < (NSInteger)pts.count) {
+                        hasCurve = [pts[segIndex][@"hasCurve"] boolValue];
+                    }
+
+                    if (hasCurve) {
+                        NSMenuItem *removeCurveItem = [[NSMenuItem alloc] initWithTitle:@"Remove Curve"
+                                                                                action:@selector(contextMenuRemovePolylineCurve:)
+                                                                         keyEquivalent:@""];
+                        removeCurveItem.target = self;
+                        removeCurveItem.enabled = !isLocked;
+                        [menu addItem:removeCurveItem];
+                    } else {
+                        NSMenuItem *addCurveItem = [[NSMenuItem alloc] initWithTitle:@"Add Curve"
+                                                                             action:@selector(contextMenuAddPolylineCurve:)
+                                                                      keyEquivalent:@""];
+                        addCurveItem.target = self;
+                        addCurveItem.enabled = !isLocked;
+                        [menu addItem:addCurveItem];
+                    }
+                }
+            }
+        }
 
         [menu addItem:[NSMenuItem separatorItem]];
     }
@@ -2161,6 +2471,21 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
+- (void)contextMenuCreateShadow:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName || !_engineBridge) return;
+
+    NSString *shadowName = [_engineBridge createShadowModel:modelName];
+    if (shadowName) {
+        [self reloadModels];
+        [self selectModel:shadowName];
+
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"XLModelListDidChangeNotification"
+                                                            object:nil
+                                                          userInfo:@{@"selectedModel": shadowName}];
+    }
+}
+
 - (void)contextMenuFlipHorizontal:(NSMenuItem *)sender {
     NSString *modelName = sender.representedObject;
     if (!modelName) return;
@@ -2206,6 +2531,69 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (!editType) return;
     if ([_delegate respondsToSelector:@selector(previewView:didRequestBulkEdit:)]) {
         [_delegate previewView:self didRequestBulkEdit:editType];
+    }
+}
+
+#pragma mark - Context Menu Actions (Polyline)
+
+- (void)contextMenuAddPolylinePoint:(NSMenuItem *)sender {
+    if (!_engineBridge || !_selectedModelName) return;
+    if (_contextMenuPolylineHitType != XLPolylineHitSegment || _contextMenuPolylineHitIndex < 0) return;
+
+    if ([_engineBridge insertPolylinePoint:_selectedModelName afterSegment:_contextMenuPolylineHitIndex]) {
+        [self refreshPolylinePoints];
+        [self reloadModels];
+        _contentDirty = YES;
+    }
+}
+
+- (void)contextMenuDeletePolylinePoint:(NSMenuItem *)sender {
+    if (!_engineBridge || !_selectedModelName) return;
+    NSInteger pointIndex = _polylineRenderer.selectedPoint;
+    if (pointIndex < 0) return;
+
+    if ([_engineBridge deletePolylinePoint:_selectedModelName index:pointIndex]) {
+        _polylineRenderer.selectedPoint = -1;
+        _polylineRenderer.selectedSegment = -1;
+        [self refreshPolylinePoints];
+        [self reloadModels];
+        _contentDirty = YES;
+    }
+}
+
+- (void)contextMenuAddPolylineCurve:(NSMenuItem *)sender {
+    if (!_engineBridge || !_selectedModelName) return;
+
+    NSInteger segIndex = -1;
+    if (_contextMenuPolylineHitType == XLPolylineHitSegment) {
+        segIndex = _contextMenuPolylineHitIndex;
+    } else if (_polylineRenderer.selectedSegment >= 0) {
+        segIndex = _polylineRenderer.selectedSegment;
+    }
+    if (segIndex < 0) return;
+
+    if ([_engineBridge setPolylineCurve:_selectedModelName segment:segIndex create:YES]) {
+        [self refreshPolylinePoints];
+        [self reloadModels];
+        _contentDirty = YES;
+    }
+}
+
+- (void)contextMenuRemovePolylineCurve:(NSMenuItem *)sender {
+    if (!_engineBridge || !_selectedModelName) return;
+
+    NSInteger segIndex = -1;
+    if (_contextMenuPolylineHitType == XLPolylineHitSegment) {
+        segIndex = _contextMenuPolylineHitIndex;
+    } else if (_polylineRenderer.selectedSegment >= 0) {
+        segIndex = _polylineRenderer.selectedSegment;
+    }
+    if (segIndex < 0) return;
+
+    if ([_engineBridge setPolylineCurve:_selectedModelName segment:segIndex create:NO]) {
+        [self refreshPolylinePoints];
+        [self reloadModels];
+        _contentDirty = YES;
     }
 }
 
@@ -2311,7 +2699,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)clearModelSelection {
     _selectedModelName = nil;
     [_handles clearSelection];
+    [_polylineRenderer clearPoints];
     _isManipulatingHandle = NO;
+    _isManipulatingPolylinePoint = NO;
     _activeHandleType = XLHandleTypeNone;
     _contentDirty = YES;
 }
@@ -2360,6 +2750,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _cameraController.perspective = show3D;
     _handles.is3D = show3D;
     _contentDirty = YES;
+    _scrollbarsDirty = YES;
 }
 
 
@@ -2497,6 +2888,289 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     _backgroundTexture = texture;
     NSLog(@"XLMetalPreviewView: Loaded background image %lux%lu from %@", (unsigned long)w, (unsigned long)h, path);
+}
+
+#pragma mark - 2D Scrollbars
+
+static const CGFloat kScrollerWidth = 11.0;
+static const CGFloat kScrollerMargin = 2.0;
+
+- (void)setupScrollbars {
+    _horizontalScroller = [[NSScroller alloc] initWithFrame:NSZeroRect];
+    _horizontalScroller.scrollerStyle = NSScrollerStyleOverlay;
+    _horizontalScroller.knobStyle = NSScrollerKnobStyleLight;
+    _horizontalScroller.target = self;
+    _horizontalScroller.action = @selector(horizontalScrollerAction:);
+    _horizontalScroller.alphaValue = 0.0;
+    _horizontalScroller.hidden = YES;
+    [self addSubview:_horizontalScroller];
+
+    _verticalScroller = [[NSScroller alloc] initWithFrame:NSZeroRect];
+    _verticalScroller.scrollerStyle = NSScrollerStyleOverlay;
+    _verticalScroller.knobStyle = NSScrollerKnobStyleLight;
+    _verticalScroller.target = self;
+    _verticalScroller.action = @selector(verticalScrollerAction:);
+    _verticalScroller.alphaValue = 0.0;
+    _verticalScroller.hidden = YES;
+    [self addSubview:_verticalScroller];
+}
+
+- (void)layoutScrollbars {
+    CGRect bounds = self.bounds;
+
+    CGFloat hScrollerWidth = bounds.size.width - kScrollerMargin * 2.0 - kScrollerWidth;
+    if (hScrollerWidth < 40.0) hScrollerWidth = 40.0;
+    _horizontalScroller.frame = NSMakeRect(
+        kScrollerMargin,
+        kScrollerMargin,
+        hScrollerWidth,
+        kScrollerWidth
+    );
+
+    CGFloat vScrollerHeight = bounds.size.height - kScrollerMargin * 2.0 - kScrollerWidth;
+    if (vScrollerHeight < 40.0) vScrollerHeight = 40.0;
+    _verticalScroller.frame = NSMakeRect(
+        bounds.size.width - kScrollerWidth - kScrollerMargin,
+        kScrollerMargin + kScrollerWidth,
+        kScrollerWidth,
+        vScrollerHeight
+    );
+}
+
+- (void)updateContentBoundingBox {
+    CGRect bb = CGRectZero;
+    BOOL hasModels = NO;
+
+    for (NSDictionary *modelData in _modelDataCache) {
+        NSDictionary *bounds = modelData[@"bounds"];
+        if (!bounds || bounds.count == 0) continue;
+
+        float minX = [bounds[@"minX"] floatValue];
+        float maxX = [bounds[@"maxX"] floatValue];
+        float minY = [bounds[@"minY"] floatValue];
+        float maxY = [bounds[@"maxY"] floatValue];
+
+        if (!hasModels) {
+            bb = CGRectMake(minX, minY, maxX - minX, maxY - minY);
+            hasModels = YES;
+        } else {
+            CGRect modelRect = CGRectMake(minX, minY, maxX - minX, maxY - minY);
+            bb = CGRectUnion(bb, modelRect);
+        }
+    }
+
+    if (!hasModels) {
+        bb = CGRectMake(-500.0, 0.0, 1000.0, 500.0);
+    }
+
+    CGFloat padX = bb.size.width * 0.1;
+    CGFloat padY = bb.size.height * 0.1;
+    bb = CGRectInset(bb, -padX, -padY);
+
+    _contentBoundingBox = bb;
+}
+
+- (void)updateScrollbars {
+    if (!_scrollbarsEnabled || _show3D) {
+        [self hideScrollbarsAnimated:NO];
+        return;
+    }
+
+    [self layoutScrollbars];
+    [self updateContentBoundingBox];
+
+    CGSize drawableSize = _mlayer.drawableSize;
+    if (drawableSize.width <= 0 || drawableSize.height <= 0) return;
+
+    float aspect = (float)drawableSize.width / (float)drawableSize.height;
+    CGRect visibleRect = [_cameraController visibleRectForAspect:aspect];
+    CGRect contentRect = _contentBoundingBox;
+    CGRect totalRect = CGRectUnion(visibleRect, contentRect);
+
+    BOOL needsHScroller = (totalRect.size.width > visibleRect.size.width * 1.01);
+    if (needsHScroller) {
+        double knobProportion = visibleRect.size.width / totalRect.size.width;
+        double scrollPosition = (visibleRect.origin.x - totalRect.origin.x) /
+                                (totalRect.size.width - visibleRect.size.width);
+        scrollPosition = fmax(0.0, fmin(1.0, scrollPosition));
+        _horizontalScroller.doubleValue = scrollPosition;
+        _horizontalScroller.knobProportion = knobProportion;
+        [_horizontalScroller setEnabled:YES];
+    }
+
+    BOOL needsVScroller = (totalRect.size.height > visibleRect.size.height * 1.01);
+    if (needsVScroller) {
+        double knobProportion = visibleRect.size.height / totalRect.size.height;
+        double scrollPosition = (visibleRect.origin.y - totalRect.origin.y) /
+                                (totalRect.size.height - visibleRect.size.height);
+        scrollPosition = fmax(0.0, fmin(1.0, scrollPosition));
+        scrollPosition = 1.0 - scrollPosition;
+        _verticalScroller.doubleValue = scrollPosition;
+        _verticalScroller.knobProportion = knobProportion;
+        [_verticalScroller setEnabled:YES];
+    }
+
+    BOOL shouldShow = needsHScroller || needsVScroller;
+    if (shouldShow) {
+        _horizontalScroller.hidden = !needsHScroller;
+        _verticalScroller.hidden = !needsVScroller;
+        [self showScrollbarsAnimated:YES];
+        [self resetScrollbarFadeTimer];
+    } else {
+        [self hideScrollbarsAnimated:YES];
+    }
+}
+
+- (void)resetScrollbarFadeTimer {
+    [_scrollbarFadeTimer invalidate];
+    _scrollbarFadeTimer = [NSTimer scheduledTimerWithTimeInterval:1.5
+                                                          target:self
+                                                        selector:@selector(scrollbarFadeTimerFired:)
+                                                        userInfo:nil
+                                                         repeats:NO];
+}
+
+- (void)scrollbarFadeTimerFired:(NSTimer *)timer {
+    _scrollbarFadeTimer = nil;
+    [self hideScrollbarsAnimated:YES];
+}
+
+- (void)showScrollbarsAnimated:(BOOL)animated {
+    if (animated) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.2;
+            if (!self->_horizontalScroller.hidden)
+                self->_horizontalScroller.animator.alphaValue = 1.0;
+            if (!self->_verticalScroller.hidden)
+                self->_verticalScroller.animator.alphaValue = 1.0;
+        }];
+    } else {
+        if (!_horizontalScroller.hidden) _horizontalScroller.alphaValue = 1.0;
+        if (!_verticalScroller.hidden) _verticalScroller.alphaValue = 1.0;
+    }
+}
+
+- (void)hideScrollbarsAnimated:(BOOL)animated {
+    if (animated) {
+        [NSAnimationContext runAnimationGroup:^(NSAnimationContext *context) {
+            context.duration = 0.3;
+            self->_horizontalScroller.animator.alphaValue = 0.0;
+            self->_verticalScroller.animator.alphaValue = 0.0;
+        } completionHandler:^{
+            if (self->_horizontalScroller.alphaValue == 0.0)
+                self->_horizontalScroller.hidden = YES;
+            if (self->_verticalScroller.alphaValue == 0.0)
+                self->_verticalScroller.hidden = YES;
+        }];
+    } else {
+        _horizontalScroller.alphaValue = 0.0;
+        _horizontalScroller.hidden = YES;
+        _verticalScroller.alphaValue = 0.0;
+        _verticalScroller.hidden = YES;
+    }
+}
+
+- (void)horizontalScrollerAction:(NSScroller *)sender {
+    if (_show3D) return;
+
+    CGSize drawableSize = _mlayer.drawableSize;
+    if (drawableSize.width <= 0 || drawableSize.height <= 0) return;
+
+    float aspect = (float)drawableSize.width / (float)drawableSize.height;
+    CGRect visibleRect = [_cameraController visibleRectForAspect:aspect];
+    CGRect contentRect = _contentBoundingBox;
+    CGRect totalRect = CGRectUnion(visibleRect, contentRect);
+
+    double scrollableRange = totalRect.size.width - visibleRect.size.width;
+    if (scrollableRange <= 0) return;
+
+    float newCenterX;
+
+    switch (sender.hitPart) {
+        case NSScrollerKnob:
+        case NSScrollerKnobSlot: {
+            double position = sender.doubleValue;
+            float newMinX = totalRect.origin.x + position * scrollableRange;
+            newCenterX = newMinX + visibleRect.size.width * 0.5f;
+            break;
+        }
+        case NSScrollerDecrementPage:
+        case NSScrollerDecrementLine: {
+            newCenterX = _cameraController.target.x - visibleRect.size.width * 0.25f;
+            break;
+        }
+        case NSScrollerIncrementPage:
+        case NSScrollerIncrementLine: {
+            newCenterX = _cameraController.target.x + visibleRect.size.width * 0.25f;
+            break;
+        }
+        default:
+            return;
+    }
+
+    [_cameraController setTargetX:newCenterX];
+    _contentDirty = YES;
+    [self updateScrollbars];
+
+    if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
+        [_delegate previewView:self didChangeCamera:_cameraController];
+    }
+}
+
+- (void)verticalScrollerAction:(NSScroller *)sender {
+    if (_show3D) return;
+
+    CGSize drawableSize = _mlayer.drawableSize;
+    if (drawableSize.width <= 0 || drawableSize.height <= 0) return;
+
+    float aspect = (float)drawableSize.width / (float)drawableSize.height;
+    CGRect visibleRect = [_cameraController visibleRectForAspect:aspect];
+    CGRect contentRect = _contentBoundingBox;
+    CGRect totalRect = CGRectUnion(visibleRect, contentRect);
+
+    double scrollableRange = totalRect.size.height - visibleRect.size.height;
+    if (scrollableRange <= 0) return;
+
+    float newCenterY;
+
+    switch (sender.hitPart) {
+        case NSScrollerKnob:
+        case NSScrollerKnobSlot: {
+            double position = 1.0 - sender.doubleValue;
+            float newMinY = totalRect.origin.y + position * scrollableRange;
+            newCenterY = newMinY + visibleRect.size.height * 0.5f;
+            break;
+        }
+        case NSScrollerDecrementPage:
+        case NSScrollerDecrementLine: {
+            newCenterY = _cameraController.target.y + visibleRect.size.height * 0.25f;
+            break;
+        }
+        case NSScrollerIncrementPage:
+        case NSScrollerIncrementLine: {
+            newCenterY = _cameraController.target.y - visibleRect.size.height * 0.25f;
+            break;
+        }
+        default:
+            return;
+    }
+
+    [_cameraController setTargetY:newCenterY];
+    _contentDirty = YES;
+    [self updateScrollbars];
+
+    if ([_delegate respondsToSelector:@selector(previewView:didChangeCamera:)]) {
+        [_delegate previewView:self didChangeCamera:_cameraController];
+    }
+}
+
+- (void)setScrollbarsEnabled:(BOOL)scrollbarsEnabled {
+    _scrollbarsEnabled = scrollbarsEnabled;
+    if (!scrollbarsEnabled) {
+        [self hideScrollbarsAnimated:YES];
+    } else {
+        _scrollbarsDirty = YES;
+    }
 }
 
 @end

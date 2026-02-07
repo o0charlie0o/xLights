@@ -13,15 +13,17 @@
 #import "setup/XLControllerInspectorViewController.h"
 #import "setup/XLControllerDefinitionLoader.h"
 #import "setup/XLUploadProgressSheet.h"
+#import "setup/XLMultiControllerUploadDialogController.h"
 #import "setup/XLControllerModelWindowController.h"
 
-@interface XLSetupViewController () <XLControllerInspectorDelegate, XLUploadProgressSheetDelegate>
+@interface XLSetupViewController () <XLControllerInspectorDelegate, XLUploadProgressSheetDelegate, XLMultiControllerUploadDelegate>
 
 @property (nonatomic, strong, readwrite) XLControllersViewController *controllersViewController;
 @property (nonatomic, strong, readwrite) XLPortConfigurationView *portConfigurationView;
 @property (nonatomic, strong, readwrite) XLControllerInspectorViewController *inspectorViewController;
 @property (nonatomic, strong) NSSplitViewController *splitViewController;
 @property (nonatomic, strong) XLUploadProgressSheet *uploadProgressSheet;
+@property (nonatomic, strong) XLMultiControllerUploadDialogController *multiUploadDialog;
 @property (nonatomic, strong) XLControllerModelWindowController *controllerModelWindowController;
 
 @end
@@ -224,6 +226,10 @@
                             attachedToWindow:self.view.window];
 }
 
+- (void)controllersViewDidRequestBulkUpload:(XLControllersViewController *)controllersView {
+    [self presentMultiControllerUploadDialog];
+}
+
 - (void)controllersView:(XLControllersViewController *)controllersView
     didRequestUnlinkFromBaseAtIndices:(NSIndexSet *)indices {
     if (indices.count == 0) return;
@@ -258,6 +264,26 @@
 
 - (void)uploadProgressSheetDidCancel:(XLUploadProgressSheet *)sheet {
     _uploadProgressSheet = nil;
+}
+
+#pragma mark - Multi-Controller Upload
+
+- (void)presentMultiControllerUploadDialog {
+    _multiUploadDialog = [[XLMultiControllerUploadDialogController alloc] initWithEngineBridge:_engineBridge];
+    _multiUploadDialog.delegate = self;
+    [_multiUploadDialog presentAsSheetOnWindow:self.view.window];
+}
+
+#pragma mark - XLMultiControllerUploadDelegate
+
+- (void)multiControllerUploadDialog:(XLMultiControllerUploadDialogController *)dialog
+              didCompleteWithResults:(NSArray<XLMultiUploadControllerEntry *> *)results {
+    _multiUploadDialog = nil;
+    [_controllersViewController reloadData];
+}
+
+- (void)multiControllerUploadDialogDidCancel:(XLMultiControllerUploadDialogController *)dialog {
+    _multiUploadDialog = nil;
 }
 
 #pragma mark - XLPortConfigurationViewDelegate

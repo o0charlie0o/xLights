@@ -200,6 +200,18 @@
 /// Get all model properties as a dictionary
 - (NSDictionary *)getModelProperties:(NSString *)modelName;
 
+/// Get the smart remote number for a model (0=None, 1=A, 2=B, 3=C, etc.)
+- (NSInteger)getSmartRemote:(NSString *)modelName;
+
+/// Get the smart remote type for a model
+- (NSString *)getSmartRemoteType:(NSString *)modelName;
+
+/// Set the smart remote number for a model (0=None, 1=A, 2=B, 3=C, etc.)
+- (BOOL)setSmartRemote:(NSString *)modelName value:(NSInteger)smartRemote;
+
+/// Set the smart remote type for a model
+- (BOOL)setSmartRemoteType:(NSString *)modelName value:(NSString *)type;
+
 /// Create a new model with the given type, name, and properties
 - (BOOL)createModel:(NSString *)modelType name:(NSString *)modelName properties:(NSDictionary *)properties;
 
@@ -214,6 +226,32 @@
 
 /// Duplicate a model and return the new name
 - (NSString *)duplicateModelReturningName:(NSString *)modelName;
+
+/// Replace one model with another: the replacement takes the target's name, position,
+/// controller assignment, and group memberships. The target model is deleted.
+/// Options dictionary controls behavior:
+///   @"copyStartChannel" (BOOL) - copy the target's start channel to the replacement
+///   @"copyPosition" (BOOL) - copy the target's position, size, and rotation to the replacement
+///   @"mergeSubmodels" (BOOL) - merge the target's submodels into the replacement
+/// Returns YES if the replacement was successful.
+- (BOOL)replaceModel:(NSString *)targetModelName
+            withModel:(NSString *)replacementModelName
+              options:(NSDictionary *)options;
+
+/// Create a shadow model for the given source model
+- (NSString *)createShadowModel:(NSString *)sourceModelName;
+
+/// Check if a model is a shadow model
+- (BOOL)isShadowModel:(NSString *)modelName;
+
+/// Get the name of the model that a shadow model mirrors
+- (NSString *)getShadowModelFor:(NSString *)modelName;
+
+/// Set or clear the shadow model target for a model
+- (BOOL)setShadowModelFor:(NSString *)modelName target:(NSString *)targetModelName;
+
+/// Get names of all models that shadow a given model
+- (NSArray<NSString *> *)getModelsShadowing:(NSString *)modelName;
 
 /// Get complete model data for undo/redo serialization
 /// Returns all properties needed to recreate the model
@@ -750,6 +788,39 @@
 
 /// Get model names visible in a specific layout group.
 - (NSArray<NSString *> *)getModelsForLayoutGroup:(NSString *)groupName;
+
+#pragma mark - Polyline Point Editing
+
+/// Check if a model is a polyline or multi-point type
+- (BOOL)isPolylineModel:(NSString *)modelName;
+
+/// Get polyline points as array of dictionaries.
+/// Each dict has: x, y, z (world-space), hasCurve (BOOL), cp0x/cp0y/cp0z, cp1x/cp1y/cp1z
+- (NSArray<NSDictionary *> *)getPolylinePoints:(NSString *)modelName;
+
+/// Get the number of points in a polyline model
+- (NSInteger)getPolylinePointCount:(NSString *)modelName;
+
+/// Move a polyline point to a new world-space position
+- (BOOL)movePolylinePoint:(NSString *)modelName index:(NSInteger)pointIndex
+                        x:(float)worldX y:(float)worldY z:(float)worldZ;
+
+/// Move a curve control point to a new world-space position
+- (BOOL)movePolylineCurvePoint:(NSString *)modelName segmentIndex:(NSInteger)segmentIndex
+                  controlPoint:(NSInteger)cpIndex
+                             x:(float)worldX y:(float)worldY z:(float)worldZ;
+
+/// Insert a new point after the given segment (midpoint between segment endpoints)
+- (BOOL)insertPolylinePoint:(NSString *)modelName afterSegment:(NSInteger)afterSegment;
+
+/// Delete a polyline point at the given index
+- (BOOL)deletePolylinePoint:(NSString *)modelName index:(NSInteger)pointIndex;
+
+/// Add or remove a Bezier curve on a segment
+- (BOOL)setPolylineCurve:(NSString *)modelName segment:(NSInteger)segmentIndex create:(BOOL)create;
+
+/// Check if a polyline model supports curves (Poly Line yes, MultiPoint no)
+- (BOOL)polylineModelSupportsCurves:(NSString *)modelName;
 
 #pragma mark - Utility
 
