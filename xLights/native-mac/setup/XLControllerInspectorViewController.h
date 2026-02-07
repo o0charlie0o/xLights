@@ -57,6 +57,7 @@
 /// Sections:
 ///   - General (name, description, active state, ID)
 ///   - Connection (IP, serial port, protocol, universes, channels)
+///   - Authentication (username/password, shown only for controllers supporting auth)
 ///   - Hardware (vendor/model/variant cascading dropdowns)
 ///   - Capabilities (read-only hardware limits)
 ///   - Upload (upload config, auto-upload, last upload time)
@@ -74,7 +75,8 @@
 /// @"protocol", @"startUniverse", @"universeCount", @"startChannel",
 /// @"vendor", @"model", @"variant", @"maxChannels",
 /// @"supportedProtocols", @"maxUniverses", @"supportsUpload",
-/// @"autoUpload", @"lastUpload", @"type"
+/// @"autoUpload", @"lastUpload", @"type",
+/// @"supportsAuth", @"authUsername"
 - (void)setControllerData:(NSDictionary *)data;
 
 /// Clear the inspector and show the empty/placeholder state.

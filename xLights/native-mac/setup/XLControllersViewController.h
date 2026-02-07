@@ -74,6 +74,14 @@ typedef NS_ENUM(NSInteger, XLControllerStatus) {
     didMoveControllerFromIndex:(NSInteger)fromIndex
     toIndex:(NSInteger)toIndex;
 
+/// Called when the user requests visualising (controller model dialog) for a controller.
+- (void)controllersView:(XLControllersViewController *)controllersView
+    didRequestVisualiseControllerAtIndex:(NSInteger)index;
+
+/// Called when the user requests unlinking controllers from the base show folder.
+- (void)controllersView:(XLControllersViewController *)controllersView
+    didRequestUnlinkFromBaseAtIndices:(NSIndexSet *)indices;
+
 @end
 
 /// Column identifiers for the controller table view.

@@ -12,7 +12,7 @@
 #import "XLNetworkDiscoveryController.h"
 #import "XLDiscoveryResultsViewController.h"
 #import "../XLEngineBridge.h"
-
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 NSString * const XLControllerColumnName     = @"Name";
 NSString * const XLControllerColumnProtocol = @"Protocol";
 NSString * const XLControllerColumnAddress  = @"Address";
@@ -40,6 +40,7 @@ static const CGFloat kStatusDotSize = 8.0;
 @property (nonatomic, copy) NSString *model;
 @property (nonatomic, copy) NSString *active;
 @property (nonatomic, assign) XLControllerStatus status;
+@property (nonatomic, assign) BOOL fromBase;
 @end
 
 @implementation XLControllerEntryObj
@@ -382,6 +383,7 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Controller Actions"];
 
     [menu addItemWithTitle:@"Edit Controller" action:@selector(contextEditController:) keyEquivalent:@""];
+    [menu addItemWithTitle:@"Visualise" action:@selector(contextVisualise:) keyEquivalent:@""];
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Add Ethernet Controller" action:@selector(contextAddEthernet:) keyEquivalent:@""];
     [menu addItemWithTitle:@"Add Serial Controller" action:@selector(contextAddSerial:) keyEquivalent:@""];
@@ -398,6 +400,8 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Delete Controller" action:@selector(contextDeleteController:) keyEquivalent:@""];
     [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Unlink from Base Show Folder" action:@selector(contextUnlinkFromBase:) keyEquivalent:@""];
+    [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Upload Configuration" action:@selector(contextUploadConfig:) keyEquivalent:@""];
     [menu addItemWithTitle:@"Upload to Selected Controllers" action:@selector(contextUploadSelectedConfigs:) keyEquivalent:@""];
 
@@ -411,6 +415,10 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItem:sortItem];
 
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Export Controller Configuration..." action:@selector(contextExportControllerConfig:) keyEquivalent:@""];
+    [menu addItemWithTitle:@"Import Controller Configuration..." action:@selector(contextImportControllerConfig:) keyEquivalent:@""];
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Discover Controllers..." action:@selector(discoverButtonClicked:) keyEquivalent:@""];
 
@@ -465,6 +473,9 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
 
             NSNumber *statusNum = info[XLControllerColumnStatus];
             entry.status = statusNum ? (XLControllerStatus)statusNum.integerValue : XLControllerStatusUnknown;
+
+            NSNumber *fromBaseNum = info[@"fromBase"];
+            entry.fromBase = fromBaseNum ? fromBaseNum.boolValue : NO;
 
             [self.controllerEntries addObject:entry];
         }
@@ -587,11 +598,20 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
     NSString *value = GetControllerField(entry, identifier);
     cell.textField.stringValue = value ?: @"";
 
-    // Dim inactive controllers
-    if ([entry.active caseInsensitiveCompare:@"Inactive"] == NSOrderedSame) {
+    // Color based on fromBase and active state (matches legacy TabSetup.cpp coloring)
+    if (entry.fromBase) {
+        if ([entry.active caseInsensitiveCompare:@"Inactive"] == NSOrderedSame) {
+            cell.textField.textColor = [NSColor colorWithRed:0.5 green:0.5 blue:1.0 alpha:1.0];
+        } else {
+            cell.textField.textColor = [NSColor cyanColor];
+        }
+        cell.toolTip = @"From Base Show Directory";
+    } else if ([entry.active caseInsensitiveCompare:@"Inactive"] == NSOrderedSame) {
         cell.textField.textColor = [NSColor tertiaryLabelColor];
+        cell.toolTip = nil;
     } else {
         cell.textField.textColor = [NSColor labelColor];
+        cell.toolTip = nil;
     }
 
     return cell;
@@ -758,6 +778,16 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
     }
 }
 
+- (void)contextVisualise:(id)sender {
+    NSInteger row = _tableView.clickedRow;
+    if (row < 0) row = _tableView.selectedRow;
+    if (row < 0) return;
+
+    if ([_delegate respondsToSelector:@selector(controllersView:didRequestVisualiseControllerAtIndex:)]) {
+        [_delegate controllersView:self didRequestVisualiseControllerAtIndex:row];
+    }
+}
+
 - (void)contextAddEthernet:(id)sender {
     if ([_delegate respondsToSelector:@selector(controllersView:didRequestAddController:)]) {
         [_delegate controllersView:self didRequestAddController:XLControllerTypeEthernet];
@@ -811,6 +841,15 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
     if (row < 0) row = _tableView.selectedRow;
     if (row < 0) return;
     [self confirmDeleteControllerAtIndex:row];
+}
+
+- (void)contextUnlinkFromBase:(id)sender {
+    NSIndexSet *selectedIndices = _tableView.selectedRowIndexes;
+    if (selectedIndices.count == 0) return;
+
+    if ([_delegate respondsToSelector:@selector(controllersView:didRequestUnlinkFromBaseAtIndices:)]) {
+        [_delegate controllersView:self didRequestUnlinkFromBaseAtIndices:selectedIndices];
+    }
 }
 
 - (void)contextUploadConfig:(id)sender {
@@ -870,6 +909,76 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
     [_tableView reloadData];
 }
 
+#pragma mark - Import / Export
+
+- (void)contextExportControllerConfig:(id)sender {
+    if (!_engineBridge) return;
+
+    NSSavePanel *savePanel = [NSSavePanel savePanel];
+    savePanel.title = @"Export Controller Configuration";
+    savePanel.nameFieldStringValue = @"xlights_controllers.xml";
+    savePanel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"xml"]];
+    savePanel.canCreateDirectories = YES;
+
+    [savePanel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+        if (result != NSModalResponseOK) return;
+
+        NSString *path = savePanel.URL.path;
+        BOOL ok = [self->_engineBridge exportControllerConfig:path];
+        if (ok) {
+            NSLog(@"XLControllersViewController: Exported controller config to %@", path);
+        } else {
+            NSAlert *alert = [[NSAlert alloc] init];
+            alert.messageText = @"Export Failed";
+            alert.informativeText = @"Could not export the controller configuration. Check the log for details.";
+            alert.alertStyle = NSAlertStyleWarning;
+            [alert addButtonWithTitle:@"OK"];
+            [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        }
+    }];
+}
+
+- (void)contextImportControllerConfig:(id)sender {
+    if (!_engineBridge) return;
+
+    NSOpenPanel *openPanel = [NSOpenPanel openPanel];
+    openPanel.title = @"Import Controller Configuration";
+    openPanel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"xml"]];
+    openPanel.allowsMultipleSelection = NO;
+    openPanel.canChooseDirectories = NO;
+
+    [openPanel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+        if (result != NSModalResponseOK) return;
+
+        NSString *path = openPanel.URL.path;
+
+        // Confirm replacement
+        NSAlert *confirm = [[NSAlert alloc] init];
+        confirm.messageText = @"Import Controller Configuration?";
+        confirm.informativeText = @"This will replace all current controllers with those from the imported file. This action cannot be undone.";
+        confirm.alertStyle = NSAlertStyleWarning;
+        [confirm addButtonWithTitle:@"Import"];
+        [confirm addButtonWithTitle:@"Cancel"];
+
+        [confirm beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse confirmResult) {
+            if (confirmResult != NSAlertFirstButtonReturn) return;
+
+            BOOL ok = [self->_engineBridge importControllerConfig:path];
+            if (ok) {
+                NSLog(@"XLControllersViewController: Imported controller config from %@", path);
+                [self reloadData];
+            } else {
+                NSAlert *errorAlert = [[NSAlert alloc] init];
+                errorAlert.messageText = @"Import Failed";
+                errorAlert.informativeText = @"Could not import the controller configuration. The file may be invalid or in an unsupported format.";
+                errorAlert.alertStyle = NSAlertStyleWarning;
+                [errorAlert addButtonWithTitle:@"OK"];
+                [errorAlert beginSheetModalForWindow:self.view.window completionHandler:nil];
+            }
+        }];
+    }];
+}
+
 #pragma mark - Delete Confirmation
 
 - (void)confirmDeleteControllerAtIndex:(NSInteger)index {
@@ -902,6 +1011,7 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
     SEL action = menuItem.action;
 
     if (action == @selector(contextEditController:) ||
+        action == @selector(contextVisualise:) ||
         action == @selector(contextDeleteController:) ||
         action == @selector(contextActivate:) ||
         action == @selector(contextActivateXLightsOnly:) ||
@@ -913,6 +1023,30 @@ static NSString *GetControllerField(XLControllerEntryObj *entry, NSString *colum
     if (action == @selector(contextUploadSelectedConfigs:)) {
         // Only enable if multiple controllers are selected
         return (_tableView.selectedRowIndexes.count >= 2);
+    }
+
+    if (action == @selector(contextUnlinkFromBase:)) {
+        NSIndexSet *selectedIndices = _tableView.selectedRowIndexes;
+        if (selectedIndices.count == 0) return NO;
+        __block BOOL allFromBase = YES;
+        [selectedIndices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+            if (idx < self.controllerEntries.count) {
+                if (!self.controllerEntries[idx].fromBase) {
+                    allFromBase = NO;
+                    *stop = YES;
+                }
+            }
+        }];
+        return allFromBase;
+    }
+
+    if (action == @selector(contextDeleteController:) ||
+        action == @selector(contextEditController:)) {
+        if (row >= 0 && (NSUInteger)row < self.controllerEntries.count) {
+            if (self.controllerEntries[row].fromBase) {
+                return NO;
+            }
+        }
     }
 
     return YES;

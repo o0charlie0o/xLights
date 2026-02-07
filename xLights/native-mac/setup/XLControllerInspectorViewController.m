@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLControllerInspectorViewController.h"
+#import "XLKeychainHelper.h"
 #import "../XLEngineBridge.h"
 
 static const CGFloat kSectionHeaderHeight = 28.0;
@@ -216,6 +217,10 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 @property (nonatomic, strong) NSTextField *universeCountField;
 @property (nonatomic, strong) NSTextField *startChannelField;
 
+// Authentication section controls
+@property (nonatomic, strong) NSTextField *authUsernameField;
+@property (nonatomic, strong) NSSecureTextField *authPasswordField;
+
 // Hardware section controls
 @property (nonatomic, strong) NSPopUpButton *vendorPopUp;
 @property (nonatomic, strong) NSPopUpButton *modelPopUp;
@@ -235,6 +240,7 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 // Section references
 @property (nonatomic, strong) XLDisclosureSection *generalSection;
 @property (nonatomic, strong) XLDisclosureSection *connectionSection;
+@property (nonatomic, strong) XLDisclosureSection *authSection;
 @property (nonatomic, strong) XLDisclosureSection *hardwareSection;
 @property (nonatomic, strong) XLDisclosureSection *capabilitiesSection;
 @property (nonatomic, strong) XLDisclosureSection *uploadSection;
@@ -242,6 +248,11 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 // Current data
 @property (nonatomic, strong) NSDictionary *currentData;
 @property (nonatomic, assign) BOOL isEthernetController;
+@property (nonatomic, assign) BOOL supportsAuth;
+
+// Base show folder state
+@property (nonatomic, strong) NSView *baseBannerView;
+@property (nonatomic, assign) BOOL isFromBase;
 
 @end
 
@@ -348,11 +359,64 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 #pragma mark - Section Building
 
 - (void)buildSections {
+    [self buildBaseBanner];
     [self buildGeneralSection];
     [self buildConnectionSection];
+    [self buildAuthSection];
     [self buildHardwareSection];
     [self buildCapabilitiesSection];
     [self buildUploadSection];
+}
+
+- (void)buildBaseBanner {
+    _baseBannerView = [[NSView alloc] initWithFrame:NSZeroRect];
+    _baseBannerView.translatesAutoresizingMaskIntoConstraints = NO;
+    _baseBannerView.wantsLayer = YES;
+    _baseBannerView.layer.backgroundColor = [[NSColor colorWithRed:0.0 green:0.6 blue:0.8 alpha:0.15] CGColor];
+    _baseBannerView.hidden = YES;
+
+    NSImageView *icon = [[NSImageView alloc] initWithFrame:NSZeroRect];
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    icon.image = [NSImage imageWithSystemSymbolName:@"link"
+                          accessibilityDescription:@"Linked to Base"];
+    icon.contentTintColor = [NSColor cyanColor];
+    icon.imageScaling = NSImageScaleProportionallyUpOrDown;
+    [_baseBannerView addSubview:icon];
+
+    NSTextField *label = [NSTextField labelWithString:@"From Base Show Directory"];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    label.textColor = [NSColor cyanColor];
+    [_baseBannerView addSubview:label];
+
+    NSTextField *hint = [NSTextField labelWithString:@"Unlink via context menu to edit"];
+    hint.translatesAutoresizingMaskIntoConstraints = NO;
+    hint.font = [NSFont systemFontOfSize:10];
+    hint.textColor = [NSColor secondaryLabelColor];
+    [_baseBannerView addSubview:hint];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_baseBannerView.heightAnchor constraintEqualToConstant:48.0],
+
+        [icon.leadingAnchor constraintEqualToAnchor:_baseBannerView.leadingAnchor constant:12],
+        [icon.centerYAnchor constraintEqualToAnchor:_baseBannerView.centerYAnchor],
+        [icon.widthAnchor constraintEqualToConstant:16],
+        [icon.heightAnchor constraintEqualToConstant:16],
+
+        [label.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:8],
+        [label.topAnchor constraintEqualToAnchor:_baseBannerView.topAnchor constant:6],
+        [label.trailingAnchor constraintLessThanOrEqualToAnchor:_baseBannerView.trailingAnchor constant:-12],
+
+        [hint.leadingAnchor constraintEqualToAnchor:label.leadingAnchor],
+        [hint.topAnchor constraintEqualToAnchor:label.bottomAnchor constant:2],
+        [hint.trailingAnchor constraintLessThanOrEqualToAnchor:_baseBannerView.trailingAnchor constant:-12],
+    ]];
+
+    [_mainStack addArrangedSubview:_baseBannerView];
+    [NSLayoutConstraint activateConstraints:@[
+        [_baseBannerView.leadingAnchor constraintEqualToAnchor:_mainStack.leadingAnchor],
+        [_baseBannerView.trailingAnchor constraintEqualToAnchor:_mainStack.trailingAnchor],
+    ]];
 }
 
 - (void)buildGeneralSection {
@@ -428,6 +492,30 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     [NSLayoutConstraint activateConstraints:@[
         [_connectionSection.leadingAnchor constraintEqualToAnchor:_mainStack.leadingAnchor],
         [_connectionSection.trailingAnchor constraintEqualToAnchor:_mainStack.trailingAnchor],
+    ]];
+}
+
+- (void)buildAuthSection {
+    _authSection = [[XLDisclosureSection alloc] initWithTitle:@"AUTHENTICATION" identifier:@"controller_auth"];
+
+    _authUsernameField = [self makeEditableTextField];
+    _authUsernameField.placeholderString = @"Username";
+    _authUsernameField.delegate = self;
+    _authUsernameField.tag = 210;
+    [_authSection addRowWithLabel:@"Username" control:_authUsernameField];
+
+    _authPasswordField = [self makeSecureTextField];
+    _authPasswordField.placeholderString = @"Password";
+    _authPasswordField.delegate = self;
+    _authPasswordField.tag = 211;
+    [_authSection addRowWithLabel:@"Password" control:_authPasswordField];
+
+    _authSection.hidden = YES;
+
+    [_mainStack addArrangedSubview:_authSection];
+    [NSLayoutConstraint activateConstraints:@[
+        [_authSection.leadingAnchor constraintEqualToAnchor:_mainStack.leadingAnchor],
+        [_authSection.trailingAnchor constraintEqualToAnchor:_mainStack.trailingAnchor],
     ]];
 }
 
@@ -528,6 +616,22 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     return field;
 }
 
+- (NSSecureTextField *)makeSecureTextField {
+    NSSecureTextField *field = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
+    field.translatesAutoresizingMaskIntoConstraints = NO;
+    field.font = [NSFont systemFontOfSize:11];
+    field.textColor = [NSColor labelColor];
+    field.backgroundColor = [NSColor colorWithWhite:0.22 alpha:1.0];
+    field.bordered = YES;
+    field.bezelStyle = NSTextFieldRoundedBezel;
+    field.editable = YES;
+    field.selectable = YES;
+    field.cell.scrollable = YES;
+    [field setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                      forOrientation:NSLayoutConstraintOrientationHorizontal];
+    return field;
+}
+
 - (NSTextField *)makeReadOnlyTextField {
     NSTextField *field = [NSTextField labelWithString:@"--"];
     field.translatesAutoresizingMaskIntoConstraints = NO;
@@ -563,12 +667,20 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     NSString *type = data[@"type"] ?: @"Ethernet";
     _isEthernetController = [type isEqualToString:@"Ethernet"];
 
+    NSNumber *authSupported = data[@"supportsAuth"];
+    _supportsAuth = authSupported ? authSupported.boolValue : NO;
+
     [self populateGeneralSection:data];
     [self populateConnectionSection:data];
+    [self populateAuthSection:data];
     [self populateHardwareSection:data];
     [self populateCapabilitiesSection:data];
     [self populateUploadSection:data];
     [self updateConnectionFieldVisibility];
+
+    NSNumber *fromBaseNum = data[@"fromBase"];
+    _isFromBase = fromBaseNum ? fromBaseNum.boolValue : NO;
+    [self updateBaseShowFolderState];
 }
 
 - (void)populateGeneralSection:(NSDictionary *)data {
@@ -604,6 +716,28 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     NSString *serialPort = data[@"serialPort"];
     if (serialPort) {
         [_serialPortPopUp selectItemWithTitle:serialPort];
+    }
+}
+
+- (void)populateAuthSection:(NSDictionary *)data {
+    _authSection.hidden = !_supportsAuth;
+
+    if (!_supportsAuth) {
+        _authUsernameField.stringValue = @"";
+        _authPasswordField.stringValue = @"";
+        return;
+    }
+
+    NSString *username = data[@"authUsername"] ?: @"";
+    _authUsernameField.stringValue = username;
+
+    if (username.length > 0) {
+        NSString *controllerName = data[@"name"] ?: @"";
+        NSString *password = [XLKeychainHelper passwordForController:controllerName
+                                                            username:username];
+        _authPasswordField.stringValue = password ?: @"";
+    } else {
+        _authPasswordField.stringValue = @"";
     }
 }
 
@@ -657,6 +791,10 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 
 - (void)clearInspector {
     _currentData = nil;
+    _supportsAuth = NO;
+    _authSection.hidden = YES;
+    _isFromBase = NO;
+    _baseBannerView.hidden = YES;
     [self showEmptyState];
 }
 
@@ -668,6 +806,28 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     _serialPortPopUp.superview.hidden = _isEthernetController;
     _startUniverseField.superview.hidden = !_isEthernetController;
     _universeCountField.superview.hidden = !_isEthernetController;
+}
+
+#pragma mark - Authentication
+
+- (void)saveAuthCredentials {
+    NSString *controllerName = _currentData[@"name"] ?: @"";
+    NSString *username = _authUsernameField.stringValue;
+    NSString *password = _authPasswordField.stringValue;
+
+    if (controllerName.length == 0) return;
+
+    if (username.length > 0 && password.length > 0) {
+        [XLKeychainHelper savePassword:password
+                         forController:controllerName
+                              username:username];
+    } else if (username.length == 0) {
+        NSString *oldUsername = _currentData[@"authUsername"] ?: @"";
+        if (oldUsername.length > 0) {
+            [XLKeychainHelper deletePasswordForController:controllerName
+                                                username:oldUsername];
+        }
+    }
 }
 
 #pragma mark - Vendor/Model/Variant Cascading
@@ -793,6 +953,11 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
         if (value < 0) {
             field.integerValue = 1;
         }
+    } else if (field.tag == 210 || field.tag == 211) {
+        // Authentication fields - save credentials via keychain
+        [self saveAuthCredentials];
+        [self notifyDelegate];
+        return;
     }
 
     [self notifyDelegate];

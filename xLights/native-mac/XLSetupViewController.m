@@ -12,6 +12,7 @@
 #import "XLEngineBridge.h"
 #import "setup/XLControllerInspectorViewController.h"
 #import "setup/XLUploadProgressSheet.h"
+#import "setup/XLControllerModelWindowController.h"
 
 @interface XLSetupViewController () <XLControllerInspectorDelegate, XLUploadProgressSheetDelegate>
 
@@ -20,6 +21,7 @@
 @property (nonatomic, strong, readwrite) XLControllerInspectorViewController *inspectorViewController;
 @property (nonatomic, strong) NSSplitViewController *splitViewController;
 @property (nonatomic, strong) XLUploadProgressSheet *uploadProgressSheet;
+@property (nonatomic, strong) XLControllerModelWindowController *controllerModelWindowController;
 
 @end
 
@@ -136,6 +138,16 @@
     didRequestEditControllerAtIndex:(NSInteger)index {
     // Focus the inspector for editing
     // Could also open a modal dialog for complex edits
+}
+
+- (void)controllersView:(XLControllersViewController *)controllersView
+    didRequestVisualiseControllerAtIndex:(NSInteger)index {
+    NSString *controllerName = [controllersView selectedControllerName];
+    if (!controllerName) return;
+
+    _controllerModelWindowController = [[XLControllerModelWindowController alloc]
+        initWithControllerName:controllerName engineBridge:_engineBridge];
+    [_controllerModelWindowController showWindow:self];
 }
 
 - (void)controllersView:(XLControllersViewController *)controllersView
