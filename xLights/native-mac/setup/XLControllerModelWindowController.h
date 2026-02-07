@@ -47,10 +47,12 @@ typedef struct {
 
 #pragma mark - Controller Port Layout View
 
+@protocol XLControllerPortLayoutViewDelegate;
+
 /// Custom NSView that draws the visual controller port layout.
 /// Ports are rendered as labeled rows on the left, with assigned models drawn
 /// as colored rectangles to the right. Supports mouse-driven drag-and-drop,
-/// hover highlighting, and context menus.
+/// hover highlighting, context menus, and keyboard shortcuts (A-F for smart remote).
 @interface XLControllerPortLayoutView : NSView <NSDraggingSource, NSDraggingDestination>
 
 /// Scale factor for box/font sizing (default 1.0).
@@ -62,6 +64,9 @@ typedef struct {
 /// Currently displayed controller name.
 @property (nonatomic, copy) NSString *controllerName;
 
+/// Delegate for layout change notifications.
+@property (nonatomic, weak) id<XLControllerPortLayoutViewDelegate> layoutDelegate;
+
 /// Reload port layout data from the engine bridge.
 - (void)reloadPortLayout;
 
@@ -71,6 +76,23 @@ typedef struct {
 /// Total content width (for scroll view).
 - (CGFloat)contentWidth;
 
+/// Auto-layout: assign unassigned models to ports sequentially.
+- (void)autoLayoutModels;
+
+/// Remove a model from its assigned port by name.
+- (void)removeModelByName:(NSString *)modelName;
+
+/// Access port data for CSV export.
+- (int)portCount;
+- (XLCMPortRow)portRowAtIndex:(int)index;
+
+@end
+
+/// Delegate protocol for port layout view events.
+@protocol XLControllerPortLayoutViewDelegate <NSObject>
+@optional
+/// Called when a model assignment changes (add/remove/reorder).
+- (void)portLayoutViewDidChangeAssignments:(XLControllerPortLayoutView *)view;
 @end
 
 #pragma mark - Model List Entry
@@ -89,18 +111,24 @@ typedef struct {
 /// Native equivalent of the legacy ControllerModelDialog.
 ///
 /// Displays a split-pane window with:
-/// - LEFT: Available models list (unassigned and all models)
+/// - LEFT: Available models list with search filter (unassigned and all models)
 /// - RIGHT: Visual controller port layout with models as colored blocks
+/// - BOTTOM: Check/validation text area
 ///
 /// Users drag models from left to right to assign them to ports,
 /// drag between ports to reorder, and use context menus for port/model settings.
+/// Supports auto-layout, CSV export, print, and keyboard shortcuts (A-F for smart remote).
 ///
 /// Opened from the Setup tab when the user selects "Visualise" for a controller.
 @interface XLControllerModelWindowController : NSWindowController <NSSplitViewDelegate,
-    NSTableViewDataSource, NSTableViewDelegate>
+    NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate,
+    NSSearchFieldDelegate, XLControllerPortLayoutViewDelegate>
 
 /// Engine bridge for data operations.
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
+
+/// Whether changes have been made since opening.
+@property (nonatomic, assign, readonly) BOOL hasUnsavedChanges;
 
 /// Initialize for the given controller.
 /// @param controllerName Name of the controller to visualize.

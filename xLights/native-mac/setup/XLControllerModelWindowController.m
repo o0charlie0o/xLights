@@ -245,6 +245,141 @@ static NSString *CStr(const char *c) {
     }
 }
 
+#pragma mark - Public Data Access
+
+- (int)portCount {
+    return _portCount;
+}
+
+- (XLCMPortRow)portRowAtIndex:(int)index {
+    if (index >= 0 && index < _portCount) {
+        return _ports[index];
+    }
+    XLCMPortRow empty;
+    memset(&empty, 0, sizeof(XLCMPortRow));
+    return empty;
+}
+
+#pragma mark - Auto Layout
+
+- (void)autoLayoutModels {
+    if (!_engineBridge || !_controllerName) return;
+
+    NSArray<NSString *> *allModels = [_engineBridge getModelNamesExcludingGroups];
+    int currentPort = 0;
+
+    for (NSString *modelName in allModels) {
+        NSDictionary *info = [_engineBridge getModelInfo:modelName];
+        if (!info) continue;
+
+        NSString *controller = info[@"controller"];
+        if (controller.length > 0) continue; // Skip already-assigned models
+
+        // Find next pixel port with space
+        while (currentPort < _portCount && (_ports[currentPort].portType != 0 ||
+               _ports[currentPort].modelCount >= XL_CM_MAX_MODELS_PER_PORT)) {
+            currentPort++;
+        }
+        if (currentPort >= _portCount) break;
+
+        XLCMPortRow *port = &_ports[currentPort];
+        BOOL success = [_engineBridge assignModel:modelName
+                                     toController:_controllerName
+                                             port:port->portNumber];
+        if (success) {
+            XLCMModelEntry *entry = &port->models[port->modelCount];
+            memset(entry, 0, sizeof(XLCMModelEntry));
+            SafeCopy(entry->modelName, 64, modelName);
+            entry->channelCount = [info[@"channelCount"] intValue];
+            entry->pixelCount = [info[@"nodeCount"] intValue];
+            entry->startChannel = [info[@"startChannel"] intValue];
+            entry->isMain = YES;
+            port->modelCount++;
+            port->totalChannels += entry->channelCount;
+        }
+    }
+
+    [self setNeedsDisplay:YES];
+
+    if ([_layoutDelegate respondsToSelector:@selector(portLayoutViewDidChangeAssignments:)]) {
+        [_layoutDelegate portLayoutViewDidChangeAssignments:self];
+    }
+}
+
+#pragma mark - Remove Model by Name
+
+- (void)removeModelByName:(NSString *)modelName {
+    if (!modelName) return;
+
+    for (int i = 0; i < _portCount; i++) {
+        XLCMPortRow *port = &_ports[i];
+        for (int j = 0; j < port->modelCount; j++) {
+            if ([CStr(port->models[j].modelName) isEqualToString:modelName]) {
+                [_engineBridge removeModelFromController:_controllerName port:port->portNumber];
+
+                port->totalChannels -= port->models[j].channelCount;
+                for (int k = j; k < port->modelCount - 1; k++) {
+                    port->models[k] = port->models[k + 1];
+                }
+                port->modelCount--;
+
+                [self setNeedsDisplay:YES];
+
+                if ([_layoutDelegate respondsToSelector:@selector(portLayoutViewDidChangeAssignments:)]) {
+                    [_layoutDelegate portLayoutViewDidChangeAssignments:self];
+                }
+                return;
+            }
+        }
+    }
+}
+
+#pragma mark - Keyboard Shortcuts
+
+- (void)keyDown:(NSEvent *)event {
+    if (_hoverPortIndex < 0 || _hoverModelIndex < 0) {
+        [super keyDown:event];
+        return;
+    }
+
+    NSString *chars = event.charactersIgnoringModifiers.uppercaseString;
+    if (chars.length == 0) {
+        [super keyDown:event];
+        return;
+    }
+
+    unichar ch = [chars characterAtIndex:0];
+    int sr = -1;
+
+    if (ch >= 'A' && ch <= 'F') {
+        sr = (int)(ch - 'A') + 1;
+    } else if (ch == '0' || ch == 'N') {
+        sr = 0;
+    } else if (ch == NSDeleteCharacter || ch == NSBackspaceCharacter) {
+        // Delete key removes model from port
+        NSString *modelName = CStr(_ports[_hoverPortIndex].models[_hoverModelIndex].modelName);
+        [self removeModelByName:modelName];
+        return;
+    } else {
+        [super keyDown:event];
+        return;
+    }
+
+    if (sr >= 0 && _hoverPortIndex < _portCount) {
+        XLCMPortRow *port = &_ports[_hoverPortIndex];
+        if (_hoverModelIndex < port->modelCount) {
+            port->models[_hoverModelIndex].smartRemote = sr;
+            NSString *modelName = CStr(port->models[_hoverModelIndex].modelName);
+            [_engineBridge updateModelProperty:modelName key:@"SmartRemote" value:@(sr)];
+            [self setNeedsDisplay:YES];
+
+            if ([_layoutDelegate respondsToSelector:@selector(portLayoutViewDidChangeAssignments:)]) {
+                [_layoutDelegate portLayoutViewDidChangeAssignments:self];
+            }
+        }
+    }
+}
+
 #pragma mark - Geometry
 
 - (CGFloat)scaledBoxWidth {
@@ -373,6 +508,25 @@ static NSString *CStr(const char *c) {
                                CStr(port->protocol), port->totalChannels];
         [protoText drawAtPoint:NSMakePoint(labelPt.x, labelPt.y + labelSize.height + 2)
                 withAttributes:modelDetailAttrs];
+
+        // Channel capacity progress bar
+        if (port->maxChannels > 0 && port->totalChannels > 0) {
+            CGFloat barH = 3.0;
+            CGFloat barY = NSMaxY(labelRect) - barH - 2.0;
+            NSRect barBg = NSMakeRect(labelRect.origin.x + 4, barY, labelRect.size.width - 8, barH);
+            [[NSColor colorWithWhite:0.3 alpha:0.4] setFill];
+            NSRectFill(barBg);
+
+            CGFloat ratio = (CGFloat)port->totalChannels / (CGFloat)port->maxChannels;
+            CGFloat fillW = MIN(ratio, 1.0) * barBg.size.width;
+            NSColor *barColor;
+            if (ratio > 1.0) barColor = [NSColor systemRedColor];
+            else if (ratio > 0.85) barColor = [NSColor systemYellowColor];
+            else barColor = [NSColor systemGreenColor];
+
+            [barColor setFill];
+            NSRectFill(NSMakeRect(barBg.origin.x, barBg.origin.y, fillW, barH));
+        }
 
         // Draw models on this port
         for (int j = 0; j < port->modelCount; j++) {
@@ -644,6 +798,10 @@ static NSString *CStr(const char *c) {
     // Notify parent to refresh model list
     [[NSNotificationCenter defaultCenter] postNotificationName:@"XLControllerModelLayoutChanged" object:self];
 
+    if (success && [_layoutDelegate respondsToSelector:@selector(portLayoutViewDidChangeAssignments:)]) {
+        [_layoutDelegate portLayoutViewDidChangeAssignments:self];
+    }
+
     return success;
 }
 
@@ -913,8 +1071,12 @@ static NSString *CStr(const char *c) {
 @property (nonatomic, strong) NSTextField *checkTextView;
 @property (nonatomic, strong) NSButton *printButton;
 @property (nonatomic, strong) NSButton *csvButton;
+@property (nonatomic, strong) NSButton *autoLayoutButton;
+@property (nonatomic, strong) NSSearchField *searchField;
+@property (nonatomic, copy) NSString *searchString;
 @property (nonatomic, strong) NSMutableArray<XLCMModelListEntry *> *modelList;
 @property (nonatomic, strong) NSMutableArray<XLCMModelListEntry *> *filteredModelList;
+@property (nonatomic, assign, readwrite) BOOL hasUnsavedChanges;
 
 @end
 
@@ -1017,7 +1179,17 @@ static NSString *CStr(const char *c) {
     _hideOtherControllersCheckbox.font = [NSFont systemFontOfSize:11];
     _hideOtherControllersCheckbox.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // Print button (stub)
+    // Auto-layout button
+    _autoLayoutButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"rectangle.3.group"
+                                                              accessibilityDescription:@"Auto Layout"]
+                                           target:self
+                                           action:@selector(autoLayout:)];
+    _autoLayoutButton.bezelStyle = NSBezelStyleSmallSquare;
+    _autoLayoutButton.bordered = NO;
+    _autoLayoutButton.toolTip = @"Auto-assign unassigned models to ports";
+    _autoLayoutButton.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // Print button
     _printButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"printer"
                                                        accessibilityDescription:@"Print"]
                                       target:self
@@ -1040,6 +1212,7 @@ static NSString *CStr(const char *c) {
     [toolbar addSubview:scaleLabel];
     [toolbar addSubview:_scaleSlider];
     [toolbar addSubview:_hideOtherControllersCheckbox];
+    [toolbar addSubview:_autoLayoutButton];
     [toolbar addSubview:_printButton];
     [toolbar addSubview:_csvButton];
 
@@ -1061,6 +1234,10 @@ static NSString *CStr(const char *c) {
         [_printButton.trailingAnchor constraintEqualToAnchor:_csvButton.leadingAnchor constant:-4],
         [_printButton.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
         [_printButton.widthAnchor constraintEqualToConstant:24],
+
+        [_autoLayoutButton.trailingAnchor constraintEqualToAnchor:_printButton.leadingAnchor constant:-4],
+        [_autoLayoutButton.centerYAnchor constraintEqualToAnchor:toolbar.centerYAnchor],
+        [_autoLayoutButton.widthAnchor constraintEqualToConstant:24],
     ]];
 
     return toolbar;
@@ -1097,6 +1274,16 @@ static NSString *CStr(const char *c) {
     header.textColor = [NSColor secondaryLabelColor];
     header.translatesAutoresizingMaskIntoConstraints = NO;
     [panel addSubview:header];
+
+    // Search field
+    _searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
+    _searchField.placeholderString = @"Filter models...";
+    _searchField.font = [NSFont systemFontOfSize:11];
+    _searchField.delegate = self;
+    _searchField.target = self;
+    _searchField.action = @selector(searchFieldChanged:);
+    _searchField.translatesAutoresizingMaskIntoConstraints = NO;
+    [panel addSubview:_searchField];
 
     // Model table view
     _modelListScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
@@ -1142,7 +1329,11 @@ static NSString *CStr(const char *c) {
         [header.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:8],
         [header.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-8],
 
-        [_modelListScrollView.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:4],
+        [_searchField.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:4],
+        [_searchField.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:8],
+        [_searchField.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-8],
+
+        [_modelListScrollView.topAnchor constraintEqualToAnchor:_searchField.bottomAnchor constant:4],
         [_modelListScrollView.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor],
         [_modelListScrollView.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor],
         [_modelListScrollView.bottomAnchor constraintEqualToAnchor:panel.bottomAnchor],
@@ -1165,6 +1356,7 @@ static NSString *CStr(const char *c) {
     _portLayoutView = [[XLControllerPortLayoutView alloc] initWithFrame:NSMakeRect(0, 0, 800, 1000)];
     _portLayoutView.engineBridge = _engineBridge;
     _portLayoutView.controllerName = _controllerName;
+    _portLayoutView.layoutDelegate = self;
 
     _portLayoutScrollView.documentView = _portLayoutView;
 
@@ -1240,8 +1432,7 @@ static NSString *CStr(const char *c) {
         return [a.name localizedCaseInsensitiveCompare:b.name];
     }];
 
-    _filteredModelList = [_modelList mutableCopy];
-    [_modelListTableView reloadData];
+    [self applySearchFilter];
 }
 
 - (void)updateCheckText {
@@ -1254,6 +1445,26 @@ static NSString *CStr(const char *c) {
             [check appendString:@"WARN: Controller is inactive.\n"];
         }
     }
+
+    // Check port capacity
+    int totalModels = 0;
+    int usedPorts = 0;
+    int overCapacity = 0;
+    for (int i = 0; i < _portLayoutView.portCount; i++) {
+        XLCMPortRow row = [_portLayoutView portRowAtIndex:i];
+        totalModels += row.modelCount;
+        if (row.modelCount > 0) usedPorts++;
+        if (row.maxChannels > 0 && row.totalChannels > row.maxChannels) {
+            overCapacity++;
+            [check appendFormat:@"WARN: Port %d exceeds capacity (%d/%d channels).\n",
+             row.portNumber, row.totalChannels, row.maxChannels];
+        }
+    }
+
+    // Summary stats
+    int unassigned = (int)_modelList.count;
+    [check appendFormat:@"\n%d models assigned across %d ports. %d unassigned models available.",
+     totalModels, usedPorts, unassigned];
 
     if (check.length == 0) {
         [check appendString:@"No issues found."];
@@ -1387,10 +1598,28 @@ static NSString *CStr(const char *c) {
     NSMutableString *csv = [NSMutableString string];
     [csv appendString:@"Port,Type,Protocol,Model,Channels,Pixels,Start Channel,Smart Remote\n"];
 
-    // Access port data from the layout view
-    // For now, basic stub
-    [csv appendFormat:@"# Controller: %@\n", _controllerName];
-    [csv appendString:@"# Export not yet fully implemented\n"];
+    for (int i = 0; i < _portLayoutView.portCount; i++) {
+        XLCMPortRow row = [_portLayoutView portRowAtIndex:i];
+        NSString *portType = (row.portType == 0) ? @"Pixel" : @"Serial";
+        NSString *protocol = [NSString stringWithUTF8String:row.protocol];
+
+        if (row.modelCount == 0) {
+            [csv appendFormat:@"%d,%@,%@,,,,\n", row.portNumber, portType, protocol];
+        } else {
+            for (int j = 0; j < row.modelCount; j++) {
+                XLCMModelEntry *model = &row.models[j];
+                NSString *modelName = [NSString stringWithUTF8String:model->modelName];
+                NSString *sr = @"";
+                if (model->smartRemote > 0) {
+                    sr = [NSString stringWithFormat:@"%c", (char)('A' + model->smartRemote - 1)];
+                }
+                [csv appendFormat:@"%d,%@,%@,%@,%d,%d,%d,%@\n",
+                 row.portNumber, portType, protocol,
+                 modelName, model->channelCount, model->pixelCount,
+                 model->startChannel, sr];
+            }
+        }
+    }
 
     NSError *error;
     [csv writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&error];
@@ -1402,6 +1631,58 @@ static NSString *CStr(const char *c) {
         [alert addButtonWithTitle:@"OK"];
         [alert beginSheetModalForWindow:self.window completionHandler:nil];
     }
+}
+
+- (void)autoLayout:(id)sender {
+    NSAlert *confirm = [[NSAlert alloc] init];
+    confirm.messageText = @"Auto Layout";
+    confirm.informativeText = @"This will assign all unassigned models to available ports sequentially. Continue?";
+    [confirm addButtonWithTitle:@"Auto Layout"];
+    [confirm addButtonWithTitle:@"Cancel"];
+
+    [confirm beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            [self->_portLayoutView autoLayoutModels];
+            self.hasUnsavedChanges = YES;
+        }
+    }];
+}
+
+#pragma mark - Search Field
+
+- (void)searchFieldChanged:(NSSearchField *)sender {
+    _searchString = sender.stringValue;
+    [self applySearchFilter];
+}
+
+- (void)controlTextDidChange:(NSNotification *)notification {
+    if (notification.object == _searchField) {
+        _searchString = _searchField.stringValue;
+        [self applySearchFilter];
+    }
+}
+
+- (void)applySearchFilter {
+    if (_searchString.length == 0) {
+        _filteredModelList = [_modelList mutableCopy];
+    } else {
+        NSMutableArray<XLCMModelListEntry *> *filtered = [NSMutableArray array];
+        for (XLCMModelListEntry *entry in _modelList) {
+            if ([entry.name rangeOfString:_searchString options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                [filtered addObject:entry];
+            }
+        }
+        _filteredModelList = filtered;
+    }
+    [_modelListTableView reloadData];
+}
+
+#pragma mark - XLControllerPortLayoutViewDelegate
+
+- (void)portLayoutViewDidChangeAssignments:(XLControllerPortLayoutView *)view {
+    self.hasUnsavedChanges = YES;
+    [self loadModelList];
+    [self updateCheckText];
 }
 
 #pragma mark - Notifications
