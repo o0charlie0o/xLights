@@ -87,6 +87,12 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     view.wantsLayer = YES;
     view.layer.backgroundColor = [[NSColor colorWithWhite:0.16 alpha:1.0] CGColor];
 
+    // Ensure SwiftUI fills this view to the available space (don't resist stretching)
+    [view setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [view setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationVertical];
+    [view setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [view setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationVertical];
+
     // Layout group toolbar
     NSView *toolbarView = [[NSView alloc] initWithFrame:NSZeroRect];
     toolbarView.translatesAutoresizingMaskIntoConstraints = NO;

@@ -43,6 +43,15 @@ struct XLLayoutTabView: NSViewControllerRepresentable {
     func updateNSViewController(_ nsViewController: XLLayoutViewController, context: Context) {
         // Update if needed when SwiftUI state changes
     }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: XLLayoutViewController, context: Context) -> CGSize? {
+        // Always fill all available space so the internal NSSplitView divider
+        // doesn't cause SwiftUI to resize the entire container
+        return CGSize(
+            width: proposal.width ?? 800,
+            height: proposal.height ?? 600
+        )
+    }
 }
 
 // MARK: - Sequencer Tab View Wrapper
