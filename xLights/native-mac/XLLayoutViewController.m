@@ -14,10 +14,14 @@
 #import "layout/XLModelTreeNode.h"
 #import "layout/XLModelCreationSheet.h"
 #import "layout/XLModelImportSheet.h"
+#import "layout/XLVendorModelWindowController.h"
 #import "layout/XLManipulationHandlesRenderer.h"
 #import "layout/XLModelPropertiesView.h"
 #import "layout/XLLayoutUndoController.h"
+#import "dialogs/XLCustomModelWindow.h"
+#import "dialogs/XLModelGroupWindow.h"
 #import "input/XLKeyboardHandler.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static const CGFloat kModelTreeMinWidth = 200.0;
 static const CGFloat kModelTreeDefaultWidth = 280.0;
@@ -38,6 +42,7 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 @property (nonatomic, strong) NSSplitView *splitView;
 @property (nonatomic, strong) XLModelCreationSheet *modelCreationSheet;
 @property (nonatomic, strong) XLModelImportSheet *modelImportSheet;
+@property (nonatomic, strong) XLVendorModelWindowController *vendorModelWindowController;
 @property (nonatomic, strong) NSScrollView *propertiesScrollView;
 @property (nonatomic, strong, readwrite) XLLayoutUndoController *undoController;
 @property (nonatomic, assign) XLToolMode manipulationToolMode;
@@ -52,6 +57,9 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 /// Layout group selector and toolbar
 @property (nonatomic, strong, readwrite) NSPopUpButton *layoutGroupSelector;
 @property (nonatomic, copy, readwrite) NSString *currentLayoutGroup;
+
+/// Model group management window
+@property (nonatomic, strong) XLModelGroupWindow *modelGroupWindow;
 
 @end
 
@@ -224,6 +232,50 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
     _undoController.engineBridge = engineBridge;
 }
 
+#pragma mark - Layout Group Selector
+
+- (void)reloadLayoutGroupSelector {
+    [_layoutGroupSelector removeAllItems];
+    NSArray<NSString *> *groups = [_engineBridge getLayoutGroupNames];
+    if (groups.count == 0) {
+        [_layoutGroupSelector addItemWithTitle:@"Default"];
+    } else {
+        for (NSString *group in groups) {
+            [_layoutGroupSelector addItemWithTitle:group];
+        }
+    }
+    // Select current group
+    NSString *current = [_engineBridge getCurrentLayoutGroup];
+    if (current) {
+        [_layoutGroupSelector selectItemWithTitle:current];
+        _currentLayoutGroup = current;
+    }
+}
+
+- (void)layoutGroupSelectorChanged:(id)sender {
+    NSString *selected = _layoutGroupSelector.titleOfSelectedItem;
+    if (selected && ![selected isEqualToString:_currentLayoutGroup]) {
+        _currentLayoutGroup = selected;
+        [_engineBridge setCurrentLayoutGroup:selected];
+        [_modelTreeController reloadData];
+        [_previewView setNeedsDisplay:YES];
+    }
+}
+
+- (void)layoutGroupListDidChange:(NSNotification *)notification {
+    [self reloadLayoutGroupSelector];
+}
+
+- (void)layoutGroupDidChange:(NSNotification *)notification {
+    NSString *groupName = notification.userInfo[@"groupName"];
+    if (groupName) {
+        _currentLayoutGroup = groupName;
+        [_layoutGroupSelector selectItemWithTitle:groupName];
+    }
+    [_modelTreeController reloadData];
+    [_previewView setNeedsDisplay:YES];
+}
+
 #pragma mark - NSSplitViewDelegate
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMin ofSubviewAt:(NSInteger)dividerIndex {
@@ -366,10 +418,97 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
                                  completion:^(BOOL imported, NSArray<NSString *> *importedModelNames) {
         if (imported && importedModelNames.count > 0) {
             [weakSelf.modelTreeController reloadData];
-            // Select first imported model
+            [weakSelf.previewView reloadModels];
+            [weakSelf selectModel:importedModelNames.firstObject];
             [weakSelf.modelTreeController selectModelWithName:importedModelNames.firstObject];
         }
         weakSelf.modelImportSheet = nil;
+    }];
+}
+
+- (IBAction)importModels:(id)sender {
+    [self showModelImportSheet];
+}
+
+- (IBAction)exportModelToFile:(id)sender {
+    NSString *selectedModel = [_modelTreeController selectedModelName];
+    if (!selectedModel) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Model Selected";
+        alert.informativeText = @"Please select a model in the layout tree before exporting.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSSavePanel *savePanel = [NSSavePanel savePanel];
+    savePanel.title = @"Export Model";
+    savePanel.nameFieldStringValue = [selectedModel stringByAppendingPathExtension:@"xmodel"];
+    savePanel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"xmodel"]];
+
+    [savePanel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && savePanel.URL) {
+            NSDictionary *modelData = [self->_engineBridge getModelData:selectedModel];
+            if (modelData) {
+                // Build a simple xmodel XML from the model data
+                NSMutableString *xml = [NSMutableString string];
+                [xml appendString:@"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"];
+                [xml appendFormat:@"<model name=\"%@\"", selectedModel];
+
+                NSDictionary *props = modelData[@"properties"];
+                for (NSString *key in props) {
+                    if ([key isEqualToString:@"name"]) continue;
+                    NSString *value = [NSString stringWithFormat:@"%@", props[key]];
+                    // Escape XML special characters
+                    value = [value stringByReplacingOccurrencesOfString:@"&" withString:@"&amp;"];
+                    value = [value stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
+                    value = [value stringByReplacingOccurrencesOfString:@"<" withString:@"&lt;"];
+                    value = [value stringByReplacingOccurrencesOfString:@">" withString:@"&gt;"];
+                    [xml appendFormat:@" %@=\"%@\"", key, value];
+                }
+                [xml appendString:@" />\n"];
+
+                NSError *error = nil;
+                BOOL written = [xml writeToURL:savePanel.URL
+                                    atomically:YES
+                                      encoding:NSUTF8StringEncoding
+                                         error:&error];
+                if (!written) {
+                    NSLog(@"XLLayoutViewController: Failed to export model: %@", error);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        NSAlert *alert = [[NSAlert alloc] init];
+                        alert.messageText = @"Export Failed";
+                        alert.informativeText = [NSString stringWithFormat:@"Could not write model file: %@",
+                                                 error.localizedDescription];
+                        [alert addButtonWithTitle:@"OK"];
+                        [alert runModal];
+                    });
+                } else {
+                    NSLog(@"XLLayoutViewController: Exported model '%@' to %@", selectedModel, savePanel.URL.path);
+                }
+            }
+        }
+    }];
+}
+
+- (void)showVendorModelDownload {
+    if (!_vendorModelWindowController) {
+        _vendorModelWindowController = [[XLVendorModelWindowController alloc] init];
+    }
+    _vendorModelWindowController.engineBridge = _engineBridge;
+    _vendorModelWindowController.showFolderPath = [_engineBridge getShowFolderPath];
+
+    __weak typeof(self) weakSelf = self;
+    [_vendorModelWindowController showWithCompletion:^(BOOL imported, NSString *modelFilePath) {
+        if (imported) {
+            [weakSelf.modelTreeController reloadData];
+
+            // Try to select the imported model
+            if (modelFilePath) {
+                NSString *modelName = [[modelFilePath lastPathComponent] stringByDeletingPathExtension];
+                [weakSelf.modelTreeController selectModelWithName:modelName];
+            }
+        }
     }];
 }
 
@@ -682,6 +821,19 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
             [self selectModel:modelName];
         }
     }
+}
+
+- (void)modelPropertiesDidRequestEditCustomModel:(XLModelPropertiesView *)view
+                                        forModel:(NSString *)modelName {
+    XLCustomModelWindow *customModelWindow = [[XLCustomModelWindow alloc] initWithModelName:modelName];
+    customModelWindow.engineBridge = _engineBridge;
+
+    [customModelWindow showWithCompletion:^(BOOL saved) {
+        if (saved) {
+            [self selectModel:modelName];
+            [self.modelTreeController reloadData];
+        }
+    }];
 }
 
 #pragma mark - XLLayoutUndoDelegate
@@ -1576,6 +1728,31 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 
     NSLog(@"XLLayoutViewController: Unhandled layout key action: %@", actionType);
     return NO;
+}
+
+#pragma mark - Model Group Management
+
+- (void)modelTreeDidRequestManageGroups:(XLModelTreeViewController *)controller {
+    [self showModelGroupManagement];
+}
+
+- (void)showModelGroupManagement {
+    if (_modelGroupWindow) {
+        [_modelGroupWindow.window makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    _modelGroupWindow = [[XLModelGroupWindow alloc] init];
+    _modelGroupWindow.engineBridge = _engineBridge;
+
+    __weak typeof(self) weakSelf = self;
+    [_modelGroupWindow showWithCompletion:^(BOOL changed) {
+        if (changed) {
+            [weakSelf.modelTreeController reloadData];
+            [weakSelf.previewView reloadModels];
+        }
+        weakSelf.modelGroupWindow = nil;
+    }];
 }
 
 @end

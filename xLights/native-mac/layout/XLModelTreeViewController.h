@@ -68,6 +68,9 @@
 /// User requested cloning a group
 - (void)modelTree:(XLModelTreeViewController *)controller didRequestCloneGroup:(NSString *)groupName;
 
+/// User requested opening the model group management window
+- (void)modelTreeDidRequestManageGroups:(XLModelTreeViewController *)controller;
+
 @end
 
 /// NSOutlineView-based model hierarchy tree for the Layout tab.

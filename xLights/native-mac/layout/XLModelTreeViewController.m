@@ -682,6 +682,15 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
                                                      keyEquivalent:@""];
     deleteEmptyItem.target = self;
     [menu addItem:deleteEmptyItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // Manage Groups
+    NSMenuItem *manageGroupsItem = [[NSMenuItem alloc] initWithTitle:@"Manage Groups..."
+                                                              action:@selector(contextManageGroups:)
+                                                       keyEquivalent:@""];
+    manageGroupsItem.target = self;
+    [menu addItem:manageGroupsItem];
 }
 
 - (void)addSingleSelectionItemsToMenu:(NSMenu *)menu node:(XLModelTreeNode *)node {
@@ -1288,6 +1297,12 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
             [self reloadData];
         }
     }];
+}
+
+- (void)contextManageGroups:(id)sender {
+    if ([_delegate respondsToSelector:@selector(modelTreeDidRequestManageGroups:)]) {
+        [_delegate modelTreeDidRequestManageGroups:self];
+    }
 }
 
 #pragma mark - Context Menu Actions (Bulk Edit)

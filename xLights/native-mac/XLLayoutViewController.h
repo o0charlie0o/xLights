@@ -19,6 +19,7 @@
 
 @class XLEngineBridge;
 @class XLKeyboardHandler;
+@class XLModelGroupWindow;
 
 /// View controller for the Layout/Preview tab.
 ///
@@ -56,6 +57,15 @@
 /// Show the model import sheet
 - (void)showModelImportSheet;
 
+/// Menu action: Import Models (File > Import > Import Models or Model > Import Model)
+- (IBAction)importModels:(id)sender;
+
+/// Menu action: Export selected model to .xmodel file
+- (IBAction)exportModelToFile:(id)sender;
+
+/// Show the vendor model download window
+- (void)showVendorModelDownload;
+
 /// Select a model and show its manipulation handles
 - (void)selectModel:(NSString *)modelName;
 
@@ -90,5 +100,8 @@
 
 /// Returns YES if redo is available
 - (BOOL)canRedo;
+
+/// Show the model group management window
+- (void)showModelGroupManagement;
 
 @end
