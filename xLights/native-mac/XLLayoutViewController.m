@@ -257,6 +257,15 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
                                     tag:(NSInteger)tag {
     NSImage *image = [NSImage imageWithSystemSymbolName:symbolName
                                       accessibilityDescription:tooltip];
+    if (!image) {
+        // Fallback: use first letter of tooltip as text button
+        image = [NSImage imageWithSystemSymbolName:@"questionmark.square"
+                                  accessibilityDescription:tooltip];
+    }
+    if (!image) {
+        // Ultimate fallback: create a simple 16x16 placeholder
+        image = [[NSImage alloc] initWithSize:NSMakeSize(16, 16)];
+    }
     NSButton *button = [NSButton buttonWithImage:image target:self action:@selector(modelTypeButtonClicked:)];
     button.bezelStyle = NSBezelStyleAccessoryBarAction;
     button.bordered = YES;
@@ -275,23 +284,23 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 - (NSScrollView *)buildModelTypeToolbar {
     // Model types with SF Symbol names and display names (used as type key for creation sheet)
     NSArray<NSArray<NSString *> *> *modelTypes = @[
-        @[@"archway",                        @"Arches"],
-        @[@"arrow.up.and.down.and.sparkles", @"Candy Canes"],
+        @[@"rainbow",                        @"Arches"],
+        @[@"wand.and.rays",                  @"Candy Canes"],
         @[@"rectangle.split.3x1",            @"Channel Block"],
         @[@"circle",                         @"Circle"],
         @[@"cube",                           @"Cube"],
         @[@"square.dashed",                  @"Custom"],
-        @[@"light.recessed",                 @"DMX"],
-        @[@"chevron.down",                   @"Icicles"],
+        @[@"lightbulb",                      @"DMX"],
+        @[@"chevron.down.2",                 @"Icicles"],
         @[@"photo",                          @"Image"],
         @[@"square.grid.3x3",               @"Matrix"],
-        @[@"point.topleft.down.to.point.bottomright.curvepath", @"Poly Line"],
+        @[@"scribble.variable",              @"Poly Line"],
         @[@"line.diagonal",                  @"Single Line"],
         @[@"globe",                          @"Sphere"],
-        @[@"arrow.trianglehead.2.clockwise.rotate.90", @"Spinner"],
+        @[@"arrow.triangle.2.circlepath",    @"Spinner"],
         @[@"star",                           @"Star"],
-        @[@"tree",                           @"Tree"],
-        @[@"window.ceiling",                 @"Window Frame"],
+        @[@"leaf",                           @"Tree"],
+        @[@"rectangle.split.3x3",            @"Window Frame"],
     ];
 
     NSStackView *stack = [[NSStackView alloc] init];
