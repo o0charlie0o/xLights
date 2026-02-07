@@ -91,10 +91,14 @@
 ///
 /// Columns:
 ///   - Name (with icon based on model type)
-///   - Type (model type string)
-///   - Channels (channel count, right-aligned)
-///   - Controller (controller assignment)
-@interface XLModelTreeViewController : NSViewController <NSOutlineViewDataSource, NSOutlineViewDelegate, NSSearchFieldDelegate, NSMenuDelegate>
+///   - Start Chan (start channel string, right-aligned)
+///   - End Chan (end channel number, right-aligned)
+///   - Ctrlr Conn (controller:port assignment)
+/// Notification posted when the 3D Objects list selection changes.
+/// userInfo contains @"objectName" (NSString, may be nil).
+extern NSNotificationName const XLViewObjectSelectionDidChangeNotification;
+
+@interface XLModelTreeViewController : NSViewController <NSOutlineViewDataSource, NSOutlineViewDelegate, NSSearchFieldDelegate, NSMenuDelegate, NSTableViewDataSource, NSTableViewDelegate>
 
 /// The outline view displaying the model tree
 @property (nonatomic, strong, readonly) NSOutlineView *outlineView;
@@ -108,11 +112,20 @@
 /// Top-level items in the tree (groups and ungrouped models)
 @property (nonatomic, copy) NSArray<XLModelTreeNode *> *rootNodes;
 
+/// Whether the layout is in 3D mode (controls visibility of 3D Objects tab)
+@property (nonatomic, assign) BOOL show3D;
+
 /// Reload data from the engine bridge
 - (void)reloadData;
 
+/// Reload the 3D Objects list from the engine bridge
+- (void)reloadViewObjects;
+
 /// Programmatically select a model by name (for syncing with preview)
 - (void)selectModelWithName:(NSString *)name;
+
+/// Programmatically select multiple models by name (for syncing with preview)
+- (void)selectModelsWithNames:(NSArray<NSString *> *)names;
 
 /// Expand all tree items
 - (void)expandAll;

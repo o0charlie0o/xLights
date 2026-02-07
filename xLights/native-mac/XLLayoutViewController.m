@@ -37,15 +37,20 @@ static const float kPastePositionOffset = 40.0f;
 /// Time window (seconds) for coalescing rapid nudge operations into one undo group
 static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 
+/// NSUserDefaults keys for layout view state
+static NSString * const kLayoutShow3DKey = @"XLLayoutShow3D";
+static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled";
+
 @interface XLLayoutViewController ()
 
-@property (nonatomic, strong) NSSplitView *splitView;
+@property (nonatomic, strong) NSSplitViewController *splitController;
 @property (nonatomic, strong) XLModelCreationSheet *modelCreationSheet;
 @property (nonatomic, strong) XLModelImportSheet *modelImportSheet;
 @property (nonatomic, strong) XLVendorModelWindowController *vendorModelWindowController;
 @property (nonatomic, strong) NSScrollView *propertiesScrollView;
 @property (nonatomic, strong, readwrite) XLLayoutUndoController *undoController;
 @property (nonatomic, assign) XLToolMode manipulationToolMode;
+@property (nonatomic, assign) BOOL initialDividersSet;
 
 /// Nudge undo coalescing: accumulate rapid nudges into a single undo operation
 @property (nonatomic, assign) BOOL nudgeUndoGroupOpen;
@@ -57,6 +62,13 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 /// Layout group selector and toolbar
 @property (nonatomic, strong, readwrite) NSPopUpButton *layoutGroupSelector;
 @property (nonatomic, copy, readwrite) NSString *currentLayoutGroup;
+
+/// Model type creation toolbar
+@property (nonatomic, strong, readwrite) NSScrollView *modelTypeToolbar;
+
+/// 2D/3D mode and overlap controls
+@property (nonatomic, strong, readwrite) NSSegmentedControl *viewModeControl;
+@property (nonatomic, strong, readwrite) NSButton *overlapCheckToggle;
 
 /// Model group management window
 @property (nonatomic, strong) XLModelGroupWindow *modelGroupWindow;
@@ -93,6 +105,39 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
     _layoutGroupSelector.action = @selector(layoutGroupSelectorChanged:);
     [toolbarView addSubview:_layoutGroupSelector];
 
+    // 2D/3D mode segmented control (right side of toolbar)
+    _viewModeControl = [NSSegmentedControl segmentedControlWithLabels:@[@"2D", @"3D"]
+                                                         trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                               target:self
+                                                               action:@selector(viewModeChanged:)];
+    _viewModeControl.translatesAutoresizingMaskIntoConstraints = NO;
+    _viewModeControl.controlSize = NSControlSizeSmall;
+    _viewModeControl.font = [NSFont systemFontOfSize:11];
+    [_viewModeControl setWidth:32 forSegment:0];
+    [_viewModeControl setWidth:32 forSegment:1];
+
+    // Restore saved state (default to 3D)
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL show3D = YES;
+    if ([defaults objectForKey:kLayoutShow3DKey] != nil) {
+        show3D = [defaults boolForKey:kLayoutShow3DKey];
+    }
+    _viewModeControl.selectedSegment = show3D ? 1 : 0;
+    [toolbarView addSubview:_viewModeControl];
+
+    // Overlap checks toggle (right side of toolbar, after 2D/3D control)
+    _overlapCheckToggle = [NSButton checkboxWithTitle:@"Overlap checks"
+                                               target:self
+                                               action:@selector(overlapCheckToggled:)];
+    _overlapCheckToggle.translatesAutoresizingMaskIntoConstraints = NO;
+    _overlapCheckToggle.controlSize = NSControlSizeSmall;
+    _overlapCheckToggle.font = [NSFont systemFontOfSize:11];
+    _overlapCheckToggle.contentTintColor = [NSColor secondaryLabelColor];
+
+    BOOL overlapChecks = [defaults boolForKey:kLayoutOverlapChecksKey];
+    _overlapCheckToggle.state = overlapChecks ? NSControlStateValueOn : NSControlStateValueOff;
+    [toolbarView addSubview:_overlapCheckToggle];
+
     [NSLayoutConstraint activateConstraints:@[
         [toolbarView.topAnchor constraintEqualToAnchor:view.topAnchor],
         [toolbarView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
@@ -105,39 +150,57 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
         [_layoutGroupSelector.centerYAnchor constraintEqualToAnchor:toolbarView.centerYAnchor],
         [_layoutGroupSelector.leadingAnchor constraintEqualToAnchor:previewLabel.trailingAnchor constant:4],
         [_layoutGroupSelector.widthAnchor constraintGreaterThanOrEqualToConstant:140],
+
+        [_overlapCheckToggle.centerYAnchor constraintEqualToAnchor:toolbarView.centerYAnchor],
+        [_overlapCheckToggle.trailingAnchor constraintEqualToAnchor:toolbarView.trailingAnchor constant:-8],
+
+        [_viewModeControl.centerYAnchor constraintEqualToAnchor:toolbarView.centerYAnchor],
+        [_viewModeControl.trailingAnchor constraintEqualToAnchor:_overlapCheckToggle.leadingAnchor constant:-12],
     ]];
 
-    // Split view: model tree (left) | preview (center) | properties (right)
-    _splitView = [[NSSplitView alloc] initWithFrame:view.bounds];
-    _splitView.translatesAutoresizingMaskIntoConstraints = NO;
-    _splitView.vertical = YES;
-    _splitView.dividerStyle = NSSplitViewDividerStyleThin;
-    _splitView.delegate = (id<NSSplitViewDelegate>)self;
-    [view addSubview:_splitView];
+    // Model type creation toolbar (scrollable horizontal button bar)
+    _modelTypeToolbar = [self buildModelTypeToolbar];
+    _modelTypeToolbar.translatesAutoresizingMaskIntoConstraints = NO;
+    [view addSubview:_modelTypeToolbar];
 
     [NSLayoutConstraint activateConstraints:@[
-        [_splitView.topAnchor constraintEqualToAnchor:toolbarView.bottomAnchor],
-        [_splitView.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
-        [_splitView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
-        [_splitView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_modelTypeToolbar.topAnchor constraintEqualToAnchor:toolbarView.bottomAnchor],
+        [_modelTypeToolbar.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_modelTypeToolbar.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_modelTypeToolbar.heightAnchor constraintEqualToConstant:34],
     ]];
+
+    // Build split view using NSSplitViewController + NSSplitViewItem pattern
+    // (matches XLMainWindowController's setupSplitView approach)
+    _splitController = [[NSSplitViewController alloc] init];
+    _splitController.splitView.vertical = YES;
+    _splitController.splitView.dividerStyle = NSSplitViewDividerStyleThin;
 
     // Model tree (left sidebar)
     _modelTreeController = [[XLModelTreeViewController alloc] init];
     _modelTreeController.delegate = self;
     _modelTreeController.engineBridge = self.engineBridge;
+    _modelTreeController.show3D = show3D;
 
-    NSView *treeView = _modelTreeController.view;
-    treeView.translatesAutoresizingMaskIntoConstraints = NO;
-    [_splitView addSubview:treeView];
+    NSSplitViewItem *treeItem = [NSSplitViewItem splitViewItemWithViewController:_modelTreeController];
+    treeItem.canCollapse = NO;
+    treeItem.minimumThickness = kModelTreeMinWidth;
+    treeItem.holdingPriority = NSLayoutPriorityDefaultLow + 10;
+    [_splitController addSplitViewItem:treeItem];
 
     // Preview (center)
     _previewView = [[XLMetalPreviewView alloc] initWithFrame:NSZeroRect];
-    _previewView.translatesAutoresizingMaskIntoConstraints = NO;
     _previewView.delegate = self;
-    _previewView.show3D = YES;
+    _previewView.show3D = show3D;
     _previewView.showGrid = YES;
-    [_splitView addSubview:_previewView];
+
+    NSViewController *previewVC = [[NSViewController alloc] init];
+    previewVC.view = _previewView;
+    NSSplitViewItem *previewItem = [NSSplitViewItem splitViewItemWithViewController:previewVC];
+    previewItem.canCollapse = NO;
+    previewItem.minimumThickness = 300.0;
+    previewItem.holdingPriority = NSLayoutPriorityDefaultHigh;
+    [_splitController addSplitViewItem:previewItem];
 
     // Properties (right sidebar) - in a scroll view
     _propertiesView = [[XLModelPropertiesView alloc] initWithFrame:NSZeroRect];
@@ -146,7 +209,6 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
     _propertiesView.engineBridge = self.engineBridge;
 
     _propertiesScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    _propertiesScrollView.translatesAutoresizingMaskIntoConstraints = NO;
     _propertiesScrollView.hasVerticalScroller = YES;
     _propertiesScrollView.hasHorizontalScroller = NO;
     _propertiesScrollView.autohidesScrollers = YES;
@@ -162,15 +224,155 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
         [_propertiesView.trailingAnchor constraintEqualToAnchor:_propertiesScrollView.contentView.trailingAnchor],
     ]];
 
-    [_splitView addSubview:_propertiesScrollView];
+    NSViewController *propertiesVC = [[NSViewController alloc] init];
+    propertiesVC.view = _propertiesScrollView;
+    NSSplitViewItem *propertiesItem = [NSSplitViewItem splitViewItemWithViewController:propertiesVC];
+    propertiesItem.canCollapse = NO;
+    propertiesItem.minimumThickness = kPropertiesMinWidth;
+    propertiesItem.holdingPriority = NSLayoutPriorityDefaultLow + 10;
+    [_splitController addSplitViewItem:propertiesItem];
 
-    // Set initial split positions
-    CGFloat totalWidth = view.bounds.size.width;
-    CGFloat previewWidth = totalWidth - kModelTreeDefaultWidth - kPropertiesDefaultWidth;
-    [_splitView setPosition:kModelTreeDefaultWidth ofDividerAtIndex:0];
-    [_splitView setPosition:kModelTreeDefaultWidth + previewWidth ofDividerAtIndex:1];
+    // Embed the split view controller as a child for proper containment
+    NSView *splitView = _splitController.view;
+    splitView.translatesAutoresizingMaskIntoConstraints = NO;
+    [view addSubview:splitView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [splitView.topAnchor constraintEqualToAnchor:_modelTypeToolbar.bottomAnchor],
+        [splitView.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
+        [splitView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [splitView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+    ]];
 
     self.view = view;
+
+    // Add as child VC after self.view is set (addChildViewController requires valid view)
+    [self addChildViewController:_splitController];
+}
+
+#pragma mark - Model Type Toolbar
+
+- (NSButton *)modelTypeButtonWithSymbol:(NSString *)symbolName
+                                tooltip:(NSString *)tooltip
+                                    tag:(NSInteger)tag {
+    NSImage *image = [NSImage imageWithSystemSymbolName:symbolName
+                                      accessibilityDescription:tooltip];
+    NSButton *button = [NSButton buttonWithImage:image target:self action:@selector(modelTypeButtonClicked:)];
+    button.bezelStyle = NSBezelStyleAccessoryBarAction;
+    button.bordered = YES;
+    button.imagePosition = NSImageOnly;
+    button.imageScaling = NSImageScaleProportionallyDown;
+    button.toolTip = tooltip;
+    button.tag = tag;
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [button.widthAnchor constraintEqualToConstant:30],
+        [button.heightAnchor constraintEqualToConstant:24],
+    ]];
+    return button;
+}
+
+- (NSScrollView *)buildModelTypeToolbar {
+    // Model types with SF Symbol names and display names (used as type key for creation sheet)
+    NSArray<NSArray<NSString *> *> *modelTypes = @[
+        @[@"archway",                        @"Arches"],
+        @[@"arrow.up.and.down.and.sparkles", @"Candy Canes"],
+        @[@"rectangle.split.3x1",            @"Channel Block"],
+        @[@"circle",                         @"Circle"],
+        @[@"cube",                           @"Cube"],
+        @[@"square.dashed",                  @"Custom"],
+        @[@"light.recessed",                 @"DMX"],
+        @[@"chevron.down",                   @"Icicles"],
+        @[@"photo",                          @"Image"],
+        @[@"square.grid.3x3",               @"Matrix"],
+        @[@"point.topleft.down.to.point.bottomright.curvepath", @"Poly Line"],
+        @[@"line.diagonal",                  @"Single Line"],
+        @[@"globe",                          @"Sphere"],
+        @[@"arrow.trianglehead.2.clockwise.rotate.90", @"Spinner"],
+        @[@"star",                           @"Star"],
+        @[@"tree",                           @"Tree"],
+        @[@"window.ceiling",                 @"Window Frame"],
+    ];
+
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    stack.spacing = 2;
+    stack.alignment = NSLayoutAttributeCenterY;
+    stack.edgeInsets = NSEdgeInsetsMake(0, 6, 0, 6);
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+
+    for (NSUInteger i = 0; i < modelTypes.count; i++) {
+        NSString *symbol = modelTypes[i][0];
+        NSString *typeName = modelTypes[i][1];
+        NSButton *btn = [self modelTypeButtonWithSymbol:symbol tooltip:typeName tag:(NSInteger)i];
+        [stack addArrangedSubview:btn];
+    }
+
+    // Separator between model types and utility buttons
+    NSBox *separator = [[NSBox alloc] initWithFrame:NSZeroRect];
+    separator.boxType = NSBoxSeparator;
+    separator.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [separator.widthAnchor constraintEqualToConstant:1],
+        [separator.heightAnchor constraintEqualToConstant:18],
+    ]];
+    [stack addArrangedSubview:separator];
+
+    // Download vendor models button
+    NSButton *downloadBtn = [self modelTypeButtonWithSymbol:@"arrow.down.circle"
+                                                   tooltip:@"Download Vendor Models"
+                                                       tag:100];
+    [stack addArrangedSubview:downloadBtn];
+
+    // Import custom model button
+    NSButton *importBtn = [self modelTypeButtonWithSymbol:@"square.and.arrow.down"
+                                                 tooltip:@"Import Model"
+                                                     tag:101];
+    [stack addArrangedSubview:importBtn];
+
+    // Wrap in scroll view for horizontal scrolling when window is narrow
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    scrollView.hasHorizontalScroller = YES;
+    scrollView.hasVerticalScroller = NO;
+    scrollView.autohidesScrollers = YES;
+    scrollView.borderType = NSNoBorder;
+    scrollView.drawsBackground = YES;
+    scrollView.backgroundColor = [NSColor colorWithWhite:0.15 alpha:1.0];
+    scrollView.documentView = stack;
+
+    NSClipView *clipView = scrollView.contentView;
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:clipView.topAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:clipView.bottomAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:clipView.leadingAnchor],
+        [stack.heightAnchor constraintEqualToAnchor:clipView.heightAnchor],
+    ]];
+
+    return scrollView;
+}
+
+- (void)modelTypeButtonClicked:(NSButton *)sender {
+    NSInteger tag = sender.tag;
+
+    if (tag == 100) {
+        [self showVendorModelDownload];
+        return;
+    }
+    if (tag == 101) {
+        [self showModelImportSheet];
+        return;
+    }
+
+    NSArray<NSString *> *modelTypes = @[
+        @"Arches", @"Candy Canes", @"Channel Block", @"Circle",
+        @"Cube", @"Custom", @"DMX", @"Icicles",
+        @"Image", @"Matrix", @"Poly Line", @"Single Line",
+        @"Sphere", @"Spinner", @"Star", @"Tree", @"Window Frame",
+    ];
+
+    if (tag >= 0 && tag < (NSInteger)modelTypes.count) {
+        [self showModelCreationSheetForType:modelTypes[tag]];
+    }
 }
 
 - (void)viewDidLoad {
@@ -216,6 +418,23 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 
 - (void)viewDidAppear {
     [super viewDidAppear];
+
+    // Set initial divider positions after Auto Layout has stabilized.
+    // Must be deferred because NSSplitViewController needs a layout pass first.
+    if (!_initialDividersSet) {
+        _initialDividersSet = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSSplitView *sv = self->_splitController.splitView;
+            CGFloat totalWidth = sv.bounds.size.width;
+            if (totalWidth > 0) {
+                CGFloat previewWidth = totalWidth - kModelTreeDefaultWidth - kPropertiesDefaultWidth;
+                if (previewWidth < 300) previewWidth = 300;
+                [sv setPosition:kModelTreeDefaultWidth ofDividerAtIndex:0];
+                [sv setPosition:kModelTreeDefaultWidth + previewWidth ofDividerAtIndex:1];
+            }
+        });
+    }
+
     [_previewView startRenderLoop];
 }
 
@@ -276,33 +495,29 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
     [_previewView setNeedsDisplay:YES];
 }
 
-#pragma mark - NSSplitViewDelegate
-
-- (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMin ofSubviewAt:(NSInteger)dividerIndex {
-    if (dividerIndex == 0) {
-        // Left divider: minimum for model tree
-        return kModelTreeMinWidth;
-    } else {
-        // Right divider: minimum preview width (leave room for properties)
-        return kModelTreeMinWidth + 300; // model tree + min preview
-    }
-}
-
-- (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposedMax ofSubviewAt:(NSInteger)dividerIndex {
-    if (dividerIndex == 0) {
-        // Left divider: leave room for preview and properties
-        return proposedMax - 300 - kPropertiesMinWidth;
-    } else {
-        // Right divider: leave room for properties
-        return proposedMax - kPropertiesMinWidth;
-    }
-}
-
 #pragma mark - XLMetalPreviewDelegate
 
 - (void)previewView:(XLMetalPreviewView *)view didSelectModel:(NSString *)modelName {
     if (modelName) {
         [_modelTreeController selectModelWithName:modelName];
+    } else {
+        // Deselect all in tree
+        [_modelTreeController.outlineView deselectAll:nil];
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didSelectModels:(NSArray<NSString *> *)modelNames {
+    if (modelNames.count > 0) {
+        [_modelTreeController selectModelsWithNames:modelNames];
+        // Show properties for the primary (last) model
+        NSString *primaryModel = modelNames.lastObject;
+        NSDictionary *modelInfo = [_engineBridge getModelInfo:primaryModel];
+        if (modelInfo) {
+            [_propertiesView showPropertiesForModel:primaryModel info:modelInfo];
+        }
+    } else {
+        [_modelTreeController.outlineView deselectAll:nil];
+        [_propertiesView clearProperties];
     }
 }
 
@@ -313,11 +528,46 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 
 - (void)modelTree:(XLModelTreeViewController *)controller didSelectModel:(NSString *)modelName {
     NSLog(@"XLLayoutViewController: Model selected from tree: %@", modelName);
-    [self selectModel:modelName];
+    // Check if the tree has multi-selection active
+    NSArray<NSString *> *treeSelection = [controller selectedModelNames];
+    if (treeSelection.count > 1) {
+        [_previewView selectModels:treeSelection];
+    } else {
+        [self selectModel:modelName];
+    }
 }
 
 - (void)modelTree:(XLModelTreeViewController *)controller didMoveModel:(NSString *)modelName toGroup:(NSString *)groupName atIndex:(NSInteger)index {
     NSLog(@"XLLayoutViewController: Model '%@' moved to group '%@' at index %ld", modelName, groupName, (long)index);
+
+    if (!_engineBridge) return;
+
+    // Find which groups currently contain this model so we can remove from old groups
+    NSArray<NSString *> *currentGroups = [_engineBridge getGroupsContainingModel:modelName];
+
+    if (groupName) {
+        // Moving into a group: remove from any current groups first (except target)
+        for (NSString *oldGroup in currentGroups) {
+            if (![oldGroup isEqualToString:groupName]) {
+                [_engineBridge removeModel:modelName fromGroup:oldGroup];
+            }
+        }
+
+        // Add to target group if not already a member
+        if (![currentGroups containsObject:groupName]) {
+            [_engineBridge addModel:modelName toGroup:groupName];
+        }
+    } else {
+        // Moving to root level: remove from all groups
+        for (NSString *oldGroup in currentGroups) {
+            [_engineBridge removeModel:modelName fromGroup:oldGroup];
+        }
+    }
+
+    // Notify the rest of the app that model list changed
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"XLModelListDidChangeNotification"
+                      object:self];
 }
 
 - (void)modelTree:(XLModelTreeViewController *)controller didRequestAddModelOfType:(NSString *)modelType {
@@ -728,6 +978,26 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
 
 - (void)toggle2D3DMode {
     _previewView.show3D = !_previewView.show3D;
+    _viewModeControl.selectedSegment = _previewView.show3D ? 1 : 0;
+    [[NSUserDefaults standardUserDefaults] setBool:_previewView.show3D forKey:kLayoutShow3DKey];
+    _modelTreeController.show3D = _previewView.show3D;
+}
+
+- (void)viewModeChanged:(NSSegmentedControl *)sender {
+    BOOL show3D = (sender.selectedSegment == 1);
+    _previewView.show3D = show3D;
+    [[NSUserDefaults standardUserDefaults] setBool:show3D forKey:kLayoutShow3DKey];
+    _modelTreeController.show3D = show3D;
+    [_previewView setNeedsDisplay:YES];
+}
+
+- (void)overlapCheckToggled:(NSButton *)sender {
+    BOOL enabled = (sender.state == NSControlStateValueOn);
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kLayoutOverlapChecksKey];
+}
+
+- (BOOL)overlapChecksEnabled {
+    return (_overlapCheckToggle.state == NSControlStateValueOn);
 }
 
 - (void)setGridSnapSize:(float)snapSize {
@@ -1320,6 +1590,209 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
                            forModels:selectedNames];
     }
 
+    [_previewView reloadModels];
+}
+
+#pragma mark - XLMetalPreviewDelegate (New Context Menu Operations)
+
+- (NSArray<NSString *> *)previewViewSelectedModelNames:(XLMetalPreviewView *)view {
+    NSArray<NSString *> *treeSelection = [_modelTreeController selectedModelNames];
+    if (treeSelection.count > 0) return treeSelection;
+    if (view.selectedModelName) return @[view.selectedModelName];
+    return @[];
+}
+
+- (void)previewViewDidRequestDeletePreview:(XLMetalPreviewView *)view {
+    NSString *currentGroup = _currentLayoutGroup;
+    if (!currentGroup || [currentGroup isEqualToString:@"Default"]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Cannot Delete Default Preview";
+        alert.informativeText = @"The Default preview cannot be deleted.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Delete Preview \"%@\"?", currentGroup];
+    alert.informativeText = @"This will remove the preview and unassign all models in it. This cannot be undone.";
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.buttons.firstObject.hasDestructiveAction = YES;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        BOOL success = [_engineBridge deleteLayoutGroup:currentGroup];
+        if (success) {
+            [self reloadLayoutGroupSelector];
+            [_modelTreeController reloadData];
+            [_previewView reloadModels];
+        }
+    }
+}
+
+- (void)previewViewDidRequestRenamePreview:(XLMetalPreviewView *)view {
+    NSString *currentGroup = _currentLayoutGroup;
+    if (!currentGroup || [currentGroup isEqualToString:@"Default"]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Cannot Rename Default Preview";
+        alert.informativeText = @"The Default preview cannot be renamed.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Rename Preview";
+    alert.informativeText = [NSString stringWithFormat:@"Enter a new name for preview \"%@\":", currentGroup];
+    [alert addButtonWithTitle:@"Rename"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
+    input.stringValue = currentGroup;
+    alert.accessoryView = input;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *newName = input.stringValue;
+        if (newName.length > 0 && ![newName isEqualToString:currentGroup]) {
+            BOOL success = [_engineBridge renameLayoutGroup:currentGroup toName:newName];
+            if (success) {
+                [self reloadLayoutGroupSelector];
+                [_modelTreeController reloadData];
+                [_previewView reloadModels];
+            }
+        }
+    }
+}
+
+- (void)previewViewDidRequestPrintLayoutImage:(XLMetalPreviewView *)view {
+    NSLog(@"XLLayoutViewController: Print Layout Image not yet implemented");
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Print Layout Image";
+    alert.informativeText = @"This feature is not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (void)previewViewDidRequestSaveLayoutImage:(XLMetalPreviewView *)view {
+    NSLog(@"XLLayoutViewController: Save Layout Image not yet implemented");
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Save Layout Image";
+    alert.informativeText = @"This feature is not yet implemented.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (void)previewViewDidRequestImportModels:(XLMetalPreviewView *)view {
+    [self showModelImportSheet];
+}
+
+- (void)previewViewDidRequestImportPreviews:(XLMetalPreviewView *)view {
+    [self importModelsFromRGBEffects:nil];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestNodeLayout:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Node Layout for '%@' not yet implemented", modelName);
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Node Layout - Not Yet Implemented";
+    alert.informativeText = @"The Node Layout dialog will allow visual editing of individual node positions within the model.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestWiringView:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Wiring View for '%@' not yet implemented", modelName);
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Wiring View - Not Yet Implemented";
+    alert.informativeText = @"The Wiring View dialog will show the physical wiring order and connections for the model.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestExportAsCustomModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Export as Custom Model for '%@' not yet implemented", modelName);
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Export as Custom xLights Model - Not Yet Implemented";
+    alert.informativeText = @"This will export the current model as a Custom model type that can be imported into other shows.";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestExportXModel:(NSString *)modelName {
+    // Reuse the existing export implementation - temporarily select this model
+    NSString *previousSelection = [_modelTreeController selectedModelName];
+    [_modelTreeController selectModelWithName:modelName];
+    [self exportModelToFile:nil];
+    if (previousSelection) {
+        [_modelTreeController selectModelWithName:previousSelection];
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestAddModel:(NSString *)modelName toGroup:(NSString *)groupName {
+    BOOL success = [_engineBridge addModel:modelName toGroup:groupName];
+    if (success) {
+        [_modelTreeController reloadData];
+        NSLog(@"XLLayoutViewController: Added model '%@' to group '%@'", modelName, groupName);
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestCreateGroupFromModels:(NSArray<NSString *> *)modelNames {
+    if (modelNames.count == 0) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Create Group";
+    alert.informativeText = [NSString stringWithFormat:@"Enter a name for the new group (%lu models):", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Create"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
+    input.placeholderString = @"Group Name";
+    alert.accessoryView = input;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *groupName = input.stringValue;
+        if (groupName.length > 0) {
+            BOOL success = [_engineBridge createModelGroup:groupName withModels:modelNames];
+            if (success) {
+                [_modelTreeController reloadData];
+                [_previewView reloadModels];
+                NSLog(@"XLLayoutViewController: Created group '%@' with %lu models", groupName, (unsigned long)modelNames.count);
+            } else {
+                NSAlert *errorAlert = [[NSAlert alloc] init];
+                errorAlert.messageText = @"Cannot Create Group";
+                errorAlert.informativeText = [NSString stringWithFormat:@"A model or group named \"%@\" already exists.", groupName];
+                [errorAlert addButtonWithTitle:@"OK"];
+                [errorAlert runModal];
+            }
+        }
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestLockModels:(NSArray<NSString *> *)modelNames lock:(BOOL)lock {
+    for (NSString *name in modelNames) {
+        [_engineBridge updateModelProperty:name key:@"Locked" value:@(lock)];
+    }
+    [_previewView reloadModels];
+    if (_previewView.selectedModelName) {
+        [self selectModel:_previewView.selectedModelName];
+    }
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestDeleteModels:(NSArray<NSString *> *)modelNames {
+    for (NSString *name in modelNames) {
+        NSDictionary *modelData = [_engineBridge getModelData:name];
+        BOOL success = [_engineBridge deleteModel:name];
+        if (success) {
+            [_undoController registerModelDeleted:name modelData:modelData];
+        }
+    }
+    [self clearSelection];
+    [_modelTreeController reloadData];
     [_previewView reloadModels];
 }
 

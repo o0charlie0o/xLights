@@ -28,6 +28,9 @@
 /// Called when the user clicks on a model in the preview
 - (void)previewView:(XLMetalPreviewView *)view didSelectModel:(NSString *)modelName;
 
+/// Called when the user selects multiple models (Cmd+click or rubber-band)
+- (void)previewView:(XLMetalPreviewView *)view didSelectModels:(NSArray<NSString *> *)modelNames;
+
 /// Called when the camera position or orientation changes
 - (void)previewView:(XLMetalPreviewView *)view didChangeCamera:(XLCameraController *)camera;
 
@@ -70,6 +73,52 @@
 /// @param deltaX World-space X offset (negative = left, positive = right)
 /// @param deltaY World-space Y offset (negative = down, positive = up)
 - (void)previewView:(XLMetalPreviewView *)view didNudgeModelWithDeltaX:(float)deltaX deltaY:(float)deltaY;
+
+/// Returns the names of all currently selected models (from tree + preview).
+/// Used by the context menu to determine single vs multi-selection state.
+- (NSArray<NSString *> *)previewViewSelectedModelNames:(XLMetalPreviewView *)view;
+
+/// Called when the user requests to delete the current preview/layout group
+- (void)previewViewDidRequestDeletePreview:(XLMetalPreviewView *)view;
+
+/// Called when the user requests to rename the current preview/layout group
+- (void)previewViewDidRequestRenamePreview:(XLMetalPreviewView *)view;
+
+/// Called when the user requests to print the layout image
+- (void)previewViewDidRequestPrintLayoutImage:(XLMetalPreviewView *)view;
+
+/// Called when the user requests to save the layout image to a file
+- (void)previewViewDidRequestSaveLayoutImage:(XLMetalPreviewView *)view;
+
+/// Called when the user requests to import models
+- (void)previewViewDidRequestImportModels:(XLMetalPreviewView *)view;
+
+/// Called when the user requests to import previews from another show
+- (void)previewViewDidRequestImportPreviews:(XLMetalPreviewView *)view;
+
+/// Called when the user requests node layout for a model
+- (void)previewView:(XLMetalPreviewView *)view didRequestNodeLayout:(NSString *)modelName;
+
+/// Called when the user requests wiring view for a model
+- (void)previewView:(XLMetalPreviewView *)view didRequestWiringView:(NSString *)modelName;
+
+/// Called when the user requests to export a model as a custom xLights model
+- (void)previewView:(XLMetalPreviewView *)view didRequestExportAsCustomModel:(NSString *)modelName;
+
+/// Called when the user requests to export a model as an .xmodel file
+- (void)previewView:(XLMetalPreviewView *)view didRequestExportXModel:(NSString *)modelName;
+
+/// Called when the user requests to add a model to an existing group
+- (void)previewView:(XLMetalPreviewView *)view didRequestAddModel:(NSString *)modelName toGroup:(NSString *)groupName;
+
+/// Called when the user requests to create a new group from selected models
+- (void)previewView:(XLMetalPreviewView *)view didRequestCreateGroupFromModels:(NSArray<NSString *> *)modelNames;
+
+/// Called when the user requests to lock or unlock multiple models
+- (void)previewView:(XLMetalPreviewView *)view didRequestLockModels:(NSArray<NSString *> *)modelNames lock:(BOOL)lock;
+
+/// Called when the user requests to delete multiple models
+- (void)previewView:(XLMetalPreviewView *)view didRequestDeleteModels:(NSArray<NSString *> *)modelNames;
 
 @end
 
@@ -200,8 +249,19 @@
 /// The manipulation handles renderer
 @property (nonatomic, strong, readonly) XLManipulationHandlesRenderer *handlesRenderer;
 
-/// Name of the currently selected model (nil if none)
+/// Name of the currently selected model (nil if none).
+/// For single selection: set this property directly.
+/// For multi-selection: use selectedModelNames.
 @property (nonatomic, strong, nullable) NSString *selectedModelName;
+
+/// Names of all currently selected models in the preview.
+/// For single selection this contains one element matching selectedModelName.
+/// For multi-selection (Cmd+click, rubber-band) it may contain multiple names.
+@property (nonatomic, copy, readonly) NSArray<NSString *> *selectedModelNames;
+
+/// Select multiple models by name. Shows bounding box highlights for all,
+/// manipulation handles only for the primary (last) model.
+- (void)selectModels:(NSArray<NSString *> *)modelNames;
 
 /// Set model transform for manipulation handles
 /// @param position World position of the model center

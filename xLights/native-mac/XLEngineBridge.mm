@@ -5821,6 +5821,43 @@ static XLEngineBridge *_sharedBridge = nil;
     return 1.0;
 }
 
+#pragma mark - View Objects (3D Objects)
+
+- (NSArray<NSDictionary *> *)getViewObjects {
+    // Stub: view object persistence not yet wired to C++ engine.
+    // Returns empty array until engine-level view object management is implemented.
+    return @[];
+}
+
+- (NSDictionary *)getViewObject:(NSString *)objectName {
+    // Stub
+    return nil;
+}
+
+- (BOOL)addViewObject:(NSString *)objectType name:(NSString *)name properties:(NSDictionary *)properties {
+    // Stub
+    NSLog(@"XLEngineBridge: addViewObject:%@ name:%@ (stub)", objectType, name);
+    return NO;
+}
+
+- (BOOL)removeViewObject:(NSString *)objectName {
+    // Stub
+    NSLog(@"XLEngineBridge: removeViewObject:%@ (stub)", objectName);
+    return NO;
+}
+
+- (BOOL)updateViewObjectProperty:(NSString *)objectName key:(NSString *)key value:(id)value {
+    // Stub
+    NSLog(@"XLEngineBridge: updateViewObjectProperty:%@ key:%@ (stub)", objectName, key);
+    return NO;
+}
+
+- (BOOL)renameViewObject:(NSString *)oldName toName:(NSString *)newName {
+    // Stub
+    NSLog(@"XLEngineBridge: renameViewObject:%@ -> %@ (stub)", oldName, newName);
+    return NO;
+}
+
 #pragma mark - Utility Conversion Methods
 
 + (NSString *)stringFromStdString:(const char *)stdString {

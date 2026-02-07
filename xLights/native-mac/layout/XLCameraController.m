@@ -336,6 +336,7 @@ static NSString * const kDefaultViewpointKey = @"XLHousePreviewCamera.defaultVie
         @"targetX": @(_target.x),
         @"targetY": @(_target.y),
         @"targetZ": @(_target.z),
+        @"perspective": @(_perspective),
     };
 }
 
@@ -351,6 +352,11 @@ static NSString * const kDefaultViewpointKey = @"XLHousePreviewCamera.defaultVie
 
     el = fmaxf(_minElevation, fminf(_maxElevation, el));
     dist = fmaxf(_minDistance, fminf(_maxDistance, dist));
+
+    // Restore perspective mode if stored in this viewpoint
+    if (state[@"perspective"] != nil) {
+        _perspective = [state[@"perspective"] boolValue];
+    }
 
     if (animated) {
         [self animateToAzimuth:az elevation:el distance:dist target:tgt duration:0.3];

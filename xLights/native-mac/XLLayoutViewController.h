@@ -48,6 +48,15 @@
 /// The layout group selector (preview chooser)
 @property (nonatomic, strong, readonly) NSPopUpButton *layoutGroupSelector;
 
+/// The model type creation toolbar (horizontal button bar)
+@property (nonatomic, strong, readonly) NSScrollView *modelTypeToolbar;
+
+/// The 2D/3D mode segmented control
+@property (nonatomic, strong, readonly) NSSegmentedControl *viewModeControl;
+
+/// The overlap checks enabled toggle
+@property (nonatomic, strong, readonly) NSButton *overlapCheckToggle;
+
 /// The currently active layout group name
 @property (nonatomic, copy, readonly) NSString *currentLayoutGroup;
 

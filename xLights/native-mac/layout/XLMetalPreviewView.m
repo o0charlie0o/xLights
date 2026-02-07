@@ -135,6 +135,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 @property (nonatomic, assign) BOOL scrollbarsDirty;
 @property (nonatomic, strong) NSTimer *scrollbarFadeTimer;
 
+// Multi-selection state
+@property (nonatomic, strong) NSMutableOrderedSet<NSString *> *selectedModelNamesSet;
+
+// Rubber-band selection state
+@property (nonatomic, assign) BOOL isRubberBanding;
+@property (nonatomic, assign) NSPoint rubberBandOrigin;
+@property (nonatomic, assign) NSPoint rubberBandCurrent;
+@property (nonatomic, strong) id<MTLRenderPipelineState> rubberBandPipelineState;
+
+- (void)completeRubberBandSelection;
+
 @end
 
 @implementation XLMetalPreviewView
@@ -216,9 +227,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _backgroundAlpha = 1.0f;
     _backgroundImageSize = CGSizeZero;
 
+    // Multi-selection and rubber-band
+    _selectedModelNamesSet = [[NSMutableOrderedSet alloc] init];
+    _isRubberBanding = NO;
+
     [self setupDepthStencilState];
     [self buildGridPipeline];
     [self buildGridVertices];
+    [self buildRubberBandPipeline];
 
     // Initialize manipulation handles renderer
     _handles = [[XLManipulationHandlesRenderer alloc] initWithDevice:_device];
@@ -538,6 +554,70 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     samplerDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
     samplerDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
     _backgroundSamplerState = [_device newSamplerStateWithDescriptor:samplerDesc];
+}
+
+- (void)buildRubberBandPipeline {
+    NSError *error = nil;
+
+    NSString *shaderSource = @
+        "#include <metal_stdlib>\n"
+        "using namespace metal;\n"
+        "\n"
+        "struct RBVertex {\n"
+        "    float2 position [[attribute(0)]];\n"
+        "    float4 color    [[attribute(1)]];\n"
+        "};\n"
+        "\n"
+        "struct RBOut {\n"
+        "    float4 position [[position]];\n"
+        "    float4 color;\n"
+        "};\n"
+        "\n"
+        "vertex RBOut rbVertexShader(\n"
+        "    RBVertex in [[stage_in]]) {\n"
+        "    RBOut out;\n"
+        "    out.position = float4(in.position, 0.0, 1.0);\n"
+        "    out.color = in.color;\n"
+        "    return out;\n"
+        "}\n"
+        "\n"
+        "fragment float4 rbFragmentShader(RBOut in [[stage_in]]) {\n"
+        "    return in.color;\n"
+        "}\n";
+
+    id<MTLLibrary> library = [_device newLibraryWithSource:shaderSource options:nil error:&error];
+    if (!library) {
+        NSLog(@"XLMetalPreviewView: Failed to compile rubber-band shaders: %@", error);
+        return;
+    }
+
+    MTLVertexDescriptor *vertexDesc = [[MTLVertexDescriptor alloc] init];
+    vertexDesc.attributes[0].format = MTLVertexFormatFloat2;
+    vertexDesc.attributes[0].offset = 0;
+    vertexDesc.attributes[0].bufferIndex = 0;
+    vertexDesc.attributes[1].format = MTLVertexFormatFloat4;
+    vertexDesc.attributes[1].offset = sizeof(simd_float2);
+    vertexDesc.attributes[1].bufferIndex = 0;
+    vertexDesc.layouts[0].stride = sizeof(simd_float2) + sizeof(simd_float4);
+    vertexDesc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+
+    MTLRenderPipelineDescriptor *pipeDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    pipeDesc.vertexFunction = [library newFunctionWithName:@"rbVertexShader"];
+    pipeDesc.fragmentFunction = [library newFunctionWithName:@"rbFragmentShader"];
+    pipeDesc.vertexDescriptor = vertexDesc;
+    pipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    pipeDesc.colorAttachments[0].blendingEnabled = YES;
+    pipeDesc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    pipeDesc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    pipeDesc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    pipeDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    pipeDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    pipeDesc.sampleCount = _sampleCount;
+
+    _rubberBandPipelineState = [_device newRenderPipelineStateWithDescriptor:pipeDesc error:&error];
+    if (!_rubberBandPipelineState) {
+        NSLog(@"XLMetalPreviewView: Failed to create rubber-band pipeline: %@", error);
+    }
 }
 
 - (void)buildGridVertices {
@@ -880,6 +960,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                                           scale:1];
         }
 
+        // Render multi-selection bounding boxes for non-primary selected models
+        if (_selectedModelNamesSet.count > 1 && _handles) {
+            [self renderMultiSelectionBoundsWithEncoder:encoder
+                                        viewProjection:viewProjection
+                                                  zoom:(float)_cameraController.distance];
+        }
+
+        // Render rubber-band selection overlay
+        [self renderRubberBandWithEncoder:encoder drawableSize:drawableSize];
+
         [encoder endEncoding];
 
         [commandBuffer presentDrawable:drawable];
@@ -1073,6 +1163,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)selectModel:(NSString *)modelName {
     _selectedModelName = modelName;
 
+    // Update multi-selection set: single select replaces all
+    [_selectedModelNamesSet removeAllObjects];
+    if (modelName) {
+        [_selectedModelNamesSet addObject:modelName];
+    }
+
     if (!modelName) {
         [self clearModelSelection];
         return;
@@ -1198,13 +1294,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         const uint8_t *pixels = (const uint8_t *)pixelData.bytes;
         NSUInteger pixelCount = pixelWidth * pixelHeight;
 
-        // Determine color - highlighted models get a brighter color
+        // Determine color - highlighted and selected models get brighter colors
         BOOL isHighlighted = [modelName isEqualToString:_highlightedModelName];
         BOOL isSelected = [modelName isEqualToString:_selectedModelName];
+        BOOL isMultiSelected = !isSelected && [_selectedModelNamesSet containsObject:modelName];
 
         float baseGray = 0.6f;
         if (isSelected) {
             baseGray = 1.0f;
+        } else if (isMultiSelected) {
+            baseGray = 0.95f;
         } else if (isHighlighted) {
             baseGray = 0.9f;
         }
@@ -1425,6 +1524,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _isDragging = NO;
     _isRightDragging = NO;
     _isManipulatingHandle = NO;
+    _isRubberBanding = NO;
 }
 
 - (void)scrollWheel:(NSEvent *)event {
@@ -1618,36 +1718,80 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 #pragma mark - Hit Testing
 
 - (void)handleClickAtEvent:(NSEvent *)event {
-    NSPoint localPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    NSString *hitModel = [self hitTestModelAtEvent:event];
+    BOOL cmdHeld = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
 
-    // Convert to normalized device coordinates
-    CGSize drawableSize = _mlayer.drawableSize;
-    CGFloat scale = self.window.backingScaleFactor ?: 1.0;
-    float ndcX = (float)(localPoint.x * scale / drawableSize.width) * 2.0f - 1.0f;
-    float ndcY = (float)(localPoint.y * scale / drawableSize.height) * 2.0f - 1.0f;
+    if (hitModel) {
+        if (cmdHeld) {
+            // Cmd+click: toggle model in/out of multi-selection
+            if ([_selectedModelNamesSet containsObject:hitModel]) {
+                [_selectedModelNamesSet removeObject:hitModel];
+            } else {
+                [_selectedModelNamesSet addObject:hitModel];
+            }
 
-    // Build inverse view-projection matrix for ray casting
-    float aspect = (float)drawableSize.width / (float)drawableSize.height;
-    simd_float4x4 viewMatrix = _cameraController.viewMatrix;
-    simd_float4x4 projMatrix = [_cameraController projectionMatrixForAspect:aspect];
-    simd_float4x4 viewProj = simd_mul(projMatrix, viewMatrix);
-    simd_float4x4 invViewProj = simd_inverse(viewProj);
+            if (_selectedModelNamesSet.count == 0) {
+                [self clearModelSelection];
+                if ([_delegate respondsToSelector:@selector(previewView:didSelectModel:)]) {
+                    [_delegate previewView:self didSelectModel:nil];
+                }
+            } else if (_selectedModelNamesSet.count == 1) {
+                NSString *onlyModel = _selectedModelNamesSet.firstObject;
+                [self selectModel:onlyModel];
+            } else {
+                // Multiple models selected: update primary to last added
+                _selectedModelName = _selectedModelNamesSet.lastObject;
+                _modelVerticesDirty = YES;
+                _contentDirty = YES;
 
-    // Ray origin and direction in world space
-    simd_float4 nearPoint = simd_mul(invViewProj, (simd_float4){ndcX, ndcY, 0.0f, 1.0f});
-    simd_float4 farPoint = simd_mul(invViewProj, (simd_float4){ndcX, ndcY, 1.0f, 1.0f});
+                // Show handles for primary model
+                NSDictionary *info = [_engineBridge getModelInfo:_selectedModelName];
+                if (info) {
+                    float posX = [info[@"WorldPosX"] floatValue];
+                    float posY = [info[@"WorldPosY"] floatValue];
+                    float posZ = [info[@"WorldPosZ"] floatValue];
+                    float scaleX = [info[@"ScaleX"] floatValue] ?: 1.0f;
+                    float scaleY = [info[@"ScaleY"] floatValue] ?: 1.0f;
+                    float scaleZ = [info[@"ScaleZ"] floatValue] ?: 1.0f;
+                    float rotX = [info[@"RotateX"] floatValue];
+                    float rotY = [info[@"RotateY"] floatValue];
+                    float rotZ = [info[@"RotateZ"] floatValue];
+                    float renderWidth = [info[@"RenderWidth"] floatValue];
+                    float renderHeight = [info[@"RenderHeight"] floatValue];
+                    float renderDepth = [info[@"RenderDepth"] floatValue];
+                    if (renderWidth < 0.001f) renderWidth = 1.0f;
+                    if (renderHeight < 0.001f) renderHeight = 1.0f;
+                    if (renderDepth < 0.001f) renderDepth = 2.0f;
+                    BOOL isLocked = [info[@"Locked"] boolValue];
+                    BOOL supportsZScaling = _show3D && (renderDepth > 2.1f);
+                    simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
+                    simd_float3 bbMax = simd_make_float3(renderWidth/2, renderHeight/2, renderDepth/2);
+                    [self setModelTransformWithPosition:(simd_float3){posX, posY, posZ}
+                                                  scale:(simd_float3){scaleX, scaleY, scaleZ}
+                                               rotation:(simd_float3){rotX, rotY, rotZ}
+                                         boundingBoxMin:bbMin
+                                         boundingBoxMax:bbMax
+                                            renderWidth:renderWidth
+                                           renderHeight:renderHeight
+                                            renderDepth:renderDepth
+                                               isLocked:isLocked
+                                       supportsZScaling:supportsZScaling];
+                }
 
-    simd_float3 rayOrigin = (simd_float3){nearPoint.x, nearPoint.y, nearPoint.z} / nearPoint.w;
-    simd_float3 rayEnd = (simd_float3){farPoint.x, farPoint.y, farPoint.z} / farPoint.w;
-    simd_float3 rayDir = simd_normalize(rayEnd - rayOrigin);
-
-    // Model hit testing will be performed through XLEngineBridge by passing
-    // rayOrigin and rayDir to the model engine for bounding box intersection.
-    // For now, store the ray for future use and notify the delegate with nil
-    // to indicate a deselect/background click.
-
-    if ([_delegate respondsToSelector:@selector(previewView:didSelectModel:)]) {
-        [_delegate previewView:self didSelectModel:nil];
+                if ([_delegate respondsToSelector:@selector(previewView:didSelectModels:)]) {
+                    [_delegate previewView:self didSelectModels:[_selectedModelNamesSet array]];
+                }
+            }
+        } else {
+            // Regular click: single select
+            [self selectModel:hitModel];
+        }
+    } else {
+        // Clicked empty area: deselect all
+        [self clearModelSelection];
+        if ([_delegate respondsToSelector:@selector(previewView:didSelectModel:)]) {
+            [_delegate previewView:self didSelectModel:nil];
+        }
     }
 }
 
@@ -1662,6 +1806,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _isRightDragging = NO;
     _isManipulatingHandle = NO;
     _isManipulatingPolylinePoint = NO;
+    _isRubberBanding = NO;
+    _rubberBandOrigin = NSZeroPoint;
 
     // Check polyline points first (higher priority than bounding box handles)
     if (_selectedModelName && _polylineRenderer && _polylineRenderer.active) {
@@ -1728,6 +1874,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             return;
         }
     }
+
+    // Check if clicking on a model (for potential single-click select in mouseUp)
+    // or on empty space (potential rubber-band start)
+    NSString *hitModel = [self hitTestModelAtEvent:event];
+    if (!hitModel) {
+        // Empty space: prepare for rubber-band selection on drag
+        _rubberBandOrigin = _lastDragPoint;
+        _rubberBandCurrent = _lastDragPoint;
+    }
 }
 
 - (void)mouseDragged:(NSEvent *)event {
@@ -1785,6 +1940,25 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         return;
     }
 
+    // Check if we should start or continue rubber-band selection.
+    // Rubber-band activates when mouse-down was on empty space (rubberBandOrigin was set
+    // to a valid point by mouseDown:) and we drag beyond a small threshold.
+    if (!_isDragging && !_isRubberBanding &&
+        !NSEqualPoints(_rubberBandOrigin, NSZeroPoint)) {
+        float dragDist = sqrtf(
+            (float)(current.x - _rubberBandOrigin.x) * (float)(current.x - _rubberBandOrigin.x) +
+            (float)(current.y - _rubberBandOrigin.y) * (float)(current.y - _rubberBandOrigin.y));
+        if (dragDist > 3.0f) {
+            _isRubberBanding = YES;
+        }
+    }
+
+    if (_isRubberBanding) {
+        _rubberBandCurrent = current;
+        _contentDirty = YES;
+        return;
+    }
+
     // Camera orbit mode
     _isDragging = YES;
     [_cameraController orbitByDeltaX:dx deltaY:dy sensitivity:0.005f];
@@ -1820,6 +1994,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             [_delegate previewView:self didEndManipulatingModel:_selectedModelName];
         }
 
+        _contentDirty = YES;
+        return;
+    }
+
+    if (_isRubberBanding) {
+        _isRubberBanding = NO;
+        [self completeRubberBandSelection];
         _contentDirty = YES;
         return;
     }
@@ -1999,6 +2180,246 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
+#pragma mark - Multi-Selection Rendering
+
+- (void)renderMultiSelectionBoundsWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                               viewProjection:(simd_float4x4)viewProjection
+                                         zoom:(float)zoom {
+    if (_selectedModelNamesSet.count < 2) return;
+
+    typedef struct {
+        simd_float3 position;
+        simd_float4 color;
+    } MSVertex;
+
+    NSMutableData *vertexData = [[NSMutableData alloc] init];
+    simd_float4 multiColor = simd_make_float4(0.4f, 1.0f, 0.4f, 0.6f);
+
+    for (NSString *modelName in _selectedModelNamesSet) {
+        if ([modelName isEqualToString:_selectedModelName]) continue;
+
+        NSDictionary *boundsDict = nil;
+        for (NSDictionary *modelData in _modelDataCache) {
+            if ([modelData[@"name"] isEqualToString:modelName]) {
+                boundsDict = modelData[@"bounds"];
+                break;
+            }
+        }
+        if (!boundsDict || boundsDict.count == 0) continue;
+
+        float minX = [boundsDict[@"minX"] floatValue];
+        float maxX = [boundsDict[@"maxX"] floatValue];
+        float minY = [boundsDict[@"minY"] floatValue];
+        float maxY = [boundsDict[@"maxY"] floatValue];
+        float minZ = [boundsDict[@"minZ"] floatValue];
+        float maxZ = [boundsDict[@"maxZ"] floatValue];
+
+        float pad = 3.0f;
+        minX -= pad; maxX += pad;
+        minY -= pad; maxY += pad;
+        minZ -= pad; maxZ += pad;
+
+        MSVertex box[24] = {
+            // Front face
+            { .position = {minX, minY, maxZ}, .color = multiColor },
+            { .position = {maxX, minY, maxZ}, .color = multiColor },
+            { .position = {maxX, minY, maxZ}, .color = multiColor },
+            { .position = {maxX, maxY, maxZ}, .color = multiColor },
+            { .position = {maxX, maxY, maxZ}, .color = multiColor },
+            { .position = {minX, maxY, maxZ}, .color = multiColor },
+            { .position = {minX, maxY, maxZ}, .color = multiColor },
+            { .position = {minX, minY, maxZ}, .color = multiColor },
+            // Back face
+            { .position = {minX, minY, minZ}, .color = multiColor },
+            { .position = {maxX, minY, minZ}, .color = multiColor },
+            { .position = {maxX, minY, minZ}, .color = multiColor },
+            { .position = {maxX, maxY, minZ}, .color = multiColor },
+            { .position = {maxX, maxY, minZ}, .color = multiColor },
+            { .position = {minX, maxY, minZ}, .color = multiColor },
+            { .position = {minX, maxY, minZ}, .color = multiColor },
+            { .position = {minX, minY, minZ}, .color = multiColor },
+            // Connecting edges
+            { .position = {minX, minY, minZ}, .color = multiColor },
+            { .position = {minX, minY, maxZ}, .color = multiColor },
+            { .position = {maxX, minY, minZ}, .color = multiColor },
+            { .position = {maxX, minY, maxZ}, .color = multiColor },
+            { .position = {maxX, maxY, minZ}, .color = multiColor },
+            { .position = {maxX, maxY, maxZ}, .color = multiColor },
+            { .position = {minX, maxY, minZ}, .color = multiColor },
+            { .position = {minX, maxY, maxZ}, .color = multiColor },
+        };
+        [vertexData appendBytes:box length:sizeof(box)];
+    }
+
+    NSUInteger vertexCount = vertexData.length / sizeof(MSVertex);
+    if (vertexCount > 0) {
+        // Use the grid pipeline which has the same float3 position + float4 color vertex layout
+        [encoder pushDebugGroup:@"MultiSelectionBounds"];
+        [encoder setRenderPipelineState:_gridPipelineState];
+        [encoder setVertexBytes:vertexData.bytes length:vertexData.length atIndex:0];
+        [encoder setVertexBytes:&viewProjection length:sizeof(simd_float4x4) atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexCount];
+        [encoder popDebugGroup];
+    }
+}
+
+#pragma mark - Rubber-Band Selection
+
+- (void)completeRubberBandSelection {
+    // Build the screen-space selection rectangle
+    CGFloat minX = fmin(_rubberBandOrigin.x, _rubberBandCurrent.x);
+    CGFloat maxX = fmax(_rubberBandOrigin.x, _rubberBandCurrent.x);
+    CGFloat minY = fmin(_rubberBandOrigin.y, _rubberBandCurrent.y);
+    CGFloat maxY = fmax(_rubberBandOrigin.y, _rubberBandCurrent.y);
+
+    // Ignore tiny rubber-bands (accidental clicks)
+    if ((maxX - minX) < 4.0 && (maxY - minY) < 4.0) {
+        return;
+    }
+
+    CGSize drawableSize = _mlayer.drawableSize;
+    CGFloat backingScale = self.window.backingScaleFactor ?: 1.0;
+    float aspect = (float)drawableSize.width / (float)drawableSize.height;
+    simd_float4x4 viewMatrix = _cameraController.viewMatrix;
+    simd_float4x4 projMatrix = [_cameraController projectionMatrixForAspect:aspect];
+    simd_float4x4 viewProj = simd_mul(projMatrix, viewMatrix);
+
+    float viewWidth = (float)(drawableSize.width / backingScale);
+    float viewHeight = (float)(drawableSize.height / backingScale);
+
+    NSMutableArray<NSString *> *modelsInRect = [[NSMutableArray alloc] init];
+
+    for (NSDictionary *modelData in _modelDataCache) {
+        NSDictionary *bounds = modelData[@"bounds"];
+        if (!bounds || bounds.count == 0) continue;
+
+        // Get the model's world-space AABB center and project it to screen
+        float bMinX = [bounds[@"minX"] floatValue];
+        float bMaxX = [bounds[@"maxX"] floatValue];
+        float bMinY = [bounds[@"minY"] floatValue];
+        float bMaxY = [bounds[@"maxY"] floatValue];
+        float bMinZ = [bounds[@"minZ"] floatValue];
+        float bMaxZ = [bounds[@"maxZ"] floatValue];
+
+        // Project all 8 corners of the AABB to screen and find 2D bounding rect
+        float corners[8][3] = {
+            {bMinX, bMinY, bMinZ}, {bMaxX, bMinY, bMinZ},
+            {bMinX, bMaxY, bMinZ}, {bMaxX, bMaxY, bMinZ},
+            {bMinX, bMinY, bMaxZ}, {bMaxX, bMinY, bMaxZ},
+            {bMinX, bMaxY, bMaxZ}, {bMaxX, bMaxY, bMaxZ},
+        };
+
+        float screenMinX = FLT_MAX, screenMaxX = -FLT_MAX;
+        float screenMinY = FLT_MAX, screenMaxY = -FLT_MAX;
+        BOOL allBehind = YES;
+
+        for (int c = 0; c < 8; c++) {
+            simd_float4 worldPos = simd_make_float4(corners[c][0], corners[c][1], corners[c][2], 1.0f);
+            simd_float4 clipPos = simd_mul(viewProj, worldPos);
+
+            if (clipPos.w <= 0.001f) continue;
+            allBehind = NO;
+
+            float ndcX = clipPos.x / clipPos.w;
+            float ndcY = clipPos.y / clipPos.w;
+
+            float sx = (ndcX * 0.5f + 0.5f) * viewWidth;
+            float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * viewHeight;
+
+            // NSView coordinates have Y up, but our screen coords from convertPoint also have Y up
+            // Actually in NSView, Y=0 is bottom. Our minY/maxY are already in NSView coords.
+            sy = viewHeight - sy; // convert from top-down to NSView bottom-up
+
+            screenMinX = fminf(screenMinX, sx);
+            screenMaxX = fmaxf(screenMaxX, sx);
+            screenMinY = fminf(screenMinY, sy);
+            screenMaxY = fmaxf(screenMaxY, sy);
+        }
+
+        if (allBehind) continue;
+
+        // Check if the model's screen-space bounds intersect with the rubber-band rect
+        BOOL intersects = !(screenMaxX < (float)minX || screenMinX > (float)maxX ||
+                           screenMaxY < (float)minY || screenMinY > (float)maxY);
+
+        if (intersects) {
+            NSString *name = modelData[@"name"];
+            if (name) {
+                [modelsInRect addObject:name];
+            }
+        }
+    }
+
+    if (modelsInRect.count > 0) {
+        [self selectModels:modelsInRect];
+    } else {
+        [self clearModelSelection];
+        if ([_delegate respondsToSelector:@selector(previewView:didSelectModel:)]) {
+            [_delegate previewView:self didSelectModel:nil];
+        }
+    }
+}
+
+- (void)renderRubberBandWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                         drawableSize:(CGSize)drawableSize {
+    if (!_isRubberBanding || !_rubberBandPipelineState) return;
+
+    CGFloat backingScale = self.window.backingScaleFactor ?: 1.0;
+    float viewWidth = (float)(drawableSize.width / backingScale);
+    float viewHeight = (float)(drawableSize.height / backingScale);
+
+    // Convert screen points to NDC (-1..1)
+    float x0 = ((float)_rubberBandOrigin.x / viewWidth) * 2.0f - 1.0f;
+    float y0 = ((float)_rubberBandOrigin.y / viewHeight) * 2.0f - 1.0f;
+    float x1 = ((float)_rubberBandCurrent.x / viewWidth) * 2.0f - 1.0f;
+    float y1 = ((float)_rubberBandCurrent.y / viewHeight) * 2.0f - 1.0f;
+
+    // Semi-transparent fill color (light blue)
+    simd_float4 fillColor = simd_make_float4(0.3f, 0.5f, 1.0f, 0.15f);
+    // Border color (brighter blue)
+    simd_float4 borderColor = simd_make_float4(0.3f, 0.5f, 1.0f, 0.7f);
+
+    typedef struct {
+        simd_float2 position;
+        simd_float4 color;
+    } RBVertex;
+
+    // Fill: two triangles
+    RBVertex fillVertices[6] = {
+        { .position = {x0, y0}, .color = fillColor },
+        { .position = {x1, y0}, .color = fillColor },
+        { .position = {x0, y1}, .color = fillColor },
+        { .position = {x0, y1}, .color = fillColor },
+        { .position = {x1, y0}, .color = fillColor },
+        { .position = {x1, y1}, .color = fillColor },
+    };
+
+    // Border: 4 lines (8 vertices)
+    RBVertex borderVertices[8] = {
+        { .position = {x0, y0}, .color = borderColor },
+        { .position = {x1, y0}, .color = borderColor },
+        { .position = {x1, y0}, .color = borderColor },
+        { .position = {x1, y1}, .color = borderColor },
+        { .position = {x1, y1}, .color = borderColor },
+        { .position = {x0, y1}, .color = borderColor },
+        { .position = {x0, y1}, .color = borderColor },
+        { .position = {x0, y0}, .color = borderColor },
+    };
+
+    [encoder pushDebugGroup:@"RubberBandSelection"];
+    [encoder setRenderPipelineState:_rubberBandPipelineState];
+
+    // Draw fill
+    [encoder setVertexBytes:fillVertices length:sizeof(fillVertices) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+
+    // Draw border
+    [encoder setVertexBytes:borderVertices length:sizeof(borderVertices) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:8];
+
+    [encoder popDebugGroup];
+}
+
 #pragma mark - Context Menu
 
 - (NSString *)hitTestModelAtEvent:(NSEvent *)event {
@@ -2088,10 +2509,78 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         [self selectModel:modelUnderCursor];
     }
 
+    // Query the delegate for the full multi-selection list
+    NSArray<NSString *> *allSelectedNames = nil;
+    if ([_delegate respondsToSelector:@selector(previewViewSelectedModelNames:)]) {
+        allSelectedNames = [_delegate previewViewSelectedModelNames:self];
+    }
+    // Fall back to just the preview's single selection
+    if (allSelectedNames.count == 0 && _selectedModelName) {
+        allSelectedNames = @[_selectedModelName];
+    }
+
+    NSUInteger selectionCount = allSelectedNames.count;
     BOOL hasSelectedModel = (_selectedModelName != nil);
 
-    // Model operations (when a model is selected)
-    if (hasSelectedModel) {
+    // ===== MULTI-MODEL SELECTION (2+ models) =====
+    if (selectionCount >= 2) {
+        NSString *headerTitle = [NSString stringWithFormat:@"%lu Models Selected", (unsigned long)selectionCount];
+        NSMenuItem *headerItem = [[NSMenuItem alloc] initWithTitle:headerTitle action:nil keyEquivalent:@""];
+        headerItem.enabled = NO;
+        [menu addItem:headerItem];
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Bulk Edit submenu
+        [menu addItem:[self buildBulkEditMenuItem]];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Align submenu
+        [menu addItem:[self buildAlignMenuItem]];
+
+        // Distribute submenu
+        [menu addItem:[self buildDistributeMenuItem]];
+
+        // Resize submenu
+        [menu addItem:[self buildResizeMenuItem]];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Lock/Unlock All
+        NSMenuItem *lockAllItem = [[NSMenuItem alloc] initWithTitle:@"Lock All Selected"
+                                                             action:@selector(contextMenuLockAllModels:)
+                                                      keyEquivalent:@""];
+        lockAllItem.target = self;
+        [menu addItem:lockAllItem];
+
+        NSMenuItem *unlockAllItem = [[NSMenuItem alloc] initWithTitle:@"Unlock All Selected"
+                                                               action:@selector(contextMenuUnlockAllModels:)
+                                                        keyEquivalent:@""];
+        unlockAllItem.target = self;
+        [menu addItem:unlockAllItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Delete Models
+        NSMenuItem *deleteAllItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Delete %lu Models", (unsigned long)selectionCount]
+                                                               action:@selector(contextMenuDeleteAllModels:)
+                                                        keyEquivalent:@""];
+        deleteAllItem.target = self;
+        [menu addItem:deleteAllItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Create Group from Selection
+        NSMenuItem *createGroupItem = [[NSMenuItem alloc] initWithTitle:@"Create Group from Selection"
+                                                                action:@selector(contextMenuCreateGroupFromSelection:)
+                                                         keyEquivalent:@""];
+        createGroupItem.target = self;
+        [menu addItem:createGroupItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+    // ===== SINGLE MODEL SELECTION =====
+    } else if (hasSelectedModel) {
         NSMenuItem *selectItem = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"Select \"%@\"", _selectedModelName]
                                                             action:nil
                                                      keyEquivalent:@""];
@@ -2119,22 +2608,77 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             [menu addItem:lockItem];
         }
 
-        // Delete
-        NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete Model"
-                                                            action:@selector(contextMenuDeleteModel:)
-                                                     keyEquivalent:@""];
-        deleteItem.target = self;
-        deleteItem.representedObject = _selectedModelName;
-        deleteItem.enabled = !isLocked;
-        [menu addItem:deleteItem];
+        [menu addItem:[NSMenuItem separatorItem]];
 
-        // Create Shadow Model
-        NSMenuItem *shadowItem = [[NSMenuItem alloc] initWithTitle:@"Create Shadow Model"
-                                                            action:@selector(contextMenuCreateShadow:)
+        // Node Layout
+        NSMenuItem *nodeLayoutItem = [[NSMenuItem alloc] initWithTitle:@"Node Layout"
+                                                                action:@selector(contextMenuNodeLayout:)
+                                                         keyEquivalent:@""];
+        nodeLayoutItem.target = self;
+        nodeLayoutItem.representedObject = _selectedModelName;
+        [menu addItem:nodeLayoutItem];
+
+        // Wiring View
+        NSMenuItem *wiringItem = [[NSMenuItem alloc] initWithTitle:@"Wiring View"
+                                                            action:@selector(contextMenuWiringView:)
                                                      keyEquivalent:@""];
-        shadowItem.target = self;
-        shadowItem.representedObject = _selectedModelName;
-        [menu addItem:shadowItem];
+        wiringItem.target = self;
+        wiringItem.representedObject = _selectedModelName;
+        [menu addItem:wiringItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Export as Custom xLights Model
+        NSMenuItem *exportCustomItem = [[NSMenuItem alloc] initWithTitle:@"Export as Custom xLights Model"
+                                                                 action:@selector(contextMenuExportAsCustomModel:)
+                                                          keyEquivalent:@""];
+        exportCustomItem.target = self;
+        exportCustomItem.representedObject = _selectedModelName;
+        [menu addItem:exportCustomItem];
+
+        // Export xLights Model (.xmodel)
+        NSMenuItem *exportModelItem = [[NSMenuItem alloc] initWithTitle:@"Export xLights Model (.xmodel)"
+                                                                action:@selector(contextMenuExportXModel:)
+                                                         keyEquivalent:@""];
+        exportModelItem.target = self;
+        exportModelItem.representedObject = _selectedModelName;
+        [menu addItem:exportModelItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Add to Existing Groups submenu
+        if (_engineBridge) {
+            NSArray<NSDictionary *> *groups = [_engineBridge getModelGroups];
+            if (groups.count > 0) {
+                NSMenu *addToGroupMenu = [[NSMenu alloc] initWithTitle:@"Add to Group"];
+                BOOL hasOptions = NO;
+                for (NSDictionary *group in groups) {
+                    NSString *groupName = group[@"name"];
+                    NSArray<NSString *> *members = group[@"modelNames"];
+                    if (![members containsObject:_selectedModelName]) {
+                        NSMenuItem *gItem = [[NSMenuItem alloc] initWithTitle:groupName
+                                                                      action:@selector(contextMenuAddToGroup:)
+                                                               keyEquivalent:@""];
+                        gItem.target = self;
+                        gItem.representedObject = groupName;
+                        [addToGroupMenu addItem:gItem];
+                        hasOptions = YES;
+                    }
+                }
+                if (hasOptions) {
+                    NSMenuItem *addToGroupItem = [[NSMenuItem alloc] initWithTitle:@"Add to Existing Group" action:nil keyEquivalent:@""];
+                    [menu setSubmenu:addToGroupMenu forItem:addToGroupItem];
+                    [menu addItem:addToGroupItem];
+                }
+            }
+        }
+
+        // Create Group
+        NSMenuItem *createGroupItem = [[NSMenuItem alloc] initWithTitle:@"Create Group"
+                                                                action:@selector(contextMenuCreateGroupFromSelection:)
+                                                         keyEquivalent:@""];
+        createGroupItem.target = self;
+        [menu addItem:createGroupItem];
 
         [menu addItem:[NSMenuItem separatorItem]];
 
@@ -2157,82 +2701,24 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
         [menu addItem:[NSMenuItem separatorItem]];
 
-        // Multi-model operations (Align, Distribute, Resize)
-        // These are shown when a model is selected; the delegate decides
-        // if there's actually a multi-selection from the model tree
-        NSMenu *alignMenu = [[NSMenu alloc] initWithTitle:@"Align"];
-        for (NSString *option in @[@"Top", @"Bottom", @"Left", @"Right", @"Horizontal Center", @"Vertical Center"]) {
-            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
-                                                         action:@selector(contextMenuAlignModels:)
-                                                  keyEquivalent:@""];
-            item.target = self;
-            item.representedObject = option;
-            [alignMenu addItem:item];
-        }
-        if (_show3D) {
-            [alignMenu addItem:[NSMenuItem separatorItem]];
-            for (NSString *option in @[@"Front", @"Back", @"Depth Center", @"Align With Ground"]) {
-                NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
-                                                             action:@selector(contextMenuAlignModels:)
-                                                      keyEquivalent:@""];
-                item.target = self;
-                item.representedObject = option;
-                [alignMenu addItem:item];
-            }
-        }
-        NSMenuItem *alignItem = [[NSMenuItem alloc] initWithTitle:@"Align" action:nil keyEquivalent:@""];
-        [menu setSubmenu:alignMenu forItem:alignItem];
-        [menu addItem:alignItem];
+        // Create Shadow Model
+        NSMenuItem *shadowItem = [[NSMenuItem alloc] initWithTitle:@"Create Shadow Model"
+                                                            action:@selector(contextMenuCreateShadow:)
+                                                     keyEquivalent:@""];
+        shadowItem.target = self;
+        shadowItem.representedObject = _selectedModelName;
+        [menu addItem:shadowItem];
 
-        NSMenu *distributeMenu = [[NSMenu alloc] initWithTitle:@"Distribute"];
-        for (NSString *option in @[@"Horizontal", @"Vertical", @"Depth"]) {
-            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
-                                                         action:@selector(contextMenuDistributeModels:)
-                                                  keyEquivalent:@""];
-            item.target = self;
-            item.representedObject = option;
-            [distributeMenu addItem:item];
-        }
-        NSMenuItem *distributeItem = [[NSMenuItem alloc] initWithTitle:@"Distribute" action:nil keyEquivalent:@""];
-        [menu setSubmenu:distributeMenu forItem:distributeItem];
-        [menu addItem:distributeItem];
+        [menu addItem:[NSMenuItem separatorItem]];
 
-        NSMenu *resizeMenu = [[NSMenu alloc] initWithTitle:@"Resize"];
-        for (NSString *option in @[@"Match Width", @"Match Height", @"Match Size"]) {
-            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
-                                                         action:@selector(contextMenuResizeModels:)
-                                                  keyEquivalent:@""];
-            item.target = self;
-            item.representedObject = option;
-            [resizeMenu addItem:item];
-        }
-        NSMenuItem *resizeItem = [[NSMenuItem alloc] initWithTitle:@"Resize" action:nil keyEquivalent:@""];
-        [menu setSubmenu:resizeMenu forItem:resizeItem];
-        [menu addItem:resizeItem];
-
-        // Bulk Edit submenu
-        NSMenu *bulkEditMenu = [[NSMenu alloc] initWithTitle:@"Bulk Edit"];
-        NSArray *bulkEditOptions = @[
-            @"Active", @"Inactive", @"---",
-            @"Tag Color", @"Preview",
-            @"Pixel Size", @"Pixel Style", @"Transparency", @"---",
-            @"Controller Name", @"Controller Port", @"Controller Protocol",
-        ];
-        for (NSString *option in bulkEditOptions) {
-            if ([option isEqualToString:@"---"]) {
-                [bulkEditMenu addItem:[NSMenuItem separatorItem]];
-            } else {
-                NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
-                                                             action:@selector(contextMenuBulkEdit:)
-                                                      keyEquivalent:@""];
-                item.target = self;
-                item.representedObject = option;
-                [bulkEditMenu addItem:item];
-            }
-        }
-        NSMenuItem *bulkEditItem = [[NSMenuItem alloc] initWithTitle:@"Bulk Edit" action:nil keyEquivalent:@""];
-        [menu setSubmenu:bulkEditMenu forItem:bulkEditItem];
-        [menu addItem:bulkEditItem];
+        // Delete
+        NSMenuItem *deleteItem = [[NSMenuItem alloc] initWithTitle:@"Delete Model"
+                                                            action:@selector(contextMenuDeleteModel:)
+                                                     keyEquivalent:@""];
+        deleteItem.target = self;
+        deleteItem.representedObject = _selectedModelName;
+        deleteItem.enabled = !isLocked;
+        [menu addItem:deleteItem];
 
         // Polyline point editing items
         if (_engineBridge && [_engineBridge isPolylineModel:_selectedModelName]) {
@@ -2309,7 +2795,41 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
 
         [menu addItem:[NSMenuItem separatorItem]];
+
+    // ===== NO SELECTION (background click) =====
+    } else {
+        // Preview/layout group management
+        NSMenuItem *deletePreviewItem = [[NSMenuItem alloc] initWithTitle:@"Delete this Preview"
+                                                                  action:@selector(contextMenuDeletePreview:)
+                                                           keyEquivalent:@""];
+        deletePreviewItem.target = self;
+        [menu addItem:deletePreviewItem];
+
+        NSMenuItem *renamePreviewItem = [[NSMenuItem alloc] initWithTitle:@"Rename this Preview"
+                                                                  action:@selector(contextMenuRenamePreview:)
+                                                           keyEquivalent:@""];
+        renamePreviewItem.target = self;
+        [menu addItem:renamePreviewItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
+        // Import
+        NSMenuItem *importModelsItem = [[NSMenuItem alloc] initWithTitle:@"Import Models"
+                                                                 action:@selector(contextMenuImportModels:)
+                                                          keyEquivalent:@""];
+        importModelsItem.target = self;
+        [menu addItem:importModelsItem];
+
+        NSMenuItem *importPreviewsItem = [[NSMenuItem alloc] initWithTitle:@"Import Previews"
+                                                                   action:@selector(contextMenuImportPreviews:)
+                                                            keyEquivalent:@""];
+        importPreviewsItem.target = self;
+        [menu addItem:importPreviewsItem];
+
+        [menu addItem:[NSMenuItem separatorItem]];
     }
+
+    // ===== COMMON SECTION (always shown) =====
 
     // View operations
     NSMenuItem *resetItem = [[NSMenuItem alloc] initWithTitle:@"Reset View"
@@ -2318,11 +2838,20 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     resetItem.target = self;
     [menu addItem:resetItem];
 
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // Save / Print Layout Image
     NSMenuItem *saveImageItem = [[NSMenuItem alloc] initWithTitle:@"Save Layout Image"
                                                           action:@selector(contextMenuSaveLayoutImage:)
                                                    keyEquivalent:@""];
     saveImageItem.target = self;
     [menu addItem:saveImageItem];
+
+    NSMenuItem *printImageItem = [[NSMenuItem alloc] initWithTitle:@"Print Layout Image"
+                                                           action:@selector(contextMenuPrintLayoutImage:)
+                                                    keyEquivalent:@""];
+    printImageItem.target = self;
+    [menu addItem:printImageItem];
 
     [menu addItem:[NSMenuItem separatorItem]];
 
@@ -2417,6 +2946,93 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [NSMenu popUpContextMenu:menu withEvent:event forView:self];
 }
 
+#pragma mark - Context Menu Submenu Builders
+
+- (NSMenuItem *)buildBulkEditMenuItem {
+    NSMenu *bulkEditMenu = [[NSMenu alloc] initWithTitle:@"Bulk Edit"];
+    NSArray *bulkEditOptions = @[
+        @"Active", @"Inactive", @"---",
+        @"Tag Color", @"Preview",
+        @"Pixel Size", @"Pixel Style", @"Transparency", @"---",
+        @"Controller Name", @"Controller Port", @"Controller Protocol",
+    ];
+    for (NSString *option in bulkEditOptions) {
+        if ([option isEqualToString:@"---"]) {
+            [bulkEditMenu addItem:[NSMenuItem separatorItem]];
+        } else {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                         action:@selector(contextMenuBulkEdit:)
+                                                  keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = option;
+            [bulkEditMenu addItem:item];
+        }
+    }
+    NSMenuItem *bulkEditItem = [[NSMenuItem alloc] initWithTitle:@"Bulk Edit" action:nil keyEquivalent:@""];
+    [bulkEditItem setSubmenu:bulkEditMenu];
+    return bulkEditItem;
+}
+
+- (NSMenuItem *)buildAlignMenuItem {
+    NSMenu *alignMenu = [[NSMenu alloc] initWithTitle:@"Align"];
+    for (NSString *option in @[@"Top", @"Bottom", @"Left", @"Right", @"Horizontal Center", @"Vertical Center"]) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                     action:@selector(contextMenuAlignModels:)
+                                              keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = option;
+        [alignMenu addItem:item];
+    }
+    if (_show3D) {
+        [alignMenu addItem:[NSMenuItem separatorItem]];
+        for (NSString *option in @[@"Front", @"Back", @"Depth Center", @"Align With Ground"]) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                         action:@selector(contextMenuAlignModels:)
+                                                  keyEquivalent:@""];
+            item.target = self;
+            item.representedObject = option;
+            [alignMenu addItem:item];
+        }
+    }
+    NSMenuItem *alignItem = [[NSMenuItem alloc] initWithTitle:@"Align" action:nil keyEquivalent:@""];
+    [alignItem setSubmenu:alignMenu];
+    return alignItem;
+}
+
+- (NSMenuItem *)buildDistributeMenuItem {
+    NSMenu *distributeMenu = [[NSMenu alloc] initWithTitle:@"Distribute"];
+    NSArray *options = @[@"Horizontal", @"Vertical"];
+    if (_show3D) {
+        options = @[@"Horizontal", @"Vertical", @"Depth"];
+    }
+    for (NSString *option in options) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                     action:@selector(contextMenuDistributeModels:)
+                                              keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = option;
+        [distributeMenu addItem:item];
+    }
+    NSMenuItem *distributeItem = [[NSMenuItem alloc] initWithTitle:@"Distribute" action:nil keyEquivalent:@""];
+    [distributeItem setSubmenu:distributeMenu];
+    return distributeItem;
+}
+
+- (NSMenuItem *)buildResizeMenuItem {
+    NSMenu *resizeMenu = [[NSMenu alloc] initWithTitle:@"Resize"];
+    for (NSString *option in @[@"Match Width", @"Match Height", @"Match Size"]) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                     action:@selector(contextMenuResizeModels:)
+                                              keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = option;
+        [resizeMenu addItem:item];
+    }
+    NSMenuItem *resizeItem = [[NSMenuItem alloc] initWithTitle:@"Resize" action:nil keyEquivalent:@""];
+    [resizeItem setSubmenu:resizeMenu];
+    return resizeItem;
+}
+
 #pragma mark - Context Menu Actions (Grid)
 
 - (void)contextMenuToggleGrid:(NSMenuItem *)sender {
@@ -2434,7 +3050,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     self.gridCenterAtOrigin = !self.gridCenterAtOrigin;
 }
 
-#pragma mark - Context Menu Actions (Model)
+#pragma mark - Context Menu Actions (Model - Single)
 
 - (void)contextMenuLockModel:(NSMenuItem *)sender {
     NSString *modelName = sender.representedObject;
@@ -2502,6 +3118,106 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
+- (void)contextMenuNodeLayout:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestNodeLayout:)]) {
+        [_delegate previewView:self didRequestNodeLayout:modelName];
+    }
+}
+
+- (void)contextMenuWiringView:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestWiringView:)]) {
+        [_delegate previewView:self didRequestWiringView:modelName];
+    }
+}
+
+- (void)contextMenuExportAsCustomModel:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestExportAsCustomModel:)]) {
+        [_delegate previewView:self didRequestExportAsCustomModel:modelName];
+    }
+}
+
+- (void)contextMenuExportXModel:(NSMenuItem *)sender {
+    NSString *modelName = sender.representedObject;
+    if (!modelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestExportXModel:)]) {
+        [_delegate previewView:self didRequestExportXModel:modelName];
+    }
+}
+
+- (void)contextMenuAddToGroup:(NSMenuItem *)sender {
+    NSString *groupName = sender.representedObject;
+    if (!groupName || !_selectedModelName) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestAddModel:toGroup:)]) {
+        [_delegate previewView:self didRequestAddModel:_selectedModelName toGroup:groupName];
+    }
+}
+
+- (void)contextMenuCreateGroupFromSelection:(NSMenuItem *)sender {
+    NSArray<NSString *> *names = nil;
+    if ([_delegate respondsToSelector:@selector(previewViewSelectedModelNames:)]) {
+        names = [_delegate previewViewSelectedModelNames:self];
+    }
+    if (names.count == 0 && _selectedModelName) {
+        names = @[_selectedModelName];
+    }
+    if (names.count == 0) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestCreateGroupFromModels:)]) {
+        [_delegate previewView:self didRequestCreateGroupFromModels:names];
+    }
+}
+
+#pragma mark - Context Menu Actions (Model - Multi)
+
+- (void)contextMenuLockAllModels:(NSMenuItem *)sender {
+    NSArray<NSString *> *names = nil;
+    if ([_delegate respondsToSelector:@selector(previewViewSelectedModelNames:)]) {
+        names = [_delegate previewViewSelectedModelNames:self];
+    }
+    if (names.count == 0) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestLockModels:lock:)]) {
+        [_delegate previewView:self didRequestLockModels:names lock:YES];
+    }
+}
+
+- (void)contextMenuUnlockAllModels:(NSMenuItem *)sender {
+    NSArray<NSString *> *names = nil;
+    if ([_delegate respondsToSelector:@selector(previewViewSelectedModelNames:)]) {
+        names = [_delegate previewViewSelectedModelNames:self];
+    }
+    if (names.count == 0) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestLockModels:lock:)]) {
+        [_delegate previewView:self didRequestLockModels:names lock:NO];
+    }
+}
+
+- (void)contextMenuDeleteAllModels:(NSMenuItem *)sender {
+    NSArray<NSString *> *names = nil;
+    if ([_delegate respondsToSelector:@selector(previewViewSelectedModelNames:)]) {
+        names = [_delegate previewViewSelectedModelNames:self];
+    }
+    if (names.count == 0) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Delete %lu Models?", (unsigned long)names.count];
+    alert.informativeText = @"This action cannot be undone.";
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+    alert.buttons.firstObject.hasDestructiveAction = YES;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        if ([_delegate respondsToSelector:@selector(previewView:didRequestDeleteModels:)]) {
+            [_delegate previewView:self didRequestDeleteModels:names];
+        }
+    }
+}
+
 - (void)contextMenuAlignModels:(NSMenuItem *)sender {
     NSString *alignment = sender.representedObject;
     if (!alignment) return;
@@ -2531,6 +3247,32 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (!editType) return;
     if ([_delegate respondsToSelector:@selector(previewView:didRequestBulkEdit:)]) {
         [_delegate previewView:self didRequestBulkEdit:editType];
+    }
+}
+
+#pragma mark - Context Menu Actions (Background/Preview)
+
+- (void)contextMenuDeletePreview:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(previewViewDidRequestDeletePreview:)]) {
+        [_delegate previewViewDidRequestDeletePreview:self];
+    }
+}
+
+- (void)contextMenuRenamePreview:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(previewViewDidRequestRenamePreview:)]) {
+        [_delegate previewViewDidRequestRenamePreview:self];
+    }
+}
+
+- (void)contextMenuImportModels:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(previewViewDidRequestImportModels:)]) {
+        [_delegate previewViewDidRequestImportModels:self];
+    }
+}
+
+- (void)contextMenuImportPreviews:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(previewViewDidRequestImportPreviews:)]) {
+        [_delegate previewViewDidRequestImportPreviews:self];
     }
 }
 
@@ -2597,16 +3339,23 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
+#pragma mark - Context Menu Actions (View)
+
 - (void)contextMenuResetView:(NSMenuItem *)sender {
     [self resetCamera];
     [self frameAllModels];
 }
 
 - (void)contextMenuSaveLayoutImage:(NSMenuItem *)sender {
-    // Placeholder: save the current Metal view contents as an image
-    NSLog(@"XLMetalPreviewView: Save Layout Image (not yet implemented)");
+    if ([_delegate respondsToSelector:@selector(previewViewDidRequestSaveLayoutImage:)]) {
+        [_delegate previewViewDidRequestSaveLayoutImage:self];
+    }
+}
 
-    NSBeep();
+- (void)contextMenuPrintLayoutImage:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(previewViewDidRequestPrintLayoutImage:)]) {
+        [_delegate previewViewDidRequestPrintLayoutImage:self];
+    }
 }
 
 - (void)contextMenuSetDefaultViewpoint:(NSMenuItem *)sender {
@@ -2615,6 +3364,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)contextMenuRestoreDefaultViewpoint:(NSMenuItem *)sender {
     if ([_cameraController restoreDefaultViewpoint]) {
+        self.show3D = _cameraController.perspective;
         _contentDirty = YES;
     }
 }
@@ -2642,6 +3392,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSString *name = sender.representedObject;
     if (!name) return;
     if ([_cameraController loadViewpointWithName:name]) {
+        self.show3D = _cameraController.perspective;
         _contentDirty = YES;
     }
 }
@@ -2698,12 +3449,78 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)clearModelSelection {
     _selectedModelName = nil;
+    [_selectedModelNamesSet removeAllObjects];
     [_handles clearSelection];
     [_polylineRenderer clearPoints];
     _isManipulatingHandle = NO;
     _isManipulatingPolylinePoint = NO;
     _activeHandleType = XLHandleTypeNone;
     _contentDirty = YES;
+}
+
+- (NSArray<NSString *> *)selectedModelNames {
+    return [_selectedModelNamesSet array];
+}
+
+- (void)selectModels:(NSArray<NSString *> *)modelNames {
+    [_selectedModelNamesSet removeAllObjects];
+
+    if (!modelNames || modelNames.count == 0) {
+        [self clearModelSelection];
+        return;
+    }
+
+    [_selectedModelNamesSet addObjectsFromArray:modelNames];
+
+    // The primary (last) model gets manipulation handles
+    NSString *primaryModel = modelNames.lastObject;
+    _selectedModelName = primaryModel;
+
+    NSDictionary *info = [_engineBridge getModelInfo:primaryModel];
+    if (!info) {
+        [_handles clearSelection];
+    } else {
+        float posX = [info[@"WorldPosX"] floatValue];
+        float posY = [info[@"WorldPosY"] floatValue];
+        float posZ = [info[@"WorldPosZ"] floatValue];
+        float scaleX = [info[@"ScaleX"] floatValue] ?: 1.0f;
+        float scaleY = [info[@"ScaleY"] floatValue] ?: 1.0f;
+        float scaleZ = [info[@"ScaleZ"] floatValue] ?: 1.0f;
+        float rotX = [info[@"RotateX"] floatValue];
+        float rotY = [info[@"RotateY"] floatValue];
+        float rotZ = [info[@"RotateZ"] floatValue];
+        float renderWidth = [info[@"RenderWidth"] floatValue];
+        float renderHeight = [info[@"RenderHeight"] floatValue];
+        float renderDepth = [info[@"RenderDepth"] floatValue];
+        if (renderWidth < 0.001f) renderWidth = 1.0f;
+        if (renderHeight < 0.001f) renderHeight = 1.0f;
+        if (renderDepth < 0.001f) renderDepth = 2.0f;
+        BOOL isLocked = [info[@"Locked"] boolValue];
+        BOOL supportsZScaling = _show3D && (renderDepth > 2.1f);
+
+        simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
+        simd_float3 bbMax = simd_make_float3(renderWidth/2, renderHeight/2, renderDepth/2);
+
+        [self setModelTransformWithPosition:(simd_float3){posX, posY, posZ}
+                                      scale:(simd_float3){scaleX, scaleY, scaleZ}
+                                   rotation:(simd_float3){rotX, rotY, rotZ}
+                             boundingBoxMin:bbMin
+                             boundingBoxMax:bbMax
+                                renderWidth:renderWidth
+                               renderHeight:renderHeight
+                                renderDepth:renderDepth
+                                   isLocked:isLocked
+                           supportsZScaling:supportsZScaling];
+    }
+
+    // Rebuild vertices to update selection highlight colors
+    _modelVerticesDirty = YES;
+    _contentDirty = YES;
+
+    // Notify delegate
+    if ([_delegate respondsToSelector:@selector(previewView:didSelectModels:)]) {
+        [_delegate previewView:self didSelectModels:[_selectedModelNamesSet array]];
+    }
 }
 
 - (void)setToolMode:(NSInteger)mode {

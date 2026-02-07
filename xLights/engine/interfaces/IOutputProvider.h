@@ -53,6 +53,8 @@ struct ControllerInfo {
     std::string ip;                 // For Ethernet controllers
     std::string commPort;           // For Serial controllers
     std::string protocol;           // e.g., "E131", "ArtNet", "DDP", "DMX"
+    std::string fppProxy;
+    std::string forceLocalIP;
 
     // Hardware identification
     std::string vendor;
@@ -64,12 +66,22 @@ struct ControllerInfo {
     int32_t endChannel = -1;
     int32_t channels = 0;
     int outputCount = 0;
+    int priority = 100;
 
     // State
     bool active = true;
     bool autoLayout = true;
     bool autoSize = true;
     bool managed = true;
+    bool autoUpload = false;
+    bool fullxLightsControl = false;
+    int defaultBrightness = 100;
+    float defaultGamma = 1.0f;
+    bool suppressDuplicateFrames = false;
+    bool monitor = true;
+    bool fromBase = false;
+    bool universePerString = false;
+    std::string activeState;        // "Active", "Inactive", "xLights Only"
 };
 
 // Abstract interface for output/controller access.

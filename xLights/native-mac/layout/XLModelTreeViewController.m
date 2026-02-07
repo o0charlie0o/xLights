@@ -10,21 +10,38 @@
 
 #import "XLModelTreeViewController.h"
 #import "XLModelTreeNode.h"
+#import "XLViewObject.h"
 #import "../XLEngineBridge.h"
 #import "../dialogs/XLSubModelsWindow.h"
 #import "../dialogs/XLModelStateWindow.h"
 #import "../dialogs/XLModelDialogs.h"
 #import "../dialogs/XLModelFaceWindow.h"
 
+NSNotificationName const XLViewObjectSelectionDidChangeNotification = @"XLViewObjectSelectionDidChangeNotification";
+
 static NSString * const kXLModelTreeDragType = @"com.xlights.modelTreeNode";
 
 static NSString * const kColumnName = @"NameColumn";
-static NSString * const kColumnType = @"TypeColumn";
-static NSString * const kColumnChannels = @"ChannelsColumn";
+static NSString * const kColumnStartChan = @"StartChanColumn";
+static NSString * const kColumnEndChan = @"EndChanColumn";
 static NSString * const kColumnController = @"ControllerColumn";
+
+static NSString * const kViewObjectColumnName = @"VONameColumn";
+static NSString * const kViewObjectColumnType = @"VOTypeColumn";
+
+/// Tab indices for the Models / 3D Objects segmented control
+typedef NS_ENUM(NSInteger, XLTreeTab) {
+    XLTreeTabModels = 0,
+    XLTreeTabViewObjects = 1,
+};
 
 @interface XLModelTreeViewController ()
 
+// Tab control (Models / 3D Objects)
+@property (nonatomic, strong) NSSegmentedControl *tabControl;
+
+// Models tab views
+@property (nonatomic, strong) NSView *modelsContainer;
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong, readwrite) NSOutlineView *outlineView;
 @property (nonatomic, strong) NSSearchField *searchField;
@@ -39,6 +56,13 @@ static NSString * const kColumnController = @"ControllerColumn";
 @property (nonatomic, strong) XLSubModelsWindow *subModelsWindow;
 @property (nonatomic, strong) XLModelStateWindow *stateDialog;
 @property (nonatomic, strong) XLModelFaceWindow *faceDialog;
+
+// 3D Objects tab views
+@property (nonatomic, strong) NSView *viewObjectsContainer;
+@property (nonatomic, strong) NSScrollView *viewObjectsScrollView;
+@property (nonatomic, strong) NSTableView *viewObjectsTable;
+@property (nonatomic, strong) NSSegmentedControl *viewObjectsFooterButtons;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *viewObjectsData;
 
 @end
 
@@ -85,10 +109,31 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 300, 600)];
     container.wantsLayer = YES;
 
-    [self setupSearchField:container];
-    [self setupOutlineView:container];
-    [self setupFooterButtons:container];
-    [self setupConstraints:container];
+    // Tab control (Models / 3D Objects) — hidden in 2D mode
+    [self setupTabControl:container];
+
+    // Models container (search + outline + footer)
+    _modelsContainer = [[NSView alloc] initWithFrame:NSZeroRect];
+    _modelsContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [container addSubview:_modelsContainer];
+
+    [self setupSearchField:_modelsContainer];
+    [self setupOutlineView:_modelsContainer];
+    [self setupFooterButtons:_modelsContainer];
+    [self setupModelsConstraints:_modelsContainer];
+
+    // 3D Objects container (table + footer) — hidden by default
+    _viewObjectsContainer = [[NSView alloc] initWithFrame:NSZeroRect];
+    _viewObjectsContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    _viewObjectsContainer.hidden = YES;
+    [container addSubview:_viewObjectsContainer];
+
+    [self setupViewObjectsTable:_viewObjectsContainer];
+    [self setupViewObjectsFooter:_viewObjectsContainer];
+    [self setupViewObjectsConstraints:_viewObjectsContainer];
+
+    // Container-level constraints: tab control at top, then content area
+    [self setupContainerConstraints:container];
 
     self.view = container;
 }
@@ -99,6 +144,19 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
 }
 
 #pragma mark - UI Setup
+
+- (void)setupTabControl:(NSView *)container {
+    _tabControl = [NSSegmentedControl segmentedControlWithLabels:@[@"Models", @"3D Objects"]
+                                                     trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                           target:self
+                                                           action:@selector(tabControlChanged:)];
+    _tabControl.translatesAutoresizingMaskIntoConstraints = NO;
+    _tabControl.controlSize = NSControlSizeSmall;
+    _tabControl.font = [NSFont systemFontOfSize:11];
+    _tabControl.selectedSegment = XLTreeTabModels;
+    _tabControl.hidden = !_show3D;  // Only visible in 3D mode
+    [container addSubview:_tabControl];
+}
 
 - (void)setupSearchField:(NSView *)container {
     _searchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
@@ -132,25 +190,25 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     [_outlineView addTableColumn:nameColumn];
     _outlineView.outlineTableColumn = nameColumn;
 
-    // Type column
-    NSTableColumn *typeColumn = [[NSTableColumn alloc] initWithIdentifier:kColumnType];
-    typeColumn.title = @"Type";
-    typeColumn.minWidth = 60;
-    typeColumn.width = 80;
-    typeColumn.resizingMask = NSTableColumnUserResizingMask;
-    [_outlineView addTableColumn:typeColumn];
+    // Start Chan column
+    NSTableColumn *startChanColumn = [[NSTableColumn alloc] initWithIdentifier:kColumnStartChan];
+    startChanColumn.title = @"Start Chan";
+    startChanColumn.minWidth = 50;
+    startChanColumn.width = 80;
+    startChanColumn.resizingMask = NSTableColumnUserResizingMask;
+    [_outlineView addTableColumn:startChanColumn];
 
-    // Channels column
-    NSTableColumn *channelsColumn = [[NSTableColumn alloc] initWithIdentifier:kColumnChannels];
-    channelsColumn.title = @"Ch";
-    channelsColumn.minWidth = 40;
-    channelsColumn.width = 50;
-    channelsColumn.resizingMask = NSTableColumnUserResizingMask;
-    [_outlineView addTableColumn:channelsColumn];
+    // End Chan column
+    NSTableColumn *endChanColumn = [[NSTableColumn alloc] initWithIdentifier:kColumnEndChan];
+    endChanColumn.title = @"End Chan";
+    endChanColumn.minWidth = 50;
+    endChanColumn.width = 70;
+    endChanColumn.resizingMask = NSTableColumnUserResizingMask;
+    [_outlineView addTableColumn:endChanColumn];
 
-    // Controller column
+    // Controller connection column
     NSTableColumn *controllerColumn = [[NSTableColumn alloc] initWithIdentifier:kColumnController];
-    controllerColumn.title = @"Controller";
+    controllerColumn.title = @"Ctrlr Conn";
     controllerColumn.minWidth = 60;
     controllerColumn.width = 90;
     controllerColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
@@ -191,9 +249,7 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     [container addSubview:_footerButtons];
 }
 
-- (void)setupConstraints:(NSView *)container {
-    // Trailing constraint at lower priority to avoid conflict during initial
-    // NSSplitView layout when the container may momentarily have width 0
+- (void)setupModelsConstraints:(NSView *)container {
     NSLayoutConstraint *searchTrailing = [_searchField.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-4];
     searchTrailing.priority = NSLayoutPriorityDefaultHigh;
 
@@ -214,6 +270,110 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         [_footerButtons.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:4],
         [_footerButtons.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-4],
         [_footerButtons.heightAnchor constraintEqualToConstant:24],
+    ]];
+}
+
+#pragma mark - 3D Objects Tab Setup
+
+- (void)setupViewObjectsTable:(NSView *)container {
+    _viewObjectsData = [[NSMutableArray alloc] init];
+
+    _viewObjectsTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    _viewObjectsTable.headerView = [[NSTableHeaderView alloc] init];
+    _viewObjectsTable.allowsMultipleSelection = NO;
+    _viewObjectsTable.allowsEmptySelection = YES;
+    _viewObjectsTable.usesAlternatingRowBackgroundColors = YES;
+    _viewObjectsTable.rowSizeStyle = NSTableViewRowSizeStyleSmall;
+    _viewObjectsTable.dataSource = self;
+    _viewObjectsTable.delegate = self;
+
+    // Name column
+    NSTableColumn *nameColumn = [[NSTableColumn alloc] initWithIdentifier:kViewObjectColumnName];
+    nameColumn.title = @"Name";
+    nameColumn.minWidth = 100;
+    nameColumn.width = 160;
+    nameColumn.resizingMask = NSTableColumnAutoresizingMask | NSTableColumnUserResizingMask;
+    [_viewObjectsTable addTableColumn:nameColumn];
+
+    // Type column
+    NSTableColumn *typeColumn = [[NSTableColumn alloc] initWithIdentifier:kViewObjectColumnType];
+    typeColumn.title = @"Type";
+    typeColumn.minWidth = 60;
+    typeColumn.width = 80;
+    typeColumn.resizingMask = NSTableColumnUserResizingMask;
+    [_viewObjectsTable addTableColumn:typeColumn];
+
+    _viewObjectsScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    _viewObjectsScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    _viewObjectsScrollView.documentView = _viewObjectsTable;
+    _viewObjectsScrollView.hasVerticalScroller = YES;
+    _viewObjectsScrollView.hasHorizontalScroller = NO;
+    _viewObjectsScrollView.autohidesScrollers = YES;
+    _viewObjectsScrollView.borderType = NSNoBorder;
+    _viewObjectsScrollView.drawsBackground = NO;
+    [container addSubview:_viewObjectsScrollView];
+}
+
+- (void)setupViewObjectsFooter:(NSView *)container {
+    _viewObjectsFooterButtons = [NSSegmentedControl segmentedControlWithImages:@[
+        [NSImage imageWithSystemSymbolName:@"plus" accessibilityDescription:@"Add Object"],
+        [NSImage imageWithSystemSymbolName:@"minus" accessibilityDescription:@"Remove Object"],
+    ] trackingMode:NSSegmentSwitchTrackingMomentary target:self action:@selector(viewObjectFooterClicked:)];
+    _viewObjectsFooterButtons.translatesAutoresizingMaskIntoConstraints = NO;
+    _viewObjectsFooterButtons.segmentStyle = NSSegmentStyleSmallSquare;
+    [_viewObjectsFooterButtons setWidth:32 forSegment:0];
+    [_viewObjectsFooterButtons setWidth:32 forSegment:1];
+    [container addSubview:_viewObjectsFooterButtons];
+}
+
+- (void)setupViewObjectsConstraints:(NSView *)container {
+    [NSLayoutConstraint activateConstraints:@[
+        [_viewObjectsScrollView.topAnchor constraintEqualToAnchor:container.topAnchor constant:4],
+        [_viewObjectsScrollView.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [_viewObjectsScrollView.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [_viewObjectsScrollView.bottomAnchor constraintEqualToAnchor:_viewObjectsFooterButtons.topAnchor constant:-2],
+
+        [_viewObjectsFooterButtons.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:4],
+        [_viewObjectsFooterButtons.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-4],
+        [_viewObjectsFooterButtons.heightAnchor constraintEqualToConstant:24],
+    ]];
+}
+
+- (void)setupContainerConstraints:(NSView *)container {
+    // Tab control at the top, pinned to leading/trailing
+    NSLayoutConstraint *tabTrailing = [_tabControl.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-4];
+    tabTrailing.priority = NSLayoutPriorityDefaultHigh;
+
+    // When tab control is hidden, the content area reaches the top.
+    // When visible, content area starts below the tab control.
+    // We use two sets of top constraints with different priorities.
+    NSLayoutConstraint *modelsTopBelowTab = [_modelsContainer.topAnchor constraintEqualToAnchor:_tabControl.bottomAnchor constant:4];
+    NSLayoutConstraint *modelsTopAtTop = [_modelsContainer.topAnchor constraintEqualToAnchor:container.topAnchor];
+    modelsTopBelowTab.priority = NSLayoutPriorityDefaultHigh;
+    modelsTopAtTop.priority = NSLayoutPriorityDefaultLow;
+
+    NSLayoutConstraint *voTopBelowTab = [_viewObjectsContainer.topAnchor constraintEqualToAnchor:_tabControl.bottomAnchor constant:4];
+    voTopBelowTab.priority = NSLayoutPriorityDefaultHigh;
+
+    [NSLayoutConstraint activateConstraints:@[
+        // Tab control
+        [_tabControl.topAnchor constraintEqualToAnchor:container.topAnchor constant:4],
+        [_tabControl.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:4],
+        tabTrailing,
+        [_tabControl.heightAnchor constraintEqualToConstant:22],
+
+        // Models container
+        modelsTopBelowTab,
+        modelsTopAtTop,
+        [_modelsContainer.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [_modelsContainer.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [_modelsContainer.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
+
+        // View objects container (same frame as models container)
+        voTopBelowTab,
+        [_viewObjectsContainer.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [_viewObjectsContainer.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [_viewObjectsContainer.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
     ]];
 }
 
@@ -258,7 +418,7 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
             NSString *modelType = memberInfo[@"type"] ?: @"Unknown";
             XLModelTreeNode *childNode = [XLModelTreeNode nodeWithName:memberName type:modelType];
             childNode.channelCount = [memberInfo[@"channelCount"] integerValue];
-            childNode.controllerName = memberInfo[@"controllerName"];
+            [self populateChannelInfoForNode:childNode fromInfo:memberInfo];
             [self populateShadowInfoForNode:childNode];
             [self loadSubmodelsForNode:childNode modelName:memberName];
             [groupNode addChild:childNode];
@@ -279,7 +439,7 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         NSString *modelType = info[@"type"] ?: @"Unknown";
         XLModelTreeNode *node = [XLModelTreeNode nodeWithName:modelName type:modelType];
         node.channelCount = [info[@"channelCount"] integerValue];
-        node.controllerName = info[@"controllerName"];
+        [self populateChannelInfoForNode:node fromInfo:info];
         [self populateShadowInfoForNode:node];
         [self loadSubmodelsForNode:node modelName:modelName];
 
@@ -287,6 +447,21 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     }
 
     _allNodes = [nodes copy];
+}
+
+- (void)populateChannelInfoForNode:(XLModelTreeNode *)node fromInfo:(NSDictionary *)info {
+    node.startChannel = info[@"startChannel"] ?: @"";
+    node.endChannel = [info[@"endChannel"] integerValue];
+
+    NSString *controllerName = info[@"controllerName"];
+    NSInteger port = [info[@"port"] integerValue];
+    if (controllerName.length > 0 && port > 0) {
+        node.controllerConnection = [NSString stringWithFormat:@"%@:%ld", controllerName, (long)port];
+    } else if (controllerName.length > 0) {
+        node.controllerConnection = controllerName;
+    } else {
+        node.controllerConnection = @"";
+    }
 }
 
 - (void)populateShadowInfoForNode:(XLModelTreeNode *)node {
@@ -370,7 +545,9 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         } else {
             filteredNode = [XLModelTreeNode nodeWithName:node.name type:node.modelType];
             filteredNode.channelCount = node.channelCount;
-            filteredNode.controllerName = node.controllerName;
+            filteredNode.startChannel = node.startChannel;
+            filteredNode.endChannel = node.endChannel;
+            filteredNode.controllerConnection = node.controllerConnection;
         }
         for (XLModelTreeNode *child in matchingChildren) {
             [filteredNode addChild:child];
@@ -413,30 +590,23 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     if ([columnId isEqualToString:kColumnName]) {
         return [self nameCellForNode:node inOutlineView:outlineView];
     }
-    else if ([columnId isEqualToString:kColumnType]) {
-        NSString *typeText;
-        if (node.isGroup) {
-            typeText = @"Group";
-        } else if (node.isSubmodel) {
-            typeText = @"Submodel";
-        } else if (node.isShadowModel) {
-            typeText = [NSString stringWithFormat:@"Shadow (%@)", node.modelType];
-        } else {
-            typeText = node.modelType;
-        }
-        return [self textCellWithIdentifier:kColumnType
-                                      text:typeText
-                              inOutlineView:outlineView];
-    }
-    else if ([columnId isEqualToString:kColumnChannels]) {
-        NSString *text = node.channelCount > 0 ? [NSString stringWithFormat:@"%ld", (long)node.channelCount] : @"";
-        NSTableCellView *cell = [self textCellWithIdentifier:kColumnChannels text:text inOutlineView:outlineView];
+    else if ([columnId isEqualToString:kColumnStartChan]) {
+        NSString *text = node.startChannel.length > 0 ? node.startChannel : @"";
+        NSTableCellView *cell = [self textCellWithIdentifier:kColumnStartChan text:text inOutlineView:outlineView];
         cell.textField.alignment = NSTextAlignmentRight;
+        cell.textField.font = [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular];
+        return cell;
+    }
+    else if ([columnId isEqualToString:kColumnEndChan]) {
+        NSString *text = node.endChannel > 0 ? [NSString stringWithFormat:@"%ld", (long)node.endChannel] : @"";
+        NSTableCellView *cell = [self textCellWithIdentifier:kColumnEndChan text:text inOutlineView:outlineView];
+        cell.textField.alignment = NSTextAlignmentRight;
+        cell.textField.font = [NSFont monospacedDigitSystemFontOfSize:10 weight:NSFontWeightRegular];
         return cell;
     }
     else if ([columnId isEqualToString:kColumnController]) {
         return [self textCellWithIdentifier:kColumnController
-                                      text:node.controllerName ?: @""
+                                      text:node.controllerConnection ?: @""
                               inOutlineView:outlineView];
     }
 
@@ -566,19 +736,45 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
             proposedChildIndex:(NSInteger)index {
     XLModelTreeNode *targetNode = (XLModelTreeNode *)item;
 
-    // Allow drops onto groups
-    if (targetNode && targetNode.isGroup) {
+    // Collect dragged model names from the pasteboard
+    NSPasteboard *pb = info.draggingPasteboard;
+    NSArray<NSPasteboardItem *> *pbItems = pb.pasteboardItems;
+    NSMutableSet<NSString *> *draggedNames = [[NSMutableSet alloc] init];
+    for (NSPasteboardItem *pbItem in pbItems) {
+        NSString *name = [pbItem stringForType:kXLModelTreeDragType];
+        if (name) [draggedNames addObject:name];
+    }
+
+    if (draggedNames.count == 0) return NSDragOperationNone;
+
+    // Prevent dropping a group onto itself
+    if (targetNode && [draggedNames containsObject:targetNode.name]) {
+        return NSDragOperationNone;
+    }
+
+    // Prevent dropping onto a submodel
+    if (targetNode && targetNode.isSubmodel) {
+        return NSDragOperationNone;
+    }
+
+    // Prevent dropping onto a regular model (non-group) -- they can't have model children
+    if (targetNode && !targetNode.isGroup) {
+        return NSDragOperationNone;
+    }
+
+    // Allow dropping between items inside a group (reorder within group)
+    if (targetNode && targetNode.isGroup && index != NSOutlineViewDropOnItemIndex) {
         return NSDragOperationMove;
     }
 
-    // Allow reordering at root level
+    // Allow dropping ON a group (appends to end of group)
+    if (targetNode && targetNode.isGroup && index == NSOutlineViewDropOnItemIndex) {
+        return NSDragOperationMove;
+    }
+
+    // Allow reordering at root level (between root items)
     if (targetNode == nil && index != NSOutlineViewDropOnItemIndex) {
         return NSDragOperationMove;
-    }
-
-    // Allow dropping on root to move to root level
-    if (targetNode == nil && index == NSOutlineViewDropOnItemIndex) {
-        return NSDragOperationNone;
     }
 
     return NSDragOperationNone;
@@ -589,14 +785,31 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
                 item:(id)item
           childIndex:(NSInteger)index {
     NSPasteboard *pb = info.draggingPasteboard;
-    NSString *modelName = [pb stringForType:kXLModelTreeDragType];
-    if (!modelName) return NO;
+    NSArray<NSPasteboardItem *> *pbItems = pb.pasteboardItems;
+
+    // Collect all dragged model names in order
+    NSMutableArray<NSString *> *draggedNames = [[NSMutableArray alloc] init];
+    for (NSPasteboardItem *pbItem in pbItems) {
+        NSString *name = [pbItem stringForType:kXLModelTreeDragType];
+        if (name) [draggedNames addObject:name];
+    }
+
+    if (draggedNames.count == 0) return NO;
 
     XLModelTreeNode *targetNode = (XLModelTreeNode *)item;
     NSString *groupName = targetNode ? targetNode.name : nil;
 
+    // Notify delegate for each dragged model so the engine can persist the change.
+    // Process in order so index adjustments are sequential.
     if ([_delegate respondsToSelector:@selector(modelTree:didMoveModel:toGroup:atIndex:)]) {
-        [_delegate modelTree:self didMoveModel:modelName toGroup:groupName atIndex:index];
+        NSInteger insertIndex = index;
+        for (NSString *modelName in draggedNames) {
+            [_delegate modelTree:self didMoveModel:modelName toGroup:groupName atIndex:insertIndex];
+            // Increment index for next item so ordering is preserved
+            if (insertIndex >= 0) {
+                insertIndex++;
+            }
+        }
     }
 
     [self reloadData];
@@ -2121,6 +2334,34 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     _suppressSelectionNotification = NO;
 }
 
+- (void)selectModelsWithNames:(NSArray<NSString *> *)names {
+    if (!names || names.count == 0) return;
+
+    _suppressSelectionNotification = YES;
+
+    NSMutableIndexSet *indexSet = [[NSMutableIndexSet alloc] init];
+
+    for (NSString *name in names) {
+        XLModelTreeNode *targetNode = [self findNodeWithName:name inNodes:_rootNodes];
+        if (targetNode) {
+            if (targetNode.parent) {
+                [_outlineView expandItem:targetNode.parent];
+            }
+            NSInteger row = [_outlineView rowForItem:targetNode];
+            if (row >= 0) {
+                [indexSet addIndex:(NSUInteger)row];
+            }
+        }
+    }
+
+    if (indexSet.count > 0) {
+        [_outlineView selectRowIndexes:indexSet byExtendingSelection:NO];
+        [_outlineView scrollRowToVisible:(NSInteger)indexSet.firstIndex];
+    }
+
+    _suppressSelectionNotification = NO;
+}
+
 - (XLModelTreeNode *)findNodeWithName:(NSString *)name inNodes:(NSArray<XLModelTreeNode *> *)nodes {
     for (XLModelTreeNode *node in nodes) {
         if ([node.name isEqualToString:name]) {
@@ -2170,6 +2411,274 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     _rootNodes = [rootNodes copy];
     _allNodes = [rootNodes copy];
     [_outlineView reloadData];
+}
+
+- (void)setShow3D:(BOOL)show3D {
+    _show3D = show3D;
+    _tabControl.hidden = !show3D;
+
+    if (!show3D) {
+        // Switch back to Models tab when leaving 3D mode
+        _tabControl.selectedSegment = XLTreeTabModels;
+        _modelsContainer.hidden = NO;
+        _viewObjectsContainer.hidden = YES;
+    }
+}
+
+#pragma mark - Tab Control
+
+- (void)tabControlChanged:(NSSegmentedControl *)sender {
+    XLTreeTab selectedTab = (XLTreeTab)sender.selectedSegment;
+
+    switch (selectedTab) {
+        case XLTreeTabModels:
+            _modelsContainer.hidden = NO;
+            _viewObjectsContainer.hidden = YES;
+            break;
+
+        case XLTreeTabViewObjects:
+            _modelsContainer.hidden = YES;
+            _viewObjectsContainer.hidden = NO;
+            [self reloadViewObjects];
+            break;
+    }
+}
+
+#pragma mark - 3D Objects Data
+
+- (void)reloadViewObjects {
+    [_viewObjectsData removeAllObjects];
+
+    if (_engineBridge) {
+        NSArray<NSDictionary *> *objects = [_engineBridge getViewObjects];
+        [_viewObjectsData addObjectsFromArray:objects];
+    }
+
+    [_viewObjectsTable reloadData];
+}
+
+#pragma mark - 3D Objects NSTableViewDataSource
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    if (tableView == _viewObjectsTable) {
+        return (NSInteger)_viewObjectsData.count;
+    }
+    return 0;
+}
+
+#pragma mark - 3D Objects NSTableViewDelegate
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    if (tableView != _viewObjectsTable) return nil;
+    if (row < 0 || row >= (NSInteger)_viewObjectsData.count) return nil;
+
+    NSDictionary *objectInfo = _viewObjectsData[(NSUInteger)row];
+    NSString *columnId = tableColumn.identifier;
+
+    if ([columnId isEqualToString:kViewObjectColumnName]) {
+        NSTableCellView *cell = [tableView makeViewWithIdentifier:kViewObjectColumnName owner:self];
+        if (!cell) {
+            cell = [[NSTableCellView alloc] initWithFrame:NSZeroRect];
+            cell.identifier = kViewObjectColumnName;
+
+            NSImageView *imageView = [[NSImageView alloc] initWithFrame:NSZeroRect];
+            imageView.translatesAutoresizingMaskIntoConstraints = NO;
+            imageView.imageScaling = NSImageScaleProportionallyDown;
+            [cell addSubview:imageView];
+            cell.imageView = imageView;
+
+            NSTextField *textField = [NSTextField textFieldWithString:@""];
+            textField.translatesAutoresizingMaskIntoConstraints = NO;
+            textField.bordered = NO;
+            textField.drawsBackground = NO;
+            textField.editable = NO;
+            textField.lineBreakMode = NSLineBreakByTruncatingTail;
+            textField.font = [NSFont systemFontOfSize:12];
+            [cell addSubview:textField];
+            cell.textField = textField;
+
+            [NSLayoutConstraint activateConstraints:@[
+                [imageView.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:2],
+                [imageView.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+                [imageView.widthAnchor constraintEqualToConstant:16],
+                [imageView.heightAnchor constraintEqualToConstant:16],
+                [textField.leadingAnchor constraintEqualToAnchor:imageView.trailingAnchor constant:4],
+                [textField.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-2],
+                [textField.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            ]];
+        }
+
+        NSString *name = objectInfo[@"name"] ?: @"";
+        NSString *typeStr = objectInfo[@"type"] ?: @"Unknown";
+        NSString *iconName = [self iconNameForViewObjectType:typeStr];
+
+        cell.textField.stringValue = name;
+        cell.textField.textColor = [NSColor labelColor];
+
+        NSImage *icon = [NSImage imageWithSystemSymbolName:iconName accessibilityDescription:typeStr];
+        if (icon) {
+            NSImageSymbolConfiguration *config = [NSImageSymbolConfiguration configurationWithPointSize:12 weight:NSFontWeightRegular];
+            cell.imageView.image = [icon imageWithSymbolConfiguration:config];
+            cell.imageView.contentTintColor = [NSColor systemTealColor];
+        }
+
+        return cell;
+    }
+    else if ([columnId isEqualToString:kViewObjectColumnType]) {
+        NSTableCellView *cell = [tableView makeViewWithIdentifier:kViewObjectColumnType owner:self];
+        if (!cell) {
+            cell = [[NSTableCellView alloc] initWithFrame:NSZeroRect];
+            cell.identifier = kViewObjectColumnType;
+
+            NSTextField *textField = [NSTextField textFieldWithString:@""];
+            textField.translatesAutoresizingMaskIntoConstraints = NO;
+            textField.bordered = NO;
+            textField.drawsBackground = NO;
+            textField.editable = NO;
+            textField.lineBreakMode = NSLineBreakByTruncatingTail;
+            textField.font = [NSFont systemFontOfSize:11];
+            textField.textColor = [NSColor secondaryLabelColor];
+            [cell addSubview:textField];
+            cell.textField = textField;
+
+            [NSLayoutConstraint activateConstraints:@[
+                [textField.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:2],
+                [textField.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-2],
+                [textField.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+            ]];
+        }
+
+        cell.textField.stringValue = objectInfo[@"type"] ?: @"Unknown";
+        return cell;
+    }
+
+    return nil;
+}
+
+- (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
+    if (tableView == _viewObjectsTable) {
+        return 22.0;
+    }
+    return 22.0;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    if (notification.object != _viewObjectsTable) return;
+
+    NSInteger row = _viewObjectsTable.selectedRow;
+    NSString *objectName = nil;
+    if (row >= 0 && row < (NSInteger)_viewObjectsData.count) {
+        objectName = _viewObjectsData[(NSUInteger)row][@"name"];
+    }
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:XLViewObjectSelectionDidChangeNotification
+                                                        object:self
+                                                      userInfo:objectName ? @{@"objectName": objectName} : nil];
+}
+
+- (NSString *)iconNameForViewObjectType:(NSString *)typeStr {
+    if ([typeStr isEqualToString:@"Image"]) return @"photo";
+    if ([typeStr isEqualToString:@"Gridlines"]) return @"grid";
+    if ([typeStr isEqualToString:@"Mesh"]) return @"cube.transparent";
+    if ([typeStr isEqualToString:@"Terrain"]) return @"mountain.2";
+    if ([typeStr isEqualToString:@"Ruler"]) return @"ruler";
+    return @"questionmark.square";
+}
+
+#pragma mark - 3D Objects Footer Actions
+
+- (void)viewObjectFooterClicked:(NSSegmentedControl *)sender {
+    NSInteger segment = sender.selectedSegment;
+
+    switch (segment) {
+        case 0: // Add
+            [self showAddViewObjectMenu];
+            break;
+        case 1: // Remove
+            [self removeSelectedViewObject];
+            break;
+    }
+}
+
+- (void)showAddViewObjectMenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Add Object"];
+
+    NSArray *objectTypes = @[
+        @[@"Image", @"photo"],
+        @[@"Gridlines", @"grid"],
+        @[@"Mesh", @"cube.transparent"],
+        @[@"Terrain", @"mountain.2"],
+        @[@"Ruler", @"ruler"],
+    ];
+
+    for (NSArray *typeInfo in objectTypes) {
+        NSString *typeName = typeInfo[0];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:typeName
+                                                      action:@selector(addViewObjectOfType:)
+                                               keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = typeName;
+
+        NSImage *icon = [NSImage imageWithSystemSymbolName:typeInfo[1] accessibilityDescription:typeName];
+        if (icon) {
+            item.image = icon;
+        }
+
+        [menu addItem:item];
+    }
+
+    [menu popUpMenuPositioningItem:nil atLocation:NSZeroPoint inView:_viewObjectsFooterButtons];
+}
+
+- (void)addViewObjectOfType:(NSMenuItem *)sender {
+    NSString *typeName = sender.representedObject;
+    if (!typeName) return;
+
+    // Generate a unique default name
+    NSString *baseName = typeName;
+    NSString *name = baseName;
+    NSInteger counter = 1;
+    while ([self viewObjectExistsWithName:name]) {
+        counter++;
+        name = [NSString stringWithFormat:@"%@ %ld", baseName, (long)counter];
+    }
+
+    if (_engineBridge) {
+        [_engineBridge addViewObject:typeName name:name properties:nil];
+    }
+
+    [self reloadViewObjects];
+}
+
+- (void)removeSelectedViewObject {
+    NSInteger row = _viewObjectsTable.selectedRow;
+    if (row < 0 || row >= (NSInteger)_viewObjectsData.count) return;
+
+    NSString *objectName = _viewObjectsData[(NSUInteger)row][@"name"];
+    if (!objectName) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Delete \"%@\"?", objectName];
+    alert.informativeText = @"This action cannot be undone.";
+    [alert addButtonWithTitle:@"Delete"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.buttons.firstObject.hasDestructiveAction = YES;
+
+    [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse response) {
+        if (response == NSAlertFirstButtonReturn) {
+            if (self.engineBridge) {
+                [self.engineBridge removeViewObject:objectName];
+            }
+            [self reloadViewObjects];
+        }
+    }];
+}
+
+- (BOOL)viewObjectExistsWithName:(NSString *)name {
+    for (NSDictionary *obj in _viewObjectsData) {
+        if ([obj[@"name"] isEqualToString:name]) return YES;
+    }
+    return NO;
 }
 
 @end

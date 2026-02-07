@@ -42,6 +42,18 @@ class NativeArtNetOutput;
 class NativeDDPOutput;
 
 // Native controller configuration loaded from XML
+// Represents a single output (universe/DDP connection) within a controller
+struct NativeOutputConfig {
+    std::string protocol;  // "E131", "ArtNet", "DDP", "DMX"
+    std::string ip;        // IP address (from ComPort attr for E131)
+    int universe = 1;      // Universe/BaudRate number
+    int32_t channels = 512;
+    int32_t startChannel = 1;
+    int priority = 100;
+    int channelsPerPacket = 1440;  // DDP
+    bool keepChannelNumbers = true;  // DDP
+};
+
 struct NativeControllerConfig {
     std::string name;
     std::string description;
@@ -58,19 +70,34 @@ struct NativeControllerConfig {
     std::string model;
     std::string variant;
 
-    // Channel configuration
+    // Channel configuration (aggregate across all outputs)
     int32_t startChannel = 1;
     int32_t channels = 512;
-    int universe = 1;
-    int priority = 100;  // E1.31 priority
+    int universe = 1;       // Start universe
+    int universeCount = 1;  // Number of universes
+    int priority = 100;     // E1.31 priority
     int channelsPerPacket = 1440;  // DDP
     bool keepChannelNumbers = true;  // DDP
 
     // State
     bool active = true;
-    bool autoLayout = true;
-    bool autoSize = true;
+    bool autoLayout = false;
+    bool autoSize = false;
     bool managed = true;
+    bool monitor = true;
+    bool fromBase = false;
+    bool suppressDuplicateFrames = false;
+    bool fullxLightsControl = false;
+    bool autoUpload = false;
+    bool universePerString = false;
+    int defaultBrightness = 100;
+    float defaultGamma = 1.0f;
+    std::string fppProxy;
+    std::string forceLocalIP;
+    std::string activeState;  // "Active", "Inactive", "xLights Only"
+
+    // Child outputs (universes/connections)
+    std::vector<NativeOutputConfig> outputs;
 };
 
 // Abstract base class for native protocol outputs

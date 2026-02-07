@@ -21,6 +21,9 @@
         _modelType = @"";
         _name = @"";
         _channelCount = 0;
+        _startChannel = @"";
+        _endChannel = 0;
+        _controllerConnection = @"";
         _shadowModelFor = @"";
     }
     return self;
@@ -139,8 +142,9 @@
 
 - (NSString *)description {
     NSString *type = _isGroup ? @"Group" : (_isSubmodel ? @"Submodel" : _modelType);
-    return [NSString stringWithFormat:@"<%@: %@ (%@, %ld ch, %lu children)>",
-            NSStringFromClass([self class]), _name, type, (long)_channelCount, (unsigned long)_children.count];
+    return [NSString stringWithFormat:@"<%@: %@ (%@, %ld ch, start=%@, end=%ld, %lu children)>",
+            NSStringFromClass([self class]), _name, type, (long)_channelCount,
+            _startChannel, (long)_endChannel, (unsigned long)_children.count];
 }
 
 @end

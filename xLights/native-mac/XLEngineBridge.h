@@ -931,6 +931,38 @@
 /// Check if a polyline model supports curves (Poly Line yes, MultiPoint no)
 - (BOOL)polylineModelSupportsCurves:(NSString *)modelName;
 
+#pragma mark - View Objects (3D Objects)
+
+/// Get all view objects in the current layout.
+/// Returns array of dictionaries with: name, type, active, posX, posY, posZ, etc.
+- (NSArray<NSDictionary *> *)getViewObjects;
+
+/// Get a specific view object by name.
+/// Returns dictionary with view object properties, or nil if not found.
+- (NSDictionary *)getViewObject:(NSString *)objectName;
+
+/// Add a new view object.
+/// @param objectType Type string: "Image", "Gridlines", "Mesh", "Terrain", "Ruler"
+/// @param name Name for the new object
+/// @param properties Optional initial properties
+/// @return YES if the object was created successfully
+- (BOOL)addViewObject:(NSString *)objectType name:(NSString *)name properties:(NSDictionary * _Nullable)properties;
+
+/// Remove a view object by name.
+/// @return YES if the object was removed
+- (BOOL)removeViewObject:(NSString *)objectName;
+
+/// Update a view object property.
+/// @param objectName Name of the view object
+/// @param key Property key to update
+/// @param value New value
+/// @return YES if the property was updated
+- (BOOL)updateViewObjectProperty:(NSString *)objectName key:(NSString *)key value:(id)value;
+
+/// Rename a view object.
+/// @return YES if the rename was successful
+- (BOOL)renameViewObject:(NSString *)oldName toName:(NSString *)newName;
+
 #pragma mark - Utility
 
 /// Convert std::string to NSString (utility method, publicly exposed for testing)

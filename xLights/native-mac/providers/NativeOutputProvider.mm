@@ -537,6 +537,41 @@ NativeOutputProvider::~NativeOutputProvider() {
     stopOutput();
 }
 
+static std::string normalizeProtocol(NSString* proto) {
+    if (!proto) return "";
+    NSString* lower = [proto lowercaseString];
+    if ([lower isEqualToString:@"e131"] || [lower isEqualToString:@"e1.31"]) return "E131";
+    if ([lower isEqualToString:@"artnet"]) return "ArtNet";
+    if ([lower isEqualToString:@"ddp"]) return "DDP";
+    if ([lower isEqualToString:@"dmx"]) return "DMX";
+    if ([lower isEqualToString:@"lor"]) return "LOR";
+    if ([lower isEqualToString:@"renard"]) return "Renard";
+    if ([lower isEqualToString:@"zcpp"]) return "ZCPP";
+    if ([lower isEqualToString:@"opc"]) return "OPC";
+    return [proto UTF8String];
+}
+
+static std::string getAttr(NSXMLElement* node, NSString* name) {
+    NSString* val = [[node attributeForName:name] stringValue];
+    return val ? [val UTF8String] : "";
+}
+
+static int getAttrInt(NSXMLElement* node, NSString* name, int defaultVal = 0) {
+    NSString* val = [[node attributeForName:name] stringValue];
+    return val ? [val intValue] : defaultVal;
+}
+
+static float getAttrFloat(NSXMLElement* node, NSString* name, float defaultVal = 0.0f) {
+    NSString* val = [[node attributeForName:name] stringValue];
+    return val ? [val floatValue] : defaultVal;
+}
+
+static bool getAttrBool(NSXMLElement* node, NSString* name, bool defaultVal = false) {
+    NSString* val = [[node attributeForName:name] stringValue];
+    if (!val) return defaultVal;
+    return [val intValue] != 0 || [val caseInsensitiveCompare:@"TRUE"] == NSOrderedSame;
+}
+
 bool NativeOutputProvider::loadFromXML(const std::string& xmlPath) {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
 
@@ -554,89 +589,104 @@ bool NativeOutputProvider::loadFromXML(const std::string& xmlPath) {
             return false;
         }
 
-        // Clear existing controllers
         _controllers.clear();
         _cachedTotalChannels = -1;
 
-        // Step 1: Parse individual <network> elements (the actual outputs).
-        // These exist as children of <Controller> elements and represent
-        // individual E1.31 universes, DDP connections, etc.
-        NSArray* networks = [doc.rootElement nodesForXPath:@"//network" error:nil];
-        for (NSXMLElement* node in networks) {
-            NativeControllerConfig config;
-            if (parseController((__bridge void*)node, config)) {
-                _controllers.push_back(config);
-            }
-        }
-
-        // Step 2: Calculate cumulative start channels for network entries only.
-        // These are the actual output channels — no double-counting.
+        // Parse <Controller> elements — these are the real controllers
+        NSArray* controllerNodes = [doc.rootElement nodesForXPath:@"Controller" error:nil];
         int32_t cumulativeChannel = 1;
-        for (size_t i = 0; i < _controllers.size(); i++) {
-            auto& config = _controllers[i];
-            if (config.startChannel <= 1 && i > 0) {
-                config.startChannel = cumulativeChannel;
-            }
-            cumulativeChannel = config.startChannel + config.channels;
-        }
 
-        // Step 3: Parse parent <Controller> elements and create alias entries.
-        // Models reference parent controller names (e.g., "!FPP-Chance:1"),
-        // so we need entries with the parent name pointing to the correct
-        // start channel (the first child network's start channel).
-        NSArray* controllers = [doc.rootElement nodesForXPath:@"//Controller" error:nil];
-        for (NSXMLElement* node in controllers) {
+        for (NSXMLElement* node in controllerNodes) {
             NSString* ctrlName = [[node attributeForName:@"Name"] stringValue];
-            NSString* ctrlIP = [[node attributeForName:@"IP"] stringValue];
             if (!ctrlName || ctrlName.length == 0) continue;
 
-            std::string name = [ctrlName UTF8String];
-            std::string ip = ctrlIP ? [ctrlIP UTF8String] : "";
+            NativeControllerConfig config;
+            config.name = [ctrlName UTF8String];
+            config.description = getAttr(node, @"Description");
+            config.id = getAttrInt(node, @"Id");
 
-            // Find the first child network entry with matching IP to get its start channel
-            int32_t firstChildStart = -1;
-            int32_t totalChannels = 0;
-            for (const auto& child : _controllers) {
-                if (!ip.empty() && child.ip == ip) {
-                    if (firstChildStart < 0) {
-                        firstChildStart = child.startChannel;
-                    }
-                    totalChannels += child.channels;
-                }
-            }
-
-            if (firstChildStart > 0) {
-                NativeControllerConfig alias;
-                alias.name = name;
-                alias.ip = ip;
-                alias.startChannel = firstChildStart;
-                alias.channels = totalChannels;
-
-                // Read protocol from parent or first child Connection element
-                NSString* proto = [[node attributeForName:@"Protocol"] stringValue];
-                if (!proto) {
-                    for (NSXMLNode* child in [node children]) {
-                        if ([child isKindOfClass:[NSXMLElement class]]) {
-                            NSXMLElement* childElem = (NSXMLElement*)child;
-                            if ([childElem.name isEqualToString:@"network"] ||
-                                [childElem.name isEqualToString:@"Connection"]) {
-                                proto = [[childElem attributeForName:@"NetworkType"] stringValue];
-                                if (!proto) proto = [[childElem attributeForName:@"Protocol"] stringValue];
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (proto) alias.protocol = [proto UTF8String];
-                alias.type = OutputControllerType::Ethernet;
-
-                NSLog(@"NativeOutputProvider: Controller alias '%s' → startCh=%d, totalCh=%d (from child networks at IP %s)",
-                      name.c_str(), firstChildStart, totalChannels, ip.c_str());
-                _controllers.push_back(alias);
+            // Type
+            std::string typeStr = getAttr(node, @"Type");
+            if (typeStr == "Serial") {
+                config.type = OutputControllerType::Serial;
+            } else if (typeStr == "Null") {
+                config.type = OutputControllerType::Null;
             } else {
-                NSLog(@"NativeOutputProvider: Controller '%s' has no matching child networks (IP=%s)",
-                      name.c_str(), ip.c_str());
+                config.type = OutputControllerType::Ethernet;
             }
+
+            // Connection
+            config.ip = getAttr(node, @"IP");
+            config.commPort = getAttr(node, @"CommPort");
+            config.protocol = normalizeProtocol([[node attributeForName:@"Protocol"] stringValue]);
+            config.priority = getAttrInt(node, @"Priority", 100);
+            config.fppProxy = getAttr(node, @"FPPProxy");
+            config.forceLocalIP = getAttr(node, @"ForceLocalIP");
+            config.universePerString = getAttrBool(node, @"UPS");
+
+            // Hardware ID
+            config.vendor = getAttr(node, @"Vendor");
+            config.model = getAttr(node, @"Model");
+            config.variant = getAttr(node, @"Variant");
+
+            // State
+            std::string activeStr = getAttr(node, @"ActiveState");
+            config.activeState = activeStr;
+            config.active = (activeStr != "Inactive");
+            config.autoLayout = getAttrBool(node, @"AutoLayout");
+            config.autoSize = getAttrBool(node, @"AutoSize");
+            config.autoUpload = getAttrBool(node, @"AutoUpload");
+            config.suppressDuplicateFrames = getAttrBool(node, @"SuppressDuplicates");
+            config.monitor = getAttrBool(node, @"Monitor", true);
+            config.fromBase = getAttrBool(node, @"FromBase");
+            config.fullxLightsControl = getAttrBool(node, @"FullxLightsControl");
+            config.defaultBrightness = getAttrInt(node, @"DefaultBrightnessUnderFullControl", 100);
+            config.defaultGamma = getAttrFloat(node, @"DefaultGammaUnderFullControl", 1.0f);
+
+            // Parse child <network> elements as outputs
+            int32_t totalChannels = 0;
+            int firstUniverse = -1;
+            int universeCount = 0;
+
+            NSArray* children = [node children];
+            for (NSXMLNode* child in children) {
+                if (![child isKindOfClass:[NSXMLElement class]]) continue;
+                NSXMLElement* childElem = (NSXMLElement*)child;
+                if (![childElem.name isEqualToString:@"network"]) continue;
+
+                NativeOutputConfig output;
+                output.ip = getAttr(childElem, @"ComPort");
+                output.universe = getAttrInt(childElem, @"BaudRate", 1);
+                output.channels = getAttrInt(childElem, @"MaxChannels", 512);
+                output.protocol = normalizeProtocol([[childElem attributeForName:@"NetworkType"] stringValue]);
+                output.channelsPerPacket = getAttrInt(childElem, @"ChannelsPerPacket", 1440);
+                output.keepChannelNumbers = getAttrBool(childElem, @"KeepChannelNumbers", true);
+                output.startChannel = cumulativeChannel;
+
+                totalChannels += output.channels;
+                if (firstUniverse < 0) firstUniverse = output.universe;
+                universeCount++;
+
+                cumulativeChannel += output.channels;
+                config.outputs.push_back(output);
+            }
+
+            // Set aggregate channel info from child outputs
+            if (!config.outputs.empty()) {
+                config.startChannel = config.outputs[0].startChannel;
+                config.channels = totalChannels;
+                config.universe = (firstUniverse >= 0) ? firstUniverse : 1;
+                config.universeCount = universeCount;
+            } else {
+                config.startChannel = cumulativeChannel;
+                config.channels = 0;
+            }
+
+            NSLog(@"NativeOutputProvider: Loaded controller '%s' — %s %s, %d outputs, %d channels",
+                  config.name.c_str(), config.protocol.c_str(), config.ip.c_str(),
+                  (int)config.outputs.size(), totalChannels);
+
+            _controllers.push_back(config);
         }
 
         NSLog(@"NativeOutputProvider: Loaded %lu controllers from %@",
@@ -815,42 +865,71 @@ bool NativeOutputProvider::saveToXML(const std::string& xmlPath) {
 
     @autoreleasepool {
         NSXMLElement* root = [[NSXMLElement alloc] initWithName:@"Networks"];
+        // Root attributes
+        [root addAttribute:[NSXMLNode attributeWithName:@"computer" stringValue:[[NSHost currentHost] localizedName] ?: @""]];
+        [root addAttribute:[NSXMLNode attributeWithName:@"GlobalFPPProxy" stringValue:@""]];
+        [root addAttribute:[NSXMLNode attributeWithName:@"GlobalForceLocalIP" stringValue:@""]];
+
         NSXMLDocument* doc = [[NSXMLDocument alloc] initWithRootElement:root];
 
         for (const auto& config : _controllers) {
-            NSXMLElement* network = [[NSXMLElement alloc] initWithName:@"network"];
+            NSXMLElement* ctrl = [[NSXMLElement alloc] initWithName:@"Controller"];
 
-            [network addAttribute:[NSXMLNode attributeWithName:@"Name"
-                                                   stringValue:[NSString stringWithUTF8String:config.name.c_str()]]];
-            [network addAttribute:[NSXMLNode attributeWithName:@"NetworkType"
-                                                   stringValue:[NSString stringWithUTF8String:config.protocol.c_str()]]];
+            // Controller attributes matching legacy format
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Id" stringValue:[NSString stringWithFormat:@"%d", config.id]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Name" stringValue:[NSString stringWithUTF8String:config.name.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Description" stringValue:[NSString stringWithUTF8String:config.description.c_str()]]];
 
-            if (config.type == OutputControllerType::Ethernet) {
-                [network addAttribute:[NSXMLNode attributeWithName:@"IP"
-                                                       stringValue:[NSString stringWithUTF8String:config.ip.c_str()]]];
-            } else {
-                [network addAttribute:[NSXMLNode attributeWithName:@"ComPort"
-                                                       stringValue:[NSString stringWithUTF8String:config.commPort.c_str()]]];
+            NSString* typeStr = @"Ethernet";
+            if (config.type == OutputControllerType::Serial) typeStr = @"Serial";
+            else if (config.type == OutputControllerType::Null) typeStr = @"Null";
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Type" stringValue:typeStr]];
+
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Vendor" stringValue:[NSString stringWithUTF8String:config.vendor.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Model" stringValue:[NSString stringWithUTF8String:config.model.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Variant" stringValue:[NSString stringWithUTF8String:config.variant.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"AutoSize" stringValue:config.autoSize ? @"1" : @"0"]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"FromBase" stringValue:config.fromBase ? @"1" : @"0"]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"FullxLightsControl" stringValue:config.fullxLightsControl ? @"TRUE" : @"FALSE"]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"DefaultBrightnessUnderFullControl" stringValue:[NSString stringWithFormat:@"%d", config.defaultBrightness]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"DefaultGammaUnderFullControl" stringValue:[NSString stringWithFormat:@"%.0f", config.defaultGamma]]];
+
+            NSString* activeState = @"Active";
+            if (!config.activeState.empty()) {
+                activeState = [NSString stringWithUTF8String:config.activeState.c_str()];
+            } else if (!config.active) {
+                activeState = @"Inactive";
+            }
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"ActiveState" stringValue:activeState]];
+
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"AutoLayout" stringValue:config.autoLayout ? @"1" : @"0"]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"AutoUpload" stringValue:config.autoUpload ? @"1" : @"0"]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"SuppressDuplicates" stringValue:config.suppressDuplicateFrames ? @"1" : @"0"]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Monitor" stringValue:config.monitor ? @"1" : @"0"]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"IP" stringValue:[NSString stringWithUTF8String:config.ip.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Protocol" stringValue:[NSString stringWithUTF8String:config.protocol.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"FPPProxy" stringValue:[NSString stringWithUTF8String:config.fppProxy.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"Priority" stringValue:[NSString stringWithFormat:@"%d", config.priority]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"ForceLocalIP" stringValue:[NSString stringWithUTF8String:config.forceLocalIP.c_str()]]];
+            [ctrl addAttribute:[NSXMLNode attributeWithName:@"UPS" stringValue:config.universePerString ? @"TRUE" : @"FALSE"]];
+
+            // Write child <network> elements for each output
+            for (const auto& output : config.outputs) {
+                NSXMLElement* network = [[NSXMLElement alloc] initWithName:@"network"];
+                [network addAttribute:[NSXMLNode attributeWithName:@"ComPort" stringValue:[NSString stringWithUTF8String:output.ip.c_str()]]];
+                [network addAttribute:[NSXMLNode attributeWithName:@"BaudRate" stringValue:[NSString stringWithFormat:@"%d", output.universe]]];
+                [network addAttribute:[NSXMLNode attributeWithName:@"NetworkType" stringValue:[NSString stringWithUTF8String:output.protocol.c_str()]]];
+                [network addAttribute:[NSXMLNode attributeWithName:@"MaxChannels" stringValue:[NSString stringWithFormat:@"%d", output.channels]]];
+
+                if (output.protocol == "DDP") {
+                    [network addAttribute:[NSXMLNode attributeWithName:@"ChannelsPerPacket" stringValue:[NSString stringWithFormat:@"%d", output.channelsPerPacket]]];
+                    [network addAttribute:[NSXMLNode attributeWithName:@"KeepChannelNumbers" stringValue:output.keepChannelNumbers ? @"1" : @"0"]];
+                }
+
+                [ctrl addChild:network];
             }
 
-            [network addAttribute:[NSXMLNode attributeWithName:@"Universe"
-                                                   stringValue:[NSString stringWithFormat:@"%d", config.universe]]];
-            [network addAttribute:[NSXMLNode attributeWithName:@"MaxChannels"
-                                                   stringValue:[NSString stringWithFormat:@"%d", config.channels]]];
-            [network addAttribute:[NSXMLNode attributeWithName:@"Enabled"
-                                                   stringValue:config.active ? @"1" : @"0"]];
-
-            if (config.protocol == "E131" && config.priority != E131_DEFAULT_PRIORITY) {
-                [network addAttribute:[NSXMLNode attributeWithName:@"Priority"
-                                                       stringValue:[NSString stringWithFormat:@"%d", config.priority]]];
-            }
-
-            if (config.protocol == "DDP") {
-                [network addAttribute:[NSXMLNode attributeWithName:@"ChannelsPerPacket"
-                                                       stringValue:[NSString stringWithFormat:@"%d", config.channelsPerPacket]]];
-            }
-
-            [root addChild:network];
+            [root addChild:ctrl];
         }
 
         NSData* xmlData = [doc XMLDataWithOptions:NSXMLNodePrettyPrint];
@@ -1063,17 +1142,29 @@ ControllerInfo NativeOutputProvider::buildControllerInfo(const NativeControllerC
     info.ip = config.ip;
     info.commPort = config.commPort;
     info.protocol = config.protocol;
+    info.fppProxy = config.fppProxy;
+    info.forceLocalIP = config.forceLocalIP;
     info.vendor = config.vendor;
     info.model = config.model;
     info.variant = config.variant;
     info.startChannel = config.startChannel;
     info.endChannel = config.startChannel + config.channels - 1;
     info.channels = config.channels;
-    info.outputCount = 1;
+    info.outputCount = config.outputs.empty() ? 1 : (int)config.outputs.size();
+    info.priority = config.priority;
     info.active = config.active;
     info.autoLayout = config.autoLayout;
     info.autoSize = config.autoSize;
     info.managed = config.managed;
+    info.autoUpload = config.autoUpload;
+    info.fullxLightsControl = config.fullxLightsControl;
+    info.defaultBrightness = config.defaultBrightness;
+    info.defaultGamma = config.defaultGamma;
+    info.suppressDuplicateFrames = config.suppressDuplicateFrames;
+    info.monitor = config.monitor;
+    info.fromBase = config.fromBase;
+    info.universePerString = config.universePerString;
+    info.activeState = config.activeState;
 
     return info;
 }

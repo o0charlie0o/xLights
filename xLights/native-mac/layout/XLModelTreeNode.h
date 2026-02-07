@@ -28,8 +28,14 @@
 /// Number of channels this model uses
 @property (nonatomic, assign) NSInteger channelCount;
 
-/// Controller name this model is assigned to (may be nil)
-@property (nonatomic, copy) NSString *controllerName;
+/// Start channel string (e.g. "1" or ">ControllerName:1")
+@property (nonatomic, copy) NSString *startChannel;
+
+/// Numeric end channel (last channel number, 1-based)
+@property (nonatomic, assign) NSInteger endChannel;
+
+/// Controller connection string (e.g. "ControllerName:1")
+@property (nonatomic, copy) NSString *controllerConnection;
 
 /// Child nodes (models in a group, or submodels in a model)
 @property (nonatomic, strong) NSMutableArray<XLModelTreeNode *> *children;

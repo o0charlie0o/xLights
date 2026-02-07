@@ -920,11 +920,6 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    [_effectsGridView reloadData];
-    [_rowHeadingsView reloadData];
-
-    // Load audio if sequence has media file
-    [self loadAudioForSequence];
 
     // Initialize keyboard handler for processing key bindings
     // Use the show folder path so custom key_bindings.xml is loaded
@@ -957,6 +952,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                                              selector:@selector(handleZoomToSelection:)
                                                  name:@"XLZoomToSelection"
                                                object:nil];
+
+    // Check sequence state and show/hide empty state accordingly.
+    // This is needed because SwiftUI recreates this VC on tab switches,
+    // and the empty state starts hidden by default in loadView.
+    [self reloadSequenceData];
 }
 
 #pragma mark - Audio Loading
