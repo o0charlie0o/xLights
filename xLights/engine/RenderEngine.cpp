@@ -654,7 +654,16 @@ void RenderEngine::renderFrame(int timeMS)
         }
         double durationSec = durationMS / 1000.0;
 
-        // Create or reuse persistent live coordinator
+        auto modelNames = _modelProvider->getModelNames();
+
+        auto frameStart = std::chrono::steady_clock::now();
+        int modelsRendered = 0;
+
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+
+        // Create or reuse persistent live coordinator.
+        // Must be under _bufferCacheMutex because invalidateAllCaches() can
+        // reset _liveCoordinator from another thread while holding this lock.
         if (!_liveCoordinator) {
             _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec);
             _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
@@ -668,13 +677,6 @@ void RenderEngine::renderFrame(int timeMS)
             _liveCoordinator->resetPersistentState();
         }
         _lastLiveRenderTimeMS = timeMS;
-
-        auto modelNames = _modelProvider->getModelNames();
-
-        auto frameStart = std::chrono::steady_clock::now();
-        int modelsRendered = 0;
-
-        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.clear();
 
         for (const auto& name : modelNames) {
@@ -730,6 +732,11 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
         }
         double durationSec = durationMS / 1000.0;
 
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+
+        // Create or reuse persistent live coordinator.
+        // Must be under _bufferCacheMutex because invalidateAllCaches() can
+        // reset _liveCoordinator from another thread while holding this lock.
         if (!_liveCoordinator) {
             _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec);
             _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
@@ -750,8 +757,6 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
             fb.height = rf.height;
             fb.timeMS = rf.timeMS;
             fb.pixels = std::move(rf.pixels);
-
-            std::lock_guard<std::mutex> lock(_bufferCacheMutex);
             _bufferCache[modelName] = std::move(fb);
 
             notifyModelFrameRendered(modelName, timeMS);
