@@ -447,6 +447,118 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
     [self showModelImportSheet];
 }
 
+- (IBAction)importModelsFromRGBEffects:(id)sender {
+    if (!self.view.window) return;
+
+    _modelImportSheet = [[XLModelImportSheet alloc] init];
+    _modelImportSheet.engineBridge = _engineBridge;
+
+    __weak typeof(self) weakSelf = self;
+    [_modelImportSheet showRGBEffectsImportForWindow:self.view.window
+                                          completion:^(BOOL imported, NSArray<NSString *> *importedModelNames) {
+        if (imported && importedModelNames.count > 0) {
+            [weakSelf.modelTreeController reloadData];
+            [weakSelf.previewView reloadModels];
+            [weakSelf selectModel:importedModelNames.firstObject];
+            [weakSelf.modelTreeController selectModelWithName:importedModelNames.firstObject];
+        }
+        weakSelf.modelImportSheet = nil;
+    }];
+}
+
+- (IBAction)importLORS5Models:(id)sender {
+    if (!self.view.window) return;
+
+    NSOpenPanel *openPanel = [NSOpenPanel openPanel];
+    openPanel.title = @"Import LOR S5 Models";
+    openPanel.message = @"Select an LOR S5 preview file (LORPreviews.xml or .lorprev)";
+    openPanel.canChooseFiles = YES;
+    openPanel.canChooseDirectories = NO;
+    openPanel.allowsMultipleSelection = NO;
+
+    NSMutableArray<UTType *> *types = [NSMutableArray array];
+    UTType *lorprevType = [UTType typeWithFilenameExtension:@"lorprev"];
+    if (lorprevType) [types addObject:lorprevType];
+    UTType *xmlType = [UTType typeWithIdentifier:@"public.xml"];
+    if (xmlType) [types addObject:xmlType];
+    openPanel.allowedContentTypes = types;
+
+    __weak typeof(self) weakSelf = self;
+    [openPanel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+        if (result != NSModalResponseOK || !openPanel.URL) return;
+        [weakSelf performLORS5ImportFromFile:openPanel.URL.path];
+    }];
+}
+
+- (void)performLORS5ImportFromFile:(NSString *)filePath {
+    NSArray<NSString *> *previewNames = [_engineBridge getLORS5PreviewNames:filePath];
+
+    if (!previewNames || previewNames.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Import Error";
+        alert.informativeText = @"No previews found in the LOR S5 file.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    if (previewNames.count == 1) {
+        [self executeLORS5Import:filePath previewName:previewNames[0]];
+    } else {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Select LOR S5 Preview";
+        alert.informativeText = @"This file contains multiple previews. Choose which preview to import models from:";
+
+        NSPopUpButton *previewPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 300, 28) pullsDown:NO];
+        for (NSString *name in previewNames) {
+            [previewPopup addItemWithTitle:name];
+        }
+        alert.accessoryView = previewPopup;
+
+        [alert addButtonWithTitle:@"Import"];
+        [alert addButtonWithTitle:@"Cancel"];
+
+        __weak typeof(self) weakSelf = self;
+        [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
+            if (returnCode == NSAlertFirstButtonReturn) {
+                [weakSelf executeLORS5Import:filePath previewName:previewPopup.titleOfSelectedItem];
+            }
+        }];
+    }
+}
+
+- (void)executeLORS5Import:(NSString *)filePath previewName:(NSString *)previewName {
+    NSString *layoutGroup = _currentLayoutGroup ?: @"Default";
+    if ([layoutGroup isEqualToString:@"All Models"]) {
+        layoutGroup = @"Default";
+    }
+
+    NSArray<NSString *> *importedNames = [_engineBridge importModelsFromLORS5File:filePath
+                                                                     previewName:previewName
+                                                                     layoutGroup:layoutGroup];
+
+    if (importedNames.count > 0) {
+        [_modelTreeController reloadData];
+        [_previewView reloadModels];
+        [self selectModel:importedNames.firstObject];
+        [_modelTreeController selectModelWithName:importedNames.firstObject];
+
+        NSAlert *successAlert = [[NSAlert alloc] init];
+        successAlert.messageText = @"Import Complete";
+        successAlert.informativeText = [NSString stringWithFormat:@"Successfully imported %lu model(s) from LOR S5 preview '%@'.",
+                                        (unsigned long)importedNames.count, previewName];
+        [successAlert addButtonWithTitle:@"OK"];
+        [successAlert beginSheetModalForWindow:self.view.window completionHandler:nil];
+    } else {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Import Failed";
+        alert.informativeText = @"No models could be imported from the LOR S5 file. Check the console log for details.";
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+    }
+}
+
 - (IBAction)exportModelToFile:(id)sender {
     NSString *selectedModel = [_modelTreeController selectedModelName];
     if (!selectedModel) {
@@ -1529,6 +1641,14 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
     }
 
     if (action == @selector(importModels:)) {
+        return YES;
+    }
+
+    if (action == @selector(importModelsFromRGBEffects:)) {
+        return YES;
+    }
+
+    if (action == @selector(importLORS5Models:)) {
         return YES;
     }
 

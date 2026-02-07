@@ -549,7 +549,9 @@ static const CGFloat kWindowHeight = 700.0;
 @property (nonatomic, strong) XLStateGridView *stateGrid;
 @property (nonatomic, strong) XLStateNodeSelectionView *nodeSelectionView;
 @property (nonatomic, strong) NSButton *outputToLightsCheckbox;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *stateDataDict;
+@property (nonatomic, strong) NSButton *customColorsCheckbox;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSString *> *> *stateDataDict;
+@property (nonatomic, copy) NSString *currentDefinitionName;
 @property (nonatomic, assign) BOOL hasUnsavedChanges;
 @end
 
@@ -658,18 +660,33 @@ static const CGFloat kWindowHeight = 700.0;
     NSTabViewItem *nodeRangesTab = [[NSTabViewItem alloc] initWithIdentifier:@"nodeRanges"];
     nodeRangesTab.label = @"Node Ranges";
 
+    // Custom colors checkbox
+    _customColorsCheckbox = [[NSButton alloc] initWithFrame:NSMakeRect(10, 440, 140, 20)];
+    _customColorsCheckbox.buttonType = NSButtonTypeSwitch;
+    _customColorsCheckbox.title = @"Custom Colors";
+    _customColorsCheckbox.target = self;
+    _customColorsCheckbox.action = @selector(customColorsChanged:);
+    [nodeRangesTab.view addSubview:_customColorsCheckbox];
+
     _stateGrid = [[XLStateGridView alloc] initWithFrame:NSMakeRect(0, 0, 480, 400)];
     _stateGrid.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _stateGrid.delegate = self;
     [nodeRangesTab.view addSubview:_stateGrid];
 
-    // Add state button in tab
+    // Add/Remove state buttons in tab
     NSButton *addStateButton = [[NSButton alloc] initWithFrame:NSMakeRect(10, 410, 100, 26)];
     addStateButton.bezelStyle = NSBezelStyleRounded;
     addStateButton.title = @"Add State";
     addStateButton.target = self;
     addStateButton.action = @selector(addState:);
     [nodeRangesTab.view addSubview:addStateButton];
+
+    NSButton *removeStateButton = [[NSButton alloc] initWithFrame:NSMakeRect(115, 410, 110, 26)];
+    removeStateButton.bezelStyle = NSBezelStyleRounded;
+    removeStateButton.title = @"Remove State";
+    removeStateButton.target = self;
+    removeStateButton.action = @selector(removeState:);
+    [nodeRangesTab.view addSubview:removeStateButton];
 
     [_stateTypeTabView addTabViewItem:nodeRangesTab];
 
@@ -732,7 +749,135 @@ static const CGFloat kWindowHeight = 700.0;
 }
 
 - (void)stateNameChanged:(NSPopUpButton *)sender {
-    // Load state data for selected definition
+    // Save current grid data before switching
+    [self saveCurrentGridToDict];
+
+    NSString *newName = sender.selectedItem.title;
+    _currentDefinitionName = newName;
+    [self loadDefinitionIntoGrid:newName];
+}
+
+/// Save current grid state into the stateDataDict for the current definition
+- (void)saveCurrentGridToDict {
+    if (!_currentDefinitionName || _currentDefinitionName.length == 0) return;
+
+    NSMutableDictionary *info = [NSMutableDictionary dictionary];
+
+    // Save type
+    NSInteger tabIndex = [_stateTypeTabView indexOfTabViewItem:_stateTypeTabView.selectedTabViewItem];
+    if (tabIndex == 0) {
+        info[@"Type"] = @"SingleNode";
+    } else {
+        info[@"Type"] = @"NodeRange";
+    }
+
+    // Save custom colors setting
+    info[@"CustomColors"] = (_customColorsCheckbox.state == NSControlStateValueOn) ? @"1" : @"0";
+
+    // Save grid data (state entries)
+    for (NSInteger i = 0; i < _stateGrid.stateCount; i++) {
+        XLStateData data = [_stateGrid stateDataAtIndex:i];
+        NSString *key = [NSString stringWithFormat:@"s%03ld", (long)(i + 1)];
+
+        NSString *nodeStr = [NSString stringWithUTF8String:data.nodeData];
+        NSString *nameStr = [NSString stringWithUTF8String:data.stateName];
+
+        if (nameStr.length > 0 || nodeStr.length > 0) {
+            if (nodeStr.length > 0) {
+                info[key] = nodeStr;
+            }
+            if (nameStr.length > 0) {
+                info[[key stringByAppendingString:@"-Name"]] = [nameStr lowercaseString];
+            }
+            if (data.hasCustomColor) {
+                info[[key stringByAppendingString:@"-Color"]] =
+                    [NSString stringWithFormat:@"#%02X%02X%02X",
+                     data.colorRed, data.colorGreen, data.colorBlue];
+            }
+        }
+    }
+
+    _stateDataDict[_currentDefinitionName] = info;
+}
+
+/// Load a state definition from stateDataDict into the grid
+- (void)loadDefinitionIntoGrid:(NSString *)defName {
+    NSDictionary *info = _stateDataDict[defName];
+    if (!info) info = @{};
+
+    // Set type
+    NSString *type = info[@"Type"];
+    if (!type || type.length == 0) type = @"NodeRange";
+    if ([type isEqualToString:@"SingleNode"]) {
+        [_stateTypeTabView selectTabViewItemAtIndex:0];
+    } else {
+        [_stateTypeTabView selectTabViewItemAtIndex:1];
+    }
+
+    // Set custom colors
+    BOOL customColors = [info[@"CustomColors"] isEqualToString:@"1"];
+    _customColorsCheckbox.state = customColors ? NSControlStateValueOn : NSControlStateValueOff;
+    _stateGrid.customColorsEnabled = customColors;
+
+    // Clear existing grid
+    while (_stateGrid.stateCount > 0) {
+        [_stateGrid removeStateAtIndex:0];
+    }
+
+    // Find all state entries (keys matching s### pattern)
+    NSMutableSet *indices = [NSMutableSet set];
+    for (NSString *key in info) {
+        if (key.length >= 4 && [key characterAtIndex:0] == 's') {
+            NSString *numPart = key;
+            // Strip suffix like "-Name" or "-Color"
+            NSRange dashRange = [key rangeOfString:@"-"];
+            if (dashRange.location != NSNotFound) {
+                numPart = [key substringToIndex:dashRange.location];
+            }
+            // Extract the numeric part
+            NSString *digits = [numPart substringFromIndex:1];
+            NSInteger idx = [digits integerValue];
+            if (idx > 0) {
+                [indices addObject:@(idx)];
+            }
+        }
+    }
+
+    // Sort indices and populate grid
+    NSArray *sortedIndices = [[indices allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    for (NSNumber *idxNum in sortedIndices) {
+        NSInteger idx = [idxNum integerValue];
+        NSString *key = [NSString stringWithFormat:@"s%03ld", (long)idx];
+
+        NSString *nodeData = info[key] ?: @"";
+        NSString *stateName = info[[key stringByAppendingString:@"-Name"]] ?: @"";
+        NSString *colorStr = info[[key stringByAppendingString:@"-Color"]];
+
+        XLStateData stateData = {0};
+        strlcpy(stateData.stateName, [stateName UTF8String] ?: "", sizeof(stateData.stateName));
+        strlcpy(stateData.nodeData, [nodeData UTF8String] ?: "", sizeof(stateData.nodeData));
+        stateData.active = YES;
+
+        if (colorStr && colorStr.length >= 7 && [colorStr characterAtIndex:0] == '#') {
+            unsigned int r = 0, g = 0, b = 0;
+            NSScanner *scanner = [NSScanner scannerWithString:[colorStr substringFromIndex:1]];
+            unsigned int hexValue = 0;
+            [scanner scanHexInt:&hexValue];
+            r = (hexValue >> 16) & 0xFF;
+            g = (hexValue >> 8) & 0xFF;
+            b = hexValue & 0xFF;
+            stateData.colorRed = (uint8_t)r;
+            stateData.colorGreen = (uint8_t)g;
+            stateData.colorBlue = (uint8_t)b;
+            stateData.hasCustomColor = YES;
+        }
+
+        [_stateGrid addStateWithName:@""];
+        [_stateGrid setStateData:stateData atIndex:_stateGrid.stateCount - 1];
+    }
+
+    [_nodeSelectionView clearHighlight];
+    [_nodeSelectionView clearSelection];
 }
 
 - (void)addStateDefinition:(NSButton *)sender {
@@ -749,8 +894,13 @@ static const CGFloat kWindowHeight = 700.0;
 
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
         if (returnCode == NSAlertFirstButtonReturn && input.stringValue.length > 0) {
-            [self->_stateNamePopup addItemWithTitle:input.stringValue];
-            [self->_stateNamePopup selectItemWithTitle:input.stringValue];
+            [self saveCurrentGridToDict];
+            NSString *newName = input.stringValue;
+            self->_stateDataDict[newName] = [NSMutableDictionary dictionaryWithObject:@"NodeRange" forKey:@"Type"];
+            [self->_stateNamePopup addItemWithTitle:newName];
+            [self->_stateNamePopup selectItemWithTitle:newName];
+            self->_currentDefinitionName = newName;
+            [self loadDefinitionIntoGrid:newName];
             self->_hasUnsavedChanges = YES;
         }
     }];
@@ -758,11 +908,11 @@ static const CGFloat kWindowHeight = 700.0;
 
 - (void)deleteStateDefinition:(NSButton *)sender {
     NSString *selected = _stateNamePopup.selectedItem.title;
-    if ([selected isEqualToString:@"Default"]) {
+    if (_stateNamePopup.numberOfItems <= 1) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Cannot Delete";
-        alert.informativeText = @"The Default state definition cannot be deleted.";
-        [alert runModal];
+        alert.informativeText = @"Cannot delete the last state definition.";
+        [alert beginSheetModalForWindow:self.window completionHandler:nil];
         return;
     }
 
@@ -776,6 +926,12 @@ static const CGFloat kWindowHeight = 700.0;
         if (returnCode == NSAlertFirstButtonReturn) {
             [self->_stateNamePopup removeItemWithTitle:selected];
             [self->_stateDataDict removeObjectForKey:selected];
+            // Switch to first remaining definition
+            if (self->_stateNamePopup.numberOfItems > 0) {
+                [self->_stateNamePopup selectItemAtIndex:0];
+                self->_currentDefinitionName = self->_stateNamePopup.selectedItem.title;
+                [self loadDefinitionIntoGrid:self->_currentDefinitionName];
+            }
             self->_hasUnsavedChanges = YES;
         }
     }];
@@ -799,6 +955,19 @@ static const CGFloat kWindowHeight = 700.0;
             self->_hasUnsavedChanges = YES;
         }
     }];
+}
+
+- (void)removeState:(NSButton *)sender {
+    NSInteger selected = _stateGrid.selectedStateIndex;
+    if (selected < 0 || selected >= _stateGrid.stateCount) return;
+    [_stateGrid removeStateAtIndex:selected];
+    _hasUnsavedChanges = YES;
+}
+
+- (void)customColorsChanged:(NSButton *)sender {
+    BOOL enabled = (sender.state == NSControlStateValueOn);
+    _stateGrid.customColorsEnabled = enabled;
+    _hasUnsavedChanges = YES;
 }
 
 - (void)importStates:(NSButton *)sender {
@@ -837,6 +1006,8 @@ static const CGFloat kWindowHeight = 700.0;
 }
 
 - (void)okClicked:(NSButton *)sender {
+    // Save current grid state before closing
+    [self saveCurrentGridToDict];
     _needsReload = _hasUnsavedChanges;
     [self.window close];
     if (_completion) {
@@ -852,12 +1023,27 @@ static const CGFloat kWindowHeight = 700.0;
 }
 
 - (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)stateInfo {
-    return [_stateDataDict copy];
+    // Ensure current grid is saved
+    [self saveCurrentGridToDict];
+
+    // Filter out empty definitions
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    for (NSString *key in _stateDataDict) {
+        NSDictionary *def = _stateDataDict[key];
+        if (def.count > 0) {
+            result[key] = [def copy];
+        }
+    }
+    return [result copy];
 }
 
 - (void)setStateInfo:(NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)info {
     [_stateDataDict removeAllObjects];
-    [_stateDataDict addEntriesFromDictionary:info];
+
+    // Deep copy into mutable dictionaries
+    for (NSString *key in info) {
+        _stateDataDict[key] = [info[key] mutableCopy];
+    }
 
     [_stateNamePopup removeAllItems];
     NSArray *sortedKeys = [[info allKeys] sortedArrayUsingSelector:@selector(compare:)];
@@ -867,7 +1053,12 @@ static const CGFloat kWindowHeight = 700.0;
 
     if (_stateNamePopup.numberOfItems == 0) {
         [_stateNamePopup addItemWithTitle:@"Default"];
+        _stateDataDict[@"Default"] = [NSMutableDictionary dictionaryWithObject:@"NodeRange" forKey:@"Type"];
     }
+
+    // Load first definition into grid
+    _currentDefinitionName = [_stateNamePopup itemAtIndex:0].title;
+    [self loadDefinitionIntoGrid:_currentDefinitionName];
 }
 
 #pragma mark - XLStateGridDelegate

@@ -7,6 +7,7 @@
 #import "dialogs/XLRenderProgressDialog.h"
 #import "dialogs/XLToolsDialogs.h"
 #import "dialogs/XLConvertDialogs.h"
+#import "dialogs/XLModelDialogs.h"
 #import "XLMainWindowController.h"
 #import "XLEngineBridge.h"
 #import "XLSequencerViewController.h"
@@ -538,6 +539,29 @@ void XLSetCommandPaletteVisible(bool visible) {
     }];
 }
 
+- (IBAction)importModelsFromRGBEffects:(id)sender {
+    NSWindow *window = [NSApp mainWindow];
+    if (!window) return;
+
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+    if (!engineBridge) return;
+
+    _activeImportSheet = [[XLModelImportSheet alloc] init];
+    _activeImportSheet.engineBridge = engineBridge;
+
+    __weak typeof(self) weakSelf = self;
+    [_activeImportSheet showRGBEffectsImportForWindow:window
+                                           completion:^(BOOL imported, NSArray<NSString *> *importedModelNames) {
+        if (imported && importedModelNames.count > 0) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"XLModelsDidChangeNotification"
+                                                                object:nil
+                                                              userInfo:@{@"importedModels": importedModelNames}];
+        }
+        weakSelf.activeImportSheet = nil;
+    }];
+}
+
 #pragma mark - Audio Menu Actions
 
 - (IBAction)setPlaybackSpeed:(id)sender {
@@ -862,18 +886,18 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)generateCustomModel:(id)sender {
-    XLGeneratorPlaceholderDialog *dialog = [[XLGeneratorPlaceholderDialog alloc] init];
-    dialog.featureName = @"Generate Custom Model";
-    dialog.featureDescription = @"Creates a custom model definition from an image of your physical display. "
-        @"Upload a photo of your lights and click each pixel to map them into a custom model layout.";
-    dialog.plannedCapabilities = @[
-        @"Image-based pixel mapping",
-        @"Automatic pixel detection from photos",
-        @"Manual click-to-place pixel assignment",
-        @"Multi-string support for complex layouts",
-        @"Export as .xmodel file for sharing"
-    ];
-    [dialog presentAsModalWithCompletion:nil];
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    XLGenerateCustomModelDialog *dialog = [[XLGenerateCustomModelDialog alloc] init];
+    dialog.engineBridge = engineBridge;
+    [dialog showWithCompletion:^(BOOL accepted) {
+        if (accepted && dialog.generatedModelData.length > 0) {
+            NSLog(@"Generated custom model '%@' with %ld nodes, grid %ld x %ld",
+                  dialog.modelName, (long)dialog.generatedNodeCount,
+                  (long)dialog.gridWidth, (long)dialog.gridHeight);
+        }
+    }];
 }
 
 - (IBAction)remapCustomModel:(id)sender {

@@ -206,6 +206,8 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     NSMenu *importMenu = [[NSMenu alloc] initWithTitle:@"Import"];
     [importMenu addItemWithTitle:@"Import Effects…" action:@selector(importEffects:) keyEquivalent:@""];
     [importMenu addItemWithTitle:@"Import Models…" action:@selector(importModels:) keyEquivalent:@""];
+    [importMenu addItemWithTitle:@"Import LOR S5 Models/Groups…" action:@selector(importLORS5Models:) keyEquivalent:@""];
+    [importMenu addItemWithTitle:@"Import Models from RGB Effects…" action:@selector(importModelsFromRGBEffects:) keyEquivalent:@""];
     [importMenu addItemWithTitle:@"Import Controllers…" action:@selector(importControllers:) keyEquivalent:@""];
     importItem.submenu = importMenu;
 
@@ -422,6 +424,8 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [modelMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *importModelItem = [modelMenu addItemWithTitle:@"Import Model…" action:@selector(importModels:) keyEquivalent:@"I"];
     importModelItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [modelMenu addItemWithTitle:@"Import LOR S5 Models/Groups…" action:@selector(importLORS5Models:) keyEquivalent:@""];
+    [modelMenu addItemWithTitle:@"Import from RGB Effects…" action:@selector(importModelsFromRGBEffects:) keyEquivalent:@""];
     [modelMenu addItemWithTitle:@"Export Model…" action:@selector(exportModelToFile:) keyEquivalent:@""];
 
     [modelMenu addItem:[NSMenuItem separatorItem]];

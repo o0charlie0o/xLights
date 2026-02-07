@@ -20,6 +20,7 @@ typedef NS_ENUM(NSInteger, XLModelImportType) {
     XLModelImportTypeLayout,       // Layout (.xlights layout)
     XLModelImportTypeLOR,          // Light-O-Rama
     XLModelImportTypeVixen,        // Vixen 3
+    XLModelImportTypeRGBEffects,   // xlights_rgbeffects.xml (import from another show folder)
     XLModelImportTypeUnknown,
 };
 
@@ -32,6 +33,7 @@ typedef void (^XLModelImportCompletion)(BOOL imported, NSArray<NSString *> *_Nul
 /// - .xmodel files (xLights native model format)
 /// - .xlights sequence files (extract models)
 /// - Layout files from other xLights installations
+/// - xlights_rgbeffects.xml (import from another show folder)
 /// - Third-party formats (LOR, Vixen)
 @interface XLModelImportSheet : NSObject
 
@@ -50,11 +52,37 @@ typedef void (^XLModelImportCompletion)(BOOL imported, NSArray<NSString *> *_Nul
 - (void)importFromFile:(NSString *)filePath
             completion:(XLModelImportCompletion)completion;
 
+/// Show import specifically for RGB Effects files (xlights_rgbeffects.xml).
+/// Presents a file chooser filtered for xlights_rgbeffects.xml, then shows
+/// a tree-based selection UI with layout group organization.
+/// @param parentWindow The window to attach the sheet to
+/// @param completion Called when import is complete
+- (void)showRGBEffectsImportForWindow:(NSWindow *)parentWindow
+                           completion:(XLModelImportCompletion)completion;
+
 /// Determine the import type from a file path
 + (XLModelImportType)importTypeForFile:(NSString *)filePath;
 
 /// Get the file extension for an import type
 + (NSString *)fileExtensionForImportType:(XLModelImportType)importType;
+
+@end
+
+/// Tree-based selection controller for RGB Effects model import.
+/// Organizes models by layout group, similar to legacy ImportPreviewsModelsDialog.
+@interface XLRGBEffectsImportController : NSViewController
+
+/// Parsed data from the RGB Effects file
+@property (nonatomic, copy) NSDictionary *parsedData;
+
+/// Initialize with parsed RGB Effects data
+- (instancetype)initWithParsedData:(NSDictionary *)parsedData;
+
+/// Get names of models/groups selected for import
+- (NSArray<NSString *> *)selectedModelNames;
+
+/// Get the target layout group for imported models (nil = keep original)
+- (NSString *)targetLayoutGroup;
 
 @end
 

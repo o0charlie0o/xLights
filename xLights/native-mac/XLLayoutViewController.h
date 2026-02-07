@@ -60,6 +60,12 @@
 /// Menu action: Import Models (File > Import > Import Models or Model > Import Model)
 - (IBAction)importModels:(id)sender;
 
+/// Menu action: Import Models from RGB Effects (another show folder's xlights_rgbeffects.xml)
+- (IBAction)importModelsFromRGBEffects:(id)sender;
+
+/// Menu action: Import LOR S5 Models/Groups from a preview file
+- (IBAction)importLORS5Models:(id)sender;
+
 /// Menu action: Export selected model to .xmodel file
 - (IBAction)exportModelToFile:(id)sender;
 

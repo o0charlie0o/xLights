@@ -28,7 +28,9 @@
 
 /// Displays editable model properties in a vertical stack of disclosure sections.
 ///
-/// Sections: General, Position & Size, Controller, Appearance.
+/// Sections: General, Model Type, String Properties, Position & Size, Controller, Appearance.
+/// The Model Type section dynamically changes its contents depending on the selected
+/// model's type (e.g. Matrix, Tree, Arches, Single Line, Star, Circle, Icicles, Custom).
 /// Supports single-model and multi-model (mixed state) editing.
 @interface XLModelPropertiesView : NSView
 
