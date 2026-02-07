@@ -36,4 +36,12 @@
 /// Clear the inspector (no selection).
 - (void)clearInspector;
 
+/// Host a child view controller's view in the inspector panel.
+/// Used for tab-specific inspectors (e.g. controller inspector on Setup tab).
+/// The child VC's view fills the entire inspector scroll area.
+- (void)setContentViewController:(NSViewController *)viewController;
+
+/// Remove any hosted child view controller and restore the default inspector.
+- (void)removeContentViewController;
+
 @end

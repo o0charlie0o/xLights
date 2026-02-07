@@ -13,7 +13,6 @@
 #import <Cocoa/Cocoa.h>
 #import "layout/XLMetalPreviewView.h"
 #import "layout/XLModelTreeViewController.h"
-#import "layout/XLModelPropertiesView.h"
 #import "layout/XLLayoutUndoController.h"
 #import "input/XLKeyboardHandler.h"
 
@@ -24,9 +23,10 @@
 /// View controller for the Layout/Preview tab.
 ///
 /// Displays Metal-based 3D preview, model tree, and manipulation handles.
-/// Layout: Left sidebar (model tree) | Center (Metal preview) | Right sidebar (properties)
+/// Layout: Left sidebar (model tree) | Center (Metal preview)
+/// Properties are shown in the global inspector panel (right sidebar).
 /// The preview already uses Metal with integrated 2D/3D manipulation handles.
-@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLModelPropertiesDelegate, XLLayoutUndoDelegate, XLKeyboardActionDelegate>
+@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLLayoutUndoDelegate, XLKeyboardActionDelegate>
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 
@@ -38,9 +38,6 @@
 
 /// The model tree view controller (left sidebar)
 @property (nonatomic, strong, readonly) XLModelTreeViewController *modelTreeController;
-
-/// The model properties view (right sidebar)
-@property (nonatomic, strong, readonly) XLModelPropertiesView *propertiesView;
 
 /// The undo controller for model manipulation operations
 @property (nonatomic, strong, readonly) XLLayoutUndoController *undoController;

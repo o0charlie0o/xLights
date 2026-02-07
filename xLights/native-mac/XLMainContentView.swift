@@ -238,8 +238,7 @@ struct XLMainContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     // Inspector (right side) - always in hierarchy but zero-width when hidden
-                    // Layout tab has its own properties panel in its split view, so hide the global inspector
-                    if appState.inspectorVisible && appState.currentTab != .layout {
+                    if appState.inspectorVisible {
                         Divider()
                         inspectorPanel
                             .frame(width: appState.inspectorWidth)
@@ -416,12 +415,10 @@ struct XLMainContentView: View {
     private var inspectorPanel: some View {
         // Context-sensitive inspector:
         // - When on sequencer tab with effect selected: show effect properties
-        // - Layout tab has its own properties panel in its split view
+        // - Layout tab: show model properties (updated via notifications)
         // - Otherwise: show general inspector
         if appState.currentTab == .sequencer {
             EffectPropertiesView(state: appState.effectSelectionState)
-        } else if appState.currentTab == .layout {
-            EmptyView()
         } else {
             XLInspectorView(engineBridge: appState.engineBridge)
         }

@@ -16,7 +16,6 @@
 #import "layout/XLModelImportSheet.h"
 #import "layout/XLVendorModelWindowController.h"
 #import "layout/XLManipulationHandlesRenderer.h"
-#import "layout/XLModelPropertiesView.h"
 #import "layout/XLLayoutUndoController.h"
 #import "dialogs/XLCustomModelWindow.h"
 #import "dialogs/XLModelGroupWindow.h"
@@ -25,8 +24,13 @@
 
 static const CGFloat kModelTreeMinWidth = 200.0;
 static const CGFloat kModelTreeDefaultWidth = 280.0;
-static const CGFloat kPropertiesMinWidth = 200.0;
-static const CGFloat kPropertiesDefaultWidth = 260.0;
+/// Notification posted when model selection changes in the layout tab.
+/// userInfo: @{@"modelNames": NSArray<NSString*>} or empty dict for clear.
+NSNotificationName const XLLayoutModelSelectionDidChangeNotification = @"XLLayoutModelSelectionDidChange";
+
+/// Notification posted when a model property changes via the inspector.
+/// userInfo: @{@"modelName": NSString, @"key": NSString, @"value": id, @"oldValue": id (nullable)}
+NSNotificationName const XLInspectorPropertyDidChangeNotification = @"XLInspectorPropertyDidChange";
 
 /// Custom pasteboard type for model clipboard data
 static NSPasteboardType const XLModelPasteboardType = @"com.xlights.model";
@@ -47,7 +51,6 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 @property (nonatomic, strong) XLModelCreationSheet *modelCreationSheet;
 @property (nonatomic, strong) XLModelImportSheet *modelImportSheet;
 @property (nonatomic, strong) XLVendorModelWindowController *vendorModelWindowController;
-@property (nonatomic, strong) NSScrollView *propertiesScrollView;
 @property (nonatomic, strong, readwrite) XLLayoutUndoController *undoController;
 @property (nonatomic, assign) XLToolMode manipulationToolMode;
 @property (nonatomic, assign) BOOL initialDividersSet;
@@ -202,37 +205,8 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     previewItem.holdingPriority = NSLayoutPriorityDefaultHigh;
     [_splitController addSplitViewItem:previewItem];
 
-    // Properties (right sidebar) - in a scroll view
-    _propertiesView = [[XLModelPropertiesView alloc] initWithFrame:NSZeroRect];
-    _propertiesView.translatesAutoresizingMaskIntoConstraints = NO;
-    _propertiesView.delegate = self;
-    _propertiesView.engineBridge = self.engineBridge;
-
-    _propertiesScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-    _propertiesScrollView.hasVerticalScroller = YES;
-    _propertiesScrollView.hasHorizontalScroller = NO;
-    _propertiesScrollView.autohidesScrollers = YES;
-    _propertiesScrollView.borderType = NSNoBorder;
-    _propertiesScrollView.drawsBackground = YES;
-    _propertiesScrollView.backgroundColor = [NSColor colorWithWhite:0.18 alpha:1.0];
-    _propertiesScrollView.documentView = _propertiesView;
-
-    // Set up document view constraints within scroll view
-    [NSLayoutConstraint activateConstraints:@[
-        [_propertiesView.topAnchor constraintEqualToAnchor:_propertiesScrollView.contentView.topAnchor],
-        [_propertiesView.leadingAnchor constraintEqualToAnchor:_propertiesScrollView.contentView.leadingAnchor],
-        [_propertiesView.trailingAnchor constraintEqualToAnchor:_propertiesScrollView.contentView.trailingAnchor],
-    ]];
-
-    NSViewController *propertiesVC = [[NSViewController alloc] init];
-    propertiesVC.view = _propertiesScrollView;
-    NSSplitViewItem *propertiesItem = [NSSplitViewItem splitViewItemWithViewController:propertiesVC];
-    propertiesItem.canCollapse = NO;
-    propertiesItem.minimumThickness = kPropertiesMinWidth;
-    propertiesItem.holdingPriority = NSLayoutPriorityDefaultLow + 10;
-    [_splitController addSplitViewItem:propertiesItem];
-
     // Embed the split view controller as a child for proper containment
+    // (Properties are shown in the global inspector sidebar, not here)
     NSView *splitView = _splitController.view;
     splitView.translatesAutoresizingMaskIntoConstraints = NO;
     [view addSubview:splitView];
@@ -421,6 +395,12 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
                                                  name:@"XLLayoutGroupDidChangeNotification"
                                                object:nil];
 
+    // Listen for property changes from the global inspector
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(inspectorPropertyDidChange:)
+                                                 name:XLInspectorPropertyDidChangeNotification
+                                               object:nil];
+
     [self reloadLayoutGroupSelector];
     [_modelTreeController reloadData];
 }
@@ -428,18 +408,14 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 - (void)viewDidAppear {
     [super viewDidAppear];
 
-    // Set initial divider positions after Auto Layout has stabilized.
-    // Must be deferred because NSSplitViewController needs a layout pass first.
+    // Set initial divider position after Auto Layout has stabilized.
+    // Only 1 divider: tree | preview. Preview gets all remaining space.
     if (!_initialDividersSet) {
         _initialDividersSet = YES;
         dispatch_async(dispatch_get_main_queue(), ^{
             NSSplitView *sv = self->_splitController.splitView;
-            CGFloat totalWidth = sv.bounds.size.width;
-            if (totalWidth > 0) {
-                CGFloat previewWidth = totalWidth - kModelTreeDefaultWidth - kPropertiesDefaultWidth;
-                if (previewWidth < 300) previewWidth = 300;
+            if (sv.bounds.size.width > 0) {
                 [sv setPosition:kModelTreeDefaultWidth ofDividerAtIndex:0];
-                [sv setPosition:kModelTreeDefaultWidth + previewWidth ofDividerAtIndex:1];
             }
         });
     }
@@ -456,7 +432,6 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 - (void)setEngineBridge:(XLEngineBridge *)engineBridge {
     _engineBridge = engineBridge;
     _modelTreeController.engineBridge = engineBridge;
-    _propertiesView.engineBridge = engineBridge;
     _undoController.engineBridge = engineBridge;
 }
 
@@ -518,15 +493,10 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 - (void)previewView:(XLMetalPreviewView *)view didSelectModels:(NSArray<NSString *> *)modelNames {
     if (modelNames.count > 0) {
         [_modelTreeController selectModelsWithNames:modelNames];
-        // Show properties for the primary (last) model
-        NSString *primaryModel = modelNames.lastObject;
-        NSDictionary *modelInfo = [_engineBridge getModelInfo:primaryModel];
-        if (modelInfo) {
-            [_propertiesView showPropertiesForModel:primaryModel info:modelInfo];
-        }
+        [self postModelSelectionNotification:modelNames];
     } else {
         [_modelTreeController.outlineView deselectAll:nil];
-        [_propertiesView clearProperties];
+        [self postModelSelectionNotification:@[]];
     }
 }
 
@@ -960,8 +930,8 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
                                            isLocked:isLocked
                                    supportsZScaling:supportsZScaling];
 
-        // Update properties view with real model data
-        [_propertiesView showPropertiesForModel:modelName info:modelInfo];
+        // Notify global inspector to show model properties
+        [self postModelSelectionNotification:@[modelName]];
     }
 
     [_modelTreeController selectModelWithName:modelName];
@@ -970,7 +940,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 - (void)clearSelection {
     _previewView.selectedModelName = nil;
     [_previewView clearModelSelection];
-    [_propertiesView clearProperties];
+    [self postModelSelectionNotification:@[]];
 }
 
 - (void)setToolMode:(NSInteger)mode {
@@ -1111,12 +1081,9 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     // Trigger a full refresh to ensure model state is synced
     [_modelTreeController reloadData];
 
-    // Re-select to refresh properties view
+    // Re-select to refresh inspector properties
     if (modelName) {
-        NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
-        if (modelInfo) {
-            [_propertiesView showPropertiesForModel:modelName info:modelInfo];
-        }
+        [self postModelSelectionNotification:@[modelName]];
     }
 }
 
@@ -1196,55 +1163,44 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     _nudgeCoalesceTimer = nil;
 }
 
-#pragma mark - XLModelPropertiesDelegate
+#pragma mark - Model Selection Notifications
 
-- (void)modelProperties:(XLModelPropertiesView *)view
-       didChangeProperty:(NSString *)key
-                   value:(id)value
-                forModel:(NSString *)modelName {
-    NSLog(@"XLLayoutViewController: Property '%@' changed to '%@' for model '%@'", key, value, modelName);
-
-    // Get old value for undo
-    NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
-    id oldValue = modelInfo[key];
-
-    // Update model via engine bridge
-    BOOL success = [_engineBridge updateModelProperty:modelName key:key value:value];
-    if (success) {
-        // Register property change for undo
-        [_undoController registerPropertyChange:modelName key:key oldValue:oldValue newValue:value];
-
-        // Refresh the model tree if name changed
-        if ([key isEqualToString:@"name"]) {
-            [_modelTreeController reloadData];
-            [_modelTreeController selectModelWithName:value];
-        }
-
-        // Refresh preview view handles if position/scale/rotation changed
-        // Keys are now mapped to engine keys by XLModelPropertiesView
-        NSSet *transformKeys = [NSSet setWithArray:@[
-            @"WorldPosX", @"WorldPosY", @"WorldPosZ",
-            @"ScaleX", @"ScaleY", @"ScaleZ", @"Scale",
-            @"RotateX", @"RotateY", @"RotateZ",
-            @"Locked"
-        ]];
-        if ([transformKeys containsObject:key]) {
-            [self selectModel:modelName];
-        }
-    }
+- (void)postModelSelectionNotification:(NSArray<NSString *> *)modelNames {
+    NSDictionary *userInfo = modelNames.count > 0 ? @{@"modelNames": modelNames} : @{};
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:XLLayoutModelSelectionDidChangeNotification
+                      object:self
+                    userInfo:userInfo];
 }
 
-- (void)modelPropertiesDidRequestEditCustomModel:(XLModelPropertiesView *)view
-                                        forModel:(NSString *)modelName {
-    XLCustomModelWindow *customModelWindow = [[XLCustomModelWindow alloc] initWithModelName:modelName];
-    customModelWindow.engineBridge = _engineBridge;
+- (void)inspectorPropertyDidChange:(NSNotification *)notification {
+    NSDictionary *info = notification.userInfo;
+    NSString *modelName = info[@"modelName"];
+    NSString *key = info[@"key"];
+    id value = info[@"value"];
+    id oldValue = info[@"oldValue"];
 
-    [customModelWindow showWithCompletion:^(BOOL saved) {
-        if (saved) {
-            [self selectModel:modelName];
-            [self.modelTreeController reloadData];
-        }
-    }];
+    if (!modelName || !key) return;
+
+    // Register property change for undo
+    [_undoController registerPropertyChange:modelName key:key oldValue:oldValue newValue:value];
+
+    // Refresh the model tree if name changed
+    if ([key isEqualToString:@"name"]) {
+        [_modelTreeController reloadData];
+        [_modelTreeController selectModelWithName:value];
+    }
+
+    // Refresh preview view handles if position/scale/rotation changed
+    NSSet *transformKeys = [NSSet setWithArray:@[
+        @"WorldPosX", @"WorldPosY", @"WorldPosZ",
+        @"ScaleX", @"ScaleY", @"ScaleZ", @"Scale",
+        @"RotateX", @"RotateY", @"RotateZ",
+        @"Locked"
+    ]];
+    if ([transformKeys containsObject:key]) {
+        [self selectModel:modelName];
+    }
 }
 
 #pragma mark - XLLayoutUndoDelegate

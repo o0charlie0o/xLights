@@ -18,6 +18,7 @@
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong) NSStackView *stackView;
 @property (nonatomic, strong) XLModelPropertiesView *modelPropertiesView;
+@property (nonatomic, strong) NSViewController *hostedContentVC;
 
 @end
 
@@ -89,6 +90,16 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    // Listen for model selection changes from the layout tab
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(layoutModelSelectionDidChange:)
+                                                 name:@"XLLayoutModelSelectionDidChange"
+                                               object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 #pragma mark - Model Properties View (lazy)
@@ -198,13 +209,84 @@
     [self addPlaceholderContent];
 }
 
+#pragma mark - Content VC Hosting
+
+- (void)setContentViewController:(NSViewController *)viewController {
+    if (_hostedContentVC == viewController) return;
+
+    [self removeContentViewController];
+
+    _hostedContentVC = viewController;
+    [self clearStackView];
+
+    // Hide the scroll view and host the child VC's view directly in our view
+    _scrollView.hidden = YES;
+
+    [self addChildViewController:viewController];
+    NSView *childView = viewController.view;
+    childView.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:childView];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [childView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [childView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [childView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [childView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    ]];
+}
+
+- (void)removeContentViewController {
+    if (!_hostedContentVC) return;
+
+    [_hostedContentVC.view removeFromSuperview];
+    [_hostedContentVC removeFromParentViewController];
+    _hostedContentVC = nil;
+
+    _scrollView.hidden = NO;
+    [self clearStackView];
+    [self addPlaceholderContent];
+}
+
+#pragma mark - Layout Model Selection Notification
+
+- (void)layoutModelSelectionDidChange:(NSNotification *)notification {
+    NSArray<NSString *> *modelNames = notification.userInfo[@"modelNames"];
+    if (!modelNames || modelNames.count == 0) {
+        [self clearInspector];
+    } else if (modelNames.count == 1) {
+        [self inspectModel:modelNames.firstObject];
+    } else {
+        [self inspectModels:modelNames];
+    }
+}
+
 #pragma mark - XLModelPropertiesDelegate
 
 - (void)modelProperties:(XLModelPropertiesView *)view
        didChangeProperty:(NSString *)key
                    value:(id)value
                 forModel:(NSString *)modelName {
-    [_engineBridge updateModelProperty:modelName key:key value:value];
+    // Get old value before updating
+    NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
+    id oldValue = modelInfo[key];
+
+    // Update model via engine bridge
+    BOOL success = [_engineBridge updateModelProperty:modelName key:key value:value];
+    if (success) {
+        // Notify the layout tab about the property change (for undo, preview refresh)
+        NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:@{
+            @"modelName": modelName,
+            @"key": key,
+            @"value": value ?: [NSNull null],
+        }];
+        if (oldValue) {
+            userInfo[@"oldValue"] = oldValue;
+        }
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"XLInspectorPropertyDidChange"
+                          object:self
+                        userInfo:userInfo];
+    }
 }
 
 - (void)modelPropertiesDidRequestEditCustomModel:(XLModelPropertiesView *)view
