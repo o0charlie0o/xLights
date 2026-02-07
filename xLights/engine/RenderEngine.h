@@ -52,6 +52,7 @@ namespace xlEngine {
 
 class IEffectProvider;
 class NativeRenderCoordinator;
+struct IRenderContext;
 
 // Rendering mode: CPU-only or GPU-accelerated (Metal on macOS, OpenGL elsewhere)
 enum class RenderMode {
@@ -241,6 +242,11 @@ public:
     // valid even if the model is re-rendered.
     FrameBuffer getFrameBuffer(const std::string& modelName) const;
 
+    // Get all rendered frame buffers in a single lock. Returns only models
+    // that have valid pixel data. Much more efficient than calling
+    // getFrameBuffer() for each model individually (single lock instead of N).
+    std::vector<FrameBuffer> getAllFrameBuffers() const;
+
     // Get the rendered node/channel data for a model at the current frame.
     // This is the output data that would be sent to hardware controllers.
     std::vector<NodeChannelData> getNodeData(const std::string& modelName) const;
@@ -353,10 +359,16 @@ private:
     IOutputProvider* _outputProvider = nullptr;
     IEffectProvider* _effectProvider = nullptr;
 
-    // Render coordinator for effect-based rendering
+    // Render coordinator for batch rendering (renderAll/renderRange)
     std::unique_ptr<NativeRenderCoordinator> _coordinator;
     std::unique_ptr<NativeSequenceData> _renderedData;
     std::string _fseqPath; // Path of currently loaded FSEQ
+
+    // Persistent coordinator for live preview rendering.
+    // Kept alive across renderFrame() calls so stateful effects accumulate.
+    std::unique_ptr<NativeRenderCoordinator> _liveCoordinator;
+    std::unique_ptr<IRenderContext> _liveContext;
+    int _lastLiveRenderTimeMS = -1; // for backward scrub detection
 
     // --- FSEQ Playback State ---
 

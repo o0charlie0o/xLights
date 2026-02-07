@@ -1070,6 +1070,27 @@ static XLEngineBridge *_sharedBridge = nil;
     };
 }
 
+- (NSArray<NSDictionary *> *)getAllFrameBuffers {
+    [self ensureEngineInitialized];
+    if (!_renderEngine) return @[];
+
+    auto buffers = _renderEngine->getAllFrameBuffers();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:buffers.size()];
+
+    for (const auto& fb : buffers) {
+        NSData *pixelData = [NSData dataWithBytes:fb.pixels.data() length:fb.pixels.size()];
+        [result addObject:@{
+            @"modelName": [NSString stringWithUTF8String:fb.modelName.c_str()],
+            @"width": @(fb.width),
+            @"height": @(fb.height),
+            @"timeMS": @(fb.timeMS),
+            @"pixels": pixelData,
+        }];
+    }
+
+    return result;
+}
+
 - (NSDictionary *)getPrerenderedFrameBuffer:(NSString *)modelName timeMS:(NSInteger)timeMS {
     // TODO: Implement when RenderEngine supports getPrerenderedFrameBuffer
     // This requires Phase 7 engine modernization to expose pre-rendered frame data
@@ -3182,6 +3203,12 @@ static XLEngineBridge *_sharedBridge = nil;
 #pragma mark - Auto-Save
 
 - (void)scheduleAutoSave {
+    // Invalidate pre-rendered data immediately so the live preview path
+    // is used instead of stale renderAll output.
+    if (_renderEngine) {
+        _renderEngine->invalidateAllCaches();
+    }
+
     if (_autoSaveTimer) {
         dispatch_source_cancel(_autoSaveTimer);
         _autoSaveTimer = nil;

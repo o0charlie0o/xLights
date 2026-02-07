@@ -989,14 +989,20 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                 }
             }
 
-            // Fall back to layout color if no pixel data for this model
+            // Fall back: black when showing effect colors (model has no effects),
+            // layout color otherwise (editing/non-playback mode)
             if (!gotPixelColor) {
-                vertex.color = (simd_float4){
-                    baseGray * (0.3f + 0.7f * defaultR),
-                    baseGray * (0.3f + 0.7f * defaultG),
-                    baseGray * (0.3f + 0.7f * defaultB),
-                    1.0f
-                };
+                if (useEffectColors) {
+                    // No pixel data = model is off during playback
+                    vertex.color = (simd_float4){0.0f, 0.0f, 0.0f, 1.0f};
+                } else {
+                    vertex.color = (simd_float4){
+                        baseGray * (0.3f + 0.7f * defaultR),
+                        baseGray * (0.3f + 0.7f * defaultG),
+                        baseGray * (0.3f + 0.7f * defaultB),
+                        1.0f
+                    };
+                }
             }
 
             [vertexData appendBytes:&vertex length:sizeof(XLGridVertex)];

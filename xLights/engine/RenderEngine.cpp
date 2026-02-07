@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 
 namespace xlEngine {
 
@@ -640,32 +641,54 @@ void RenderEngine::renderFrame(int timeMS)
 
         notifyFrameRendered(timeMS);
     } else if (_effectProvider && _modelProvider) {
-        // Effect-based live rendering: render effects directly for preview.
-        // NOTE: This path creates fresh buffers each frame so stateful effects
-        // (like Fire) won't accumulate properly. Use renderAll() first for
-        // full-fidelity preview of stateful effects.
+        // Effect-based live rendering with persistent state.
+        // The coordinator and its ModelJobs are kept alive across frames so
+        // stateful effects (Fire, etc.) accumulate properly.
         int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
         if (frameTimeMS <= 0) frameTimeMS = 50;
 
         int durationMS = _provider ? _provider->getSequenceDurationMS() : 0;
         if (durationMS <= 0) {
-            // Estimate from total frames or use a reasonable default
             int totalFrames = _provider ? _provider->getTotalFrames() : 0;
             durationMS = (totalFrames > 0) ? totalFrames * frameTimeMS : 60000;
         }
         double durationSec = durationMS / 1000.0;
 
-        RenderEngineContext context(frameTimeMS, durationSec);
-        NativeRenderCoordinator coordinator(_effectProvider, _modelProvider, &context);
+        // Create or reuse persistent live coordinator
+        if (!_liveCoordinator) {
+            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec);
+            _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
+                _effectProvider, _modelProvider, _liveContext.get());
+            _lastLiveRenderTimeMS = -1;
+        }
+
+        // Detect backward scrub: if time went backward, reset effect state
+        // so stateful effects restart cleanly rather than showing stale data.
+        if (_lastLiveRenderTimeMS >= 0 && timeMS < _lastLiveRenderTimeMS) {
+            _liveCoordinator->resetPersistentState();
+        }
+        _lastLiveRenderTimeMS = timeMS;
 
         auto modelNames = _modelProvider->getModelNames();
+
+        auto frameStart = std::chrono::steady_clock::now();
+        int modelsRendered = 0;
 
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.clear();
 
         for (const auto& name : modelNames) {
-            RenderedFrame rf = coordinator.renderModelFrame(name, timeMS);
+            auto modelStart = std::chrono::steady_clock::now();
+            RenderedFrame rf = _liveCoordinator->renderModelFrameStateful(name, timeMS);
+            auto modelEnd = std::chrono::steady_clock::now();
+            auto modelUS = std::chrono::duration_cast<std::chrono::microseconds>(modelEnd - modelStart).count();
+
             if (rf.isValid()) {
+                if (modelUS > 2000) { // Log models taking > 2ms
+                    printf("[LiveRender] Model '%s' took %.1fms (%dx%d)\n",
+                           name.c_str(), modelUS / 1000.0, rf.width, rf.height);
+                }
+                modelsRendered++;
                 FrameBuffer fb;
                 fb.modelName = rf.modelName;
                 fb.width = rf.width;
@@ -673,18 +696,15 @@ void RenderEngine::renderFrame(int timeMS)
                 fb.timeMS = rf.timeMS;
                 fb.pixels = std::move(rf.pixels);
                 _bufferCache[name] = std::move(fb);
-            } else if (rf.width > 0 && rf.height > 0) {
-                // Model has geometry but no effects — provide a black buffer
-                // so the preview turns off these pixels during playback
-                FrameBuffer fb;
-                fb.modelName = name;
-                fb.width = rf.width;
-                fb.height = rf.height;
-                fb.timeMS = timeMS;
-                fb.pixels.resize(static_cast<size_t>(rf.width) * rf.height * 4, 0);
-                _bufferCache[name] = std::move(fb);
             }
+            // Models with no effects return empty frames — skip them entirely.
+            // No need to create zeroed buffers for 196 inactive models.
         }
+
+        auto frameEnd = std::chrono::steady_clock::now();
+        auto frameUS = std::chrono::duration_cast<std::chrono::microseconds>(frameEnd - frameStart).count();
+        printf("[LiveRender] Frame @%dms: %d models rendered in %.1fms (budget=%dms)\n",
+               timeMS, modelsRendered, frameUS / 1000.0, frameTimeMS);
 
         notifyFrameRendered(timeMS);
     }
@@ -699,7 +719,7 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
         // Pre-rendered data available — use the full-frame path which reads from memory
         renderFrame(timeMS);
     } else if (_effectProvider && _modelProvider) {
-        // Targeted single-model effect rendering
+        // Targeted single-model live rendering with persistent state
         int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
         if (frameTimeMS <= 0) frameTimeMS = 50;
 
@@ -710,10 +730,19 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
         }
         double durationSec = durationMS / 1000.0;
 
-        RenderEngineContext context(frameTimeMS, durationSec);
-        NativeRenderCoordinator coordinator(_effectProvider, _modelProvider, &context);
+        if (!_liveCoordinator) {
+            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec);
+            _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
+                _effectProvider, _modelProvider, _liveContext.get());
+            _lastLiveRenderTimeMS = -1;
+        }
 
-        RenderedFrame rf = coordinator.renderModelFrame(modelName, timeMS);
+        if (_lastLiveRenderTimeMS >= 0 && timeMS < _lastLiveRenderTimeMS) {
+            _liveCoordinator->resetPersistentState(modelName);
+        }
+        _lastLiveRenderTimeMS = timeMS;
+
+        RenderedFrame rf = _liveCoordinator->renderModelFrameStateful(modelName, timeMS);
         if (rf.isValid()) {
             FrameBuffer fb;
             fb.modelName = rf.modelName;
@@ -901,6 +930,19 @@ FrameBuffer RenderEngine::getFrameBuffer(const std::string& modelName) const
     return {};
 }
 
+std::vector<FrameBuffer> RenderEngine::getAllFrameBuffers() const
+{
+    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+    std::vector<FrameBuffer> result;
+    result.reserve(_bufferCache.size());
+    for (const auto& [name, fb] : _bufferCache) {
+        if (fb.isValid()) {
+            result.push_back(fb);
+        }
+    }
+    return result;
+}
+
 std::vector<NodeChannelData> RenderEngine::getNodeData(const std::string& modelName) const
 {
     if (!_fseqLoaded) return {};
@@ -961,16 +1003,28 @@ void RenderEngine::invalidateCache(const std::string& modelName)
     std::lock_guard<std::mutex> lock(_bufferCacheMutex);
     _bufferCache.erase(modelName);
     _currentFrameIndex = -1; // Force re-read on next renderFrame
+    // Reset persistent state for this model so stale effect caches don't linger
+    if (_liveCoordinator) {
+        _liveCoordinator->resetPersistentState(modelName);
+    }
 }
 
 void RenderEngine::invalidateAllCaches()
 {
+    // Close FSEQ so the FSEQ playback path is no longer used.
+    // Must be called before taking _bufferCacheMutex (closeFSEQ locks it too).
+    closeFSEQ();
+
     std::lock_guard<std::mutex> lock(_bufferCacheMutex);
     _bufferCache.clear();
     _currentFrameIndex = -1;
     // Discard pre-rendered data so the live effect path is used until
     // the user clicks Render All again.
     _renderedData.reset();
+    // Destroy the live coordinator so it's recreated fresh
+    _liveCoordinator.reset();
+    _liveContext.reset();
+    _lastLiveRenderTimeMS = -1;
 }
 
 bool RenderEngine::getGPUAvailable() const { return false; }

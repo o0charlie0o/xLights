@@ -33,8 +33,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -105,6 +107,17 @@ public:
     // Render a single model at a single time for preview.
     RenderedFrame renderModelFrame(const std::string& modelName, int timeMS);
 
+    // Render a single model at a single time using persistent state.
+    // Unlike renderModelFrame(), this reuses ModelJob objects across calls
+    // so stateful effects (Fire, etc.) accumulate properly across frames.
+    RenderedFrame renderModelFrameStateful(const std::string& modelName, int timeMS);
+
+    // Reset all persistent model state (call on backward scrub or effect edit).
+    void resetPersistentState();
+
+    // Reset persistent state for a single model.
+    void resetPersistentState(const std::string& modelName);
+
     // Abort the current render. Thread-safe.
     void abort();
 
@@ -143,6 +156,14 @@ private:
     std::atomic<bool> _rendering{false};
     std::atomic<float> _progress{0.0f};
     mutable std::mutex _listenerMutex;
+
+    // Persistent per-model render state for stateful live preview.
+    // Keyed by model name, reused across renderModelFrameStateful() calls.
+    std::map<std::string, ModelJob> _persistentJobs;
+
+    // Models confirmed to have no effects (and no parent group with effects).
+    // Cached to avoid repeating expensive geometry extraction + element lookup.
+    std::set<std::string> _skippedModels;
 };
 
 } // namespace xlEngine

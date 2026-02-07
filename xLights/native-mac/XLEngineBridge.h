@@ -150,6 +150,11 @@
 /// Returns dictionary with: modelName, width, height, timeMS, pixels (NSData RGBA)
 - (NSDictionary *)getFrameBuffer:(NSString *)modelName;
 
+/// Get all rendered frame buffers in a single call.
+/// Returns only models with valid pixel data. Much more efficient than
+/// calling getFrameBuffer: for each model individually.
+- (NSArray<NSDictionary *> *)getAllFrameBuffers;
+
 /// Get pre-rendered pixel data for a model at a specific time.
 /// This reads from the pre-rendered SequenceData (after renderAll) and does NOT trigger
 /// a new render. Suitable for use during playback. Returns nil if data is not available.

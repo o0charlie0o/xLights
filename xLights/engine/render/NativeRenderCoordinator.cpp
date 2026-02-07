@@ -568,7 +568,7 @@ bool NativeRenderCoordinator::renderNativeEffect(
         return true;
     }
 
-    if (type == "Color Wash") {
+    if (type == "Color Wash" || type == "ColorWash") {
         // Native Color Wash — port of legacy ColorWashEffect::Render
         float oset = buf.GetEffectTimeIntervalPosition();
 

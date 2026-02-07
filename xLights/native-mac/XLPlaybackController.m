@@ -459,10 +459,22 @@
 }
 
 - (void)renderFrameAtTime:(NSInteger)timeMS {
+    static NSInteger _droppedFrames = 0;
+    static NSInteger _totalFrameRequests = 0;
+    _totalFrameRequests++;
+
     if (!_engineBridge) return;
 
     // Drop frame if a background render is already in progress
-    if (_renderInProgress) return;
+    if (_renderInProgress) {
+        _droppedFrames++;
+        if (_droppedFrames % 10 == 0) {
+            NSLog(@"[FrameDrop] Dropped %ld of %ld frames (%.0f%%)",
+                  (long)_droppedFrames, (long)_totalFrameRequests,
+                  _droppedFrames * 100.0 / _totalFrameRequests);
+        }
+        return;
+    }
 
     // Clamp time to valid range
     if (timeMS < 0) timeMS = 0;
@@ -475,20 +487,27 @@
 
     dispatch_async(_renderQueue, ^{
         @try {
+            CFAbsoluteTime renderStart = CFAbsoluteTimeGetCurrent();
+
             // FSEQ read + buffer building happens off the main thread
             [bridge renderFrame:timeMS];
 
-            // Collect all model frame buffers while still on background thread
-            NSArray<NSString *> *modelNames = [bridge getModelNamesExcludingGroups];
-            NSMutableArray<NSDictionary *> *frameUpdates = [NSMutableArray new];
+            CFAbsoluteTime afterRender = CFAbsoluteTimeGetCurrent();
 
-            for (NSString *modelName in modelNames) {
-                if (!modelName || modelName.length == 0) continue;
+            // Collect all rendered frame buffers in a single bulk call.
+            // Only returns models with valid pixel data (typically 4 of 200),
+            // avoiding 200 individual mutex lock/unlock + map lookup cycles.
+            NSArray<NSDictionary *> *frameUpdates = [bridge getAllFrameBuffers];
 
-                NSDictionary *frameBuffer = [bridge getFrameBuffer:modelName];
-                if (frameBuffer) {
-                    [frameUpdates addObject:frameBuffer];
-                }
+            CFAbsoluteTime afterCollect = CFAbsoluteTimeGetCurrent();
+            double renderMS = (afterRender - renderStart) * 1000.0;
+            double collectMS = (afterCollect - afterRender) * 1000.0;
+            double totalMS = renderMS + collectMS;
+
+            if (totalMS > 40.0) { // Log frames taking > 40ms (near frame budget)
+                NSLog(@"[RenderPipeline] @%ldms: render=%.1fms collect=%.1fms total=%.1fms models=%lu",
+                      (long)timeMS, renderMS, collectMS, totalMS,
+                      (unsigned long)frameUpdates.count);
             }
 
             // Switch to main thread only for the lightweight UI update
