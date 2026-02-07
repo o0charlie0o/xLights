@@ -347,7 +347,6 @@ protected:
     mutable std::list<std::string> aliases;
     std::vector<Model*> subModels;
     std::map<std::string, Model*> sortedSubModels;
-    void ParseSubModel(wxXmlNode* subModelNode);
     void ColourClashingChains(wxPGProperty* p);
     [[nodiscard]] uint32_t ApplyLowDefinition(uint32_t val) const;
 
@@ -440,6 +439,7 @@ public:
         return i < (int)subModels.size() ? subModels[i] : nullptr;
     }
     void RemoveSubModel(const std::string& name);
+    void ParseSubModel(wxXmlNode* subModelNode);
     [[nodiscard]] std::list<int> ParseFaceNodes(std::string channels);
 
     [[nodiscard]] bool IsPixelProtocol() const;
