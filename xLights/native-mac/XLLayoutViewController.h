@@ -26,7 +26,7 @@
 /// Layout: Left sidebar (model tree) | Center (Metal preview)
 /// Properties are shown in the global inspector panel (right sidebar).
 /// The preview already uses Metal with integrated 2D/3D manipulation handles.
-@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLLayoutUndoDelegate, XLKeyboardActionDelegate>
+@interface XLLayoutViewController : NSViewController <XLMetalPreviewDelegate, XLModelTreeDelegate, XLLayoutUndoDelegate, XLKeyboardActionDelegate, NSSplitViewDelegate>
 
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 

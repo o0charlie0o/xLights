@@ -47,7 +47,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 
 @interface XLLayoutViewController ()
 
-@property (nonatomic, strong) NSSplitViewController *splitController;
+@property (nonatomic, strong) NSSplitView *layoutSplitView;
 @property (nonatomic, strong) XLModelCreationSheet *modelCreationSheet;
 @property (nonatomic, strong) XLModelImportSheet *modelImportSheet;
 @property (nonatomic, strong) XLVendorModelWindowController *vendorModelWindowController;
@@ -179,55 +179,45 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
         [_modelTypeToolbar.heightAnchor constraintEqualToConstant:34],
     ]];
 
-    // Build split view using NSSplitViewController + NSSplitViewItem pattern
-    // (matches XLMainWindowController's setupSplitView approach)
-    _splitController = [[NSSplitViewController alloc] init];
-    _splitController.splitView.vertical = YES;
-    _splitController.splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    // Plain NSSplitView (not NSSplitViewController — which has divider drag issues
+    // when embedded inside NSViewControllerRepresentable / SwiftUI)
+    _layoutSplitView = [[NSSplitView alloc] initWithFrame:NSZeroRect];
+    _layoutSplitView.vertical = YES;
+    _layoutSplitView.dividerStyle = NSSplitViewDividerStyleThin;
+    _layoutSplitView.delegate = self;
+    _layoutSplitView.translatesAutoresizingMaskIntoConstraints = NO;
 
-    // Model tree (left sidebar)
+    // Model tree (left pane)
     _modelTreeController = [[XLModelTreeViewController alloc] init];
     _modelTreeController.delegate = self;
     _modelTreeController.engineBridge = self.engineBridge;
     _modelTreeController.show3D = show3D;
+    [self addChildViewController:_modelTreeController];
 
-    NSSplitViewItem *treeItem = [NSSplitViewItem splitViewItemWithViewController:_modelTreeController];
-    treeItem.canCollapse = NO;
-    treeItem.minimumThickness = kModelTreeMinWidth;
-    treeItem.holdingPriority = NSLayoutPriorityDefaultLow + 10;
-    [_splitController addSplitViewItem:treeItem];
+    NSView *treeView = _modelTreeController.view;
+    [_layoutSplitView addSubview:treeView];
 
-    // Preview (center)
+    // Preview (right pane)
     _previewView = [[XLMetalPreviewView alloc] initWithFrame:NSZeroRect];
     _previewView.delegate = self;
     _previewView.show3D = show3D;
     _previewView.showGrid = YES;
+    [_layoutSplitView addSubview:_previewView];
 
-    NSViewController *previewVC = [[NSViewController alloc] init];
-    previewVC.view = _previewView;
-    NSSplitViewItem *previewItem = [NSSplitViewItem splitViewItemWithViewController:previewVC];
-    previewItem.canCollapse = NO;
-    previewItem.minimumThickness = 300.0;
-    previewItem.holdingPriority = NSLayoutPriorityDefaultHigh;
-    [_splitController addSplitViewItem:previewItem];
+    // Holding priorities: tree is flexible, preview resists resizing
+    [_layoutSplitView setHoldingPriority:(NSLayoutPriorityDefaultLow + 10) forSubviewAtIndex:0];
+    [_layoutSplitView setHoldingPriority:NSLayoutPriorityDefaultHigh forSubviewAtIndex:1];
 
-    // Embed the split view controller as a child for proper containment
-    // (Properties are shown in the global inspector sidebar, not here)
-    NSView *splitView = _splitController.view;
-    splitView.translatesAutoresizingMaskIntoConstraints = NO;
-    [view addSubview:splitView];
+    [view addSubview:_layoutSplitView];
 
     [NSLayoutConstraint activateConstraints:@[
-        [splitView.topAnchor constraintEqualToAnchor:_modelTypeToolbar.bottomAnchor],
-        [splitView.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
-        [splitView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
-        [splitView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_layoutSplitView.topAnchor constraintEqualToAnchor:_modelTypeToolbar.bottomAnchor],
+        [_layoutSplitView.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
+        [_layoutSplitView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_layoutSplitView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
     ]];
 
     self.view = view;
-
-    // Add as child VC after self.view is set (addChildViewController requires valid view)
-    [self addChildViewController:_splitController];
 }
 
 #pragma mark - Model Type Toolbar
@@ -419,9 +409,8 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     if (!_initialDividersSet) {
         _initialDividersSet = YES;
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSSplitView *sv = self->_splitController.splitView;
-            if (sv.bounds.size.width > 0) {
-                [sv setPosition:kModelTreeDefaultWidth ofDividerAtIndex:0];
+            if (self->_layoutSplitView.bounds.size.width > 0) {
+                [self->_layoutSplitView setPosition:kModelTreeDefaultWidth ofDividerAtIndex:0];
             }
         });
     }
@@ -507,6 +496,26 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 }
 
 - (void)previewView:(XLMetalPreviewView *)view didChangeCamera:(XLCameraController *)camera {
+}
+
+#pragma mark - NSSplitViewDelegate
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMinimumPosition ofSubviewAt:(NSInteger)dividerIndex {
+    if (dividerIndex == 0) {
+        return kModelTreeMinWidth;
+    }
+    return proposedMinimumPosition;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposedMaximumPosition ofSubviewAt:(NSInteger)dividerIndex {
+    if (dividerIndex == 0) {
+        return splitView.bounds.size.width - 300.0;
+    }
+    return proposedMaximumPosition;
+}
+
+- (BOOL)splitView:(NSSplitView *)splitView canCollapseSubview:(NSView *)subview {
+    return NO;
 }
 
 #pragma mark - XLModelTreeDelegate
