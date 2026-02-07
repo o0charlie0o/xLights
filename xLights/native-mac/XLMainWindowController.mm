@@ -481,6 +481,12 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     [_playbackController renderCurrentFrame];
 }
 
+#pragma mark - Model Actions
+
+- (void)downloadVendorModels:(id)sender {
+    [_layoutViewController showVendorModelDownload];
+}
+
 #pragma mark - Window State Persistence
 
 - (void)saveWindowState {

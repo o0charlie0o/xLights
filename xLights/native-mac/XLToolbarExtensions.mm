@@ -417,6 +417,14 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [modelMenu addItemWithTitle:@"Delete Model" action:@selector(deleteModel:) keyEquivalent:@""];
 
     [modelMenu addItem:[NSMenuItem separatorItem]];
+    [modelMenu addItemWithTitle:@"Download Vendor Models…" action:@selector(downloadVendorModels:) keyEquivalent:@""];
+
+    [modelMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *importModelItem = [modelMenu addItemWithTitle:@"Import Model…" action:@selector(importModels:) keyEquivalent:@"I"];
+    importModelItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [modelMenu addItemWithTitle:@"Export Model…" action:@selector(exportModelToFile:) keyEquivalent:@""];
+
+    [modelMenu addItem:[NSMenuItem separatorItem]];
     [modelMenu addItemWithTitle:@"Model Properties…" action:@selector(showModelProperties:) keyEquivalent:@""];
     [modelMenu addItemWithTitle:@"Edit Submodels…" action:@selector(editSubmodels:) keyEquivalent:@""];
     [modelMenu addItemWithTitle:@"Edit States…" action:@selector(editModelStates:) keyEquivalent:@""];

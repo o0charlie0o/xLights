@@ -1508,6 +1508,14 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
         return [_undoController canRedo];
     }
 
+    if (action == @selector(importModels:)) {
+        return YES;
+    }
+
+    if (action == @selector(exportModelToFile:)) {
+        return [_modelTreeController selectedModelName] != nil;
+    }
+
     return YES;
 }
 
