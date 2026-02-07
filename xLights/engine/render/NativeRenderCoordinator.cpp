@@ -199,6 +199,102 @@ RenderedFrame NativeRenderCoordinator::renderModelFrame(
     return result;
 }
 
+RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
+    const std::string& modelName, int timeMS)
+{
+    RenderedFrame result;
+    result.modelName = modelName;
+    result.timeMS = timeMS;
+
+    if (!_effectProvider || !_modelProvider || !_context) return result;
+
+    // Fast path: skip models already known to have no effects
+    if (_skippedModels.count(modelName)) return result;
+
+    // Look up or create persistent ModelJob for this model
+    auto it = _persistentJobs.find(modelName);
+    if (it == _persistentJobs.end()) {
+        ModelGeometry geom = extractGeometry(modelName);
+        if (geom.bufferWi <= 0 || geom.bufferHt <= 0) {
+            _skippedModels.insert(modelName);
+            return result;
+        }
+
+        size_t elemIdx = _effectProvider->getElementIndex(modelName);
+
+        bool hasEffects = false;
+        if (elemIdx != SIZE_MAX) {
+            ElementInfo info;
+            if (_effectProvider->getElement(elemIdx, info)) {
+                hasEffects = (info.effectCount > 0);
+            }
+        }
+        if (!hasEffects) {
+            size_t groupIdx = findParentGroupElement(modelName);
+            if (groupIdx != SIZE_MAX) {
+                elemIdx = groupIdx;
+            } else {
+                _skippedModels.insert(modelName);
+                return result;
+            }
+        }
+        if (elemIdx == SIZE_MAX) {
+            _skippedModels.insert(modelName);
+            return result;
+        }
+
+        size_t layerCount = _effectProvider->getEffectLayerCount(elemIdx);
+        if (layerCount == 0) layerCount = 1;
+
+        int w = geom.bufferWi;
+        int h = geom.bufferHt;
+
+        ModelJob job;
+        job.elementIndex = elemIdx;
+        job.layerCount = layerCount;
+        job.pixelBuffer = std::make_unique<NativePixelBuffer>(
+            _context, w, h, static_cast<int>(layerCount), geom.nodes);
+        job.geometry = std::move(geom);
+
+        auto [inserted, _] = _persistentJobs.emplace(modelName, std::move(job));
+        it = inserted;
+    }
+
+    ModelJob& job = it->second;
+    int w = job.geometry.bufferWi;
+    int h = job.geometry.bufferHt;
+
+    result.width = w;
+    result.height = h;
+
+    renderModelAtTime(job, timeMS);
+
+    // Extract RGBA pixel data from the blended output
+    result.pixels.resize(static_cast<size_t>(w) * h * 4);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            xlColor c = job.pixelBuffer->getBlendedPixel(x, y);
+            size_t i = (static_cast<size_t>(y) * w + x) * 4;
+            result.pixels[i]     = c.red;
+            result.pixels[i + 1] = c.green;
+            result.pixels[i + 2] = c.blue;
+            result.pixels[i + 3] = c.alpha;
+        }
+    }
+
+    return result;
+}
+
+void NativeRenderCoordinator::resetPersistentState() {
+    _persistentJobs.clear();
+    _skippedModels.clear();
+}
+
+void NativeRenderCoordinator::resetPersistentState(const std::string& modelName) {
+    _persistentJobs.erase(modelName);
+    _skippedModels.erase(modelName);
+}
+
 void NativeRenderCoordinator::abort() {
     _abort.store(true);
 }
@@ -473,10 +569,79 @@ bool NativeRenderCoordinator::renderNativeEffect(
     }
 
     if (type == "Color Wash") {
-        // Native "Color Wash" effect: simple gradient fill using palette colors
+        // Native Color Wash — port of legacy ColorWashEffect::Render
+        float oset = buf.GetEffectTimeIntervalPosition();
+
+        // Read settings
+        double cycles = 1.0;
+        auto it = effectInfo.settings.find("E_TEXTCTRL_ColorWash_Cycles");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            cycles = std::atof(it->second.c_str());
+        if (cycles < 0.0) cycles = 0.0;
+
+        bool horizFade = false, vertFade = false, reverseFades = false;
+        bool shimmer = false, circularPalette = false;
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_HFade");
+        if (it != effectInfo.settings.end()) horizFade = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_VFade");
+        if (it != effectInfo.settings.end()) vertFade = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_ReverseFades");
+        if (it != effectInfo.settings.end()) reverseFades = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_Shimmer");
+        if (it != effectInfo.settings.end()) shimmer = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_CircularPalette");
+        if (it != effectInfo.settings.end()) circularPalette = (it->second == "1");
+
+        // Get blended color at current position with cycles
+        double position = buf.GetEffectTimeIntervalPosition(cycles);
         xlColor color;
-        buf.palette.GetColor(0, color);
-        buf.Fill(color);
+        buf.GetMultiColorBlend(position, circularPalette, color);
+
+        int endX = buf.BufferWi - 1;
+        int endY = buf.BufferHt - 1;
+
+        int tot = buf.curPeriod - buf.curEffStartPer;
+        if (!shimmer || (tot % 2) == 0) {
+            double halfHt = (double)endY / 2.0;
+            double halfWi = (double)endX / 2.0;
+
+            xlColor orig = color;
+            HSVValue hsvOrig = color.asHSV();
+
+            for (int x = 0; x <= endX; x++) {
+                HSVValue hsv = hsvOrig;
+                xlColor colX = orig;
+
+                if (horizFade) {
+                    double mult;
+                    if (reverseFades) {
+                        mult = (halfWi > 0) ? std::abs(halfWi - x) / halfWi : 0.0;
+                    } else {
+                        mult = (halfWi > 0) ? 1.0 - std::abs(halfWi - x) / halfWi : 1.0;
+                    }
+                    hsv.value *= mult;
+                    colX = xlColor(hsv);
+                }
+
+                for (int y = 0; y <= endY; y++) {
+                    xlColor colFinal = colX;
+                    if (vertFade) {
+                        HSVValue hsv2 = colX.asHSV();
+                        double mult;
+                        if (reverseFades) {
+                            mult = (halfHt > 0) ? std::abs(halfHt - y) / halfHt : 0.0;
+                        } else {
+                            mult = (halfHt > 0) ? 1.0 - std::abs(halfHt - y) / halfHt : 1.0;
+                        }
+                        hsv2.value *= mult;
+                        colFinal = xlColor(hsv2);
+                    }
+                    buf.SetPixel(x, y, colFinal);
+                }
+            }
+        }
+        // shimmer odd frames: leave buffer black (cleared state)
+
         return true;
     }
 
