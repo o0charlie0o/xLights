@@ -226,8 +226,9 @@ struct XLMainContentView: View {
     var body: some View {
         ZStack {
             NavigationSplitView(columnVisibility: $columnVisibility) {
-                // Sidebar: Tab selection (could add more sidebar items later)
+                // Sidebar: Tab selection — fixed width to prevent accidental resizing
                 sidebarContent
+                    .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 220)
             } detail: {
                 // Detail: Main content area with inspector
                 // Using HStack with explicit frame control instead of HSplitView

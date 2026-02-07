@@ -22,6 +22,9 @@
 
 @end
 
+/// Last selection posted by the layout tab, so a newly created inspector can restore it.
+static NSArray<NSString *> *sLastLayoutSelection = nil;
+
 @implementation XLInspectorViewController
 
 - (void)loadView {
@@ -98,6 +101,19 @@
                                                object:nil];
 }
 
+- (void)viewDidAppear {
+    [super viewDidAppear];
+
+    // Restore last layout selection when the inspector is (re)created
+    if (sLastLayoutSelection.count > 0) {
+        if (sLastLayoutSelection.count == 1) {
+            [self inspectModel:sLastLayoutSelection.firstObject];
+        } else {
+            [self inspectModels:sLastLayoutSelection];
+        }
+    }
+}
+
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
@@ -149,7 +165,13 @@
 
     NSDictionary *info = [_engineBridge getModelInfo:modelName];
     if (!info) {
-        [self clearInspector];
+        // Might be a model group — show group info
+        NSDictionary *groupInfo = [_engineBridge getModelGroup:modelName];
+        if (groupInfo) {
+            [self inspectGroup:modelName info:groupInfo];
+        } else {
+            [self clearInspector];
+        }
         return;
     }
 
@@ -164,6 +186,73 @@
         [propsView.leadingAnchor constraintEqualToAnchor:_stackView.leadingAnchor],
         [propsView.trailingAnchor constraintEqualToAnchor:_stackView.trailingAnchor],
     ]];
+}
+
+- (void)inspectGroup:(NSString *)groupName info:(NSDictionary *)groupInfo {
+    [self clearStackView];
+
+    NSArray<NSString *> *members = groupInfo[@"modelNames"] ?: @[];
+    NSString *bufferStyle = groupInfo[@"defaultBufferStyle"] ?: @"Default";
+
+    // Group header
+    NSTextField *header = [NSTextField labelWithString:groupName];
+    header.font = [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold];
+    header.textColor = [NSColor labelColor];
+    [_stackView addArrangedSubview:header];
+
+    // Type label
+    NSTextField *typeLabel = [NSTextField labelWithString:@"Model Group"];
+    typeLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightRegular];
+    typeLabel.textColor = [NSColor secondaryLabelColor];
+    [_stackView addArrangedSubview:typeLabel];
+
+    // Member count
+    NSString *countText = [NSString stringWithFormat:@"%lu model%@",
+                           (unsigned long)members.count,
+                           members.count == 1 ? @"" : @"s"];
+    NSTextField *countLabel = [NSTextField labelWithString:countText];
+    countLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightRegular];
+    countLabel.textColor = [NSColor secondaryLabelColor];
+    [_stackView addArrangedSubview:countLabel];
+
+    // Buffer style
+    NSTextField *bufferLabel = [NSTextField labelWithString:
+        [NSString stringWithFormat:@"Buffer Style: %@", bufferStyle]];
+    bufferLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightRegular];
+    bufferLabel.textColor = [NSColor secondaryLabelColor];
+    [_stackView addArrangedSubview:bufferLabel];
+
+    // Spacer
+    NSView *spacer = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 10, 8)];
+    spacer.translatesAutoresizingMaskIntoConstraints = NO;
+    [spacer.heightAnchor constraintEqualToConstant:8].active = YES;
+    [_stackView addArrangedSubview:spacer];
+
+    // Member list
+    if (members.count > 0) {
+        NSTextField *membersHeader = [NSTextField labelWithString:@"Members"];
+        membersHeader.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+        membersHeader.textColor = [NSColor labelColor];
+        [_stackView addArrangedSubview:membersHeader];
+
+        for (NSString *member in members) {
+            NSTextField *memberLabel = [NSTextField labelWithString:
+                [NSString stringWithFormat:@"  %@", member]];
+            memberLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
+            memberLabel.textColor = [NSColor secondaryLabelColor];
+            [_stackView addArrangedSubview:memberLabel];
+        }
+    }
+
+    // Add padding constraints
+    for (NSView *subview in _stackView.arrangedSubviews) {
+        if ([subview isKindOfClass:[NSTextField class]]) {
+            [NSLayoutConstraint activateConstraints:@[
+                [subview.leadingAnchor constraintEqualToAnchor:_stackView.leadingAnchor constant:12],
+                [subview.trailingAnchor constraintEqualToAnchor:_stackView.trailingAnchor constant:-12],
+            ]];
+        }
+    }
 }
 
 - (void)inspectModels:(NSArray<NSString *> *)modelNames {
@@ -251,6 +340,8 @@
 
 - (void)layoutModelSelectionDidChange:(NSNotification *)notification {
     NSArray<NSString *> *modelNames = notification.userInfo[@"modelNames"];
+    sLastLayoutSelection = [modelNames copy];
+
     if (!modelNames || modelNames.count == 0) {
         [self clearInspector];
     } else if (modelNames.count == 1) {
