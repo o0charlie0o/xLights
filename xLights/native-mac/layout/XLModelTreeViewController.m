@@ -14,7 +14,7 @@
 #import "../dialogs/XLSubModelsWindow.h"
 #import "../dialogs/XLModelStateWindow.h"
 #import "../dialogs/XLModelDialogs.h"
-#import "XLModelFaceDialogController.h"
+#import "../dialogs/XLModelFaceWindow.h"
 
 static NSString * const kXLModelTreeDragType = @"com.xlights.modelTreeNode";
 
@@ -38,7 +38,7 @@ static NSString * const kColumnController = @"ControllerColumn";
 
 @property (nonatomic, strong) XLSubModelsWindow *subModelsWindow;
 @property (nonatomic, strong) XLModelStateWindow *stateDialog;
-@property (nonatomic, strong) XLModelFaceDialogController *faceDialog;
+@property (nonatomic, strong) XLModelFaceWindow *faceDialog;
 
 @end
 
@@ -1443,14 +1443,25 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     NSString *name = [self selectedModelName];
     if (!name || !_engineBridge) return;
 
-    _faceDialog = [[XLModelFaceDialogController alloc] init];
-    _faceDialog.modelName = name;
+    _faceDialog = [[XLModelFaceWindow alloc] initWithModelName:name];
     _faceDialog.engineBridge = _engineBridge;
+
+    // Load face definitions from bridge
+    NSDictionary *faceData = [_engineBridge getAllFaceDefinitions:name];
+    if (faceData) {
+        [_faceDialog setFaceInfo:faceData];
+    }
+
     [_faceDialog showWithCompletion:^(BOOL saved) {
-        self->_faceDialog = nil;
         if (saved) {
+            // Save face definitions back through bridge
+            NSDictionary *updatedFaces = [self->_faceDialog faceInfo];
+            if (updatedFaces) {
+                [self->_engineBridge setAllFaceDefinitions:name definitions:updatedFaces];
+            }
             [self reloadData];
         }
+        self->_faceDialog = nil;
     }];
 }
 

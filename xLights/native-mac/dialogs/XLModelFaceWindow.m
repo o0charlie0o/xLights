@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLModelFaceWindow.h"
+#import "../XLEngineBridge.h"
 
 /// Standard phoneme names for lip sync animation.
 const char * const kPhonemeNames[] = {
@@ -575,7 +576,7 @@ static const CGFloat kWindowHeight = 700.0;
 
 #pragma mark - XLModelFaceWindow
 
-@interface XLModelFaceWindow () <XLPhonemeGridDelegate, XLFaceNodeSelectionDelegate>
+@interface XLModelFaceWindow () <XLPhonemeGridDelegate, XLFaceNodeSelectionDelegate, NSTabViewDelegate>
 @property (nonatomic, copy) NSString *modelName;
 @property (nonatomic, copy) XLModelFaceCompletion completion;
 @property (nonatomic, strong) NSSplitView *splitView;
@@ -585,8 +586,9 @@ static const CGFloat kWindowHeight = 700.0;
 @property (nonatomic, strong) XLMatrixFacePanel *matrixPanel;
 @property (nonatomic, strong) XLFaceNodeSelectionView *nodeSelectionView;
 @property (nonatomic, strong) NSButton *outputToLightsCheckbox;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *faceDataDict;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSString *> *> *faceDataDict;
 @property (nonatomic, assign) BOOL hasUnsavedChanges;
+@property (nonatomic, copy) NSString *currentFaceName;
 @end
 
 @implementation XLModelFaceWindow
@@ -670,6 +672,7 @@ static const CGFloat kWindowHeight = 700.0;
 
     _faceTypeTabView = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 500, kWindowHeight - 100)];
     _faceTypeTabView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _faceTypeTabView.delegate = self;
 
     // Single Node tab
     NSTabViewItem *singleNodeTab = [[NSTabViewItem alloc] initWithIdentifier:@"singleNode"];
@@ -739,11 +742,221 @@ static const CGFloat kWindowHeight = 700.0;
 
 - (void)showWithCompletion:(XLModelFaceCompletion)completion {
     _completion = [completion copy];
+    [self loadNodePositions];
+    [self loadCurrentFace];
     [self showWindow:nil];
 }
 
+#pragma mark - Data Flow: Dictionary <-> UI
+
+/// Load node positions from the engine bridge for the model preview.
+- (void)loadNodePositions {
+    if (!_engineBridge || !_modelName) return;
+
+    NSArray *nodes = [_engineBridge getModelNodes:_modelName];
+    if (!nodes || nodes.count == 0) return;
+
+    NSInteger count = nodes.count;
+    float *posX = (float *)malloc(count * sizeof(float));
+    float *posY = (float *)malloc(count * sizeof(float));
+
+    for (NSInteger i = 0; i < count; i++) {
+        NSDictionary *node = nodes[i];
+        posX[i] = [node[@"x"] floatValue];
+        posY[i] = [node[@"y"] floatValue];
+    }
+
+    [_nodeSelectionView setNodeCount:count positionsX:posX positionsY:posY];
+
+    free(posX);
+    free(posY);
+}
+
+/// Load the currently selected face definition into the UI grids.
+- (void)loadCurrentFace {
+    NSString *faceName = _faceNamePopup.selectedItem.title;
+    if (!faceName) return;
+
+    _currentFaceName = faceName;
+    NSDictionary *faceAttrs = _faceDataDict[faceName];
+    if (!faceAttrs) {
+        // Empty face - clear the grids
+        for (int i = 0; i < kPhonemeCount; i++) {
+            XLPhonemeData data = {0};
+            strlcpy(data.phonemeName, kPhonemeNames[i], sizeof(data.phonemeName));
+            [_phonemeGrid setPhonemeData:data atIndex:i];
+        }
+        return;
+    }
+
+    // Determine face type and select the appropriate tab
+    NSString *typeStr = faceAttrs[@"Type"];
+    if ([typeStr isEqualToString:@"SingleNode"]) {
+        [_faceTypeTabView selectTabViewItemAtIndex:XLFaceTypeSingleNode];
+        _phonemeGrid.faceType = XLFaceTypeSingleNode;
+    } else if ([typeStr isEqualToString:@"Matrix"]) {
+        [_faceTypeTabView selectTabViewItemAtIndex:XLFaceTypeMatrix];
+    } else {
+        // Default to NodeRanges
+        [_faceTypeTabView selectTabViewItemAtIndex:XLFaceTypeNodeRanges];
+        _phonemeGrid.faceType = XLFaceTypeNodeRanges;
+    }
+
+    // Check custom colors
+    BOOL customColors = [faceAttrs[@"CustomColors"] isEqualToString:@"1"];
+    _phonemeGrid.customColorsEnabled = customColors;
+
+    // Load phoneme data into grid
+    for (int i = 0; i < kPhonemeCount; i++) {
+        XLPhonemeData data = {0};
+        strlcpy(data.phonemeName, kPhonemeNames[i], sizeof(data.phonemeName));
+
+        // Build the key: "Mouth-AI", "Mouth-E", etc.
+        NSString *phoneme = [NSString stringWithUTF8String:kPhonemeNames[i]];
+        NSString *mouthKey = [NSString stringWithFormat:@"Mouth-%@", phoneme];
+
+        NSString *nodeValue = faceAttrs[mouthKey];
+        if (nodeValue) {
+            strlcpy(data.nodeData, [nodeValue UTF8String], sizeof(data.nodeData));
+        }
+
+        // Load custom color if present
+        NSString *colorKey = [NSString stringWithFormat:@"%@-Color", mouthKey];
+        NSString *colorValue = faceAttrs[colorKey];
+        if (colorValue && colorValue.length > 0) {
+            data.hasCustomColor = YES;
+            [self parseColorString:colorValue red:&data.colorRed green:&data.colorGreen blue:&data.colorBlue];
+        }
+
+        [_phonemeGrid setPhonemeData:data atIndex:i];
+    }
+
+    // Load matrix data if matrix type
+    if ([typeStr isEqualToString:@"Matrix"]) {
+        NSString *placement = faceAttrs[@"ImagePlacement"];
+        if (placement) {
+            _matrixPanel.imagePlacement = placement;
+        }
+
+        for (int i = 0; i < kPhonemeCount; i++) {
+            XLMatrixFaceData mdata = {0};
+            strlcpy(mdata.phonemeName, kPhonemeNames[i], sizeof(mdata.phonemeName));
+
+            NSString *phoneme = [NSString stringWithUTF8String:kPhonemeNames[i]];
+            NSString *eyesOpenKey = [NSString stringWithFormat:@"Mouth-%@-EyesOpen", phoneme];
+            NSString *eyesOpenValue = faceAttrs[eyesOpenKey];
+            if (eyesOpenValue) {
+                strlcpy(mdata.imagePath, [eyesOpenValue UTF8String], sizeof(mdata.imagePath));
+            }
+
+            [_matrixPanel setMatrixData:mdata atIndex:i];
+        }
+    }
+}
+
+/// Save the current UI state back into the faceDataDict for the current face name.
+- (void)saveCurrentFaceToDict {
+    if (!_currentFaceName) return;
+
+    NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+
+    // Determine type from selected tab
+    NSInteger tabIndex = [_faceTypeTabView indexOfTabViewItem:_faceTypeTabView.selectedTabViewItem];
+    switch (tabIndex) {
+        case XLFaceTypeSingleNode:
+            attrs[@"Type"] = @"SingleNode";
+            break;
+        case XLFaceTypeMatrix:
+            attrs[@"Type"] = @"Matrix";
+            break;
+        default:
+            attrs[@"Type"] = @"NodeRange";
+            break;
+    }
+
+    if (_phonemeGrid.customColorsEnabled) {
+        attrs[@"CustomColors"] = @"1";
+    }
+
+    // Save phoneme node data
+    for (int i = 0; i < kPhonemeCount; i++) {
+        XLPhonemeData data = [_phonemeGrid phonemeDataAtIndex:i];
+        NSString *phoneme = [NSString stringWithUTF8String:data.phonemeName];
+        NSString *mouthKey = [NSString stringWithFormat:@"Mouth-%@", phoneme];
+        NSString *nodeStr = [NSString stringWithUTF8String:data.nodeData];
+
+        if (nodeStr.length > 0) {
+            attrs[mouthKey] = nodeStr;
+        }
+
+        if (data.hasCustomColor) {
+            NSString *colorKey = [NSString stringWithFormat:@"%@-Color", mouthKey];
+            attrs[colorKey] = [NSString stringWithFormat:@"#%02X%02X%02X",
+                              data.colorRed, data.colorGreen, data.colorBlue];
+        }
+    }
+
+    // Save matrix data if matrix type
+    if (tabIndex == XLFaceTypeMatrix) {
+        attrs[@"ImagePlacement"] = _matrixPanel.imagePlacement ?: @"Centered";
+
+        for (int i = 0; i < kPhonemeCount; i++) {
+            XLMatrixFaceData mdata = [_matrixPanel matrixDataAtIndex:i];
+            NSString *phoneme = [NSString stringWithUTF8String:mdata.phonemeName];
+            NSString *imagePath = [NSString stringWithUTF8String:mdata.imagePath];
+
+            if (imagePath.length > 0) {
+                attrs[[NSString stringWithFormat:@"Mouth-%@-EyesOpen", phoneme]] = imagePath;
+            }
+        }
+    }
+
+    // Also preserve any face outline / eyes data from the dictionary that we don't edit yet
+    NSDictionary *existing = _faceDataDict[_currentFaceName];
+    if (existing) {
+        for (NSString *key in existing) {
+            if ([key hasPrefix:@"FaceOutline"] ||
+                [key hasPrefix:@"Eyes-"] ||
+                ([key hasPrefix:@"Mouth-"] && [key hasSuffix:@"-EyesClosed"])) {
+                if (!attrs[key]) {
+                    attrs[key] = existing[key];
+                }
+            }
+        }
+    }
+
+    _faceDataDict[_currentFaceName] = attrs;
+}
+
+/// Parse a color string like "#FFFFFF" or "255,255,255" into RGB components.
+- (void)parseColorString:(NSString *)colorStr
+                     red:(uint8_t *)red
+                   green:(uint8_t *)green
+                    blue:(uint8_t *)blue {
+    if ([colorStr hasPrefix:@"#"] && colorStr.length >= 7) {
+        unsigned int hexValue = 0;
+        NSScanner *scanner = [NSScanner scannerWithString:[colorStr substringFromIndex:1]];
+        [scanner scanHexInt:&hexValue];
+        *red = (hexValue >> 16) & 0xFF;
+        *green = (hexValue >> 8) & 0xFF;
+        *blue = hexValue & 0xFF;
+    } else {
+        NSArray *parts = [colorStr componentsSeparatedByString:@","];
+        if (parts.count >= 3) {
+            *red = (uint8_t)[parts[0] intValue];
+            *green = (uint8_t)[parts[1] intValue];
+            *blue = (uint8_t)[parts[2] intValue];
+        }
+    }
+}
+
+#pragma mark - Face Selection and Management
+
 - (void)faceNameChanged:(NSPopUpButton *)sender {
-    // Load face data for selected name
+    // Save current face data before switching
+    [self saveCurrentFaceToDict];
+    // Load the newly selected face
+    [self loadCurrentFace];
 }
 
 - (void)addFaceDefinition:(NSButton *)sender {
@@ -760,8 +973,29 @@ static const CGFloat kWindowHeight = 700.0;
 
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse returnCode) {
         if (returnCode == NSAlertFirstButtonReturn && input.stringValue.length > 0) {
-            [self->_faceNamePopup addItemWithTitle:input.stringValue];
-            [self->_faceNamePopup selectItemWithTitle:input.stringValue];
+            NSString *newName = input.stringValue;
+
+            // Check for duplicate
+            if (self->_faceDataDict[newName]) {
+                NSAlert *dup = [[NSAlert alloc] init];
+                dup.messageText = @"Name Already Exists";
+                dup.informativeText = [NSString stringWithFormat:
+                    @"A face definition named '%@' already exists.", newName];
+                [dup runModal];
+                return;
+            }
+
+            // Save current face before switching
+            [self saveCurrentFaceToDict];
+
+            // Create new empty face with default type NodeRange
+            NSMutableDictionary *newFace = [NSMutableDictionary dictionary];
+            newFace[@"Type"] = @"NodeRange";
+            self->_faceDataDict[newName] = newFace;
+
+            [self->_faceNamePopup addItemWithTitle:newName];
+            [self->_faceNamePopup selectItemWithTitle:newName];
+            [self loadCurrentFace];
             self->_hasUnsavedChanges = YES;
         }
     }];
@@ -769,6 +1003,8 @@ static const CGFloat kWindowHeight = 700.0;
 
 - (void)deleteFaceDefinition:(NSButton *)sender {
     NSString *selected = _faceNamePopup.selectedItem.title;
+    if (!selected) return;
+
     if ([selected isEqualToString:@"Default"]) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"Cannot Delete";
@@ -787,6 +1023,12 @@ static const CGFloat kWindowHeight = 700.0;
         if (returnCode == NSAlertFirstButtonReturn) {
             [self->_faceNamePopup removeItemWithTitle:selected];
             [self->_faceDataDict removeObjectForKey:selected];
+            self->_currentFaceName = nil;
+
+            if (self->_faceNamePopup.numberOfItems == 0) {
+                [self->_faceNamePopup addItemWithTitle:@"Default"];
+            }
+            [self loadCurrentFace];
             self->_hasUnsavedChanges = YES;
         }
     }];
@@ -797,6 +1039,8 @@ static const CGFloat kWindowHeight = 700.0;
 }
 
 - (void)okClicked:(NSButton *)sender {
+    // Save current face state before closing
+    [self saveCurrentFaceToDict];
     _needsReload = _hasUnsavedChanges;
     [self.window close];
     if (_completion) {
@@ -811,13 +1055,21 @@ static const CGFloat kWindowHeight = 700.0;
     }
 }
 
+#pragma mark - Face Info Accessors
+
 - (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)faceInfo {
+    // Save current UI state before returning
+    [self saveCurrentFaceToDict];
     return [_faceDataDict copy];
 }
 
 - (void)setFaceInfo:(NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)info {
     [_faceDataDict removeAllObjects];
-    [_faceDataDict addEntriesFromDictionary:info];
+
+    // Deep copy to mutable dictionaries
+    for (NSString *key in info) {
+        _faceDataDict[key] = [info[key] mutableCopy];
+    }
 
     [_faceNamePopup removeAllItems];
     NSArray *sortedKeys = [[info allKeys] sortedArrayUsingSelector:@selector(compare:)];
@@ -827,7 +1079,18 @@ static const CGFloat kWindowHeight = 700.0;
 
     if (_faceNamePopup.numberOfItems == 0) {
         [_faceNamePopup addItemWithTitle:@"Default"];
+        _faceDataDict[@"Default"] = [@{@"Type": @"NodeRange"} mutableCopy];
     }
+
+    // Load the first face into the UI
+    _currentFaceName = nil;
+    [self loadCurrentFace];
+}
+
+#pragma mark - NSTabViewDelegate
+
+- (void)tabView:(NSTabView *)tabView didSelectTabViewItem:(NSTabViewItem *)tabViewItem {
+    _hasUnsavedChanges = YES;
 }
 
 #pragma mark - XLPhonemeGridDelegate
