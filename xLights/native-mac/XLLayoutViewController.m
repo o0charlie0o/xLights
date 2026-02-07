@@ -399,6 +399,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 
     [self reloadLayoutGroupSelector];
     [_modelTreeController reloadData];
+    [_previewView reloadModels];
 }
 
 - (void)viewDidAppear {
@@ -415,6 +416,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
         });
     }
 
+    [_previewView reloadModels];
     [_previewView startRenderLoop];
 }
 
@@ -427,6 +429,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 - (void)setEngineBridge:(XLEngineBridge *)engineBridge {
     _engineBridge = engineBridge;
     _modelTreeController.engineBridge = engineBridge;
+    _previewView.engineBridge = engineBridge;
     _undoController.engineBridge = engineBridge;
 }
 
