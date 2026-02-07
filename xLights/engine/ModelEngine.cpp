@@ -10,6 +10,10 @@
 
 #include "ModelEngine.h"
 
+#ifdef XLIGHTS_NATIVE
+#include "../native-mac/providers/NativeModelProvider.h"
+#endif
+
 #ifndef XLIGHTS_NATIVE
 #include "adapters/ModelManagerAdapter.h"
 
@@ -57,6 +61,48 @@ static std::string attrStr(const std::map<std::string, std::string>& attrs,
                            const std::string& key, const std::string& defaultVal = "") {
     auto it = attrs.find(key);
     return (it != attrs.end()) ? it->second : defaultVal;
+}
+
+// Determine channels per node from the StringType XML attribute.
+// Mirrors the logic from Model::GetNodeChannelCount().
+static uint32_t channelsPerNodeFromStringType(const std::string& stringType)
+{
+    if (stringType.empty()) return 3; // Default RGB
+
+    if (stringType.find("Single Color") == 0) return 1;
+    if (stringType == "Strobes White 3fps" || stringType == "Strobes") return 1;
+    if (stringType == "Node Single Color") return 1;
+    if (stringType == "RGBWW Nodes") return 5;
+    if (stringType == "4 Channel RGBW" || stringType == "4 Channel WRGB") return 4;
+
+    // Various WRGB/RGBW variants: check for 'W' at position 0 or 3
+    if (stringType.size() >= 4) {
+        if (stringType[0] == 'W' || stringType[3] == 'W') return 4;
+    }
+
+    return 3; // Default: RGB Nodes, GRB Nodes, etc.
+}
+
+// Parse a StartChannel string and return the 0-indexed absolute channel number.
+// Handles simple numeric values. For complex references (">Model:N", "@Model:N",
+// "!Controller:N"), returns -1 to indicate it cannot be resolved without a model graph.
+static int32_t parseStartChannelSimple(const std::string& startChannel)
+{
+    if (startChannel.empty()) return 0;
+
+    // Check for complex references
+    if (startChannel.find(':') != std::string::npos ||
+        startChannel[0] == '>' || startChannel[0] == '<' ||
+        startChannel[0] == '@' || startChannel[0] == '!') {
+        return -1; // Cannot resolve without model graph
+    }
+
+    try {
+        int32_t ch = std::stoi(startChannel);
+        return (ch > 0) ? ch - 1 : 0; // Convert from 1-indexed to 0-indexed
+    } catch (...) {
+        return 0;
+    }
 }
 
 // Generate node positions for a model from its XML attributes.
@@ -924,6 +970,50 @@ ModelInfo ModelEngine::getModel(const std::string& name) const
     info.type = (typeIt != attrs.end()) ? typeIt->second : "Unknown";
     info.isGroupModel = (info.type == "ModelGroup");
     info.layoutGroup = attrStr(attrs, "LayoutGroup", "Unassigned");
+    info.startChannel = attrStr(attrs, "StartChannel", "1");
+    info.controllerName = attrStr(attrs, "Controller");
+    info.controllerProtocol = attrStr(attrs, "ControllerConnection.Protocol");
+    info.controllerPort = attrInt(attrs, "ControllerConnection.Port", 0);
+    info.isActive = (attrStr(attrs, "Active", "1") != "0");
+
+    // Compute node count from generated nodes (handles all model types)
+    auto nodes = generateNodesFromAttributes(attrs);
+    info.nodeCount = (uint32_t)nodes.size();
+
+    // Compute channels per node from StringType
+    std::string stringType = attrStr(attrs, "StringType", "RGB Nodes");
+    uint32_t chansPerNode = channelsPerNodeFromStringType(stringType);
+    info.channelCount = info.nodeCount * chansPerNode;
+
+    // Compute first/last channel from StartChannel attribute
+    int32_t startCh = parseStartChannelSimple(info.startChannel);
+    if (startCh >= 0) {
+        info.firstChannel = (uint32_t)startCh;
+        info.lastChannel = (info.channelCount > 0)
+            ? info.firstChannel + info.channelCount - 1
+            : info.firstChannel;
+    }
+
+    // Compute default buffer dimensions
+    int p1 = attrInt(attrs, "parm1", 1);
+    int p2 = attrInt(attrs, "parm2", 1);
+    if (info.type == "Vert Matrix" || info.type == "Horiz Matrix" || info.type == "Matrix") {
+        int p3 = attrInt(attrs, "parm3", 1);
+        if (p3 < 1) p3 = 1;
+        int numStrands = p1 * p3;
+        int pixelsPerStrand = (p3 > 0) ? p2 / p3 : p2;
+        if (info.type == "Vert Matrix") {
+            info.defaultBufferWi = numStrands;
+            info.defaultBufferHt = pixelsPerStrand;
+        } else {
+            info.defaultBufferWi = pixelsPerStrand;
+            info.defaultBufferHt = numStrands;
+        }
+    } else {
+        info.defaultBufferWi = (p2 > 0) ? p2 : 1;
+        info.defaultBufferHt = (p1 > 0) ? p1 : 1;
+    }
+
     info.properties = attrs;
     return info;
 }
@@ -954,16 +1044,19 @@ uint32_t ModelEngine::getModelNodeCount(const std::string& name) const
 {
     if (!_provider || !_provider->hasModel(name)) return 0;
     auto attrs = _provider->getModelAttributes(name);
-
-    int p1 = attrInt(attrs, "parm1", 1);
-    int p2 = attrInt(attrs, "parm2", 1);
-    uint32_t count = (uint32_t)(p1 * p2);
-    return (count > 0) ? count : 1;
+    if (attrs.empty()) return 0;
+    auto nodes = generateNodesFromAttributes(attrs);
+    return (uint32_t)nodes.size();
 }
 
 uint32_t ModelEngine::getModelChannelCount(const std::string& name) const
 {
-    return 0;
+    if (!_provider || !_provider->hasModel(name)) return 0;
+    auto attrs = _provider->getModelAttributes(name);
+    if (attrs.empty()) return 0;
+    auto nodes = generateNodesFromAttributes(attrs);
+    std::string stringType = attrStr(attrs, "StringType", "RGB Nodes");
+    return (uint32_t)nodes.size() * channelsPerNodeFromStringType(stringType);
 }
 
 OperationResult ModelEngine::createModel(const std::string& type, const std::string& name,
@@ -989,27 +1082,299 @@ OperationResult ModelEngine::updateModelProperty(const std::string& name, const 
 
 std::vector<SubmodelInfo> ModelEngine::getSubmodels(const std::string& modelName) const
 {
-    return {};
+    if (!_provider) return {};
+    std::vector<SubmodelInfo> result;
+    auto names = _provider->getSubmodels(modelName);
+    result.reserve(names.size());
+    for (const auto& smName : names) {
+        SubmodelInfo info;
+        info.name = smName;
+        info.fullName = modelName + "/" + smName;
+        result.push_back(info);
+    }
+    return result;
 }
 
 bool ModelEngine::hasSubmodel(const std::string& modelName, const std::string& submodelName) const
 {
-    return false;
+    if (!_provider) return false;
+    auto names = _provider->getSubmodels(modelName);
+    return std::find(names.begin(), names.end(), submodelName) != names.end();
+}
+
+SubmodelDefinition ModelEngine::getSubmodelDefinition(const std::string& modelName, const std::string& submodelName) const
+{
+    SubmodelDefinition def;
+    if (!_provider) return def;
+
+    auto attrs = _provider->getSubmodelAttributes(modelName, submodelName);
+    if (attrs.empty()) return def;
+
+    def.name = submodelName;
+    auto typeIt = attrs.find("type");
+    def.isRanges = (typeIt == attrs.end() || typeIt->second == "ranges");
+    auto layoutIt = attrs.find("layout");
+    def.vertical = (layoutIt != attrs.end() && layoutIt->second == "vertical");
+    auto bsIt = attrs.find("bufferstyle");
+    def.bufferStyle = (bsIt != attrs.end()) ? bsIt->second : "Default";
+    auto sbIt = attrs.find("subBuffer");
+    def.subBuffer = (sbIt != attrs.end()) ? sbIt->second : "";
+
+    if (def.isRanges) {
+        for (int i = 0; ; i++) {
+            std::string key = "line" + std::to_string(i);
+            auto it = attrs.find(key);
+            if (it == attrs.end()) break;
+            def.strands.push_back(it->second);
+        }
+    }
+
+    return def;
+}
+
+OperationResult ModelEngine::setSubmodel(const std::string& modelName, const std::string& submodelName,
+                                         const SubmodelDefinition& definition)
+{
+    if (!_provider) return {false, "No provider available"};
+    if (!_provider->hasModel(modelName)) return {false, "Model '" + modelName + "' not found"};
+
+    std::map<std::string, std::string> attrs;
+    attrs["name"] = submodelName;
+    attrs["type"] = definition.isRanges ? "ranges" : "subbuffer";
+    attrs["layout"] = definition.vertical ? "vertical" : "horizontal";
+    attrs["bufferstyle"] = definition.bufferStyle.empty() ? "Default" : definition.bufferStyle;
+
+    if (definition.isRanges) {
+        for (size_t i = 0; i < definition.strands.size(); i++) {
+            attrs["line" + std::to_string(i)] = definition.strands[i];
+        }
+    } else {
+        attrs["subBuffer"] = definition.subBuffer;
+    }
+
+    bool ok = _provider->setSubmodelAttributes(modelName, submodelName, attrs);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Modified;
+        event.modelName = modelName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to set submodel"};
+}
+
+OperationResult ModelEngine::deleteSubmodel(const std::string& modelName, const std::string& submodelName)
+{
+    if (!_provider) return {false, "No provider available"};
+    if (!_provider->hasModel(modelName)) return {false, "Model '" + modelName + "' not found"};
+
+    bool ok = _provider->deleteSubmodel(modelName, submodelName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Modified;
+        event.modelName = modelName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Submodel '" + submodelName + "' not found"};
+}
+
+OperationResult ModelEngine::renameSubmodel(const std::string& modelName, const std::string& oldName,
+                                            const std::string& newName)
+{
+    if (!_provider) return {false, "No provider available"};
+    if (!_provider->hasModel(modelName)) return {false, "Model '" + modelName + "' not found"};
+
+    bool ok = _provider->renameSubmodel(modelName, oldName, newName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Modified;
+        event.modelName = modelName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to rename submodel"};
+}
+
+// Helper to parse comma-separated model list from group attributes
+static std::vector<std::string> parseModelList(const std::string& modelsStr) {
+    std::vector<std::string> result;
+    std::istringstream stream(modelsStr);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        size_t start = token.find_first_not_of(" \t");
+        size_t end = token.find_last_not_of(" \t");
+        if (start != std::string::npos) {
+            result.push_back(token.substr(start, end - start + 1));
+        }
+    }
+    return result;
+}
+
+// Helper to get NativeModelProvider from the provider pointer
+static NativeModelProvider* getNativeProvider(IModelProvider* provider) {
+    return dynamic_cast<NativeModelProvider*>(provider);
 }
 
 std::vector<ModelGroupInfo> ModelEngine::getModelGroups() const
 {
-    return {};
+    if (!_provider) return {};
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return {};
+
+    std::vector<ModelGroupInfo> result;
+    auto groupNames = _provider->getGroupNames();
+    for (const auto& gName : groupNames) {
+        auto attrs = nativeProvider->getGroupAttributes(gName);
+        ModelGroupInfo info;
+        info.name = gName;
+        auto modelsIt = attrs.find("models");
+        if (modelsIt != attrs.end()) {
+            info.modelNames = parseModelList(modelsIt->second);
+        }
+        auto bsIt = attrs.find("layout");
+        if (bsIt != attrs.end()) {
+            info.defaultBufferStyle = bsIt->second;
+        }
+        result.push_back(info);
+    }
+    return result;
 }
 
 ModelGroupInfo ModelEngine::getModelGroup(const std::string& groupName) const
 {
-    return ModelGroupInfo();
+    ModelGroupInfo info;
+    if (!_provider) return info;
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return info;
+
+    auto attrs = nativeProvider->getGroupAttributes(groupName);
+    if (attrs.empty()) return info;
+
+    info.name = groupName;
+    auto modelsIt = attrs.find("models");
+    if (modelsIt != attrs.end()) {
+        info.modelNames = parseModelList(modelsIt->second);
+    }
+    auto bsIt = attrs.find("layout");
+    if (bsIt != attrs.end()) {
+        info.defaultBufferStyle = bsIt->second;
+    }
+    return info;
 }
 
 std::vector<std::string> ModelEngine::getGroupsContainingModel(const std::string& modelName) const
 {
-    return {};
+    if (!_provider) return {};
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return {};
+
+    std::vector<std::string> result;
+    auto groupNames = _provider->getGroupNames();
+    for (const auto& gName : groupNames) {
+        auto attrs = nativeProvider->getGroupAttributes(gName);
+        auto modelsIt = attrs.find("models");
+        if (modelsIt != attrs.end()) {
+            auto members = parseModelList(modelsIt->second);
+            if (std::find(members.begin(), members.end(), modelName) != members.end()) {
+                result.push_back(gName);
+            }
+        }
+    }
+    return result;
+}
+
+OperationResult ModelEngine::createModelGroup(const std::string& groupName,
+                                              const std::vector<std::string>& modelNames)
+{
+    if (!_provider) return {false, "No provider available"};
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return {false, "Write operations not supported by this provider"};
+
+    std::string modelList;
+    for (size_t i = 0; i < modelNames.size(); i++) {
+        if (i > 0) modelList += ",";
+        modelList += modelNames[i];
+    }
+
+    bool ok = nativeProvider->createGroup(groupName, modelList);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Added;
+        event.modelName = groupName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to create model group '" + groupName + "'"};
+}
+
+OperationResult ModelEngine::deleteModelGroup(const std::string& groupName)
+{
+    if (!_provider) return {false, "No provider available"};
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return {false, "Write operations not supported by this provider"};
+
+    bool ok = nativeProvider->deleteGroup(groupName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Removed;
+        event.modelName = groupName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Group '" + groupName + "' not found"};
+}
+
+OperationResult ModelEngine::renameModelGroup(const std::string& oldName, const std::string& newName)
+{
+    if (!_provider) return {false, "No provider available"};
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return {false, "Write operations not supported by this provider"};
+
+    bool ok = nativeProvider->renameGroup(oldName, newName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Renamed;
+        event.modelName = newName;
+        event.oldName = oldName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to rename group '" + oldName + "'"};
+}
+
+OperationResult ModelEngine::addModelToGroup(const std::string& groupName, const std::string& modelName)
+{
+    if (!_provider) return {false, "No provider available"};
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return {false, "Write operations not supported by this provider"};
+
+    bool ok = nativeProvider->addModelToGroup(groupName, modelName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Modified;
+        event.modelName = groupName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to add model to group"};
+}
+
+OperationResult ModelEngine::removeModelFromGroup(const std::string& groupName, const std::string& modelName)
+{
+    if (!_provider) return {false, "No provider available"};
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return {false, "Write operations not supported by this provider"};
+
+    bool ok = nativeProvider->removeModelFromGroup(groupName, modelName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Modified;
+        event.modelName = groupName;
+        const_cast<ModelEngine*>(this)->notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to remove model from group"};
 }
 
 ModelEngine::BoundingBox ModelEngine::getModelBounds(const std::string& name) const
@@ -1432,6 +1797,122 @@ bool ModelEngine::hasSubmodel(const std::string& modelName, const std::string& s
     return m->GetSubModel(submodelName) != nullptr;
 }
 
+SubmodelDefinition ModelEngine::getSubmodelDefinition(const std::string& modelName, const std::string& submodelName) const
+{
+    SubmodelDefinition def;
+    Model* m = findModel(modelName);
+    if (m == nullptr) return def;
+    wxXmlNode* xml = m->GetModelXml();
+    if (xml == nullptr) return def;
+    for (wxXmlNode* child = xml->GetChildren(); child != nullptr; child = child->GetNext()) {
+        if (child->GetName() == "subModel" && child->GetAttribute("name") == wxString(submodelName)) {
+            def.name = submodelName;
+            def.isRanges = (child->GetAttribute("type", "ranges") == "ranges");
+            def.vertical = (child->GetAttribute("layout") == "vertical");
+            def.bufferStyle = child->GetAttribute("bufferstyle", "Default").ToStdString();
+            def.subBuffer = child->GetAttribute("subBuffer").ToStdString();
+            if (def.isRanges) {
+                for (int x = 0; child->HasAttribute(wxString::Format("line%d", x)); x++) {
+                    def.strands.push_back(child->GetAttribute(wxString::Format("line%d", x)).ToStdString());
+                }
+            }
+            return def;
+        }
+    }
+    return def;
+}
+
+OperationResult ModelEngine::setSubmodel(const std::string& modelName, const std::string& submodelName, const SubmodelDefinition& definition)
+{
+    Model* m = findModel(modelName);
+    if (m == nullptr) return {false, "Model '" + modelName + "' not found"};
+    wxXmlNode* xml = m->GetModelXml();
+    if (xml == nullptr) return {false, "Model XML not available"};
+    wxXmlNode* smNode = nullptr;
+    for (wxXmlNode* child = xml->GetChildren(); child != nullptr; child = child->GetNext()) {
+        if (child->GetName() == "subModel" && child->GetAttribute("name") == wxString(submodelName)) {
+            smNode = child;
+            break;
+        }
+    }
+    if (smNode == nullptr) {
+        smNode = new wxXmlNode(wxXML_ELEMENT_NODE, "subModel");
+        smNode->AddAttribute("name", submodelName);
+        xml->AddChild(smNode);
+    }
+    // Clear old line attributes
+    for (int x = 0; smNode->HasAttribute(wxString::Format("line%d", x)); x++) {
+        smNode->DeleteAttribute(wxString::Format("line%d", x));
+    }
+    smNode->DeleteAttribute("subBuffer");
+    // Set/update attributes via delete+add pattern
+    auto setA = [&smNode](const wxString& key, const wxString& value) {
+        if (smNode->HasAttribute(key)) smNode->DeleteAttribute(key);
+        smNode->AddAttribute(key, value);
+    };
+    setA("type", definition.isRanges ? "ranges" : "subbuffer");
+    setA("layout", definition.vertical ? "vertical" : "horizontal");
+    setA("bufferstyle", definition.bufferStyle.empty() ? "Default" : definition.bufferStyle);
+    if (definition.isRanges) {
+        for (size_t i = 0; i < definition.strands.size(); i++)
+            smNode->AddAttribute(wxString::Format("line%d", (int)i), definition.strands[i]);
+    } else {
+        smNode->AddAttribute("subBuffer", definition.subBuffer);
+    }
+    m->RemoveSubModel(submodelName);
+    m->ParseSubModel(smNode);
+    ModelChangeEvent evt;
+    evt.type = ModelChangeType::Modified;
+    evt.modelName = modelName;
+    notifyModelChanged(evt);
+    return {true, ""};
+}
+
+OperationResult ModelEngine::deleteSubmodel(const std::string& modelName, const std::string& submodelName)
+{
+    Model* m = findModel(modelName);
+    if (m == nullptr) return {false, "Model '" + modelName + "' not found"};
+    wxXmlNode* xml = m->GetModelXml();
+    if (xml == nullptr) return {false, "Model XML not available"};
+    for (wxXmlNode* child = xml->GetChildren(); child != nullptr; child = child->GetNext()) {
+        if (child->GetName() == "subModel" && child->GetAttribute("name") == wxString(submodelName)) {
+            xml->RemoveChild(child);
+            delete child;
+            m->RemoveSubModel(submodelName);
+            ModelChangeEvent evt;
+            evt.type = ModelChangeType::Modified;
+            evt.modelName = modelName;
+            notifyModelChanged(evt);
+            return {true, ""};
+        }
+    }
+    return {false, "Submodel '" + submodelName + "' not found"};
+}
+
+OperationResult ModelEngine::renameSubmodel(const std::string& modelName, const std::string& oldName, const std::string& newName)
+{
+    Model* m = findModel(modelName);
+    if (m == nullptr) return {false, "Model '" + modelName + "' not found"};
+    if (m->GetSubModel(oldName) == nullptr) return {false, "Submodel '" + oldName + "' not found"};
+    if (m->GetSubModel(newName) != nullptr) return {false, "Submodel '" + newName + "' already exists"};
+    wxXmlNode* xml = m->GetModelXml();
+    if (xml == nullptr) return {false, "Model XML not available"};
+    for (wxXmlNode* child = xml->GetChildren(); child != nullptr; child = child->GetNext()) {
+        if (child->GetName() == "subModel" && child->GetAttribute("name") == wxString(oldName)) {
+            child->DeleteAttribute("name");
+            child->AddAttribute("name", newName);
+            m->RemoveSubModel(oldName);
+            m->ParseSubModel(child);
+            ModelChangeEvent evt;
+            evt.type = ModelChangeType::Modified;
+            evt.modelName = modelName;
+            notifyModelChanged(evt);
+            return {true, ""};
+        }
+    }
+    return {false, "Submodel XML node not found"};
+}
+
 // --- Groups ---
 
 std::vector<ModelGroupInfo> ModelEngine::getModelGroups() const
@@ -1496,6 +1977,112 @@ std::vector<std::string> ModelEngine::getGroupsContainingModel(const std::string
         }
     }
     return result;
+}
+
+// --- Group CRUD ---
+
+OperationResult ModelEngine::createModelGroup(const std::string& groupName,
+                                              const std::vector<std::string>& modelNames)
+{
+    if (_provider->hasModel(groupName))
+        return {false, "A model or group named '" + groupName + "' already exists"};
+
+    ModelManagerAdapter* adapter = getAdapter();
+    if (adapter == nullptr)
+        return {false, "Write operations not supported by this provider"};
+
+    bool ok = adapter->createModelGroup(groupName, modelNames);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Added;
+        event.modelName = groupName;
+        notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to create model group '" + groupName + "'"};
+}
+
+OperationResult ModelEngine::deleteModelGroup(const std::string& groupName)
+{
+    Model* m = findModel(groupName);
+    if (m == nullptr || m->GetDisplayAs() != "ModelGroup")
+        return {false, "Group '" + groupName + "' not found"};
+
+    ModelManagerAdapter* adapter = getAdapter();
+    if (adapter == nullptr)
+        return {false, "Write operations not supported by this provider"};
+
+    bool ok = adapter->deleteModel(groupName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Removed;
+        event.modelName = groupName;
+        notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to delete group '" + groupName + "'"};
+}
+
+OperationResult ModelEngine::renameModelGroup(const std::string& oldName, const std::string& newName)
+{
+    Model* m = findModel(oldName);
+    if (m == nullptr || m->GetDisplayAs() != "ModelGroup")
+        return {false, "Group '" + oldName + "' not found"};
+
+    if (_provider->hasModel(newName))
+        return {false, "A model or group named '" + newName + "' already exists"};
+
+    ModelManagerAdapter* adapter = getAdapter();
+    if (adapter == nullptr)
+        return {false, "Write operations not supported by this provider"};
+
+    bool ok = adapter->renameModel(oldName, newName);
+    if (ok) {
+        ModelChangeEvent event;
+        event.type = ModelChangeType::Renamed;
+        event.modelName = newName;
+        event.oldName = oldName;
+        notifyModelChanged(event);
+    }
+    return {ok, ok ? "" : "Failed to rename group '" + oldName + "'"};
+}
+
+OperationResult ModelEngine::addModelToGroup(const std::string& groupName, const std::string& modelName)
+{
+    Model* m = findModel(groupName);
+    if (m == nullptr || m->GetDisplayAs() != "ModelGroup")
+        return {false, "Group '" + groupName + "' not found"};
+
+    ModelGroup* grp = dynamic_cast<ModelGroup*>(m);
+    if (grp == nullptr)
+        return {false, "'" + groupName + "' is not a model group"};
+
+    grp->AddModel(modelName);
+
+    ModelChangeEvent event;
+    event.type = ModelChangeType::Modified;
+    event.modelName = groupName;
+    notifyModelChanged(event);
+
+    return {true, ""};
+}
+
+OperationResult ModelEngine::removeModelFromGroup(const std::string& groupName, const std::string& modelName)
+{
+    Model* m = findModel(groupName);
+    if (m == nullptr || m->GetDisplayAs() != "ModelGroup")
+        return {false, "Group '" + groupName + "' not found"};
+
+    ModelGroup* grp = dynamic_cast<ModelGroup*>(m);
+    if (grp == nullptr)
+        return {false, "'" + groupName + "' is not a model group"};
+
+    grp->ModelRemoved(modelName);
+
+    ModelChangeEvent event;
+    event.type = ModelChangeType::Modified;
+    event.modelName = groupName;
+    notifyModelChanged(event);
+
+    return {true, ""};
 }
 
 // --- Position & Geometry ---

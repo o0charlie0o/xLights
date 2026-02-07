@@ -24,6 +24,15 @@ static const CGFloat kModelTreeDefaultWidth = 280.0;
 static const CGFloat kPropertiesMinWidth = 200.0;
 static const CGFloat kPropertiesDefaultWidth = 260.0;
 
+/// Custom pasteboard type for model clipboard data
+static NSPasteboardType const XLModelPasteboardType = @"com.xlights.model";
+
+/// Position offset (in world units) applied to each pasted model to avoid stacking
+static const float kPastePositionOffset = 40.0f;
+
+/// Time window (seconds) for coalescing rapid nudge operations into one undo group
+static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
+
 @interface XLLayoutViewController ()
 
 @property (nonatomic, strong) NSSplitView *splitView;
@@ -33,14 +42,62 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 @property (nonatomic, strong, readwrite) XLLayoutUndoController *undoController;
 @property (nonatomic, assign) XLToolMode manipulationToolMode;
 
+/// Nudge undo coalescing: accumulate rapid nudges into a single undo operation
+@property (nonatomic, assign) BOOL nudgeUndoGroupOpen;
+@property (nonatomic, strong) NSTimer *nudgeCoalesceTimer;
+@property (nonatomic, copy) NSString *nudgeModelName;
+@property (nonatomic, assign) float nudgeStartX;
+@property (nonatomic, assign) float nudgeStartY;
+
+/// Layout group selector and toolbar
+@property (nonatomic, strong, readwrite) NSPopUpButton *layoutGroupSelector;
+@property (nonatomic, copy, readwrite) NSString *currentLayoutGroup;
+
 @end
 
 @implementation XLLayoutViewController
 
 - (void)loadView {
+    _currentLayoutGroup = @"Default";
+
     NSView *view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 600)];
     view.wantsLayer = YES;
     view.layer.backgroundColor = [[NSColor colorWithWhite:0.16 alpha:1.0] CGColor];
+
+    // Layout group toolbar
+    NSView *toolbarView = [[NSView alloc] initWithFrame:NSZeroRect];
+    toolbarView.translatesAutoresizingMaskIntoConstraints = NO;
+    toolbarView.wantsLayer = YES;
+    toolbarView.layer.backgroundColor = [[NSColor colorWithWhite:0.14 alpha:1.0] CGColor];
+    [view addSubview:toolbarView];
+
+    NSTextField *previewLabel = [NSTextField labelWithString:@"Preview:"];
+    previewLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    previewLabel.textColor = [NSColor secondaryLabelColor];
+    previewLabel.font = [NSFont systemFontOfSize:11];
+    [toolbarView addSubview:previewLabel];
+
+    _layoutGroupSelector = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    _layoutGroupSelector.translatesAutoresizingMaskIntoConstraints = NO;
+    _layoutGroupSelector.controlSize = NSControlSizeSmall;
+    _layoutGroupSelector.font = [NSFont systemFontOfSize:11];
+    _layoutGroupSelector.target = self;
+    _layoutGroupSelector.action = @selector(layoutGroupSelectorChanged:);
+    [toolbarView addSubview:_layoutGroupSelector];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [toolbarView.topAnchor constraintEqualToAnchor:view.topAnchor],
+        [toolbarView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [toolbarView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [toolbarView.heightAnchor constraintEqualToConstant:28],
+
+        [previewLabel.centerYAnchor constraintEqualToAnchor:toolbarView.centerYAnchor],
+        [previewLabel.leadingAnchor constraintEqualToAnchor:toolbarView.leadingAnchor constant:8],
+
+        [_layoutGroupSelector.centerYAnchor constraintEqualToAnchor:toolbarView.centerYAnchor],
+        [_layoutGroupSelector.leadingAnchor constraintEqualToAnchor:previewLabel.trailingAnchor constant:4],
+        [_layoutGroupSelector.widthAnchor constraintGreaterThanOrEqualToConstant:140],
+    ]];
 
     // Split view: model tree (left) | preview (center) | properties (right)
     _splitView = [[NSSplitView alloc] initWithFrame:view.bounds];
@@ -51,7 +108,7 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     [view addSubview:_splitView];
 
     [NSLayoutConstraint activateConstraints:@[
-        [_splitView.topAnchor constraintEqualToAnchor:view.topAnchor],
+        [_splitView.topAnchor constraintEqualToAnchor:toolbarView.bottomAnchor],
         [_splitView.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
         [_splitView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [_splitView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
@@ -133,6 +190,19 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
                                                  name:@"XLShowFolderDidChangeNotification"
                                                object:nil];
 
+    // Listen for layout group list changes
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(layoutGroupListDidChange:)
+                                                 name:@"XLLayoutGroupListDidChangeNotification"
+                                               object:nil];
+
+    // Listen for layout group selection changes from bridge
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(layoutGroupDidChange:)
+                                                 name:@"XLLayoutGroupDidChangeNotification"
+                                               object:nil];
+
+    [self reloadLayoutGroupSelector];
     [_modelTreeController reloadData];
 }
 
@@ -143,6 +213,7 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 
 - (void)viewDidDisappear {
     [super viewDidDisappear];
+    [self finalizeNudgeUndoGroup];
     [_previewView stopRenderLoop];
 }
 
@@ -499,6 +570,82 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     }
 }
 
+#pragma mark - Arrow Key Nudge
+
+- (void)previewView:(XLMetalPreviewView *)view didNudgeModelWithDeltaX:(float)deltaX deltaY:(float)deltaY {
+    NSString *modelName = _previewView.selectedModelName;
+    if (!modelName) return;
+
+    NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
+    if (!modelInfo) return;
+
+    if ([modelInfo[@"Locked"] boolValue]) return;
+
+    float curX = [modelInfo[@"WorldPosX"] floatValue];
+    float curY = [modelInfo[@"WorldPosY"] floatValue];
+    float newX = curX + deltaX;
+    float newY = curY + deltaY;
+
+    if (_nudgeUndoGroupOpen && [_nudgeModelName isEqualToString:modelName]) {
+        // Continue an existing nudge sequence -- just reset the coalesce timer
+        [_nudgeCoalesceTimer invalidate];
+    } else {
+        // Finalize any previous nudge group before starting a new one
+        [self finalizeNudgeUndoGroup];
+        _nudgeModelName = modelName;
+        _nudgeStartX = curX;
+        _nudgeStartY = curY;
+        _nudgeUndoGroupOpen = YES;
+    }
+
+    // Apply the delta immediately
+    [_engineBridge updateModelProperty:modelName key:@"WorldPosX" value:@(newX)];
+    [_engineBridge updateModelProperty:modelName key:@"WorldPosY" value:@(newY)];
+
+    // Restart the coalesce timer; when it fires the undo entry is registered
+    _nudgeCoalesceTimer = [NSTimer scheduledTimerWithTimeInterval:kNudgeCoalesceInterval
+                                                          target:self
+                                                        selector:@selector(nudgeCoalesceTimerFired:)
+                                                        userInfo:nil
+                                                         repeats:NO];
+
+    // Refresh the preview and properties
+    [self selectModel:modelName];
+}
+
+- (void)nudgeCoalesceTimerFired:(NSTimer *)timer {
+    [self finalizeNudgeUndoGroup];
+}
+
+- (void)finalizeNudgeUndoGroup {
+    if (!_nudgeUndoGroupOpen) return;
+
+    NSString *modelName = _nudgeModelName;
+    if (modelName) {
+        NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
+        if (modelInfo) {
+            float finalX = [modelInfo[@"WorldPosX"] floatValue];
+            float finalY = [modelInfo[@"WorldPosY"] floatValue];
+
+            // Register a single undo entry spanning start -> final position
+            [_undoController beginUndoGroup:@"Nudge"];
+            [_undoController registerPropertyChange:modelName
+                                                key:@"WorldPosX"
+                                           oldValue:@(_nudgeStartX)
+                                           newValue:@(finalX)];
+            [_undoController registerPropertyChange:modelName
+                                                key:@"WorldPosY"
+                                           oldValue:@(_nudgeStartY)
+                                           newValue:@(finalY)];
+            [_undoController endUndoGroup];
+        }
+    }
+
+    _nudgeUndoGroupOpen = NO;
+    _nudgeModelName = nil;
+    _nudgeCoalesceTimer = nil;
+}
+
 #pragma mark - XLModelPropertiesDelegate
 
 - (void)modelProperties:(XLModelPropertiesView *)view
@@ -605,20 +752,36 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
 }
 
 - (void)previewView:(XLMetalPreviewView *)view didRequestAlignModels:(NSString *)alignment {
+    BOOL isGroundAlign = [alignment isEqualToString:@"Align With Ground"];
     NSArray<NSString *> *selectedNames = [_modelTreeController selectedModelNames];
-    if (selectedNames.count < 2) return;
 
-    // Use the first selected model as the reference
+    // Ground alignment works on 1+ models; all others need 2+
+    if (isGroundAlign) {
+        if (selectedNames.count < 1) return;
+    } else {
+        if (selectedNames.count < 2) return;
+    }
+
+    // Use the first selected model as the reference (not used for ground align)
     NSString *refName = selectedNames.firstObject;
-    NSDictionary *refBounds = [_engineBridge getModelBounds:refName];
-    if (!refBounds) return;
+    NSDictionary *refBounds = isGroundAlign ? nil : [_engineBridge getModelBounds:refName];
+    if (!isGroundAlign && !refBounds) return;
 
     float refMinX = [refBounds[@"minX"] floatValue];
     float refMaxX = [refBounds[@"maxX"] floatValue];
     float refMinY = [refBounds[@"minY"] floatValue];
     float refMaxY = [refBounds[@"maxY"] floatValue];
+    float refMinZ = [refBounds[@"minZ"] floatValue];
+    float refMaxZ = [refBounds[@"maxZ"] floatValue];
 
-    for (NSUInteger i = 1; i < selectedNames.count; i++) {
+    NSString *actionName = [NSString stringWithFormat:@"Align %@", alignment];
+    [_undoController beginUndoGroup:actionName];
+
+    // For ground alignment, iterate all selected models (including first).
+    // For other alignments, skip the reference model (first).
+    NSUInteger startIndex = isGroundAlign ? 0 : 1;
+
+    for (NSUInteger i = startIndex; i < selectedNames.count; i++) {
         NSString *name = selectedNames[i];
         NSDictionary *bounds = [_engineBridge getModelBounds:name];
         NSDictionary *info = [_engineBridge getModelInfo:name];
@@ -628,11 +791,15 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
         float curMaxX = [bounds[@"maxX"] floatValue];
         float curMinY = [bounds[@"minY"] floatValue];
         float curMaxY = [bounds[@"maxY"] floatValue];
+        float curMinZ = [bounds[@"minZ"] floatValue];
+        float curMaxZ = [bounds[@"maxZ"] floatValue];
         float curPosX = [info[@"WorldPosX"] floatValue];
         float curPosY = [info[@"WorldPosY"] floatValue];
+        float curPosZ = [info[@"WorldPosZ"] floatValue];
 
         float newPosX = curPosX;
         float newPosY = curPosY;
+        float newPosZ = curPosZ;
 
         if ([alignment isEqualToString:@"Top"]) {
             newPosY = curPosY + (refMaxY - curMaxY);
@@ -650,15 +817,33 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
             float refCenterY = (refMinY + refMaxY) / 2.0f;
             float curCenterY = (curMinY + curMaxY) / 2.0f;
             newPosY = curPosY + (refCenterY - curCenterY);
+        } else if ([alignment isEqualToString:@"Front"]) {
+            newPosZ = curPosZ + (refMinZ - curMinZ);
+        } else if ([alignment isEqualToString:@"Back"]) {
+            newPosZ = curPosZ + (refMaxZ - curMaxZ);
+        } else if ([alignment isEqualToString:@"Depth Center"]) {
+            float refCenterZ = (refMinZ + refMaxZ) / 2.0f;
+            float curCenterZ = (curMinZ + curMaxZ) / 2.0f;
+            newPosZ = curPosZ + (refCenterZ - curCenterZ);
+        } else if (isGroundAlign) {
+            newPosY = curPosY - curMinY;
         }
 
         if (newPosX != curPosX) {
+            [_undoController registerPropertyChange:name key:@"WorldPosX" oldValue:@(curPosX) newValue:@(newPosX)];
             [_engineBridge updateModelProperty:name key:@"WorldPosX" value:@(newPosX)];
         }
         if (newPosY != curPosY) {
+            [_undoController registerPropertyChange:name key:@"WorldPosY" oldValue:@(curPosY) newValue:@(newPosY)];
             [_engineBridge updateModelProperty:name key:@"WorldPosY" value:@(newPosY)];
         }
+        if (newPosZ != curPosZ) {
+            [_undoController registerPropertyChange:name key:@"WorldPosZ" oldValue:@(curPosZ) newValue:@(newPosZ)];
+            [_engineBridge updateModelProperty:name key:@"WorldPosZ" value:@(newPosZ)];
+        }
     }
+
+    [_undoController endUndoGroup];
 
     [_previewView reloadModels];
     [self selectModel:_previewView.selectedModelName];
@@ -668,7 +853,23 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     NSArray<NSString *> *selectedNames = [_modelTreeController selectedModelNames];
     if (selectedNames.count < 3) return;
 
-    BOOL horizontal = [direction isEqualToString:@"Horizontal"];
+    // Determine which axis to distribute along
+    NSString *posKey;
+    NSString *boundsMinKey;
+    NSString *boundsMaxKey;
+    if ([direction isEqualToString:@"Horizontal"]) {
+        posKey = @"WorldPosX";
+        boundsMinKey = @"minX";
+        boundsMaxKey = @"maxX";
+    } else if ([direction isEqualToString:@"Depth"]) {
+        posKey = @"WorldPosZ";
+        boundsMinKey = @"minZ";
+        boundsMaxKey = @"maxZ";
+    } else {
+        posKey = @"WorldPosY";
+        boundsMinKey = @"minY";
+        boundsMaxKey = @"maxY";
+    }
 
     // Collect positions and sort
     NSMutableArray<NSDictionary *> *models = [NSMutableArray array];
@@ -677,14 +878,11 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
         NSDictionary *info = [_engineBridge getModelInfo:name];
         if (!bounds || !info) continue;
 
-        float center;
-        if (horizontal) {
-            center = ([bounds[@"minX"] floatValue] + [bounds[@"maxX"] floatValue]) / 2.0f;
-        } else {
-            center = ([bounds[@"minY"] floatValue] + [bounds[@"maxY"] floatValue]) / 2.0f;
-        }
+        float center = ([bounds[boundsMinKey] floatValue] + [bounds[boundsMaxKey] floatValue]) / 2.0f;
         [models addObject:@{@"name": name, @"center": @(center), @"info": info}];
     }
+
+    if (models.count < 3) return;
 
     [models sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         return [a[@"center"] compare:b[@"center"]];
@@ -694,6 +892,9 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     float lastCenter = [models.lastObject[@"center"] floatValue];
     float spacing = (lastCenter - firstCenter) / (float)(models.count - 1);
 
+    // Begin undo group for the batch operation
+    [_undoController.undoManager beginUndoGrouping];
+
     for (NSUInteger i = 1; i < models.count - 1; i++) {
         NSDictionary *model = models[i];
         NSString *name = model[@"name"];
@@ -702,10 +903,14 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
         float targetCenter = firstCenter + spacing * (float)i;
         float delta = targetCenter - currentCenter;
 
-        NSString *key = horizontal ? @"WorldPosX" : @"WorldPosY";
-        float currentPos = [info[key] floatValue];
-        [_engineBridge updateModelProperty:name key:key value:@(currentPos + delta)];
+        float currentPos = [info[posKey] floatValue];
+        float newPos = currentPos + delta;
+        [_undoController registerPropertyChange:name key:posKey oldValue:@(currentPos) newValue:@(newPos)];
+        [_engineBridge updateModelProperty:name key:posKey value:@(newPos)];
     }
+
+    [_undoController.undoManager endUndoGrouping];
+    [_undoController.undoManager setActionName:[NSString stringWithFormat:@"Distribute %@", direction]];
 
     [_previewView reloadModels];
     [self selectModel:_previewView.selectedModelName];
@@ -726,6 +931,8 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     BOOL matchWidth = [dimension isEqualToString:@"Match Width"] || [dimension isEqualToString:@"Match Size"];
     BOOL matchHeight = [dimension isEqualToString:@"Match Height"] || [dimension isEqualToString:@"Match Size"];
 
+    [_undoController beginUndoGroup:[NSString stringWithFormat:@"Resize %@", dimension]];
+
     for (NSUInteger i = 1; i < selectedNames.count; i++) {
         NSString *name = selectedNames[i];
         NSDictionary *bounds = [_engineBridge getModelBounds:name];
@@ -739,18 +946,417 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
             float curScaleX = [info[@"ScaleX"] floatValue];
             if (curScaleX == 0) curScaleX = 1.0f;
             float newScaleX = curScaleX * (refWidth / curWidth);
+            [_undoController registerPropertyChange:name key:@"ScaleX" oldValue:@(curScaleX) newValue:@(newScaleX)];
             [_engineBridge updateModelProperty:name key:@"ScaleX" value:@(newScaleX)];
         }
         if (matchHeight && curHeight > 0.01f) {
             float curScaleY = [info[@"ScaleY"] floatValue];
             if (curScaleY == 0) curScaleY = 1.0f;
             float newScaleY = curScaleY * (refHeight / curHeight);
+            [_undoController registerPropertyChange:name key:@"ScaleY" oldValue:@(curScaleY) newValue:@(newScaleY)];
             [_engineBridge updateModelProperty:name key:@"ScaleY" value:@(newScaleY)];
         }
     }
 
+    [_undoController endUndoGroup];
+
     [_previewView reloadModels];
     [self selectModel:_previewView.selectedModelName];
+}
+
+- (void)previewView:(XLMetalPreviewView *)view didRequestBulkEdit:(NSString *)editType {
+    NSArray<NSString *> *selectedNames = [_modelTreeController selectedModelNames];
+    if (selectedNames.count == 0) {
+        // Fall back to the single selected model in the preview
+        if (_previewView.selectedModelName) {
+            selectedNames = @[_previewView.selectedModelName];
+        } else {
+            return;
+        }
+    }
+
+    // Map the edit type string to bulk edit operations
+    if ([editType isEqualToString:@"Active"]) {
+        [self bulkSetProperty:@"Active" value:@"1" forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Inactive"]) {
+        [self bulkSetProperty:@"Active" value:@"0" forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Tag Color"]) {
+        [self bulkEditTagColorForModels:selectedNames];
+    } else if ([editType isEqualToString:@"Preview"]) {
+        [self bulkEditTextProperty:@"LayoutGroup"
+                             title:@"Set Preview Group"
+                           message:[NSString stringWithFormat:@"Enter the preview/layout group for %lu selected models.", (unsigned long)selectedNames.count]
+                      defaultValue:@"Default"
+                         forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Pixel Size"]) {
+        [self bulkEditSliderProperty:@"PixelSize"
+                               title:@"Set Pixel Size"
+                             message:[NSString stringWithFormat:@"Choose pixel size for %lu selected models.", (unsigned long)selectedNames.count]
+                            minValue:1 maxValue:10 defaultValue:2 integerOnly:YES
+                           forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Pixel Style"]) {
+        [self bulkEditPickerProperty:@"PixelStyle"
+                               title:@"Set Pixel Style"
+                             message:[NSString stringWithFormat:@"Choose pixel style for %lu selected models.", (unsigned long)selectedNames.count]
+                             options:@[@"Square", @"Circle", @"Smooth Circle", @"Blended Circle"]
+                            useIndex:YES
+                           forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Transparency"]) {
+        [self bulkEditSliderProperty:@"Transparency"
+                               title:@"Set Transparency"
+                             message:[NSString stringWithFormat:@"Choose transparency for %lu selected models (0 = opaque, 100 = fully transparent).", (unsigned long)selectedNames.count]
+                            minValue:0 maxValue:100 defaultValue:0 integerOnly:YES
+                           forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Controller Name"]) {
+        NSMutableArray *options = [NSMutableArray arrayWithObject:@"(None)"];
+        NSArray<NSString *> *controllerNames = [_engineBridge getControllerNames];
+        if (controllerNames.count > 0) {
+            [options addObjectsFromArray:controllerNames];
+        }
+        [self bulkEditPickerProperty:@"Controller"
+                               title:@"Set Controller Name"
+                             message:[NSString stringWithFormat:@"Choose controller for %lu selected models.", (unsigned long)selectedNames.count]
+                             options:options
+                            useIndex:NO
+                           forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Controller Port"]) {
+        [self bulkEditTextProperty:@"ControllerPort"
+                             title:@"Set Controller Port"
+                           message:[NSString stringWithFormat:@"Enter the port number for %lu selected models.", (unsigned long)selectedNames.count]
+                      defaultValue:@"1"
+                         forModels:selectedNames];
+    } else if ([editType isEqualToString:@"Controller Protocol"]) {
+        [self bulkEditPickerProperty:@"Protocol"
+                               title:@"Set Controller Protocol"
+                             message:[NSString stringWithFormat:@"Choose protocol for %lu selected models.", (unsigned long)selectedNames.count]
+                             options:@[@"ws2811", @"WS2801", @"TLS3001", @"LPD6803", @"LPD8806",
+                                       @"APA102", @"APA109", @"ICICOB", @"SM16716",
+                                       @"DMX", @"LOR", @"Renard", @"Open DMX"]
+                            useIndex:NO
+                           forModels:selectedNames];
+    }
+
+    [_previewView reloadModels];
+}
+
+#pragma mark - Bulk Edit Helpers (Preview Context Menu)
+
+- (void)bulkSetProperty:(NSString *)key value:(NSString *)value forModels:(NSArray<NSString *> *)modelNames {
+    for (NSString *name in modelNames) {
+        [_engineBridge updateModelProperty:name key:key value:value];
+    }
+    [_modelTreeController reloadData];
+    [_previewView reloadModels];
+}
+
+- (void)bulkEditTagColorForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Tag Color";
+    alert.informativeText = [NSString stringWithFormat:@"Choose a tag color for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSColorWell *colorWell = [[NSColorWell alloc] initWithFrame:NSMakeRect(0, 0, 60, 30)];
+    colorWell.color = [NSColor cyanColor];
+    alert.accessoryView = colorWell;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSColor *color = [colorWell.color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+        CGFloat r, g, b, a;
+        [color getRed:&r green:&g blue:&b alpha:&a];
+        NSString *colorStr = [NSString stringWithFormat:@"#%02X%02X%02X",
+                              (int)(r * 255), (int)(g * 255), (int)(b * 255)];
+        [self bulkSetProperty:@"TagColour" value:colorStr forModels:modelNames];
+    }
+}
+
+- (void)bulkEditTextProperty:(NSString *)key
+                       title:(NSString *)title
+                     message:(NSString *)message
+                defaultValue:(NSString *)defaultValue
+                   forModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = message;
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
+    input.stringValue = defaultValue ?: @"";
+    alert.accessoryView = input;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value = input.stringValue;
+        if (value.length > 0) {
+            [self bulkSetProperty:key value:value forModels:modelNames];
+        }
+    }
+}
+
+- (void)bulkEditSliderProperty:(NSString *)key
+                         title:(NSString *)title
+                       message:(NSString *)message
+                      minValue:(double)minValue
+                      maxValue:(double)maxValue
+                  defaultValue:(double)defaultValue
+                   integerOnly:(BOOL)integerOnly
+                     forModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = message;
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 250, 30)];
+    NSSlider *slider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 190, 20)];
+    slider.minValue = minValue;
+    slider.maxValue = maxValue;
+    slider.doubleValue = defaultValue;
+    if (integerOnly && (maxValue - minValue) <= 20) {
+        slider.numberOfTickMarks = (NSInteger)(maxValue - minValue) + 1;
+        slider.allowsTickMarkValuesOnly = YES;
+    }
+
+    NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(200, 2, 50, 20)];
+    label.editable = NO;
+    label.bordered = NO;
+    label.drawsBackground = NO;
+    label.alignment = NSTextAlignmentRight;
+
+    if (integerOnly) {
+        label.stringValue = [NSString stringWithFormat:@"%ld", (long)slider.integerValue];
+        [label bind:NSValueBinding toObject:slider withKeyPath:@"integerValue" options:nil];
+    } else {
+        label.stringValue = [NSString stringWithFormat:@"%.1f", slider.doubleValue];
+        [label bind:NSValueBinding toObject:slider withKeyPath:@"doubleValue" options:nil];
+    }
+
+    [container addSubview:slider];
+    [container addSubview:label];
+    alert.accessoryView = container;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value;
+        if (integerOnly) {
+            value = [NSString stringWithFormat:@"%ld", (long)slider.integerValue];
+        } else {
+            value = [NSString stringWithFormat:@"%.2f", slider.doubleValue];
+        }
+        [self bulkSetProperty:key value:value forModels:modelNames];
+    }
+}
+
+- (void)bulkEditPickerProperty:(NSString *)key
+                         title:(NSString *)title
+                       message:(NSString *)message
+                       options:(NSArray<NSString *> *)options
+                      useIndex:(BOOL)useIndex
+                     forModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = message;
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 250, 25) pullsDown:NO];
+    [popup addItemsWithTitles:options];
+    alert.accessoryView = popup;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value;
+        if (useIndex) {
+            value = [NSString stringWithFormat:@"%ld", (long)popup.indexOfSelectedItem];
+        } else {
+            value = popup.titleOfSelectedItem;
+            if ([value isEqualToString:@"(None)"]) {
+                value = @"";
+            }
+        }
+        [self bulkSetProperty:key value:value forModels:modelNames];
+    }
+}
+
+#pragma mark - Copy/Cut/Paste
+
+- (NSArray<NSString *> *)selectedModelNamesForClipboard {
+    NSArray<NSString *> *treeSelection = [_modelTreeController selectedModelNames];
+    if (treeSelection.count > 0) {
+        return treeSelection;
+    }
+    NSString *previewSelection = _previewView.selectedModelName;
+    if (previewSelection) {
+        return @[previewSelection];
+    }
+    return @[];
+}
+
+- (NSString *)generateUniquePasteName:(NSString *)baseName {
+    NSArray<NSString *> *existingNames = [_engineBridge getModelNames];
+    NSSet<NSString *> *existingSet = [NSSet setWithArray:existingNames];
+
+    NSString *candidate = [NSString stringWithFormat:@"%@_copy", baseName];
+    if (![existingSet containsObject:candidate]) {
+        return candidate;
+    }
+    for (int i = 2; i <= 1000; i++) {
+        candidate = [NSString stringWithFormat:@"%@_copy-%d", baseName, i];
+        if (![existingSet containsObject:candidate]) {
+            return candidate;
+        }
+    }
+    return [NSString stringWithFormat:@"%@_copy-%u", baseName, arc4random()];
+}
+
+- (void)copy:(id)sender {
+    NSArray<NSString *> *selectedNames = [self selectedModelNamesForClipboard];
+    if (selectedNames.count == 0) return;
+
+    NSMutableArray<NSDictionary *> *modelsData = [[NSMutableArray alloc] init];
+    for (NSString *name in selectedNames) {
+        NSDictionary *data = [_engineBridge getModelData:name];
+        if (data && data.count > 0) {
+            [modelsData addObject:data];
+        }
+    }
+
+    if (modelsData.count == 0) return;
+
+    NSData *archived = [NSKeyedArchiver archivedDataWithRootObject:modelsData
+                                             requiringSecureCoding:NO
+                                                             error:nil];
+    if (!archived) {
+        NSLog(@"XLLayoutViewController: Failed to archive model data for clipboard");
+        return;
+    }
+
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setData:archived forType:XLModelPasteboardType];
+
+    NSLog(@"XLLayoutViewController: Copied %lu model(s) to clipboard", (unsigned long)modelsData.count);
+}
+
+- (void)cut:(id)sender {
+    NSArray<NSString *> *selectedNames = [self selectedModelNamesForClipboard];
+    if (selectedNames.count == 0) return;
+
+    [self copy:sender];
+
+    for (NSString *name in selectedNames) {
+        NSDictionary *modelData = [_engineBridge getModelData:name];
+        BOOL success = [_engineBridge deleteModel:name];
+        if (success) {
+            [_undoController registerModelDeleted:name modelData:modelData];
+        }
+    }
+
+    [self clearSelection];
+    [_modelTreeController reloadData];
+    [_previewView reloadModels];
+
+    NSLog(@"XLLayoutViewController: Cut %lu model(s)", (unsigned long)selectedNames.count);
+}
+
+- (void)paste:(id)sender {
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    NSData *archived = [pb dataForType:XLModelPasteboardType];
+    if (!archived) return;
+
+    NSSet *allowedClasses = [NSSet setWithArray:@[
+        [NSArray class], [NSDictionary class], [NSString class], [NSNumber class]
+    ]];
+    NSArray<NSDictionary *> *modelsData = [NSKeyedUnarchiver unarchivedObjectOfClasses:allowedClasses
+                                                                              fromData:archived
+                                                                                 error:nil];
+    if (!modelsData || modelsData.count == 0) {
+        NSLog(@"XLLayoutViewController: Failed to unarchive model data from clipboard");
+        return;
+    }
+
+    NSString *lastPastedName = nil;
+
+    for (NSDictionary *modelData in modelsData) {
+        NSString *originalName = modelData[@"name"];
+        if (!originalName) continue;
+
+        NSString *newName = [self generateUniquePasteName:originalName];
+        NSMutableDictionary *pasteData = [modelData mutableCopy];
+
+        NSMutableDictionary *props = [pasteData[@"properties"] mutableCopy];
+        if (props) {
+            // Offset X position to avoid stacking on the original
+            float posX = [props[@"WorldPosX"] floatValue];
+            props[@"WorldPosX"] = [NSString stringWithFormat:@"%f", posX + kPastePositionOffset];
+
+            // Reset controller assignment so pasted model doesn't conflict
+            [props removeObjectForKey:@"Controller"];
+            [props removeObjectForKey:@"ModelChain"];
+            props[@"StartChannel"] = @"1";
+
+            // Unlock pasted model
+            props[@"Locked"] = @"0";
+
+            pasteData[@"properties"] = props;
+        }
+
+        BOOL success = [_engineBridge createModelFromData:pasteData withName:newName];
+        if (success) {
+            NSDictionary *createdData = [_engineBridge getModelData:newName];
+            [_undoController registerModelCreated:newName modelData:createdData];
+            lastPastedName = newName;
+            NSLog(@"XLLayoutViewController: Pasted model '%@' as '%@'", originalName, newName);
+        } else {
+            NSLog(@"XLLayoutViewController: Failed to paste model '%@' as '%@'", originalName, newName);
+        }
+    }
+
+    [_modelTreeController reloadData];
+    [_previewView reloadModels];
+
+    if (lastPastedName) {
+        [self selectModel:lastPastedName];
+        [_modelTreeController selectModelWithName:lastPastedName];
+    }
+}
+
+- (void)delete:(id)sender {
+    NSArray<NSString *> *selectedNames = [self selectedModelNamesForClipboard];
+    if (selectedNames.count == 0) return;
+
+    for (NSString *name in selectedNames) {
+        NSDictionary *modelData = [_engineBridge getModelData:name];
+        BOOL success = [_engineBridge deleteModel:name];
+        if (success) {
+            [_undoController registerModelDeleted:name modelData:modelData];
+        }
+    }
+
+    [self clearSelection];
+    [_modelTreeController reloadData];
+    [_previewView reloadModels];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    SEL action = menuItem.action;
+
+    if (action == @selector(copy:) || action == @selector(cut:) || action == @selector(delete:)) {
+        return [self selectedModelNamesForClipboard].count > 0;
+    }
+
+    if (action == @selector(paste:)) {
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        return [pb.types containsObject:XLModelPasteboardType];
+    }
+
+    if (action == @selector(undo:)) {
+        return [_undoController canUndo];
+    }
+
+    if (action == @selector(redo:)) {
+        return [_undoController canRedo];
+    }
+
+    return YES;
 }
 
 #pragma mark - Undo/Redo Actions
@@ -855,13 +1461,11 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
         return YES;
     }
     if ([actionType isEqualToString:@"MODEL_ALIGN_BACKS"]) {
-        // TODO: 3D z-axis alignment — needs getModelBounds z values
-        NSLog(@"XLLayoutViewController: MODEL_ALIGN_BACKS not yet implemented (3D)");
+        [self previewView:_previewView didRequestAlignModels:@"Back"];
         return YES;
     }
     if ([actionType isEqualToString:@"MODEL_ALIGN_FRONTS"]) {
-        // TODO: 3D z-axis alignment — needs getModelBounds z values
-        NSLog(@"XLLayoutViewController: MODEL_ALIGN_FRONTS not yet implemented (3D)");
+        [self previewView:_previewView didRequestAlignModels:@"Front"];
         return YES;
     }
 
@@ -872,6 +1476,10 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     }
     if ([actionType isEqualToString:@"MODEL_DISTRIBUTE_VERT"]) {
         [self previewView:_previewView didRequestDistributeModels:@"Vertical"];
+        return YES;
+    }
+    if ([actionType isEqualToString:@"MODEL_DISTRIBUTE_DEPTH"]) {
+        [self previewView:_previewView didRequestDistributeModels:@"Depth"];
         return YES;
     }
 
@@ -920,7 +1528,7 @@ static const CGFloat kPropertiesDefaultWidth = 260.0;
     }
 
     if ([actionType isEqualToString:@"MODEL_ALIGN_GROUND"]) {
-        NSLog(@"TODO: MODEL_ALIGN_GROUND not yet implemented");
+        [self previewView:_previewView didRequestAlignModels:@"Align With Ground"];
         return YES;
     }
 

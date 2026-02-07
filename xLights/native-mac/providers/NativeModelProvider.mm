@@ -171,6 +171,53 @@ std::vector<std::string> NativeModelProvider::getSubmodels(const std::string& mo
     return result;
 }
 
+std::map<std::string, std::string> NativeModelProvider::getSubmodelAttributes(
+    const std::string& modelName, const std::string& submodelName) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    const Model* model = nullptr;
+    if (_externalManager) {
+        model = _externalManager->GetModel(modelName);
+    } else {
+        auto it = _models.find(modelName);
+        if (it != _models.end()) model = it->second.get();
+    }
+    if (model == nullptr) return {};
+
+    wxXmlNode* xml = model->GetModelXml();
+    if (xml == nullptr) return {};
+
+    for (wxXmlNode* child = xml->GetChildren(); child != nullptr; child = child->GetNext()) {
+        if (child->GetName() == "subModel" && child->GetAttribute("name") == wxString(submodelName)) {
+            std::map<std::string, std::string> attrs;
+            for (wxXmlAttribute* attr = child->GetAttributes(); attr != nullptr; attr = attr->GetNext()) {
+                attrs[attr->GetName().ToStdString()] = attr->GetValue().ToStdString();
+            }
+            return attrs;
+        }
+    }
+    return {};
+}
+
+bool NativeModelProvider::setSubmodelAttributes(const std::string& modelName, const std::string& submodelName,
+                                                const std::map<std::string, std::string>& attrs)
+{
+    // Legacy build: submodel mutation goes through ModelEngine -> wxXmlNode directly
+    return false;
+}
+
+bool NativeModelProvider::deleteSubmodel(const std::string& modelName, const std::string& submodelName)
+{
+    return false;
+}
+
+bool NativeModelProvider::renameSubmodel(const std::string& modelName, const std::string& oldName,
+                                         const std::string& newName)
+{
+    return false;
+}
+
 bool NativeModelProvider::hasModel(const std::string& name) const
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -271,6 +318,8 @@ void NativeModelProvider::clearModels()
     std::lock_guard<std::mutex> lock(_mutex);
     _models.clear();
     _modelNames.clear();
+    _groupAttributes.clear();
+    _submodelAttributes.clear();
     _showFolderPath.clear();
 }
 
@@ -393,6 +442,47 @@ bool NativeModelProvider::parseModelsFromXML(const std::string& xmlContent)
     return modelElements.count > 0;
 }
 
+std::map<std::string, std::string> NativeModelProvider::getGroupAttributes(const std::string& groupName) const
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _groupAttributes.find(groupName);
+    if (it != _groupAttributes.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+bool NativeModelProvider::createGroup(const std::string& groupName, const std::string& modelNames)
+{
+    // Non-native build: delegate to external manager if available
+    NSLog(@"NativeModelProvider: createGroup not implemented for non-native build");
+    return false;
+}
+
+bool NativeModelProvider::deleteGroup(const std::string& groupName)
+{
+    NSLog(@"NativeModelProvider: deleteGroup not implemented for non-native build");
+    return false;
+}
+
+bool NativeModelProvider::renameGroup(const std::string& oldName, const std::string& newName)
+{
+    NSLog(@"NativeModelProvider: renameGroup not implemented for non-native build");
+    return false;
+}
+
+bool NativeModelProvider::addModelToGroup(const std::string& groupName, const std::string& modelName)
+{
+    NSLog(@"NativeModelProvider: addModelToGroup not implemented for non-native build");
+    return false;
+}
+
+bool NativeModelProvider::removeModelFromGroup(const std::string& groupName, const std::string& modelName)
+{
+    NSLog(@"NativeModelProvider: removeModelFromGroup not implemented for non-native build");
+    return false;
+}
+
 } // namespace xlEngine
 
 #else // XLIGHTS_NATIVE
@@ -434,7 +524,58 @@ const Model* NativeModelProvider::getModel(const std::string& name) const {
 }
 
 std::vector<std::string> NativeModelProvider::getSubmodels(const std::string& modelName) const {
-    return {};
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _submodelAttributes.find(modelName);
+    if (it == _submodelAttributes.end()) return {};
+    std::vector<std::string> result;
+    result.reserve(it->second.size());
+    for (const auto& pair : it->second) {
+        result.push_back(pair.first);
+    }
+    return result;
+}
+
+std::map<std::string, std::string> NativeModelProvider::getSubmodelAttributes(
+    const std::string& modelName, const std::string& submodelName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _submodelAttributes.find(modelName);
+    if (modelIt == _submodelAttributes.end()) return {};
+    auto smIt = modelIt->second.find(submodelName);
+    if (smIt == modelIt->second.end()) return {};
+    return smIt->second;
+}
+
+bool NativeModelProvider::setSubmodelAttributes(const std::string& modelName, const std::string& submodelName,
+                                                const std::map<std::string, std::string>& attrs) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_modelAttributes.find(modelName) == _modelAttributes.end()) return false;
+    _submodelAttributes[modelName][submodelName] = attrs;
+    return true;
+}
+
+bool NativeModelProvider::deleteSubmodel(const std::string& modelName, const std::string& submodelName) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _submodelAttributes.find(modelName);
+    if (modelIt == _submodelAttributes.end()) return false;
+    auto smIt = modelIt->second.find(submodelName);
+    if (smIt == modelIt->second.end()) return false;
+    modelIt->second.erase(smIt);
+    return true;
+}
+
+bool NativeModelProvider::renameSubmodel(const std::string& modelName, const std::string& oldName,
+                                         const std::string& newName) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto modelIt = _submodelAttributes.find(modelName);
+    if (modelIt == _submodelAttributes.end()) return false;
+    auto smIt = modelIt->second.find(oldName);
+    if (smIt == modelIt->second.end()) return false;
+    if (modelIt->second.find(newName) != modelIt->second.end()) return false;
+    auto attrs = smIt->second;
+    attrs["name"] = newName;
+    modelIt->second.erase(smIt);
+    modelIt->second[newName] = std::move(attrs);
+    return true;
 }
 
 bool NativeModelProvider::loadModelsFromShowFolder(const std::string& showFolderPath) {
@@ -485,6 +626,7 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
     _modelNames.clear();
     _groupNames.clear();
     _modelAttributes.clear();
+    _submodelAttributes.clear();
 
     // Parse group names first (from modelGroups section)
     NSArray<NSXMLElement*>* groupElements = [xmlDoc.rootElement nodesForXPath:@"//modelGroups/modelGroup" error:nil];
@@ -508,15 +650,52 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
                     attrs[[attr.name UTF8String]] = [attr.stringValue UTF8String];
                 }
             }
+            // Parse ControllerConnection child element attributes
+            NSArray<NSXMLElement*>* ccElements = [elem elementsForName:@"ControllerConnection"];
+            if (ccElements.count > 0) {
+                NSXMLElement* ccElem = ccElements.firstObject;
+                for (NSXMLNode* ccAttr in [ccElem attributes]) {
+                    if (ccAttr.name && ccAttr.stringValue) {
+                        std::string ccKey = "ControllerConnection." + std::string([ccAttr.name UTF8String]);
+                        attrs[ccKey] = [ccAttr.stringValue UTF8String];
+                    }
+                }
+            }
+
             _modelAttributes[name] = std::move(attrs);
+
+            // Parse subModel child elements
+            NSArray<NSXMLElement*>* smElements = [elem elementsForName:@"subModel"];
+            if (smElements.count > 0) {
+                std::map<std::string, std::map<std::string, std::string>> submodels;
+                for (NSXMLElement* smElem in smElements) {
+                    NSXMLNode* smNameAttr = [smElem attributeForName:@"name"];
+                    if (smNameAttr && smNameAttr.stringValue) {
+                        std::string smName = [smNameAttr.stringValue UTF8String];
+                        std::map<std::string, std::string> smAttrs;
+                        for (NSXMLNode* smAttr in [smElem attributes]) {
+                            if (smAttr.name && smAttr.stringValue) {
+                                smAttrs[[smAttr.name UTF8String]] = [smAttr.stringValue UTF8String];
+                            }
+                        }
+                        submodels[smName] = std::move(smAttrs);
+                    }
+                }
+                if (!submodels.empty()) {
+                    _submodelAttributes[name] = std::move(submodels);
+                }
+            }
         }
     }
 
     // Parse views
     parseViewsFromXML([content UTF8String]);
 
-    NSLog(@"NativeModelProvider: Loaded %zu groups + %zu models with attributes from XML",
-          _groupNames.size(), _modelNames.size());
+    // Parse layout groups
+    parseLayoutGroupsFromXML([content UTF8String]);
+
+    NSLog(@"NativeModelProvider: Loaded %zu groups + %zu models + %zu layout groups from XML",
+          _groupNames.size(), _modelNames.size(), _layoutGroups.size());
     return true;
 }
 
@@ -534,12 +713,25 @@ std::map<std::string, std::string> NativeModelProvider::getModelAttributes(const
     return {};
 }
 
+bool NativeModelProvider::setModelAttribute(const std::string& modelName, const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _modelAttributes.find(modelName);
+    if (it == _modelAttributes.end()) {
+        return false;
+    }
+    it->second[key] = value;
+    return true;
+}
+
 void NativeModelProvider::clearModels() {
     std::lock_guard<std::mutex> lock(_mutex);
     _modelNames.clear();
     _groupNames.clear();
     _modelAttributes.clear();
+    _groupAttributes.clear();
+    _submodelAttributes.clear();
     _views.clear();
+    _layoutGroups.clear();
     _showFolderPath.clear();
 }
 
@@ -666,6 +858,360 @@ void NativeModelProvider::parseViewsFromXML(const std::string& xmlContent) {
     }
 
     NSLog(@"NativeModelProvider: Loaded %zu views from XML", _views.size());
+}
+
+std::map<std::string, std::string> NativeModelProvider::getGroupAttributes(const std::string& groupName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _groupAttributes.find(groupName);
+    if (it != _groupAttributes.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+bool NativeModelProvider::createGroup(const std::string& groupName, const std::string& modelNames) {
+    if (groupName.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    if (std::find(_groupNames.begin(), _groupNames.end(), groupName) != _groupNames.end()) {
+        NSLog(@"NativeModelProvider: Group '%s' already exists", groupName.c_str());
+        return false;
+    }
+
+    _groupNames.push_back(groupName);
+
+    std::map<std::string, std::string> attrs;
+    attrs["name"] = groupName;
+    attrs["models"] = modelNames;
+    attrs["DisplayAs"] = "ModelGroup";
+    attrs["GridSize"] = "400";
+    attrs["layout"] = "minimalGrid";
+    _groupAttributes[groupName] = std::move(attrs);
+
+    NSLog(@"NativeModelProvider: Created group '%s'", groupName.c_str());
+    return true;
+}
+
+bool NativeModelProvider::deleteGroup(const std::string& groupName) {
+    if (groupName.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = std::find(_groupNames.begin(), _groupNames.end(), groupName);
+    if (it == _groupNames.end()) {
+        return false;
+    }
+
+    _groupNames.erase(it);
+    _groupAttributes.erase(groupName);
+
+    NSLog(@"NativeModelProvider: Deleted group '%s'", groupName.c_str());
+    return true;
+}
+
+bool NativeModelProvider::renameGroup(const std::string& oldName, const std::string& newName) {
+    if (oldName.empty() || newName.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = std::find(_groupNames.begin(), _groupNames.end(), oldName);
+    if (it == _groupNames.end()) {
+        return false;
+    }
+
+    if (std::find(_groupNames.begin(), _groupNames.end(), newName) != _groupNames.end()) {
+        NSLog(@"NativeModelProvider: Cannot rename - group '%s' already exists", newName.c_str());
+        return false;
+    }
+
+    *it = newName;
+
+    auto attrsIt = _groupAttributes.find(oldName);
+    if (attrsIt != _groupAttributes.end()) {
+        auto attrs = std::move(attrsIt->second);
+        _groupAttributes.erase(attrsIt);
+        attrs["name"] = newName;
+        _groupAttributes[newName] = std::move(attrs);
+    }
+
+    NSLog(@"NativeModelProvider: Renamed group '%s' to '%s'", oldName.c_str(), newName.c_str());
+    return true;
+}
+
+bool NativeModelProvider::addModelToGroup(const std::string& groupName, const std::string& modelName) {
+    if (groupName.empty() || modelName.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _groupAttributes.find(groupName);
+    if (it == _groupAttributes.end()) {
+        return false;
+    }
+
+    std::string& models = it->second["models"];
+    if (!models.empty()) {
+        models += ",";
+    }
+    models += modelName;
+
+    NSLog(@"NativeModelProvider: Added model '%s' to group '%s'", modelName.c_str(), groupName.c_str());
+    return true;
+}
+
+bool NativeModelProvider::removeModelFromGroup(const std::string& groupName, const std::string& modelName) {
+    if (groupName.empty() || modelName.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = _groupAttributes.find(groupName);
+    if (it == _groupAttributes.end()) {
+        return false;
+    }
+
+    std::string& modelsStr = it->second["models"];
+    std::vector<std::string> modelList;
+    std::istringstream stream(modelsStr);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        size_t start = token.find_first_not_of(" \t");
+        size_t end = token.find_last_not_of(" \t");
+        if (start != std::string::npos) {
+            std::string trimmed = token.substr(start, end - start + 1);
+            if (trimmed != modelName) {
+                modelList.push_back(trimmed);
+            }
+        }
+    }
+
+    std::string newModels;
+    for (size_t i = 0; i < modelList.size(); i++) {
+        if (i > 0) newModels += ",";
+        newModels += modelList[i];
+    }
+    modelsStr = newModels;
+
+    NSLog(@"NativeModelProvider: Removed model '%s' from group '%s'", modelName.c_str(), groupName.c_str());
+    return true;
+}
+
+// MARK: - Layout Group Management
+
+std::vector<std::string> NativeModelProvider::getLayoutGroupNames() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::vector<std::string> names;
+    names.push_back("Default");
+    names.push_back("All Models");
+    names.push_back("Unassigned");
+    for (const auto& grp : _layoutGroups) {
+        if (grp.name != "Default") {
+            names.push_back(grp.name);
+        }
+    }
+    return names;
+}
+
+LayoutGroupInfo NativeModelProvider::getLayoutGroup(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (const auto& grp : _layoutGroups) {
+        if (grp.name == name) {
+            return grp;
+        }
+    }
+    LayoutGroupInfo defaultInfo;
+    defaultInfo.name = name;
+    return defaultInfo;
+}
+
+std::vector<LayoutGroupInfo> NativeModelProvider::getLayoutGroups() const {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _layoutGroups;
+}
+
+bool NativeModelProvider::createLayoutGroup(const std::string& name) {
+    if (name.empty() || name == "Default" || name == "All Models" || name == "Unassigned") {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    for (const auto& grp : _layoutGroups) {
+        if (grp.name == name) {
+            NSLog(@"NativeModelProvider: Layout group '%s' already exists", name.c_str());
+            return false;
+        }
+    }
+
+    LayoutGroupInfo info;
+    info.name = name;
+    _layoutGroups.push_back(info);
+
+    NSLog(@"NativeModelProvider: Created layout group '%s'", name.c_str());
+    return true;
+}
+
+bool NativeModelProvider::deleteLayoutGroup(const std::string& name) {
+    if (name.empty() || name == "Default") {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = std::find_if(_layoutGroups.begin(), _layoutGroups.end(),
+                           [&](const LayoutGroupInfo& g) { return g.name == name; });
+    if (it == _layoutGroups.end()) {
+        return false;
+    }
+
+    _layoutGroups.erase(it);
+
+    // Reassign models from this group to "Unassigned"
+    for (auto& [modelName, attrs] : _modelAttributes) {
+        auto lgIt = attrs.find("LayoutGroup");
+        if (lgIt != attrs.end() && lgIt->second == name) {
+            lgIt->second = "Unassigned";
+        }
+    }
+
+    NSLog(@"NativeModelProvider: Deleted layout group '%s'", name.c_str());
+    return true;
+}
+
+bool NativeModelProvider::renameLayoutGroup(const std::string& oldName, const std::string& newName) {
+    if (oldName.empty() || newName.empty() || oldName == "Default") {
+        return false;
+    }
+    if (newName == "Default" || newName == "All Models" || newName == "Unassigned") {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = std::find_if(_layoutGroups.begin(), _layoutGroups.end(),
+                           [&](const LayoutGroupInfo& g) { return g.name == oldName; });
+    if (it == _layoutGroups.end()) {
+        return false;
+    }
+
+    // Check new name doesn't already exist
+    auto existIt = std::find_if(_layoutGroups.begin(), _layoutGroups.end(),
+                                [&](const LayoutGroupInfo& g) { return g.name == newName; });
+    if (existIt != _layoutGroups.end()) {
+        return false;
+    }
+
+    it->name = newName;
+
+    // Update model assignments
+    for (auto& [modelName, attrs] : _modelAttributes) {
+        auto lgIt = attrs.find("LayoutGroup");
+        if (lgIt != attrs.end() && lgIt->second == oldName) {
+            lgIt->second = newName;
+        }
+    }
+
+    NSLog(@"NativeModelProvider: Renamed layout group '%s' to '%s'", oldName.c_str(), newName.c_str());
+    return true;
+}
+
+bool NativeModelProvider::updateLayoutGroup(const std::string& name, const LayoutGroupInfo& info) {
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    auto it = std::find_if(_layoutGroups.begin(), _layoutGroups.end(),
+                           [&](const LayoutGroupInfo& g) { return g.name == name; });
+    if (it == _layoutGroups.end()) {
+        return false;
+    }
+
+    it->backgroundImage = info.backgroundImage;
+    it->backgroundBrightness = info.backgroundBrightness;
+    it->backgroundAlpha = info.backgroundAlpha;
+    it->scaleBackgroundImage = info.scaleBackgroundImage;
+
+    return true;
+}
+
+std::vector<std::string> NativeModelProvider::getModelsForLayoutGroup(const std::string& groupName) const {
+    std::lock_guard<std::mutex> lock(_mutex);
+
+    std::vector<std::string> result;
+
+    for (const auto& name : _modelNames) {
+        auto attrIt = _modelAttributes.find(name);
+        std::string modelGroup;
+        if (attrIt != _modelAttributes.end()) {
+            auto lgIt = attrIt->second.find("LayoutGroup");
+            if (lgIt != attrIt->second.end()) {
+                modelGroup = lgIt->second;
+            }
+        }
+
+        if (groupName == "All Models") {
+            result.push_back(name);
+        } else if (groupName == "Default") {
+            if (modelGroup.empty() || modelGroup == "Default" || modelGroup == "All Previews") {
+                result.push_back(name);
+            }
+        } else if (groupName == "Unassigned") {
+            if (modelGroup.empty() || modelGroup == "Unassigned") {
+                result.push_back(name);
+            }
+        } else {
+            if (modelGroup == groupName || modelGroup == "All Previews") {
+                result.push_back(name);
+            }
+        }
+    }
+
+    return result;
+}
+
+void NativeModelProvider::parseLayoutGroupsFromXML(const std::string& xmlContent) {
+    if (xmlContent.empty()) return;
+
+    NSData* xmlData = [NSData dataWithBytes:xmlContent.c_str() length:xmlContent.size()];
+    NSError* error = nil;
+    NSXMLDocument* xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (error || !xmlDoc) return;
+
+    NSArray<NSXMLElement*>* groupElements =
+        [xmlDoc.rootElement nodesForXPath:@"//layoutGroups/layoutGroup" error:&error];
+    if (error) return;
+
+    // Note: _mutex is already held by loadModelsFromFile caller context
+    _layoutGroups.clear();
+
+    for (NSXMLElement* elem in groupElements) {
+        NSXMLNode* nameAttr = [elem attributeForName:@"name"];
+        if (!nameAttr || !nameAttr.stringValue) continue;
+
+        LayoutGroupInfo info;
+        info.name = [nameAttr.stringValue UTF8String];
+
+        NSXMLNode* bgAttr = [elem attributeForName:@"backgroundImage"];
+        if (bgAttr && bgAttr.stringValue) {
+            info.backgroundImage = [bgAttr.stringValue UTF8String];
+        }
+
+        NSXMLNode* brightAttr = [elem attributeForName:@"backgroundBrightness"];
+        if (brightAttr && brightAttr.stringValue) {
+            info.backgroundBrightness = [brightAttr.stringValue intValue];
+        }
+
+        NSXMLNode* alphaAttr = [elem attributeForName:@"backgroundAlpha"];
+        if (alphaAttr && alphaAttr.stringValue) {
+            info.backgroundAlpha = [alphaAttr.stringValue intValue];
+        }
+
+        NSXMLNode* scaleAttr = [elem attributeForName:@"scaleImage"];
+        if (scaleAttr && scaleAttr.stringValue) {
+            info.scaleBackgroundImage = [scaleAttr.stringValue intValue] > 0;
+        }
+
+        _layoutGroups.push_back(info);
+    }
+
+    NSLog(@"NativeModelProvider: Loaded %zu layout groups from XML", _layoutGroups.size());
 }
 
 } // namespace xlEngine

@@ -80,6 +80,15 @@ struct SubmodelInfo {
     uint32_t channelCount = 0;
 };
 
+struct SubmodelDefinition {
+    std::string name;
+    bool isRanges = true;       // true = "ranges", false = "subbuffer"
+    bool vertical = false;      // layout: "vertical" or "horizontal"
+    std::string bufferStyle;    // e.g. "Default", "Keep XY", "Stacked Strands"
+    std::string subBuffer;      // sub-buffer definition (when isRanges == false)
+    std::vector<std::string> strands;  // line0, line1, ... (when isRanges == true)
+};
+
 struct ModelGroupInfo {
     std::string name;
     std::vector<std::string> modelNames;
@@ -189,12 +198,27 @@ public:
 
     std::vector<SubmodelInfo> getSubmodels(const std::string& modelName) const;
     bool hasSubmodel(const std::string& modelName, const std::string& submodelName) const;
+    SubmodelDefinition getSubmodelDefinition(const std::string& modelName, const std::string& submodelName) const;
+    OperationResult setSubmodel(const std::string& modelName, const std::string& submodelName,
+                                const SubmodelDefinition& definition);
+    OperationResult deleteSubmodel(const std::string& modelName, const std::string& submodelName);
+    OperationResult renameSubmodel(const std::string& modelName, const std::string& oldName,
+                                   const std::string& newName);
 
     // --- Groups ---
 
     std::vector<ModelGroupInfo> getModelGroups() const;
     ModelGroupInfo getModelGroup(const std::string& groupName) const;
     std::vector<std::string> getGroupsContainingModel(const std::string& modelName) const;
+
+    // --- Group CRUD ---
+
+    OperationResult createModelGroup(const std::string& groupName,
+                                     const std::vector<std::string>& modelNames = {});
+    OperationResult deleteModelGroup(const std::string& groupName);
+    OperationResult renameModelGroup(const std::string& oldName, const std::string& newName);
+    OperationResult addModelToGroup(const std::string& groupName, const std::string& modelName);
+    OperationResult removeModelFromGroup(const std::string& groupName, const std::string& modelName);
 
     // --- Position & Geometry ---
 

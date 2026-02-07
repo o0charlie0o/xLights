@@ -112,6 +112,8 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
 @property (nonatomic, strong) NSView *headerView;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSPopUpButton *portFilterPopup;
+@property (nonatomic, strong) NSArray<NSString *> *filteredPixelProtocols;
+@property (nonatomic, strong) NSArray<NSString *> *filteredSerialProtocols;
 
 @end
 
@@ -130,6 +132,7 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"XLChannelsDidRecalculateNotification" object:nil];
     _tableView.dataSource = nil;
     _tableView.delegate = nil;
 }
@@ -164,6 +167,15 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(channelsDidRecalculate:)
+                                                 name:@"XLChannelsDidRecalculateNotification"
+                                               object:nil];
+}
+
+- (void)channelsDidRecalculate:(NSNotification *)notification {
+    [self reloadData];
 }
 
 #pragma mark - Header Setup
@@ -391,6 +403,61 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
     [_tableView reloadData];
 }
 
+#pragma mark - Capability Configuration
+
+- (void)configureForPixelPorts:(NSInteger)pixelPorts serialPorts:(NSInteger)serialPorts {
+    InitPortDataSource(&_dataSource);
+    SafeStringCopy(_dataSource.controllerName, XL_PORT_MAX_STRING_LEN, _controllerName);
+
+    for (NSInteger i = 0; i < pixelPorts && _dataSource.portCount < XL_PORT_MAX_PORTS; i++) {
+        XLPortEntry *entry = &_dataSource.ports[_dataSource.portCount];
+        InitPortEntry(entry, (int)(i + 1), XLPortTypePixel);
+        _dataSource.portCount++;
+        _dataSource.pixelPortCount++;
+    }
+
+    for (NSInteger i = 0; i < serialPorts && _dataSource.portCount < XL_PORT_MAX_PORTS; i++) {
+        XLPortEntry *entry = &_dataSource.ports[_dataSource.portCount];
+        InitPortEntry(entry, (int)(i + 1), XLPortTypeSerial);
+        SafeStringCopy(entry->protocol, XL_PORT_MAX_STRING_LEN, @"DMX");
+        _dataSource.portCount++;
+        _dataSource.serialPortCount++;
+    }
+
+    _titleLabel.stringValue = _controllerName
+        ? [NSString stringWithFormat:@"Port Configuration - %@", _controllerName]
+        : @"Port Configuration";
+
+    [_tableView reloadData];
+}
+
+- (void)setAvailablePixelProtocols:(NSArray<NSString *> *)pixelProtocols
+                   serialProtocols:(NSArray<NSString *> *)serialProtocols {
+    _filteredPixelProtocols = (pixelProtocols.count > 0) ? [pixelProtocols copy] : nil;
+    _filteredSerialProtocols = (serialProtocols.count > 0) ? [serialProtocols copy] : nil;
+    [_tableView reloadData];
+}
+
+- (void)setSmartRemotesVisible:(BOOL)visible {
+    NSTableColumn *srColumn = [_tableView tableColumnWithIdentifier:XLPortColumnSmartRemote];
+    if (srColumn) {
+        srColumn.hidden = !visible;
+    }
+}
+
+- (NSArray<NSString *> *)protocolOptionsForPortType:(XLPortType)portType {
+    if (portType == XLPortTypePixel && _filteredPixelProtocols) {
+        return _filteredPixelProtocols;
+    } else if (portType == XLPortTypeSerial && _filteredSerialProtocols) {
+        return _filteredSerialProtocols;
+    }
+    if (portType == XLPortTypePixel) {
+        return @[@"ws2811", @"ws2801", @"TM18XX", @"TM1814", @"LPD6803", @"LPD8806",
+                 @"APA102", @"APA109", @"SM16716", @"UCS8903", @"UCS8904"];
+    }
+    return @[@"DMX", @"LOR", @"Renard", @"OpenDMX"];
+}
+
 #pragma mark - Validation
 
 - (void)runValidation {
@@ -593,6 +660,12 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
         return [self modelCellForPort:port row:row reusingView:[tableView makeViewWithIdentifier:@"ModelCell" owner:self]];
     }
 
+    // Protocol column uses popup button for filtered protocol selection
+    if ([identifier isEqualToString:XLPortColumnProtocol]) {
+        NSArray<NSString *> *protocols = [self protocolOptionsForPortType:port->portType];
+        return [self protocolCellForPort:port row:row protocols:protocols reusingView:[tableView makeViewWithIdentifier:@"ProtocolCell" owner:self]];
+    }
+
     // Other columns use text cells
     NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:self];
     if (!cell) {
@@ -684,6 +757,62 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
     }
 
     return cell;
+}
+
+- (NSView *)protocolCellForPort:(XLPortEntry *)port row:(NSInteger)row protocols:(NSArray<NSString *> *)protocols reusingView:(NSView *)existingView {
+    NSTableCellView *cell = (NSTableCellView *)existingView;
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSZeroRect];
+        cell.identifier = @"ProtocolCell";
+
+        NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+        popup.font = [NSFont systemFontOfSize:11];
+        popup.bordered = NO;
+        popup.translatesAutoresizingMaskIntoConstraints = NO;
+        popup.tag = row;
+        popup.target = self;
+        popup.action = @selector(protocolSelectionChanged:);
+        [cell addSubview:popup];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [popup.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor],
+            [popup.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor],
+            [popup.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
+        ]];
+
+        objc_setAssociatedObject(cell, @selector(protocolPopup), popup, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    NSPopUpButton *popup = objc_getAssociatedObject(cell, @selector(protocolPopup));
+    popup.tag = row;
+
+    [popup removeAllItems];
+    [popup addItemsWithTitles:protocols];
+
+    NSString *current = StringFromCString(port->protocol);
+    if (current.length > 0) {
+        [popup selectItemWithTitle:current];
+        if (popup.selectedItem == nil && popup.numberOfItems > 0) {
+            [popup selectItemAtIndex:0];
+        }
+    }
+
+    return cell;
+}
+
+- (void)protocolSelectionChanged:(NSPopUpButton *)sender {
+    NSInteger row = sender.tag;
+    if (row < 0 || row >= _dataSource.portCount) return;
+
+    XLPortEntry *port = &_dataSource.ports[row];
+    NSString *selected = sender.selectedItem.title;
+    SafeStringCopy(port->protocol, XL_PORT_MAX_STRING_LEN, selected);
+
+    if ([_delegate respondsToSelector:@selector(portConfigurationView:didEditPortAtIndex:property:value:)]) {
+        [_delegate portConfigurationView:self didEditPortAtIndex:row property:XLPortColumnProtocol value:selected];
+    }
+
+    [_tableView reloadData];
 }
 
 - (NSView *)modelCellForPort:(XLPortEntry *)port row:(NSInteger)row reusingView:(NSView *)existingView {
@@ -856,21 +985,26 @@ static NSImage *StatusIndicatorImage(XLPortValidationStatus status) {
     if (row < 0 || row >= _dataSource.portCount) return;
 
     XLPortEntry *port = &_dataSource.ports[row];
+    NSArray<NSString *> *protocols = [self protocolOptionsForPortType:port->portType];
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Set Protocol";
-    alert.informativeText = [NSString stringWithFormat:@"Enter protocol for port %d:", port->portNumber];
+    alert.informativeText = [NSString stringWithFormat:@"Select protocol for port %d:", port->portNumber];
 
-    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
-    input.stringValue = StringFromCString(port->protocol);
-    alert.accessoryView = input;
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 200, 24) pullsDown:NO];
+    [popup addItemsWithTitles:protocols];
+    NSString *current = StringFromCString(port->protocol);
+    if (current.length > 0) {
+        [popup selectItemWithTitle:current];
+    }
+    alert.accessoryView = popup;
 
     [alert addButtonWithTitle:@"OK"];
     [alert addButtonWithTitle:@"Cancel"];
 
     [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
         if (returnCode == NSAlertFirstButtonReturn) {
-            SafeStringCopy(port->protocol, XL_PORT_MAX_STRING_LEN, input.stringValue);
+            SafeStringCopy(port->protocol, XL_PORT_MAX_STRING_LEN, popup.selectedItem.title);
             [self.tableView reloadData];
         }
     }];

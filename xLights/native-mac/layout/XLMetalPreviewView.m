@@ -15,9 +15,16 @@
 #import <QuartzCore/CVDisplayLink.h>
 
 static const NSUInteger kDefaultMSAASampleCount = 4;
-static const NSInteger kGridLineCount = 41; // -20 to +20, step 1
-static const float kGridSpacing = 50.0f;
 static const float kGridExtent = 1000.0f;
+static const float kDefaultGridSpacing = 50.0f;
+
+static NSString * const kGridVisibleKey = @"XLPreviewGridVisible";
+static NSString * const kGridSpacingKey = @"XLPreviewGridSpacing";
+static NSString * const kGridCenterAtOriginKey = @"XLPreviewGridCenterAtOrigin";
+static NSString * const kGridColorRKey = @"XLPreviewGridColorR";
+static NSString * const kGridColorGKey = @"XLPreviewGridColorG";
+static NSString * const kGridColorBKey = @"XLPreviewGridColorB";
+static NSString * const kGridColorAKey = @"XLPreviewGridColorA";
 
 #pragma mark - Grid Vertex Structures
 
@@ -25,6 +32,11 @@ typedef struct {
     simd_float3 position;
     simd_float4 color;
 } XLGridVertex;
+
+typedef struct {
+    simd_float2 position;
+    simd_float2 texCoord;
+} XLTexturedVertex;
 
 #pragma mark - CVDisplayLink Callback
 
@@ -100,6 +112,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 @property (nonatomic, strong) XLManipulationHandlesRenderer *handles;
 
+// Background image rendering
+@property (nonatomic, strong) id<MTLTexture> backgroundTexture;
+@property (nonatomic, strong) id<MTLRenderPipelineState> backgroundPipelineState;
+@property (nonatomic, strong) id<MTLBuffer> backgroundVertexBuffer;
+@property (nonatomic, strong) id<MTLSamplerState> backgroundSamplerState;
+@property (nonatomic, assign) CGSize backgroundImageSize;
+
 @end
 
 @implementation XLMetalPreviewView
@@ -134,10 +153,29 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     _cameraController = [[XLCameraController alloc] init];
     _show3D = YES;
-    _showGrid = YES;
     _contentDirty = YES;
     _needsRenderFlag = YES;
     _lastFrameTime = CFAbsoluteTimeGetCurrent();
+
+    // Load grid settings from NSUserDefaults (with sensible defaults)
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:kGridVisibleKey] != nil) {
+        _showGrid = [defaults boolForKey:kGridVisibleKey];
+    } else {
+        _showGrid = YES;
+    }
+    float savedSpacing = [defaults floatForKey:kGridSpacingKey];
+    _gridSpacing = (savedSpacing > 0.0f) ? savedSpacing : kDefaultGridSpacing;
+    if ([defaults objectForKey:kGridCenterAtOriginKey] != nil) {
+        _gridCenterAtOrigin = [defaults boolForKey:kGridCenterAtOriginKey];
+    } else {
+        _gridCenterAtOrigin = YES;
+    }
+    float cr = [defaults objectForKey:kGridColorRKey] ? [defaults floatForKey:kGridColorRKey] : 0.3f;
+    float cg = [defaults objectForKey:kGridColorGKey] ? [defaults floatForKey:kGridColorGKey] : 0.3f;
+    float cb = [defaults objectForKey:kGridColorBKey] ? [defaults floatForKey:kGridColorBKey] : 0.3f;
+    float ca = [defaults objectForKey:kGridColorAKey] ? [defaults floatForKey:kGridColorAKey] : 0.4f;
+    _gridColor = simd_make_float4(cr, cg, cb, ca);
 
     _backgroundColor = [NSColor colorWithRed:0.0 green:0.0 blue:0.0 alpha:1.0];
     _isManipulatingHandle = NO;
@@ -156,6 +194,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _modelVerticesDirty = YES;
     _pixelDataGeneration = 0;
     _lastPixelDataGeneration = 0;
+
+    // Background image defaults
+    _backgroundBrightness = 1.0f;
+    _backgroundAlpha = 1.0f;
+    _backgroundImageSize = CGSizeZero;
 
     [self setupDepthStencilState];
     [self buildGridPipeline];
@@ -372,31 +415,140 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (!_modelPipelineState) {
         NSLog(@"XLMetalPreviewView: Failed to create model pipeline: %@", error);
     }
+
+    // Build background image pipeline (textured quad with brightness/alpha)
+    NSString *bgShaderSource = @
+        "#include <metal_stdlib>\n"
+        "using namespace metal;\n"
+        "\n"
+        "struct BgVertex {\n"
+        "    float2 position [[attribute(0)]];\n"
+        "    float2 texCoord [[attribute(1)]];\n"
+        "};\n"
+        "\n"
+        "struct BgUniforms {\n"
+        "    float brightness;\n"
+        "    float alpha;\n"
+        "};\n"
+        "\n"
+        "struct BgOut {\n"
+        "    float4 position [[position]];\n"
+        "    float2 texCoord;\n"
+        "};\n"
+        "\n"
+        "vertex BgOut bgVertexShader(\n"
+        "    BgVertex in [[stage_in]]) {\n"
+        "    BgOut out;\n"
+        "    out.position = float4(in.position, 0.0, 1.0);\n"
+        "    out.texCoord = in.texCoord;\n"
+        "    return out;\n"
+        "}\n"
+        "\n"
+        "fragment float4 bgFragmentShader(\n"
+        "    BgOut in [[stage_in]],\n"
+        "    texture2d<float> bgTexture [[texture(0)]],\n"
+        "    sampler bgSampler [[sampler(0)]],\n"
+        "    constant BgUniforms &uniforms [[buffer(0)]]) {\n"
+        "    float4 texColor = bgTexture.sample(bgSampler, in.texCoord);\n"
+        "    texColor.rgb *= uniforms.brightness;\n"
+        "    texColor.a *= uniforms.alpha;\n"
+        "    return texColor;\n"
+        "}\n";
+
+    id<MTLLibrary> bgLib = [_device newLibraryWithSource:bgShaderSource options:nil error:&error];
+    if (!bgLib) {
+        NSLog(@"XLMetalPreviewView: Failed to compile background shaders: %@", error);
+        return;
+    }
+
+    MTLVertexDescriptor *bgVertexDesc = [[MTLVertexDescriptor alloc] init];
+    bgVertexDesc.attributes[0].format = MTLVertexFormatFloat2;
+    bgVertexDesc.attributes[0].offset = 0;
+    bgVertexDesc.attributes[0].bufferIndex = 0;
+    bgVertexDesc.attributes[1].format = MTLVertexFormatFloat2;
+    bgVertexDesc.attributes[1].offset = sizeof(simd_float2);
+    bgVertexDesc.attributes[1].bufferIndex = 0;
+    bgVertexDesc.layouts[0].stride = sizeof(XLTexturedVertex);
+    bgVertexDesc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+
+    MTLRenderPipelineDescriptor *bgPipeDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    bgPipeDesc.vertexFunction = [bgLib newFunctionWithName:@"bgVertexShader"];
+    bgPipeDesc.fragmentFunction = [bgLib newFunctionWithName:@"bgFragmentShader"];
+    bgPipeDesc.vertexDescriptor = bgVertexDesc;
+    bgPipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    bgPipeDesc.colorAttachments[0].blendingEnabled = YES;
+    bgPipeDesc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    bgPipeDesc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    bgPipeDesc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+    bgPipeDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    bgPipeDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    bgPipeDesc.sampleCount = _sampleCount;
+
+    _backgroundPipelineState = [_device newRenderPipelineStateWithDescriptor:bgPipeDesc error:&error];
+    if (!_backgroundPipelineState) {
+        NSLog(@"XLMetalPreviewView: Failed to create background pipeline: %@", error);
+    }
+
+    // Fullscreen quad in NDC for background rendering
+    XLTexturedVertex bgQuad[6] = {
+        { .position = {-1.0f, -1.0f}, .texCoord = {0.0f, 1.0f} },
+        { .position = { 1.0f, -1.0f}, .texCoord = {1.0f, 1.0f} },
+        { .position = {-1.0f,  1.0f}, .texCoord = {0.0f, 0.0f} },
+        { .position = {-1.0f,  1.0f}, .texCoord = {0.0f, 0.0f} },
+        { .position = { 1.0f, -1.0f}, .texCoord = {1.0f, 1.0f} },
+        { .position = { 1.0f,  1.0f}, .texCoord = {1.0f, 0.0f} },
+    };
+    _backgroundVertexBuffer = [_device newBufferWithBytes:bgQuad
+                                                    length:sizeof(bgQuad)
+                                                   options:MTLResourceStorageModeShared];
+    [_backgroundVertexBuffer setLabel:@"BackgroundQuadVertices"];
+
+    // Sampler for background texture
+    MTLSamplerDescriptor *samplerDesc = [[MTLSamplerDescriptor alloc] init];
+    samplerDesc.minFilter = MTLSamplerMinMagFilterLinear;
+    samplerDesc.magFilter = MTLSamplerMinMagFilterLinear;
+    samplerDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+    samplerDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+    _backgroundSamplerState = [_device newSamplerStateWithDescriptor:samplerDesc];
 }
 
 - (void)buildGridVertices {
     NSMutableData *vertexData = [[NSMutableData alloc] init];
 
+    float spacing = _gridSpacing > 0.0f ? _gridSpacing : kDefaultGridSpacing;
     float halfExtent = kGridExtent;
     float fadeStart = halfExtent * 0.6f;
+    NSInteger lineCount = (NSInteger)(2.0f * halfExtent / spacing) + 1;
+    // Cap at a reasonable maximum to avoid excessive vertex data
+    if (lineCount > 201) lineCount = 201;
 
-    for (NSInteger i = 0; i < kGridLineCount; i++) {
-        float offset = (i - (kGridLineCount - 1) / 2.0f) * kGridSpacing;
+    float gridR = _gridColor.x;
+    float gridG = _gridColor.y;
+    float gridB = _gridColor.z;
+    float gridBaseAlpha = _gridColor.w;
+
+    float centerOffset = 0.0f;
+    if (!_gridCenterAtOrigin) {
+        centerOffset = fmodf(_cameraController.target.x, spacing);
+    }
+
+    for (NSInteger i = 0; i < lineCount; i++) {
+        float offset = (i - (lineCount - 1) / 2.0f) * spacing + centerOffset;
+
+        float alphaStart = [self gridAlphaForDistance:fabsf(offset) fadeStart:fadeStart fadeEnd:halfExtent baseAlpha:gridBaseAlpha];
 
         // Line along Z axis
-        float alphaStart = [self gridAlphaForDistance:fabsf(offset) fadeStart:fadeStart fadeEnd:halfExtent];
-
         XLGridVertex v0 = {
             .position = {offset, 0.0f, -halfExtent},
-            .color = {0.3f, 0.3f, 0.3f, 0.0f}
+            .color = {gridR, gridG, gridB, 0.0f}
         };
         XLGridVertex v1 = {
             .position = {offset, 0.0f, 0.0f},
-            .color = {0.3f, 0.3f, 0.3f, alphaStart}
+            .color = {gridR, gridG, gridB, alphaStart}
         };
         XLGridVertex v2 = {
             .position = {offset, 0.0f, halfExtent},
-            .color = {0.3f, 0.3f, 0.3f, 0.0f}
+            .color = {gridR, gridG, gridB, 0.0f}
         };
 
         [vertexData appendBytes:&v0 length:sizeof(XLGridVertex)];
@@ -407,15 +559,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         // Line along X axis
         XLGridVertex h0 = {
             .position = {-halfExtent, 0.0f, offset},
-            .color = {0.3f, 0.3f, 0.3f, 0.0f}
+            .color = {gridR, gridG, gridB, 0.0f}
         };
         XLGridVertex h1 = {
             .position = {0.0f, 0.0f, offset},
-            .color = {0.3f, 0.3f, 0.3f, alphaStart}
+            .color = {gridR, gridG, gridB, alphaStart}
         };
         XLGridVertex h2 = {
             .position = {halfExtent, 0.0f, offset},
-            .color = {0.3f, 0.3f, 0.3f, 0.0f}
+            .color = {gridR, gridG, gridB, 0.0f}
         };
 
         [vertexData appendBytes:&h0 length:sizeof(XLGridVertex)];
@@ -431,11 +583,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [_gridVertexBuffer setLabel:@"GridVertices"];
 }
 
-- (float)gridAlphaForDistance:(float)dist fadeStart:(float)fadeStart fadeEnd:(float)fadeEnd {
-    if (dist <= fadeStart) return 0.4f;
+- (float)gridAlphaForDistance:(float)dist fadeStart:(float)fadeStart fadeEnd:(float)fadeEnd baseAlpha:(float)baseAlpha {
+    if (dist <= fadeStart) return baseAlpha;
     if (dist >= fadeEnd) return 0.0f;
     float t = (dist - fadeStart) / (fadeEnd - fadeStart);
-    return 0.4f * (1.0f - t);
+    return baseAlpha * (1.0f - t);
 }
 
 #pragma mark - MSAA / Depth Texture Management
@@ -624,14 +776,34 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         MTLViewport viewport = {0, 0, width, height, 0.0, 1.0};
         [encoder setViewport:viewport];
 
+        // Render background image (behind everything else)
+        if (_backgroundTexture && _backgroundPipelineState && _backgroundVertexBuffer) {
+            [encoder pushDebugGroup:@"BackgroundImage"];
+            [encoder setRenderPipelineState:_backgroundPipelineState];
+            [encoder setVertexBuffer:_backgroundVertexBuffer offset:0 atIndex:0];
+
+            struct {
+                float brightness;
+                float alpha;
+            } bgUniforms;
+            bgUniforms.brightness = _backgroundBrightness;
+            bgUniforms.alpha = _backgroundAlpha;
+
+            [encoder setFragmentBytes:&bgUniforms length:sizeof(bgUniforms) atIndex:0];
+            [encoder setFragmentTexture:_backgroundTexture atIndex:0];
+            [encoder setFragmentSamplerState:_backgroundSamplerState atIndex:0];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+            [encoder popDebugGroup];
+        }
+
         // Camera matrices
         float aspect = width / height;
         simd_float4x4 viewMatrix = _cameraController.viewMatrix;
         simd_float4x4 projMatrix = [_cameraController projectionMatrixForAspect:aspect];
         simd_float4x4 viewProjection = simd_mul(projMatrix, viewMatrix);
 
-        // Render ground grid
-        if (_showGrid && _show3D && _gridPipelineState) {
+        // Render ground grid (3D) or 2D grid overlay
+        if (_showGrid && _gridPipelineState) {
             [encoder pushDebugGroup:@"Grid"];
             [encoder setRenderPipelineState:_gridPipelineState];
             [encoder setVertexBuffer:_gridVertexBuffer offset:0 atIndex:0];
@@ -712,6 +884,33 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)setShowGrid:(BOOL)showGrid {
     _showGrid = showGrid;
     _contentDirty = YES;
+    [[NSUserDefaults standardUserDefaults] setBool:showGrid forKey:kGridVisibleKey];
+}
+
+- (void)setGridSpacing:(float)gridSpacing {
+    if (gridSpacing < 1.0f) gridSpacing = 1.0f;
+    _gridSpacing = gridSpacing;
+    [self buildGridVertices];
+    _contentDirty = YES;
+    [[NSUserDefaults standardUserDefaults] setFloat:gridSpacing forKey:kGridSpacingKey];
+}
+
+- (void)setGridCenterAtOrigin:(BOOL)gridCenterAtOrigin {
+    _gridCenterAtOrigin = gridCenterAtOrigin;
+    [self buildGridVertices];
+    _contentDirty = YES;
+    [[NSUserDefaults standardUserDefaults] setBool:gridCenterAtOrigin forKey:kGridCenterAtOriginKey];
+}
+
+- (void)setGridColor:(simd_float4)gridColor {
+    _gridColor = gridColor;
+    [self buildGridVertices];
+    _contentDirty = YES;
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setFloat:gridColor.x forKey:kGridColorRKey];
+    [defaults setFloat:gridColor.y forKey:kGridColorGKey];
+    [defaults setFloat:gridColor.z forKey:kGridColorBKey];
+    [defaults setFloat:gridColor.w forKey:kGridColorAKey];
 }
 
 #pragma mark - Camera Control
@@ -1301,6 +1500,34 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             _contentDirty = YES;
             break;
 
+        // Arrow keys - nudge selected model
+        case 0x7B: // left arrow
+        case 0x7C: // right arrow
+        case 0x7D: // down arrow
+        case 0x7E: // up arrow
+        {
+            if (_selectedModelName &&
+                [_delegate respondsToSelector:@selector(previewView:didNudgeModelWithDeltaX:deltaY:)]) {
+                float nudgeAmount = 1.0f;
+                NSEventModifierFlags mods = event.modifierFlags;
+                if (mods & NSEventModifierFlagCommand) {
+                    nudgeAmount = 50.0f;
+                } else if (mods & NSEventModifierFlagShift) {
+                    nudgeAmount = 10.0f;
+                }
+
+                float dx = 0.0f, dy = 0.0f;
+                switch (event.keyCode) {
+                    case 0x7B: dx = -nudgeAmount; break; // left
+                    case 0x7C: dx =  nudgeAmount; break; // right
+                    case 0x7D: dy = -nudgeAmount; break; // down
+                    case 0x7E: dy =  nudgeAmount; break; // up
+                }
+                [_delegate previewView:self didNudgeModelWithDeltaX:dx deltaY:dy];
+            }
+            break;
+        }
+
         // Delete key - clear selection
         case 0x33: // delete/backspace
         case 0x75: // forward delete
@@ -1706,12 +1933,23 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             item.representedObject = option;
             [alignMenu addItem:item];
         }
+        if (_show3D) {
+            [alignMenu addItem:[NSMenuItem separatorItem]];
+            for (NSString *option in @[@"Front", @"Back", @"Depth Center", @"Align With Ground"]) {
+                NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                             action:@selector(contextMenuAlignModels:)
+                                                      keyEquivalent:@""];
+                item.target = self;
+                item.representedObject = option;
+                [alignMenu addItem:item];
+            }
+        }
         NSMenuItem *alignItem = [[NSMenuItem alloc] initWithTitle:@"Align" action:nil keyEquivalent:@""];
         [menu setSubmenu:alignMenu forItem:alignItem];
         [menu addItem:alignItem];
 
         NSMenu *distributeMenu = [[NSMenu alloc] initWithTitle:@"Distribute"];
-        for (NSString *option in @[@"Horizontal", @"Vertical"]) {
+        for (NSString *option in @[@"Horizontal", @"Vertical", @"Depth"]) {
             NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
                                                          action:@selector(contextMenuDistributeModels:)
                                                   keyEquivalent:@""];
@@ -1736,6 +1974,30 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         [menu setSubmenu:resizeMenu forItem:resizeItem];
         [menu addItem:resizeItem];
 
+        // Bulk Edit submenu
+        NSMenu *bulkEditMenu = [[NSMenu alloc] initWithTitle:@"Bulk Edit"];
+        NSArray *bulkEditOptions = @[
+            @"Active", @"Inactive", @"---",
+            @"Tag Color", @"Preview",
+            @"Pixel Size", @"Pixel Style", @"Transparency", @"---",
+            @"Controller Name", @"Controller Port", @"Controller Protocol",
+        ];
+        for (NSString *option in bulkEditOptions) {
+            if ([option isEqualToString:@"---"]) {
+                [bulkEditMenu addItem:[NSMenuItem separatorItem]];
+            } else {
+                NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:option
+                                                             action:@selector(contextMenuBulkEdit:)
+                                                      keyEquivalent:@""];
+                item.target = self;
+                item.representedObject = option;
+                [bulkEditMenu addItem:item];
+            }
+        }
+        NSMenuItem *bulkEditItem = [[NSMenuItem alloc] initWithTitle:@"Bulk Edit" action:nil keyEquivalent:@""];
+        [menu setSubmenu:bulkEditMenu forItem:bulkEditItem];
+        [menu addItem:bulkEditItem];
+
         [menu addItem:[NSMenuItem separatorItem]];
     }
 
@@ -1751,6 +2013,42 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                                                    keyEquivalent:@""];
     saveImageItem.target = self;
     [menu addItem:saveImageItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // Grid controls
+    NSMenuItem *gridToggle = [[NSMenuItem alloc] initWithTitle:@"Show Grid"
+                                                        action:@selector(contextMenuToggleGrid:)
+                                                 keyEquivalent:@"["];
+    gridToggle.target = self;
+    gridToggle.state = _showGrid ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:gridToggle];
+
+    // Grid Spacing submenu
+    NSMenu *gridSpacingMenu = [[NSMenu alloc] initWithTitle:@"Grid Spacing"];
+    for (NSNumber *spacingVal in @[@10, @25, @50, @100, @200]) {
+        float spacing = spacingVal.floatValue;
+        NSString *title = [NSString stringWithFormat:@"%.0f", spacing];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title
+                                                      action:@selector(contextMenuSetGridSpacing:)
+                                               keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = spacingVal;
+        if (fabsf(_gridSpacing - spacing) < 0.01f) {
+            item.state = NSControlStateValueOn;
+        }
+        [gridSpacingMenu addItem:item];
+    }
+    NSMenuItem *gridSpacingItem = [[NSMenuItem alloc] initWithTitle:@"Grid Spacing" action:nil keyEquivalent:@""];
+    [menu setSubmenu:gridSpacingMenu forItem:gridSpacingItem];
+    [menu addItem:gridSpacingItem];
+
+    NSMenuItem *gridCenterItem = [[NSMenuItem alloc] initWithTitle:@"Center Grid at Origin"
+                                                            action:@selector(contextMenuToggleGridCenter:)
+                                                     keyEquivalent:@""];
+    gridCenterItem.target = self;
+    gridCenterItem.state = _gridCenterAtOrigin ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:gridCenterItem];
 
     [menu addItem:[NSMenuItem separatorItem]];
 
@@ -1809,7 +2107,24 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [NSMenu popUpContextMenu:menu withEvent:event forView:self];
 }
 
-#pragma mark - Context Menu Actions
+#pragma mark - Context Menu Actions (Grid)
+
+- (void)contextMenuToggleGrid:(NSMenuItem *)sender {
+    self.showGrid = !self.showGrid;
+}
+
+- (void)contextMenuSetGridSpacing:(NSMenuItem *)sender {
+    NSNumber *spacingValue = sender.representedObject;
+    if (spacingValue) {
+        self.gridSpacing = spacingValue.floatValue;
+    }
+}
+
+- (void)contextMenuToggleGridCenter:(NSMenuItem *)sender {
+    self.gridCenterAtOrigin = !self.gridCenterAtOrigin;
+}
+
+#pragma mark - Context Menu Actions (Model)
 
 - (void)contextMenuLockModel:(NSMenuItem *)sender {
     NSString *modelName = sender.representedObject;
@@ -1883,6 +2198,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (!dimension) return;
     if ([_delegate respondsToSelector:@selector(previewView:didRequestResizeModels:)]) {
         [_delegate previewView:self didRequestResizeModels:dimension];
+    }
+}
+
+- (void)contextMenuBulkEdit:(NSMenuItem *)sender {
+    NSString *editType = sender.representedObject;
+    if (!editType) return;
+    if ([_delegate respondsToSelector:@selector(previewView:didRequestBulkEdit:)]) {
+        [_delegate previewView:self didRequestBulkEdit:editType];
     }
 }
 
@@ -2037,6 +2360,143 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _cameraController.perspective = show3D;
     _handles.is3D = show3D;
     _contentDirty = YES;
+}
+
+
+#pragma mark - Background Image
+
+- (void)setBackgroundImage:(NSString *)path {
+    if ([path isEqualToString:_backgroundImagePath]) return;
+
+    _backgroundImagePath = [path copy];
+    _backgroundTexture = nil;
+
+    if (!path || path.length == 0) {
+        _backgroundImageSize = CGSizeZero;
+        _contentDirty = YES;
+        return;
+    }
+
+    [self loadBackgroundTextureFromPath:path];
+    _contentDirty = YES;
+}
+
+- (void)setBackgroundBrightness:(float)brightness {
+    _backgroundBrightness = fmaxf(0.0f, fminf(brightness, 2.0f));
+    _contentDirty = YES;
+}
+
+- (void)setBackgroundAlpha:(float)alpha {
+    _backgroundAlpha = fmaxf(0.0f, fminf(alpha, 1.0f));
+    _contentDirty = YES;
+}
+
+- (void)removeBackgroundImage {
+    _backgroundImagePath = nil;
+    _backgroundTexture = nil;
+    _backgroundImageSize = CGSizeZero;
+    _contentDirty = YES;
+}
+
+- (void)loadBackgroundTextureFromPath:(NSString *)path {
+    NSImage *nsImage = [[NSImage alloc] initWithContentsOfFile:path];
+    if (!nsImage) {
+        NSLog(@"XLMetalPreviewView: Failed to load background image: %@", path);
+        return;
+    }
+
+    // Get the bitmap representation for pixel data
+    NSBitmapImageRep *bitmapRep = nil;
+    for (NSImageRep *rep in nsImage.representations) {
+        if ([rep isKindOfClass:[NSBitmapImageRep class]]) {
+            bitmapRep = (NSBitmapImageRep *)rep;
+            break;
+        }
+    }
+
+    if (!bitmapRep) {
+        // Create a bitmap representation by drawing the image
+        CGSize size = nsImage.size;
+        NSUInteger w = (NSUInteger)size.width;
+        NSUInteger h = (NSUInteger)size.height;
+        if (w == 0 || h == 0) return;
+
+        bitmapRep = [[NSBitmapImageRep alloc]
+            initWithBitmapDataPlanes:NULL
+                          pixelsWide:w
+                          pixelsHigh:h
+                       bitsPerSample:8
+                     samplesPerPixel:4
+                            hasAlpha:YES
+                            isPlanar:NO
+                      colorSpaceName:NSCalibratedRGBColorSpace
+                        bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
+                         bytesPerRow:w * 4
+                        bitsPerPixel:32];
+
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext *ctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmapRep];
+        [NSGraphicsContext setCurrentContext:ctx];
+        [nsImage drawInRect:NSMakeRect(0, 0, w, h)
+                   fromRect:NSZeroRect
+                  operation:NSCompositingOperationSourceOver
+                   fraction:1.0];
+        [NSGraphicsContext restoreGraphicsState];
+    }
+
+    NSUInteger w = bitmapRep.pixelsWide;
+    NSUInteger h = bitmapRep.pixelsHigh;
+    if (w == 0 || h == 0) return;
+
+    _backgroundImageSize = CGSizeMake(w, h);
+
+    // Create Metal texture from bitmap data
+    MTLTextureDescriptor *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                       width:w
+                                                                                      height:h
+                                                                                   mipmapped:NO];
+    texDesc.usage = MTLTextureUsageShaderRead;
+    texDesc.storageMode = MTLStorageModeShared;
+
+    id<MTLTexture> texture = [_device newTextureWithDescriptor:texDesc];
+    if (!texture) {
+        NSLog(@"XLMetalPreviewView: Failed to create background texture");
+        return;
+    }
+    [texture setLabel:@"BackgroundImage"];
+
+    // Convert bitmap to RGBA8 and upload
+    NSUInteger bytesPerRow = w * 4;
+    NSMutableData *rgbaData = [[NSMutableData alloc] initWithLength:h * bytesPerRow];
+    uint8_t *dst = (uint8_t *)rgbaData.mutableBytes;
+
+    for (NSUInteger y = 0; y < h; y++) {
+        for (NSUInteger x = 0; x < w; x++) {
+            NSColor *pixel = [bitmapRep colorAtX:x y:y];
+            NSColor *rgbPixel = [pixel colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+
+            NSUInteger idx = (y * w + x) * 4;
+            if (rgbPixel) {
+                CGFloat cr, cg, cb, ca;
+                [rgbPixel getRed:&cr green:&cg blue:&cb alpha:&ca];
+                dst[idx + 0] = (uint8_t)(cr * 255.0);
+                dst[idx + 1] = (uint8_t)(cg * 255.0);
+                dst[idx + 2] = (uint8_t)(cb * 255.0);
+                dst[idx + 3] = (uint8_t)(ca * 255.0);
+            } else {
+                dst[idx + 0] = 0;
+                dst[idx + 1] = 0;
+                dst[idx + 2] = 0;
+                dst[idx + 3] = 255;
+            }
+        }
+    }
+
+    MTLRegion region = MTLRegionMake2D(0, 0, w, h);
+    [texture replaceRegion:region mipmapLevel:0 withBytes:dst bytesPerRow:bytesPerRow];
+
+    _backgroundTexture = texture;
+    NSLog(@"XLMetalPreviewView: Loaded background image %lux%lu from %@", (unsigned long)w, (unsigned long)h, path);
 }
 
 @end

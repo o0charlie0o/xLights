@@ -139,6 +139,16 @@ typedef struct {
 /// Returns the descriptive name of the next redo operation.
 - (NSString *)redoMenuItemTitle;
 
+#pragma mark - Undo Grouping
+
+/// Begin an undo group for batch operations (e.g. aligning multiple models).
+/// All operations registered between begin/end will be undone as a single step.
+/// @param actionName Descriptive name for the grouped operation
+- (void)beginUndoGroup:(NSString *)actionName;
+
+/// End the current undo group.
+- (void)endUndoGroup;
+
 #pragma mark - Undo/Redo Actions
 
 /// Perform the next undo operation.

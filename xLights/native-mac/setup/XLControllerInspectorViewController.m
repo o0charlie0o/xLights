@@ -10,6 +10,7 @@
 
 #import "XLControllerInspectorViewController.h"
 #import "XLKeychainHelper.h"
+#import "XLControllerDefinitionLoader.h"
 #import "../XLEngineBridge.h"
 
 static const CGFloat kSectionHeaderHeight = 28.0;
@@ -234,8 +235,12 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 
 // Upload section controls
 @property (nonatomic, strong) NSButton *uploadButton;
+@property (nonatomic, strong) NSButton *uploadInputButton;
 @property (nonatomic, strong) NSSwitch *autoUploadSwitch;
 @property (nonatomic, strong) NSTextField *lastUploadField;
+
+// Current variant info from XLControllerDefinitionLoader
+@property (nonatomic, strong) XLControllerVariantInfo *currentVariantInfo;
 
 // Section references
 @property (nonatomic, strong) XLDisclosureSection *generalSection;
@@ -578,9 +583,23 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     _uploadButton.bezelStyle = NSBezelStyleRounded;
     _uploadButton.target = self;
     _uploadButton.action = @selector(uploadConfiguration:);
+    _uploadButton.enabled = NO;
+    _uploadButton.toolTip = @"Select a controller variant to enable upload";
     [_uploadButton setContentHuggingPriority:NSLayoutPriorityDefaultLow
                               forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_uploadSection addFullWidthView:_uploadButton];
+
+    _uploadInputButton = [[NSButton alloc] initWithFrame:NSZeroRect];
+    _uploadInputButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _uploadInputButton.title = @"Upload Input Configuration";
+    _uploadInputButton.bezelStyle = NSBezelStyleRounded;
+    _uploadInputButton.target = self;
+    _uploadInputButton.action = @selector(uploadInputConfiguration:);
+    _uploadInputButton.enabled = NO;
+    _uploadInputButton.toolTip = @"Select a controller variant to enable upload";
+    [_uploadInputButton setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_uploadSection addFullWidthView:_uploadInputButton];
 
     _autoUploadSwitch = [[NSSwitch alloc] initWithFrame:NSZeroRect];
     _autoUploadSwitch.target = self;
@@ -762,6 +781,8 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     if (variant.length > 0) {
         [_variantPopUp selectItemWithTitle:variant];
     }
+
+    [self updateCapabilitiesFromSelection];
 }
 
 - (void)populateCapabilitiesSection:(NSDictionary *)data {
@@ -785,8 +806,14 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     NSString *lastUpload = data[@"lastUpload"];
     _lastUploadField.stringValue = lastUpload ?: @"Never";
 
+    // Upload button enablement is driven by variant capabilities
+    // The initial state from data dict is a fallback until variant is resolved
     NSNumber *supportsUpload = data[@"supportsUpload"];
-    _uploadButton.enabled = supportsUpload ? supportsUpload.boolValue : NO;
+    BOOL uploadEnabled = supportsUpload ? supportsUpload.boolValue : NO;
+    _uploadButton.enabled = uploadEnabled;
+    _uploadButton.toolTip = uploadEnabled ? nil : @"This controller does not support upload";
+    _uploadInputButton.enabled = uploadEnabled;
+    _uploadInputButton.toolTip = uploadEnabled ? nil : @"This controller does not support input upload";
 }
 
 - (void)clearInspector {
@@ -836,17 +863,10 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     [_vendorPopUp removeAllItems];
     [_vendorPopUp addItemWithTitle:@"(None)"];
 
-    // Known vendor names from .xcontroller files
-    NSArray *vendors = @[
-        @"Advatek", @"ESPixelStick", @"Experience Lights", @"Falcon",
-        @"FPP", @"Hanson", @"HinksPix", @"Holiday Coro",
-        @"iLightThat", @"J1Sys", @"Kulp", @"LOR",
-        @"Mattos Designs", @"MicroCyb", @"Minleon", @"RGB2Go",
-        @"SanDevices", @"Scott", @"Twinkly", @"Wally's Lights",
-        @"Wasatch", @"WLED", @"YPS"
-    ];
-
-    [_vendorPopUp addItemsWithTitles:vendors];
+    NSArray<NSString *> *vendors = [[XLControllerDefinitionLoader sharedLoader] availableVendors];
+    if (vendors.count > 0) {
+        [_vendorPopUp addItemsWithTitles:vendors];
+    }
 }
 
 - (void)updateModelListForVendor:(NSString *)vendor {
@@ -855,10 +875,8 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
 
     if (vendor.length == 0 || [vendor isEqualToString:@"(None)"]) return;
 
-    // Query the engine bridge for models available for this vendor
-    NSDictionary *info = [_engineBridge getControllerInfo:vendor];
-    NSArray *models = info[@"models"];
-    if (models) {
+    NSArray<NSString *> *models = [[XLControllerDefinitionLoader sharedLoader] modelsForVendor:vendor];
+    if (models.count > 0) {
         [_modelPopUp addItemsWithTitles:models];
     }
 }
@@ -870,11 +888,8 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     if (model.length == 0 || [model isEqualToString:@"(None)"]) return;
     if (vendor.length == 0 || [vendor isEqualToString:@"(None)"]) return;
 
-    // Query the engine bridge for variants available for this vendor+model
-    NSString *key = [NSString stringWithFormat:@"%@/%@", vendor, model];
-    NSDictionary *info = [_engineBridge getControllerInfo:key];
-    NSArray *variants = info[@"variants"];
-    if (variants) {
+    NSArray<NSString *> *variants = [[XLControllerDefinitionLoader sharedLoader] variantsForVendor:vendor model:model];
+    if (variants.count > 0) {
         [_variantPopUp addItemsWithTitles:variants];
     }
 }
@@ -907,6 +922,7 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     NSString *vendor = sender.titleOfSelectedItem;
     [self updateModelListForVendor:vendor];
     [self updateVariantListForModel:@"" vendor:vendor];
+    [self updateCapabilitiesFromSelection];
     [self notifyDelegate];
 }
 
@@ -914,14 +930,20 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     NSString *vendor = _vendorPopUp.titleOfSelectedItem;
     NSString *model = sender.titleOfSelectedItem;
     [self updateVariantListForModel:model vendor:vendor];
+    [self updateCapabilitiesFromSelection];
     [self notifyDelegate];
 }
 
 - (void)variantChanged:(NSPopUpButton *)sender {
+    [self updateCapabilitiesFromSelection];
     [self notifyDelegate];
 }
 
 - (void)uploadConfiguration:(NSButton *)sender {
+    [self notifyDelegate];
+}
+
+- (void)uploadInputConfiguration:(NSButton *)sender {
     [self notifyDelegate];
 }
 
@@ -981,6 +1003,110 @@ static NSString * const kDisclosureStatePrefix = @"XLDisclosure_";
     NSString *pattern = @"^[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?)*$";
     NSPredicate *predicate = [NSPredicate predicateWithFormat:@"SELF MATCHES %@", pattern];
     return [predicate evaluateWithObject:hostname];
+}
+
+#pragma mark - Base Show Folder State
+
+- (void)updateBaseShowFolderState {
+    _baseBannerView.hidden = !_isFromBase;
+
+    if (_isFromBase) {
+        // Disable all editable fields for base controllers
+        _nameField.editable = NO;
+        _descriptionField.editable = NO;
+        _activeSwitch.enabled = NO;
+        _ipAddressField.editable = NO;
+        _serialPortPopUp.enabled = NO;
+        _protocolPopUp.enabled = NO;
+        _startUniverseField.editable = NO;
+        _universeCountField.editable = NO;
+        _startChannelField.editable = NO;
+        _vendorPopUp.enabled = NO;
+        _modelPopUp.enabled = NO;
+        _variantPopUp.enabled = NO;
+        _uploadButton.enabled = NO;
+        _autoUploadSwitch.enabled = NO;
+    } else {
+        // Re-enable all editable fields
+        _nameField.editable = YES;
+        _descriptionField.editable = YES;
+        _activeSwitch.enabled = YES;
+        _ipAddressField.editable = YES;
+        _serialPortPopUp.enabled = YES;
+        _protocolPopUp.enabled = YES;
+        _startUniverseField.editable = YES;
+        _universeCountField.editable = YES;
+        _startChannelField.editable = YES;
+        _vendorPopUp.enabled = YES;
+        _modelPopUp.enabled = YES;
+        _variantPopUp.enabled = YES;
+        _autoUploadSwitch.enabled = YES;
+        // Upload button depends on supportsUpload
+        NSNumber *supportsUpload = _currentData[@"supportsUpload"];
+        _uploadButton.enabled = supportsUpload ? supportsUpload.boolValue : NO;
+    }
+}
+
+#pragma mark - Capability Lookup
+
+- (void)updateCapabilitiesFromSelection {
+    NSString *vendor = _vendorPopUp.titleOfSelectedItem;
+    NSString *model = _modelPopUp.titleOfSelectedItem;
+    NSString *variant = _variantPopUp.titleOfSelectedItem;
+
+    _currentVariantInfo = nil;
+
+    if (vendor.length == 0 || [vendor isEqualToString:@"(None)"] ||
+        model.length == 0 || [model isEqualToString:@"(None)"] ||
+        variant.length == 0 || [variant isEqualToString:@"(None)"]) {
+        [self clearCapabilitiesDisplay];
+        return;
+    }
+
+    XLControllerVariantInfo *info = [[XLControllerDefinitionLoader sharedLoader]
+                                     variantInfoForVendor:vendor model:model variant:variant];
+    _currentVariantInfo = info;
+
+    if (!info) {
+        [self clearCapabilitiesDisplay];
+        return;
+    }
+
+    NSInteger maxChannels = info.maxPixelPortChannels * info.maxPixelPort +
+                            info.maxSerialPortChannels * info.maxSerialPort;
+    _maxChannelsField.stringValue = maxChannels > 0 ? [NSString stringWithFormat:@"%ld", (long)maxChannels] : @"--";
+
+    NSMutableArray<NSString *> *allProtocols = [NSMutableArray array];
+    if (info.pixelProtocols.count > 0) [allProtocols addObjectsFromArray:info.pixelProtocols];
+    if (info.serialProtocols.count > 0) [allProtocols addObjectsFromArray:info.serialProtocols];
+    _supportedProtocolsField.stringValue = allProtocols.count > 0 ? [allProtocols componentsJoinedByString:@", "] : @"--";
+
+    _maxUniversesField.stringValue = info.maxInputUniverses > 0
+        ? [NSString stringWithFormat:@"%ld", (long)info.maxInputUniverses] : @"--";
+    _supportsUploadField.stringValue = info.supportsUpload ? @"Yes" : @"No";
+
+    // Update upload buttons based on capabilities
+    _uploadButton.enabled = info.supportsUpload;
+    _uploadButton.toolTip = info.supportsUpload ? nil : @"This controller does not support upload";
+    _uploadInputButton.enabled = info.supportsUpload;
+    _uploadInputButton.toolTip = info.supportsUpload ? nil : @"This controller does not support input upload";
+}
+
+- (void)clearCapabilitiesDisplay {
+    _maxChannelsField.stringValue = @"--";
+    _supportedProtocolsField.stringValue = @"--";
+    _maxUniversesField.stringValue = @"--";
+    _supportsUploadField.stringValue = @"--";
+
+    _uploadButton.enabled = NO;
+    _uploadButton.toolTip = @"Select a controller variant to enable upload";
+    _uploadInputButton.enabled = NO;
+    _uploadInputButton.toolTip = @"Select a controller variant to enable upload";
+}
+
+/// Returns the current variant info, if a valid vendor/model/variant is selected.
+- (XLControllerVariantInfo *)currentVariantInfo {
+    return _currentVariantInfo;
 }
 
 #pragma mark - Delegate Notification

@@ -98,6 +98,28 @@ public:
     ///         found or has no submodels.
     virtual std::vector<std::string> getSubmodels(const std::string& modelName) const = 0;
 
+    /// Returns the full submodel definition attributes for a given submodel.
+    virtual std::map<std::string, std::string> getSubmodelAttributes(
+        const std::string& modelName, const std::string& submodelName) const {
+        return {};
+    }
+
+    /// Sets a submodel's attributes. Creates the submodel if it doesn't exist.
+    virtual bool setSubmodelAttributes(const std::string& modelName, const std::string& submodelName,
+                                       const std::map<std::string, std::string>& attrs) {
+        return false;
+    }
+
+    /// Deletes a submodel.
+    virtual bool deleteSubmodel(const std::string& modelName, const std::string& submodelName) {
+        return false;
+    }
+
+    /// Renames a submodel.
+    virtual bool renameSubmodel(const std::string& modelName, const std::string& oldName, const std::string& newName) {
+        return false;
+    }
+
     // --- Convenience Methods ---
 
     /// Checks if a model with the given name exists.

@@ -238,6 +238,35 @@
 /// Get groups containing a specific model
 - (NSArray<NSString *> *)getGroupsContainingModel:(NSString *)modelName;
 
+/// Create a new model group
+/// @param groupName Name for the new group
+/// @param modelNames Array of model names to include in the group (nil or empty for empty group)
+/// @return YES if the group was created successfully
+- (BOOL)createModelGroup:(NSString *)groupName withModels:(NSArray<NSString *> * _Nullable)modelNames;
+
+/// Delete a model group
+/// @param groupName Name of the group to delete
+/// @return YES if the group was deleted successfully
+- (BOOL)deleteModelGroup:(NSString *)groupName;
+
+/// Rename a model group
+/// @param oldName Current group name
+/// @param newName New group name
+/// @return YES if the group was renamed successfully
+- (BOOL)renameModelGroup:(NSString *)oldName toName:(NSString *)newName;
+
+/// Add a model to an existing group
+/// @param modelName Model to add
+/// @param groupName Group to add the model to
+/// @return YES if the model was added successfully
+- (BOOL)addModel:(NSString *)modelName toGroup:(NSString *)groupName;
+
+/// Remove a model from a group
+/// @param modelName Model to remove
+/// @param groupName Group to remove the model from
+/// @return YES if the model was removed successfully
+- (BOOL)removeModel:(NSString *)modelName fromGroup:(NSString *)groupName;
+
 #pragma mark - Submodels
 
 /// Get submodels of a model
@@ -300,6 +329,8 @@
 
 - (NSArray<NSString *> *)getControllerNames;
 - (NSDictionary *)getControllerInfo:(NSString *)controllerName;
+/// Unlink a controller from its base show folder (sets fromBase=false).
+- (BOOL)unlinkControllerFromBase:(NSString *)controllerName;
 - (BOOL)startOutput;
 - (void)stopOutput;
 - (BOOL)isOutputting;
@@ -357,6 +388,25 @@
 
 /// Save output configuration
 - (BOOL)saveOutputConfiguration;
+
+
+/// Export controller configuration to an XML file.
+/// The exported file uses the same format as xlights_networks.xml for compatibility.
+/// @param filePath Destination file path for the exported XML
+/// @return YES if export was successful
+- (BOOL)exportControllerConfig:(NSString *)filePath;
+
+/// Import controller configuration from an XML file.
+/// Replaces all current controllers with those from the imported file.
+/// The file should be in xlights_networks.xml format.
+/// @param filePath Path to the XML file to import
+/// @return YES if import was successful
+- (BOOL)importControllerConfig:(NSString *)filePath;
+
+/// Recalculate start channels for all models based on controller/port assignments.
+/// Automatically called when controllers, ports, or model assignments change.
+/// Posts XLChannelsDidRecalculateNotification when complete.
+- (void)recalculateStartChannels;
 
 #pragma mark - Controller Discovery
 
@@ -666,6 +716,40 @@
 /// Get all channel ranges for a model (including submodels).
 /// Returns array of dictionaries with: startChannel, endChannel, nodeIndex
 - (NSArray<NSDictionary *> *)getModelChannelRanges:(NSString *)modelName;
+
+#pragma mark - Layout Group Operations
+
+/// Get all layout group (preview) names.
+/// Always includes "Default", "All Models", "Unassigned" plus any custom groups.
+- (NSArray<NSString *> *)getLayoutGroupNames;
+
+/// Get the currently active layout group name.
+- (NSString *)getCurrentLayoutGroup;
+
+/// Set the current layout group. Updates the model filter for preview and tree.
+- (BOOL)setCurrentLayoutGroup:(NSString *)groupName;
+
+/// Create a new layout group (preview).
+/// Name must not be "Default", "All Models", or "Unassigned".
+- (BOOL)createLayoutGroup:(NSString *)name;
+
+/// Delete a layout group. Cannot delete "Default".
+/// Models assigned to this group will be reassigned to "Unassigned".
+- (BOOL)deleteLayoutGroup:(NSString *)name;
+
+/// Rename a layout group. Cannot rename "Default".
+- (BOOL)renameLayoutGroup:(NSString *)oldName toName:(NSString *)newName;
+
+/// Get layout group settings (background image, brightness, alpha).
+/// Returns dictionary with: name, backgroundImage, backgroundBrightness, backgroundAlpha, scaleBackgroundImage
+- (NSDictionary *)getLayoutGroupSettings:(NSString *)groupName;
+
+/// Update layout group settings.
+/// Supported keys: backgroundImage, backgroundBrightness, backgroundAlpha, scaleBackgroundImage
+- (BOOL)updateLayoutGroupSettings:(NSString *)groupName settings:(NSDictionary *)settings;
+
+/// Get model names visible in a specific layout group.
+- (NSArray<NSString *> *)getModelsForLayoutGroup:(NSString *)groupName;
 
 #pragma mark - Utility
 

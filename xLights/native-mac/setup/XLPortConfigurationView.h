@@ -192,4 +192,16 @@ extern NSString * const XLPortColumnStatus;
 /// Register for model drag types (call after view is loaded).
 - (void)registerForModelDrag;
 
+/// Configure the port grid for the specified number of pixel and serial ports.
+/// Clears existing port entries and creates new defaults based on controller capabilities.
+- (void)configureForPixelPorts:(NSInteger)pixelPorts serialPorts:(NSInteger)serialPorts;
+
+/// Set the available protocols for pixel and serial ports.
+/// Pass nil to use default protocol lists.
+- (void)setAvailablePixelProtocols:(nullable NSArray<NSString *> *)pixelProtocols
+                   serialProtocols:(nullable NSArray<NSString *> *)serialProtocols;
+
+/// Show or hide the Smart Remote column based on controller capabilities.
+- (void)setSmartRemotesVisible:(BOOL)visible;
+
 @end

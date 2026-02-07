@@ -61,6 +61,16 @@
 /// Called when the user requests to resize multiple models to match
 - (void)previewView:(XLMetalPreviewView *)view didRequestResizeModels:(NSString *)dimension;
 
+/// Called when the user requests a bulk edit operation on multiple models
+/// editType is one of: Active, Inactive, Tag Color, Preview, Pixel Size, Pixel Style,
+/// Transparency, Controller Name, Controller Port, Controller Protocol, Dimming Curves
+- (void)previewView:(XLMetalPreviewView *)view didRequestBulkEdit:(NSString *)editType;
+
+/// Called when the user nudges a selected model with arrow keys.
+/// @param deltaX World-space X offset (negative = left, positive = right)
+/// @param deltaY World-space Y offset (negative = down, positive = up)
+- (void)previewView:(XLMetalPreviewView *)view didNudgeModelWithDeltaX:(float)deltaX deltaY:(float)deltaY;
+
 @end
 
 /// Native NSView subclass backed by CAMetalLayer for the 3D model preview.
@@ -101,8 +111,28 @@
 /// Whether to show the ground reference grid
 @property (nonatomic, assign) BOOL showGrid;
 
+/// Grid spacing in world units (default: 50)
+@property (nonatomic, assign) float gridSpacing;
+
+/// Whether to center the grid at the world origin (default: YES)
+@property (nonatomic, assign) BOOL gridCenterAtOrigin;
+
+/// Grid line color as RGBA (default: 0.3, 0.3, 0.3, 0.4)
+@property (nonatomic, assign) simd_float4 gridColor;
+
 /// Whether to render in 3D perspective (YES) or 2D orthographic (NO)
 @property (nonatomic, assign) BOOL show3D;
+
+#pragma mark - Background Image
+
+/// File path to the background image (nil = no background image)
+@property (nonatomic, strong, nullable) NSString *backgroundImagePath;
+
+/// Brightness multiplier for the background image (0.0 = black, 1.0 = normal, 2.0 = overbright)
+@property (nonatomic, assign) float backgroundBrightness;
+
+/// Alpha/opacity for the background image (0.0 = transparent, 1.0 = opaque)
+@property (nonatomic, assign) float backgroundAlpha;
 
 #pragma mark - Camera
 
@@ -251,5 +281,19 @@
 
 /// Set whether to show rendered effect colors on models vs static layout colors
 @property (nonatomic, assign) BOOL showEffectColors;
+
+#pragma mark - Background Image Control
+
+/// Set the background image from a file path. Pass nil to remove.
+- (void)setBackgroundImage:(nullable NSString *)path;
+
+/// Set the background image brightness (0.0-2.0, default 1.0)
+- (void)setBackgroundBrightness:(float)brightness;
+
+/// Set the background image alpha/opacity (0.0-1.0, default 1.0)
+- (void)setBackgroundAlpha:(float)alpha;
+
+/// Remove the background image
+- (void)removeBackgroundImage;
 
 @end

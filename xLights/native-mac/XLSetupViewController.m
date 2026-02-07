@@ -11,6 +11,7 @@
 #import "XLSetupViewController.h"
 #import "XLEngineBridge.h"
 #import "setup/XLControllerInspectorViewController.h"
+#import "setup/XLControllerDefinitionLoader.h"
 #import "setup/XLUploadProgressSheet.h"
 #import "setup/XLControllerModelWindowController.h"
 
@@ -117,7 +118,44 @@
         if (info) {
             [_inspectorViewController setControllerData:info];
         }
+
+        // Wire capability data from XLControllerDefinitionLoader to the port config view
+        [self applyCapabilitiesToPortConfigFromControllerInfo:info];
     }
+}
+
+- (void)applyCapabilitiesToPortConfigFromControllerInfo:(NSDictionary *)info {
+    if (!info) return;
+
+    NSString *vendor = info[@"vendor"] ?: @"";
+    NSString *model = info[@"model"] ?: @"";
+    NSString *variant = info[@"variant"] ?: @"";
+
+    if (vendor.length == 0 || model.length == 0 || variant.length == 0) {
+        // No valid hardware selection -- use defaults
+        [_portConfigurationView setAvailablePixelProtocols:nil serialProtocols:nil];
+        [_portConfigurationView setSmartRemotesVisible:NO];
+        return;
+    }
+
+    XLControllerVariantInfo *variantInfo = [[XLControllerDefinitionLoader sharedLoader]
+                                            variantInfoForVendor:vendor model:model variant:variant];
+    if (!variantInfo) {
+        [_portConfigurationView setAvailablePixelProtocols:nil serialProtocols:nil];
+        [_portConfigurationView setSmartRemotesVisible:NO];
+        return;
+    }
+
+    // Configure port counts from capabilities
+    [_portConfigurationView configureForPixelPorts:variantInfo.maxPixelPort
+                                       serialPorts:variantInfo.maxSerialPort];
+
+    // Filter protocol options based on controller capabilities
+    [_portConfigurationView setAvailablePixelProtocols:variantInfo.pixelProtocols
+                                       serialProtocols:variantInfo.serialProtocols];
+
+    // Show/hide Smart Remote column based on controller support
+    [_portConfigurationView setSmartRemotesVisible:variantInfo.supportsSmartRemotes];
 }
 
 - (void)controllersView:(XLControllersViewController *)controllersView
@@ -184,6 +222,28 @@
 
     [_uploadProgressSheet uploadToControllers:controllerNames
                             attachedToWindow:self.view.window];
+}
+
+- (void)controllersView:(XLControllersViewController *)controllersView
+    didRequestUnlinkFromBaseAtIndices:(NSIndexSet *)indices {
+    if (indices.count == 0) return;
+
+    [indices enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSString *name = controllersView.controllers[idx][XLControllerColumnName];
+        if (name) {
+            [self->_engineBridge unlinkControllerFromBase:name];
+        }
+    }];
+
+    [controllersView reloadData];
+
+    NSString *selectedName = [controllersView selectedControllerName];
+    if (selectedName) {
+        NSDictionary *info = [_engineBridge getControllerInfo:selectedName];
+        if (info) {
+            [_inspectorViewController setControllerData:info];
+        }
+    }
 }
 
 #pragma mark - XLUploadProgressSheetDelegate
@@ -286,6 +346,10 @@
     NSString *selectedController = [_controllersViewController selectedControllerName];
     if (selectedController) {
         [_portConfigurationView loadPortsForController:selectedController];
+
+        // Re-apply capabilities in case vendor/model/variant changed
+        NSDictionary *info = [_engineBridge getControllerInfo:selectedController];
+        [self applyCapabilitiesToPortConfigFromControllerInfo:info];
     }
 }
 

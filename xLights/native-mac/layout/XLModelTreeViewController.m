@@ -1293,10 +1293,255 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
 #pragma mark - Context Menu Actions (Bulk Edit)
 
 - (void)contextBulkEdit:(NSMenuItem *)sender {
-    NSString *editType = sender.title;
-    [self showNotImplementedAlert:[NSString stringWithFormat:@"Bulk Edit: %@", editType]
-                          detail:[NSString stringWithFormat:@"Bulk editing '%@' for %lu selected models will be available in a future update.",
-                                  editType, (unsigned long)[self selectedModelNames].count]];
+    NSArray<NSString *> *names = [self selectedModelNames];
+    if (names.count == 0 || !_engineBridge) return;
+
+    switch (sender.tag) {
+        case XLContextTagBulkActive:
+            [self bulkSetProperty:@"Active" value:@"1" forModels:names];
+            break;
+        case XLContextTagBulkInactive:
+            [self bulkSetProperty:@"Active" value:@"0" forModels:names];
+            break;
+        case XLContextTagBulkTagColor:
+            [self bulkEditTagColorForModels:names];
+            break;
+        case XLContextTagBulkPreview:
+            [self bulkEditPreviewForModels:names];
+            break;
+        case XLContextTagBulkPixelSize:
+            [self bulkEditPixelSizeForModels:names];
+            break;
+        case XLContextTagBulkPixelStyle:
+            [self bulkEditPixelStyleForModels:names];
+            break;
+        case XLContextTagBulkTransparency:
+            [self bulkEditTransparencyForModels:names];
+            break;
+        case XLContextTagBulkControllerName:
+            [self bulkEditControllerNameForModels:names];
+            break;
+        case XLContextTagBulkControllerPort:
+            [self bulkEditControllerPortForModels:names];
+            break;
+        case XLContextTagBulkControllerProtocol:
+            [self bulkEditControllerProtocolForModels:names];
+            break;
+        case XLContextTagBulkDimmingCurves:
+            [self showNotImplementedAlert:@"Bulk Edit: Dimming Curves"
+                                  detail:@"Bulk dimming curve editing requires the dimming curve dialog."];
+            break;
+        default:
+            break;
+    }
+}
+
+- (void)bulkSetProperty:(NSString *)key value:(NSString *)value forModels:(NSArray<NSString *> *)modelNames {
+    for (NSString *name in modelNames) {
+        [_engineBridge updateModelProperty:name key:key value:value];
+    }
+    [self reloadData];
+}
+
+- (void)bulkEditTagColorForModels:(NSArray<NSString *> *)modelNames {
+    NSColorPanel *colorPanel = [NSColorPanel sharedColorPanel];
+    colorPanel.showsAlpha = NO;
+    colorPanel.color = [NSColor whiteColor];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Tag Color";
+    alert.informativeText = [NSString stringWithFormat:@"Choose a tag color for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSColorWell *colorWell = [[NSColorWell alloc] initWithFrame:NSMakeRect(0, 0, 60, 30)];
+    colorWell.color = [NSColor cyanColor];
+    alert.accessoryView = colorWell;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSColor *color = [colorWell.color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+        CGFloat r, g, b, a;
+        [color getRed:&r green:&g blue:&b alpha:&a];
+        NSString *colorStr = [NSString stringWithFormat:@"#%02X%02X%02X",
+                              (int)(r * 255), (int)(g * 255), (int)(b * 255)];
+        [self bulkSetProperty:@"TagColour" value:colorStr forModels:modelNames];
+    }
+}
+
+- (void)bulkEditPreviewForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Preview Group";
+    alert.informativeText = [NSString stringWithFormat:@"Enter the preview/layout group for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 250, 24)];
+    input.stringValue = @"Default";
+    input.placeholderString = @"Preview Group Name";
+    alert.accessoryView = input;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value = input.stringValue;
+        if (value.length > 0) {
+            [self bulkSetProperty:@"LayoutGroup" value:value forModels:modelNames];
+        }
+    }
+}
+
+- (void)bulkEditPixelSizeForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Pixel Size";
+    alert.informativeText = [NSString stringWithFormat:@"Choose pixel size for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 250, 30)];
+    NSSlider *slider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 190, 20)];
+    slider.minValue = 1;
+    slider.maxValue = 10;
+    slider.integerValue = 2;
+    slider.numberOfTickMarks = 10;
+    slider.allowsTickMarkValuesOnly = YES;
+
+    NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(200, 2, 50, 20)];
+    label.editable = NO;
+    label.bordered = NO;
+    label.drawsBackground = NO;
+    label.stringValue = @"2";
+    label.alignment = NSTextAlignmentRight;
+
+    // Bind label to slider value
+    [label bind:NSValueBinding toObject:slider withKeyPath:@"integerValue" options:nil];
+
+    [container addSubview:slider];
+    [container addSubview:label];
+    alert.accessoryView = container;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value = [NSString stringWithFormat:@"%ld", (long)slider.integerValue];
+        [self bulkSetProperty:@"PixelSize" value:value forModels:modelNames];
+    }
+}
+
+- (void)bulkEditPixelStyleForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Pixel Style";
+    alert.informativeText = [NSString stringWithFormat:@"Choose pixel style for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 250, 25) pullsDown:NO];
+    [popup addItemsWithTitles:@[@"Square", @"Circle", @"Smooth Circle", @"Blended Circle"]];
+    alert.accessoryView = popup;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        // Pixel style is stored as an integer index
+        NSString *value = [NSString stringWithFormat:@"%ld", (long)popup.indexOfSelectedItem];
+        [self bulkSetProperty:@"PixelStyle" value:value forModels:modelNames];
+    }
+}
+
+- (void)bulkEditTransparencyForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Transparency";
+    alert.informativeText = [NSString stringWithFormat:@"Choose transparency for %lu selected models (0 = opaque, 100 = fully transparent).", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 250, 30)];
+    NSSlider *slider = [[NSSlider alloc] initWithFrame:NSMakeRect(0, 0, 190, 20)];
+    slider.minValue = 0;
+    slider.maxValue = 100;
+    slider.integerValue = 0;
+
+    NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(200, 2, 50, 20)];
+    label.editable = NO;
+    label.bordered = NO;
+    label.drawsBackground = NO;
+    label.stringValue = @"0";
+    label.alignment = NSTextAlignmentRight;
+
+    [label bind:NSValueBinding toObject:slider withKeyPath:@"integerValue" options:nil];
+
+    [container addSubview:slider];
+    [container addSubview:label];
+    alert.accessoryView = container;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value = [NSString stringWithFormat:@"%ld", (long)slider.integerValue];
+        [self bulkSetProperty:@"Transparency" value:value forModels:modelNames];
+    }
+}
+
+- (void)bulkEditControllerNameForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Controller Name";
+    alert.informativeText = [NSString stringWithFormat:@"Choose controller for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 250, 25) pullsDown:NO];
+    [popup addItemWithTitle:@"(None)"];
+    NSArray<NSString *> *controllerNames = [_engineBridge getControllerNames];
+    if (controllerNames.count > 0) {
+        [popup addItemsWithTitles:controllerNames];
+    }
+    alert.accessoryView = popup;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value = popup.titleOfSelectedItem;
+        if ([value isEqualToString:@"(None)"]) {
+            value = @"";
+        }
+        [self bulkSetProperty:@"Controller" value:value forModels:modelNames];
+    }
+}
+
+- (void)bulkEditControllerPortForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Controller Port";
+    alert.informativeText = [NSString stringWithFormat:@"Enter the port number for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 100, 24)];
+    input.placeholderString = @"Port #";
+    input.stringValue = @"1";
+
+    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+    formatter.numberStyle = NSNumberFormatterDecimalStyle;
+    formatter.minimum = @(1);
+    formatter.maximum = @(512);
+    formatter.allowsFloats = NO;
+    input.formatter = formatter;
+
+    alert.accessoryView = input;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value = input.stringValue;
+        if (value.length > 0) {
+            [self bulkSetProperty:@"ControllerPort" value:value forModels:modelNames];
+        }
+    }
+}
+
+- (void)bulkEditControllerProtocolForModels:(NSArray<NSString *> *)modelNames {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Set Controller Protocol";
+    alert.informativeText = [NSString stringWithFormat:@"Choose protocol for %lu selected models.", (unsigned long)modelNames.count];
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 250, 25) pullsDown:NO];
+    [popup addItemsWithTitles:@[@"ws2811", @"WS2801", @"TLS3001", @"LPD6803", @"LPD8806",
+                                @"APA102", @"APA109", @"ICICOB", @"SM16716",
+                                @"DMX", @"LOR", @"Renard", @"Open DMX"]];
+    alert.accessoryView = popup;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSString *value = popup.titleOfSelectedItem;
+        [self bulkSetProperty:@"Protocol" value:value forModels:modelNames];
+    }
 }
 
 #pragma mark - Context Menu Actions (Align / Distribute / Resize)

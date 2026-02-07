@@ -188,6 +188,7 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:@"XLChannelsDidRecalculateNotification" object:nil];
     _tableView.dataSource = nil;
     _tableView.delegate = nil;
     [_discoveryController stopBackgroundPing];
@@ -226,12 +227,21 @@ static const void *kPingStatusCacheKey = &kPingStatusCacheKey;
     [super viewDidLoad];
     _discoveryController.engineBridge = _engineBridge;
 
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(channelsDidRecalculate:)
+                                                 name:@"XLChannelsDidRecalculateNotification"
+                                               object:nil];
+
     // Defer data loading briefly to let the view fully set up
     dispatch_async(dispatch_get_main_queue(), ^{
         [self reloadData];
         // Start background ping monitoring after data is loaded
         [self->_discoveryController startBackgroundPing];
     });
+}
+
+- (void)channelsDidRecalculate:(NSNotification *)notification {
+    [self reloadData];
 }
 
 - (void)setEngineBridge:(XLEngineBridge *)engineBridge {

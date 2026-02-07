@@ -11,7 +11,10 @@
 #include "ModelManagerAdapter.h"
 #include "../../models/ModelManager.h"
 #include "../../models/Model.h"
+#include "../../models/ModelGroup.h"
 #include "../../models/SubModel.h"
+
+#include <wx/xml/xml.h>
 
 namespace xlEngine {
 
@@ -110,6 +113,28 @@ bool ModelManagerAdapter::renameModel(const std::string& oldName, const std::str
 std::vector<std::string> ModelManagerAdapter::getGroupsContainingModel(Model* model) const
 {
     return _manager.GetGroupsContainingModel(model);
+}
+
+bool ModelManagerAdapter::createModelGroup(const std::string& groupName, const std::vector<std::string>& modelNames)
+{
+    // Build comma-separated model list
+    std::string modelList;
+    for (size_t i = 0; i < modelNames.size(); i++) {
+        if (i > 0) modelList += ",";
+        modelList += modelNames[i];
+    }
+
+    // Create XML node for the group
+    wxXmlNode* node = new wxXmlNode(wxXML_ELEMENT_NODE, "modelGroup");
+    node->AddAttribute("name", groupName);
+    node->AddAttribute("models", modelList);
+    node->AddAttribute("DisplayAs", "ModelGroup");
+    node->AddAttribute("GridSize", "400");
+    node->AddAttribute("layout", "minimalGrid");
+    node->AddAttribute("LayoutGroup", "Unassigned");
+
+    Model* model = _manager.createAndAddModel(node, 0, 0);
+    return model != nullptr;
 }
 
 } // namespace xlEngine

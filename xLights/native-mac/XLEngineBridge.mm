@@ -109,6 +109,9 @@ static XLEngineBridge *_sharedBridge = nil;
     // --- Native Mode Group Tracking ---
     std::set<std::string> _groupNames;  // Element names that are model groups
 
+    // --- Layout Group Selection ---
+    std::string _currentLayoutGroup;  // Currently active layout group name
+
     // --- Auto-Save ---
     dispatch_source_t _autoSaveTimer;
     dispatch_queue_t _autoSaveQueue;
@@ -136,6 +139,7 @@ static XLEngineBridge *_sharedBridge = nil;
         _standaloneMode = YES;  // Start in standalone mode
         _legacySupportEnabled = legacySupport;
         _showFolderPath = "";
+        _currentLayoutGroup = "Default";
         _autoSaveQueue = dispatch_queue_create("org.xlights.autosave", DISPATCH_QUEUE_SERIAL);
 
         if (_legacySupportEnabled) {
@@ -1510,6 +1514,102 @@ static XLEngineBridge *_sharedBridge = nil;
     return [self arrayFromVector:groups];
 }
 
+- (BOOL)createModelGroup:(NSString *)groupName withModels:(NSArray<NSString *> *)modelNames {
+    if (!groupName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot create model group - engine not available");
+        return NO;
+    }
+
+    std::string stdGroupName = [groupName UTF8String];
+    std::vector<std::string> stdModelNames;
+    if (modelNames) {
+        stdModelNames.reserve(modelNames.count);
+        for (NSString *name in modelNames) {
+            stdModelNames.push_back([name UTF8String]);
+        }
+    }
+
+    auto result = _modelEngine->createModelGroup(stdGroupName, stdModelNames);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: createModelGroup failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (BOOL)deleteModelGroup:(NSString *)groupName {
+    if (!groupName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot delete model group - engine not available");
+        return NO;
+    }
+
+    std::string stdName = [groupName UTF8String];
+    auto result = _modelEngine->deleteModelGroup(stdName);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: deleteModelGroup failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (BOOL)renameModelGroup:(NSString *)oldName toName:(NSString *)newName {
+    if (!oldName || !newName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot rename model group - engine not available");
+        return NO;
+    }
+
+    std::string stdOldName = [oldName UTF8String];
+    std::string stdNewName = [newName UTF8String];
+    auto result = _modelEngine->renameModelGroup(stdOldName, stdNewName);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: renameModelGroup failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (BOOL)addModel:(NSString *)modelName toGroup:(NSString *)groupName {
+    if (!modelName || !groupName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot add model to group - engine not available");
+        return NO;
+    }
+
+    std::string stdGroupName = [groupName UTF8String];
+    std::string stdModelName = [modelName UTF8String];
+    auto result = _modelEngine->addModelToGroup(stdGroupName, stdModelName);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: addModelToGroup failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (BOOL)removeModel:(NSString *)modelName fromGroup:(NSString *)groupName {
+    if (!modelName || !groupName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot remove model from group - engine not available");
+        return NO;
+    }
+
+    std::string stdGroupName = [groupName UTF8String];
+    std::string stdModelName = [modelName UTF8String];
+    auto result = _modelEngine->removeModelFromGroup(stdGroupName, stdModelName);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: removeModelFromGroup failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
 #pragma mark - Submodels
 
 - (NSArray<NSDictionary *> *)getSubmodels:(NSString *)modelName {
@@ -1545,6 +1645,112 @@ static XLEngineBridge *_sharedBridge = nil;
     std::string stdModel = [modelName UTF8String];
     std::string stdSubmodel = [submodelName UTF8String];
     return _modelEngine->hasSubmodel(stdModel, stdSubmodel) ? YES : NO;
+}
+
+- (NSDictionary *)getSubmodelDefinition:(NSString *)modelName submodelName:(NSString *)submodelName {
+    if (!modelName || !submodelName) return nil;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        return nil;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::string stdSubmodel = [submodelName UTF8String];
+    xlEngine::SubmodelDefinition def = _modelEngine->getSubmodelDefinition(stdModel, stdSubmodel);
+    if (def.name.empty()) return nil;
+
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    result[@"name"] = [NSString stringWithUTF8String:def.name.c_str()];
+    result[@"isRanges"] = @(def.isRanges);
+    result[@"vertical"] = @(def.vertical);
+    result[@"bufferStyle"] = [NSString stringWithUTF8String:def.bufferStyle.c_str()];
+    result[@"subBuffer"] = [NSString stringWithUTF8String:def.subBuffer.c_str()];
+
+    NSMutableArray *strands = [NSMutableArray arrayWithCapacity:def.strands.size()];
+    for (const auto &strand : def.strands) {
+        [strands addObject:[NSString stringWithUTF8String:strand.c_str()]];
+    }
+    result[@"strands"] = strands;
+
+    return result;
+}
+
+- (BOOL)setSubmodel:(NSString *)modelName
+       submodelName:(NSString *)submodelName
+         definition:(NSDictionary *)definition {
+    if (!modelName || !submodelName || !definition) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot set submodel - engine not available");
+        return NO;
+    }
+
+    xlEngine::SubmodelDefinition def;
+    def.name = [submodelName UTF8String];
+    def.isRanges = [definition[@"isRanges"] boolValue];
+    def.vertical = [definition[@"vertical"] boolValue];
+
+    NSString *bufStyle = definition[@"bufferStyle"];
+    def.bufferStyle = bufStyle ? [bufStyle UTF8String] : "Default";
+
+    NSString *subBuf = definition[@"subBuffer"];
+    def.subBuffer = subBuf ? [subBuf UTF8String] : "";
+
+    NSArray *strands = definition[@"strands"];
+    if (strands) {
+        for (NSString *strand in strands) {
+            def.strands.push_back([strand UTF8String]);
+        }
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::string stdSubmodel = [submodelName UTF8String];
+    xlEngine::OperationResult result = _modelEngine->setSubmodel(stdModel, stdSubmodel, def);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: setSubmodel failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (BOOL)deleteSubmodel:(NSString *)modelName submodelName:(NSString *)submodelName {
+    if (!modelName || !submodelName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot delete submodel - engine not available");
+        return NO;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::string stdSubmodel = [submodelName UTF8String];
+    xlEngine::OperationResult result = _modelEngine->deleteSubmodel(stdModel, stdSubmodel);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: deleteSubmodel failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
+- (BOOL)renameSubmodel:(NSString *)modelName
+               oldName:(NSString *)oldName
+               newName:(NSString *)newName {
+    if (!modelName || !oldName || !newName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot rename submodel - engine not available");
+        return NO;
+    }
+
+    std::string stdModel = [modelName UTF8String];
+    std::string stdOld = [oldName UTF8String];
+    std::string stdNew = [newName UTF8String];
+    xlEngine::OperationResult result = _modelEngine->renameSubmodel(stdModel, stdOld, stdNew);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: renameSubmodel failed: %s", result.message.c_str());
+    }
+    return result.success ? YES : NO;
 }
 
 #pragma mark - Model Geometry
@@ -1621,58 +1827,407 @@ static XLEngineBridge *_sharedBridge = nil;
 
 #pragma mark - Model Import Operations
 
+/// Map an .xmodel XML root element name to a user-facing model type string.
+/// Traditional .xmodel files use the element name as the model type indicator.
++ (NSString *)modelTypeFromXMLElementName:(NSString *)elementName {
+    static NSDictionary<NSString *, NSString *> *typeMap = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        typeMap = @{
+            @"custommodel":    @"Custom",
+            @"matrixmodel":    @"Matrix",
+            @"treemodel":      @"Tree",
+            @"archesmodel":    @"Arches",
+            @"starmodel":      @"Star",
+            @"polylinemodel":  @"Poly Line",
+            @"multipointmodel":@"MultiPoint",
+            @"circlemodel":    @"Circle",
+            @"spheremodel":    @"Sphere",
+            @"iciclemodel":    @"Icicles",
+            @"Cubemodel":      @"Cube",
+            @"dmxmodel":       @"DMX",
+            @"dmxgeneral":     @"DmxGeneral",
+            @"dmxservo":       @"DmxServo",
+            @"dmxservo3axis":  @"DmxServo3d",
+            @"dmxservo3d":     @"DmxServo3d",
+        };
+    });
+    NSString *type = typeMap[elementName];
+    if (!type) {
+        // Check case-insensitive for element names like "Cubemodel"
+        NSString *lower = [elementName lowercaseString];
+        for (NSString *key in typeMap) {
+            if ([[key lowercaseString] isEqualToString:lower]) {
+                return typeMap[key];
+            }
+        }
+    }
+    return type ?: elementName;
+}
+
+/// Extract all XML attributes from an NSXMLElement as a dictionary.
++ (NSDictionary<NSString *, NSString *> *)attributesFromXMLElement:(NSXMLElement *)element {
+    NSMutableDictionary *attrs = [NSMutableDictionary dictionary];
+    for (NSXMLNode *attr in [element attributes]) {
+        NSString *name = [attr name];
+        NSString *value = [attr stringValue];
+        if (name && value) {
+            attrs[name] = value;
+        }
+    }
+    return attrs;
+}
+
+/// Estimate channel count from model XML attributes.
+/// Uses parm1 (width/nodes-per-string), parm2 (height/strings), and StringType.
++ (NSInteger)estimateChannelCountFromAttributes:(NSDictionary<NSString *, NSString *> *)attrs {
+    NSInteger parm1 = [attrs[@"parm1"] integerValue];
+    NSInteger parm2 = [attrs[@"parm2"] integerValue];
+    if (parm1 <= 0) parm1 = 1;
+    if (parm2 <= 0) parm2 = 1;
+
+    NSInteger nodeCount = parm1 * parm2;
+
+    NSString *stringType = attrs[@"StringType"];
+    NSInteger channelsPerNode = 3; // default RGB
+    if (stringType) {
+        NSString *lower = [stringType lowercaseString];
+        if ([lower containsString:@"single"]) {
+            channelsPerNode = 1;
+        } else if ([lower containsString:@"4"]) {
+            channelsPerNode = 4; // RGBW
+        }
+    }
+
+    return nodeCount * channelsPerNode;
+}
+
+/// Parse models from an .xmodel file (single model, traditional or XmlSerializer format).
+/// Returns array of model info dictionaries.
+- (NSArray<NSDictionary *> *)parseXModelFile:(NSString *)filePath {
+    NSData *xmlData = [NSData dataWithContentsOfFile:filePath];
+    if (!xmlData) {
+        NSLog(@"XLEngineBridge: Cannot read file: %@", filePath);
+        return @[];
+    }
+
+    NSError *error = nil;
+    NSXMLDocument *xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (!xmlDoc || error) {
+        NSLog(@"XLEngineBridge: Failed to parse XML from %@: %@", filePath, error.localizedDescription);
+        return @[];
+    }
+
+    NSXMLElement *root = [xmlDoc rootElement];
+    if (!root) return @[];
+
+    NSString *rootName = [root name];
+    NSMutableArray<NSDictionary *> *models = [NSMutableArray array];
+
+    // Check for XmlSerializer format: <models type="exported">
+    if ([rootName isEqualToString:@"models"]) {
+        NSString *typeAttr = [[root attributeForName:@"type"] stringValue];
+        if ([typeAttr isEqualToString:@"exported"]) {
+            // New serializer format: iterate <model> children
+            for (NSXMLElement *child in [root children]) {
+                if (![[child name] isEqualToString:@"model"]) continue;
+
+                NSString *name = [[child attributeForName:@"name"] stringValue] ?: @"Unknown";
+                NSString *displayAs = [[child attributeForName:@"DisplayAs"] stringValue] ?: @"Unknown";
+                NSDictionary *attrs = [XLEngineBridge attributesFromXMLElement:child];
+                NSInteger channels = [XLEngineBridge estimateChannelCountFromAttributes:attrs];
+
+                [models addObject:@{
+                    @"name": name,
+                    @"type": displayAs,
+                    @"channels": @(channels),
+                }];
+            }
+            return models;
+        }
+        // Could also be an rgbeffects-style models container
+        for (NSXMLElement *child in [root children]) {
+            NSString *childName = [child name];
+            if ([childName isEqualToString:@"model"] || [childName isEqualToString:@"modelGroup"]) {
+                NSString *name = [[child attributeForName:@"name"] stringValue] ?: @"Unknown";
+                NSString *displayAs = [[child attributeForName:@"DisplayAs"] stringValue] ?: childName;
+                NSDictionary *attrs = [XLEngineBridge attributesFromXMLElement:child];
+                NSInteger channels = [XLEngineBridge estimateChannelCountFromAttributes:attrs];
+                [models addObject:@{
+                    @"name": name,
+                    @"type": displayAs,
+                    @"channels": @(channels),
+                }];
+            }
+        }
+        if (models.count > 0) return models;
+    }
+
+    // Traditional .xmodel format: root element IS the model (e.g. <custommodel name="...">)
+    NSString *name = [[root attributeForName:@"name"] stringValue] ?: @"Unknown";
+    NSString *type = [XLEngineBridge modelTypeFromXMLElementName:rootName];
+    NSDictionary *attrs = [XLEngineBridge attributesFromXMLElement:root];
+    NSInteger channels = [XLEngineBridge estimateChannelCountFromAttributes:attrs];
+
+    [models addObject:@{
+        @"name": name,
+        @"type": type,
+        @"channels": @(channels),
+    }];
+
+    return models;
+}
+
+/// Parse models from an .xlights sequence or layout XML file.
+/// Looks for model definitions within the XML structure.
+- (NSArray<NSDictionary *> *)parseXLightsLayoutFile:(NSString *)filePath {
+    NSData *xmlData = [NSData dataWithContentsOfFile:filePath];
+    if (!xmlData) return @[];
+
+    NSError *error = nil;
+    NSXMLDocument *xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (!xmlDoc || error) {
+        NSLog(@"XLEngineBridge: Failed to parse layout XML from %@: %@", filePath, error.localizedDescription);
+        return @[];
+    }
+
+    NSMutableArray<NSDictionary *> *models = [NSMutableArray array];
+
+    // Search for model elements in common locations:
+    // rgbeffects.xml: //models/model
+    // sequence files may also contain model references
+    NSArray<NSString *> *xpaths = @[
+        @"//models/model",
+        @"//model",
+    ];
+
+    NSMutableSet<NSString *> *seenNames = [NSMutableSet set];
+
+    for (NSString *xpath in xpaths) {
+        NSArray<NSXMLNode *> *nodes = [[xmlDoc rootElement] nodesForXPath:xpath error:nil];
+        for (NSXMLNode *node in nodes) {
+            if (![node isKindOfClass:[NSXMLElement class]]) continue;
+            NSXMLElement *elem = (NSXMLElement *)node;
+
+            NSString *name = [[elem attributeForName:@"name"] stringValue];
+            if (!name || [seenNames containsObject:name]) continue;
+            [seenNames addObject:name];
+
+            NSString *displayAs = [[elem attributeForName:@"DisplayAs"] stringValue] ?: @"Unknown";
+            NSDictionary *attrs = [XLEngineBridge attributesFromXMLElement:elem];
+            NSInteger channels = [XLEngineBridge estimateChannelCountFromAttributes:attrs];
+
+            [models addObject:@{
+                @"name": name,
+                @"type": displayAs,
+                @"channels": @(channels),
+            }];
+        }
+        if (models.count > 0) break;
+    }
+
+    return models;
+}
+
+/// Import a model from its XML attributes into the engine via createModel.
+/// Extracts all XML attributes and child elements (submodels, faces, states).
+- (BOOL)importModelFromXMLElement:(NSXMLElement *)element
+                        modelType:(NSString *)modelType
+                     originalName:(NSString *)originalName {
+    [self ensureEngineInitialized];
+    if (!_modelEngine) {
+        NSLog(@"XLEngineBridge: Cannot import model - engine not available");
+        return NO;
+    }
+
+    // Build properties map from all XML attributes
+    std::map<std::string, std::string> props;
+    for (NSXMLNode *attr in [element attributes]) {
+        NSString *attrName = [attr name];
+        NSString *attrValue = [attr stringValue];
+        if (attrName && attrValue) {
+            // Skip name - we'll set it separately to allow deconfliction
+            if ([attrName isEqualToString:@"name"]) continue;
+            props[[attrName UTF8String]] = [attrValue UTF8String];
+        }
+    }
+
+    // Collect child element data (submodels, faceInfo, stateInfo, etc.)
+    // Serialize child elements as XML strings so the model engine can reconstruct them
+    for (NSXMLElement *child in [element children]) {
+        NSString *childName = [child name];
+        if (!childName) continue;
+
+        if ([childName isEqualToString:@"subModel"] ||
+            [childName isEqualToString:@"faceInfo"] ||
+            [childName isEqualToString:@"stateInfo"] ||
+            [childName isEqualToString:@"Aliases"] ||
+            [childName isEqualToString:@"ControllerConnection"] ||
+            [childName isEqualToString:@"dimensions"]) {
+            // Store serialized child XML so the engine can reconstruct it
+            NSString *key = [NSString stringWithFormat:@"__child_%@_%lu", childName, (unsigned long)[element childCount]];
+            NSString *xmlStr = [child XMLString];
+            if (xmlStr) {
+                props[[key UTF8String]] = [xmlStr UTF8String];
+            }
+        }
+    }
+
+    // Generate a unique name via the model engine
+    std::string baseName = [originalName UTF8String];
+    std::string stdType = [modelType UTF8String];
+
+    // Check if name is taken and generate unique one
+    std::string finalName = baseName;
+    int suffix = 2;
+    while (_modelEngine->hasModel(finalName)) {
+        finalName = baseName + "-" + std::to_string(suffix);
+        suffix++;
+    }
+
+    xlEngine::OperationResult result = _modelEngine->createModel(stdType, finalName, props);
+    if (!result.success) {
+        NSLog(@"XLEngineBridge: Failed to import model '%s' as type '%s': %s",
+              finalName.c_str(), stdType.c_str(), result.message.c_str());
+    } else {
+        NSLog(@"XLEngineBridge: Imported model '%s' (type: %s)", finalName.c_str(), stdType.c_str());
+    }
+    return result.success ? YES : NO;
+}
+
 - (BOOL)importModelFromFile:(NSString *)filePath {
     if (!filePath) return NO;
 
-    std::string stdPath = [filePath UTF8String];
+    NSData *xmlData = [NSData dataWithContentsOfFile:filePath];
+    if (!xmlData) {
+        NSLog(@"XLEngineBridge: Cannot read model file: %@", filePath);
+        return NO;
+    }
 
-    // TODO: Call into ModelEngine
-    // xlEngine::OperationResult result = _modelEngine->importFromFile(stdPath);
-    // return result.success;
+    NSError *error = nil;
+    NSXMLDocument *xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (!xmlDoc || error) {
+        NSLog(@"XLEngineBridge: Failed to parse model XML from %@: %@", filePath, error.localizedDescription);
+        return NO;
+    }
 
-    NSLog(@"[Stub] importModelFromFile: %@", filePath);
-    return YES; // stub
+    NSXMLElement *root = [xmlDoc rootElement];
+    if (!root) return NO;
+
+    NSString *rootName = [root name];
+
+    // XmlSerializer format: <models type="exported"><model .../>...</models>
+    if ([rootName isEqualToString:@"models"]) {
+        NSString *typeAttr = [[root attributeForName:@"type"] stringValue];
+        if ([typeAttr isEqualToString:@"exported"]) {
+            BOOL anySuccess = NO;
+            for (NSXMLElement *child in [root children]) {
+                if (![[child name] isEqualToString:@"model"]) continue;
+                NSString *name = [[child attributeForName:@"name"] stringValue] ?: @"Imported Model";
+                NSString *displayAs = [[child attributeForName:@"DisplayAs"] stringValue] ?: @"Custom";
+                if ([self importModelFromXMLElement:child modelType:displayAs originalName:name]) {
+                    anySuccess = YES;
+                }
+            }
+            return anySuccess;
+        }
+    }
+
+    // Traditional .xmodel format: root element IS the model
+    NSString *name = [[root attributeForName:@"name"] stringValue] ?: @"Imported Model";
+    NSString *type = [XLEngineBridge modelTypeFromXMLElementName:rootName];
+
+    return [self importModelFromXMLElement:root modelType:type originalName:name];
 }
 
 - (BOOL)importModelFromFile:(NSString *)filePath modelName:(NSString *)modelName {
     if (!filePath || !modelName) return NO;
 
-    std::string stdPath = [filePath UTF8String];
-    std::string stdName = [modelName UTF8String];
+    NSString *extension = [[filePath pathExtension] lowercaseString];
 
-    // TODO: Call into ModelEngine
-    // xlEngine::OperationResult result = _modelEngine->importFromFile(stdPath, stdName);
-    // return result.success;
+    NSData *xmlData = [NSData dataWithContentsOfFile:filePath];
+    if (!xmlData) {
+        NSLog(@"XLEngineBridge: Cannot read file: %@", filePath);
+        return NO;
+    }
 
-    NSLog(@"[Stub] importModelFromFile: %@ modelName: %@", filePath, modelName);
-    return YES; // stub
+    NSError *error = nil;
+    NSXMLDocument *xmlDoc = [[NSXMLDocument alloc] initWithData:xmlData options:0 error:&error];
+    if (!xmlDoc || error) {
+        NSLog(@"XLEngineBridge: Failed to parse XML from %@: %@", filePath, error.localizedDescription);
+        return NO;
+    }
+
+    NSXMLElement *root = [xmlDoc rootElement];
+    if (!root) return NO;
+
+    // For .xmodel files, check if the single model matches the requested name
+    if ([extension isEqualToString:@"xmodel"]) {
+        NSString *rootName = [root name];
+
+        // XmlSerializer format
+        if ([rootName isEqualToString:@"models"]) {
+            for (NSXMLElement *child in [root children]) {
+                if (![[child name] isEqualToString:@"model"]) continue;
+                NSString *name = [[child attributeForName:@"name"] stringValue];
+                if ([name isEqualToString:modelName]) {
+                    NSString *displayAs = [[child attributeForName:@"DisplayAs"] stringValue] ?: @"Custom";
+                    return [self importModelFromXMLElement:child modelType:displayAs originalName:name];
+                }
+            }
+            NSLog(@"XLEngineBridge: Model '%@' not found in serialized xmodel file", modelName);
+            return NO;
+        }
+
+        // Traditional format - single model
+        NSString *name = [[root attributeForName:@"name"] stringValue];
+        if (!name || [name isEqualToString:modelName]) {
+            NSString *type = [XLEngineBridge modelTypeFromXMLElementName:rootName];
+            return [self importModelFromXMLElement:root modelType:type originalName:modelName];
+        }
+        NSLog(@"XLEngineBridge: Model name '%@' does not match file model '%@'", modelName, name);
+        return NO;
+    }
+
+    // For .xlights / layout / sequence files, search for the named model
+    NSArray<NSString *> *xpaths = @[
+        @"//models/model",
+        @"//model",
+    ];
+
+    for (NSString *xpath in xpaths) {
+        NSArray<NSXMLNode *> *nodes = [root nodesForXPath:xpath error:nil];
+        for (NSXMLNode *node in nodes) {
+            if (![node isKindOfClass:[NSXMLElement class]]) continue;
+            NSXMLElement *elem = (NSXMLElement *)node;
+            NSString *name = [[elem attributeForName:@"name"] stringValue];
+            if ([name isEqualToString:modelName]) {
+                NSString *displayAs = [[elem attributeForName:@"DisplayAs"] stringValue] ?: @"Custom";
+                return [self importModelFromXMLElement:elem modelType:displayAs originalName:name];
+            }
+        }
+    }
+
+    NSLog(@"XLEngineBridge: Model '%@' not found in file %@", modelName, filePath);
+    return NO;
 }
 
 - (NSArray<NSDictionary *> *)getModelsInFile:(NSString *)filePath {
     if (!filePath) return @[];
 
-    std::string stdPath = [filePath UTF8String];
+    NSString *extension = [[filePath pathExtension] lowercaseString];
 
-    // TODO: Call into ModelEngine
-    // std::vector<xlEngine::ModelInfo> models = _modelEngine->getModelsInFile(stdPath);
-    // NSMutableArray *result = [NSMutableArray array];
-    // for (const auto& m : models) {
-    //     [result addObject:@{
-    //         @"name": [NSString stringWithUTF8String:m.name.c_str()],
-    //         @"type": [NSString stringWithUTF8String:m.type.c_str()],
-    //         @"channels": @(m.channelCount),
-    //     }];
-    // }
-    // return result;
+    if ([extension isEqualToString:@"xmodel"]) {
+        return [self parseXModelFile:filePath];
+    }
 
-    NSLog(@"[Stub] getModelsInFile: %@", filePath);
-
-    // Stub: return sample models
-    return @[
-        @{@"name": @"Model1", @"type": @"Single Line", @"channels": @(300)},
-        @{@"name": @"Model2", @"type": @"Matrix", @"channels": @(1200)},
-        @{@"name": @"Model3", @"type": @"Tree", @"channels": @(900)},
-    ];
+    // For .xlights, .xml, and other layout/sequence files
+    NSArray<NSDictionary *> *models = [self parseXLightsLayoutFile:filePath];
+    if (models.count == 0) {
+        // Fall back to trying .xmodel parsing (some files may not have standard extensions)
+        models = [self parseXModelFile:filePath];
+    }
+    return models;
 }
 
 #pragma mark - Output Operations
@@ -1704,6 +2259,29 @@ static XLEngineBridge *_sharedBridge = nil;
 
     xlEngine::ControllerConfig config = _outputEngine->getController(stdName);
     return [self dictFromControllerConfig:config];
+}
+
+- (BOOL)unlinkControllerFromBase:(NSString *)controllerName {
+    if (!controllerName) return NO;
+
+    [self ensureEngineInitialized];
+    if (!_outputEngine) {
+        NSLog(@"XLEngineBridge: Cannot unlink controller - engine not available");
+        return NO;
+    }
+
+    std::string stdName = [controllerName UTF8String];
+    if (!_outputEngine->controllerExists(stdName)) {
+        return NO;
+    }
+
+    xlEngine::ControllerConfig config = _outputEngine->getController(stdName);
+    config.fromBase = false;
+    xlEngine::OperationResult result = _outputEngine->updateController(stdName, config);
+    if (result.success) {
+        _outputEngine->save();
+    }
+    return result.success ? YES : NO;
 }
 
 - (BOOL)startOutput {
@@ -1865,6 +2443,8 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!result.success) {
         NSLog(@"XLEngineBridge: Failed to assign model %@ to %@:%ld: %s",
               modelName, controllerName, (long)portNumber, result.message.c_str());
+    } else {
+        [self recalculateStartChannels];
     }
     return result.success ? YES : NO;
 }
@@ -1898,6 +2478,7 @@ static XLEngineBridge *_sharedBridge = nil;
                       name.c_str(), controllerName, (long)portNumber, result.message.c_str());
                 return NO;
             }
+            [self recalculateStartChannels];
             return YES;
         }
     }
@@ -1950,6 +2531,176 @@ static XLEngineBridge *_sharedBridge = nil;
         NSLog(@"XLEngineBridge: Failed to save output configuration: %s", result.message.c_str());
     }
     return result.success ? YES : NO;
+}
+
+
+- (BOOL)exportControllerConfig:(NSString *)filePath {
+    [self ensureEngineInitialized];
+
+    if (!filePath || filePath.length == 0) {
+        NSLog(@"XLEngineBridge: Cannot export controller config - no file path provided");
+        return NO;
+    }
+
+    // Native mode: use NativeOutputProvider's saveToXML directly
+    if (_nativeOutputProvider) {
+        std::string stdPath = [filePath UTF8String];
+        bool ok = _nativeOutputProvider->saveToXML(stdPath);
+        if (!ok) {
+            NSLog(@"XLEngineBridge: Failed to export controller config to %@", filePath);
+        }
+        return ok ? YES : NO;
+    }
+
+#ifndef XLIGHTS_NATIVE
+    // Legacy mode: copy the show folder's networks file to the export path
+    if (!_showFolderPath.empty()) {
+        std::string srcPath = _showFolderPath + "/xlights_networks.xml";
+        NSString *src = [NSString stringWithUTF8String:srcPath.c_str()];
+        NSError *error = nil;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:src]) {
+            [[NSFileManager defaultManager] removeItemAtPath:filePath error:nil];
+            if ([[NSFileManager defaultManager] copyItemAtPath:src toPath:filePath error:&error]) {
+                return YES;
+            }
+            NSLog(@"XLEngineBridge: Failed to export (copy) controller config: %@", error.localizedDescription);
+        }
+    }
+#endif
+
+    NSLog(@"XLEngineBridge: Cannot export controller config - no provider available");
+    return NO;
+}
+
+- (BOOL)importControllerConfig:(NSString *)filePath {
+    [self ensureEngineInitialized];
+
+    if (!filePath || filePath.length == 0) {
+        NSLog(@"XLEngineBridge: Cannot import controller config - no file path provided");
+        return NO;
+    }
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
+        NSLog(@"XLEngineBridge: Cannot import controller config - file does not exist: %@", filePath);
+        return NO;
+    }
+
+    // Native mode: use NativeOutputProvider's loadFromXML
+    if (_nativeOutputProvider) {
+        std::string stdPath = [filePath UTF8String];
+
+        // Clear existing controllers and load from the new file
+        _nativeOutputProvider->clearControllers();
+        bool ok = _nativeOutputProvider->loadFromXML(stdPath);
+        if (!ok) {
+            NSLog(@"XLEngineBridge: Failed to import controller config from %@", filePath);
+            // Attempt to reload the original config
+            if (!_showFolderPath.empty()) {
+                std::string networksPath = _showFolderPath + "/xlights_networks.xml";
+                _nativeOutputProvider->loadFromXML(networksPath);
+            }
+            return NO;
+        }
+
+        // Also save to the show folder so the import persists
+        if (!_showFolderPath.empty()) {
+            std::string networksPath = _showFolderPath + "/xlights_networks.xml";
+            _nativeOutputProvider->saveToXML(networksPath);
+        }
+
+        NSLog(@"XLEngineBridge: Successfully imported controller config from %@", filePath);
+        return YES;
+    }
+
+#ifndef XLIGHTS_NATIVE
+    // Legacy mode: copy the file into the show folder and reload
+    if (!_showFolderPath.empty()) {
+        std::string destPath = _showFolderPath + "/xlights_networks.xml";
+        NSString *dest = [NSString stringWithUTF8String:destPath.c_str()];
+        NSError *error = nil;
+
+        // Back up existing file
+        NSString *backup = [dest stringByAppendingString:@".bak"];
+        [[NSFileManager defaultManager] removeItemAtPath:backup error:nil];
+        [[NSFileManager defaultManager] copyItemAtPath:dest toPath:backup error:nil];
+
+        // Replace with imported file
+        [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+        if ([[NSFileManager defaultManager] copyItemAtPath:filePath toPath:dest error:&error]) {
+            NSLog(@"XLEngineBridge: Imported controller config (legacy mode)");
+            return YES;
+        }
+        NSLog(@"XLEngineBridge: Failed to import (copy) controller config: %@", error.localizedDescription);
+    }
+#endif
+
+    NSLog(@"XLEngineBridge: Cannot import controller config - no provider available");
+    return NO;
+}
+
+- (void)recalculateStartChannels {
+    [self ensureEngineInitialized];
+    if (!_outputEngine || !_modelEngine) return;
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"XLChannelsDidRecalculateNotification" object:self];
+        return;
+    }
+    std::vector<xlEngine::ControllerConfig> controllers = _outputEngine->getControllers();
+    std::vector<std::string> allModelNames = _modelEngine->getModelNames();
+    struct ModelPortInfo { std::string name; std::string protocol; int port; std::string modelChain; int channelCount; };
+    std::map<std::string, std::map<int, std::vector<ModelPortInfo>>> controllerPortModels;
+    for (const auto& mn : allModelNames) {
+        auto props = _modelEngine->getModelProperties(mn);
+        std::string ctrl; auto cIt = props.find("Controller"); if (cIt != props.end()) ctrl = cIt->second;
+        if (ctrl.empty()) continue;
+        std::string proto; int pt = 0; std::string mc;
+        auto pIt = props.find("ControllerConnection.Protocol"); if (pIt != props.end()) proto = pIt->second;
+        auto ptIt = props.find("ControllerConnection.Port");
+        if (ptIt != props.end()) { try { pt = std::stoi(ptIt->second); } catch (...) {} }
+        auto mcIt = props.find("ControllerConnection.ModelChain"); if (mcIt != props.end()) mc = mcIt->second;
+        if (pt <= 0) continue;
+        int p1 = 0, p2 = 0, cpn = 3;
+        auto p1It = props.find("parm1"); if (p1It != props.end()) { try { p1 = std::stoi(p1It->second); } catch (...) {} }
+        auto p2It = props.find("parm2"); if (p2It != props.end()) { try { p2 = std::stoi(p2It->second); } catch (...) {} }
+        if (p2 <= 0) p2 = 1;
+        auto stIt = props.find("StringType");
+        if (stIt != props.end()) {
+            if (stIt->second.find("Single") != std::string::npos) cpn = 1;
+            else if (stIt->second.find("4 Channel") != std::string::npos || stIt->second.find("RGBW") != std::string::npos) cpn = 4;
+        }
+        int cc = p1 * p2 * cpn; if (cc <= 0) cc = 1;
+        controllerPortModels[ctrl][pt].push_back({mn, proto, pt, mc, cc});
+    }
+    for (const auto& c : controllers) {
+        auto cIt2 = controllerPortModels.find(c.name); if (cIt2 == controllerPortModels.end()) continue;
+        int32_t ch = 1;
+        for (auto& [pn, mdls] : cIt2->second) {
+            if (mdls.size() > 1) {
+                std::vector<ModelPortInfo> s; s.reserve(mdls.size());
+                for (auto it = mdls.begin(); it != mdls.end(); ++it) {
+                    if (it->modelChain.empty() || it->modelChain == "Beginning") { s.push_back(*it); mdls.erase(it); break; }
+                }
+                if (s.empty() && !mdls.empty()) { s.push_back(mdls.front()); mdls.erase(mdls.begin()); }
+                while (!mdls.empty()) {
+                    std::string nc = ">" + s.back().name; bool f = false;
+                    for (auto it = mdls.begin(); it != mdls.end(); ++it) {
+                        if (it->modelChain == nc) { s.push_back(*it); mdls.erase(it); f = true; break; }
+                    }
+                    if (!f) { for (auto& m : mdls) s.push_back(m); mdls.clear(); }
+                }
+                mdls = s;
+            }
+            for (const auto& m : mdls) {
+                _nativeModelProvider->setModelAttribute(m.name, "StartChannel", "!" + c.name + ":" + std::to_string(ch));
+                ch += m.channelCount;
+            }
+        }
+        if (c.autoSize && ch > 1) { xlEngine::ControllerConfig u = c; u.channels = ch - 1; _outputEngine->updateController(c.name, u); }
+    }
+    NSLog(@"XLEngineBridge: Recalculated start channels for all models");
+#endif
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"XLChannelsDidRecalculateNotification" object:self];
 }
 
 #pragma mark - Controller Discovery
@@ -2019,6 +2770,8 @@ static XLEngineBridge *_sharedBridge = nil;
     xlEngine::OperationResult result = _outputEngine->addDiscoveredController(discovered);
     if (!result.success) {
         NSLog(@"XLEngineBridge: Failed to add discovered controller: %s", result.message.c_str());
+    } else {
+        [self recalculateStartChannels];
     }
     return result.success ? YES : NO;
 }
@@ -4367,6 +5120,7 @@ static XLEngineBridge *_sharedBridge = nil;
     result[@"suppressDuplicateFrames"] = @(config.suppressDuplicateFrames);
     result[@"monitor"] = @(config.monitor);
     result[@"managed"] = @(config.managed);
+    result[@"fromBase"] = @(config.fromBase);
 
     result[@"startChannel"] = @(config.startChannel);
     result[@"endChannel"] = @(config.endChannel);
@@ -4672,8 +5426,28 @@ static XLEngineBridge *_sharedBridge = nil;
     [self ensureEngineInitialized];
 
 #ifdef XLIGHTS_NATIVE
-    // TODO: Implement native model channel ranges
-    return @[];
+    if (!_modelEngine) return @[];
+
+    std::string stdName = [modelName UTF8String];
+    xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+    if (info.name.empty() || info.nodeCount == 0) return @[];
+
+    uint32_t chansPerNode = (info.nodeCount > 0) ? info.channelCount / info.nodeCount : 3;
+    if (chansPerNode == 0) chansPerNode = 3;
+
+    NSMutableArray *ranges = [NSMutableArray array];
+    for (uint32_t nodeIdx = 0; nodeIdx < info.nodeCount; nodeIdx++) {
+        uint32_t nodeStartCh = info.firstChannel + nodeIdx * chansPerNode;
+
+        [ranges addObject:@{
+            @"nodeIndex": @(nodeIdx),
+            @"startChannel": @(nodeStartCh + 1), // Convert to 1-indexed
+            @"endChannel": @(nodeStartCh + chansPerNode), // 1-indexed, inclusive
+            @"channelCount": @(chansPerNode)
+        }];
+    }
+
+    return ranges;
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) {
@@ -4703,6 +5477,179 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     return ranges;
+#endif
+}
+
+#pragma mark - Layout Group Operations
+
+- (NSArray<NSString *> *)getLayoutGroupNames {
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return @[@"Default", @"All Models", @"Unassigned"];
+
+    auto names = _nativeModelProvider->getLayoutGroupNames();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:names.size()];
+    for (const auto& name : names) {
+        [result addObject:[NSString stringWithUTF8String:name.c_str()]];
+    }
+    return result;
+#else
+    return @[@"Default", @"All Models", @"Unassigned"];
+#endif
+}
+
+- (NSString *)getCurrentLayoutGroup {
+    return [NSString stringWithUTF8String:_currentLayoutGroup.c_str()];
+}
+
+- (BOOL)setCurrentLayoutGroup:(NSString *)groupName {
+    if (!groupName) return NO;
+
+    _currentLayoutGroup = [groupName UTF8String];
+
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"XLLayoutGroupDidChangeNotification"
+                      object:self
+                    userInfo:@{@"groupName": groupName}];
+
+    return YES;
+}
+
+- (BOOL)createLayoutGroup:(NSString *)name {
+    if (!name) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    bool result = _nativeModelProvider->createLayoutGroup([name UTF8String]);
+    if (result) {
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"XLLayoutGroupListDidChangeNotification"
+                          object:self];
+    }
+    return result ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)deleteLayoutGroup:(NSString *)name {
+    if (!name) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    std::string stdName = [name UTF8String];
+    bool result = _nativeModelProvider->deleteLayoutGroup(stdName);
+    if (result) {
+        if (_currentLayoutGroup == stdName) {
+            _currentLayoutGroup = "Default";
+        }
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"XLLayoutGroupListDidChangeNotification"
+                          object:self];
+    }
+    return result ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)renameLayoutGroup:(NSString *)oldName toName:(NSString *)newName {
+    if (!oldName || !newName) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    std::string stdOldName = [oldName UTF8String];
+    bool result = _nativeModelProvider->renameLayoutGroup(stdOldName, [newName UTF8String]);
+    if (result) {
+        if (_currentLayoutGroup == stdOldName) {
+            _currentLayoutGroup = [newName UTF8String];
+        }
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"XLLayoutGroupListDidChangeNotification"
+                          object:self];
+    }
+    return result ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (NSDictionary *)getLayoutGroupSettings:(NSString *)groupName {
+    if (!groupName) return nil;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return nil;
+
+    auto info = _nativeModelProvider->getLayoutGroup([groupName UTF8String]);
+    return @{
+        @"name": [NSString stringWithUTF8String:info.name.c_str()],
+        @"backgroundImage": [NSString stringWithUTF8String:info.backgroundImage.c_str()],
+        @"backgroundBrightness": @(info.backgroundBrightness),
+        @"backgroundAlpha": @(info.backgroundAlpha),
+        @"scaleBackgroundImage": @(info.scaleBackgroundImage),
+    };
+#else
+    return @{@"name": groupName};
+#endif
+}
+
+- (BOOL)updateLayoutGroupSettings:(NSString *)groupName settings:(NSDictionary *)settings {
+    if (!groupName || !settings) return NO;
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return NO;
+
+    auto current = _nativeModelProvider->getLayoutGroup([groupName UTF8String]);
+
+    if (settings[@"backgroundImage"]) {
+        current.backgroundImage = [settings[@"backgroundImage"] UTF8String];
+    }
+    if (settings[@"backgroundBrightness"]) {
+        current.backgroundBrightness = [settings[@"backgroundBrightness"] intValue];
+    }
+    if (settings[@"backgroundAlpha"]) {
+        current.backgroundAlpha = [settings[@"backgroundAlpha"] intValue];
+    }
+    if (settings[@"scaleBackgroundImage"]) {
+        current.scaleBackgroundImage = [settings[@"scaleBackgroundImage"] boolValue];
+    }
+
+    return _nativeModelProvider->updateLayoutGroup([groupName UTF8String], current) ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (NSArray<NSString *> *)getModelsForLayoutGroup:(NSString *)groupName {
+    if (!groupName) return @[];
+
+    [self ensureEngineInitialized];
+
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeModelProvider) return @[];
+
+    auto names = _nativeModelProvider->getModelsForLayoutGroup([groupName UTF8String]);
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:names.size()];
+    for (const auto& name : names) {
+        [result addObject:[NSString stringWithUTF8String:name.c_str()]];
+    }
+    return result;
+#else
+    return @[];
 #endif
 }
 

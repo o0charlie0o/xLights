@@ -98,6 +98,12 @@ public:
     /// @return Vector of group names containing the model.
     std::vector<std::string> getGroupsContainingModel(Model* model) const;
 
+    /// Creates a new model group.
+    /// @param groupName Name for the new group.
+    /// @param modelNames Vector of model names to include in the group.
+    /// @return true if the group was created successfully.
+    bool createModelGroup(const std::string& groupName, const std::vector<std::string>& modelNames);
+
     /// Provides direct access to the underlying ModelManager.
     /// @note This is provided for legacy code that still needs direct access.
     ///       New code should use interface methods instead.

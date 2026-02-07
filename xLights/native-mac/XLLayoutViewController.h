@@ -44,6 +44,12 @@
 /// The undo controller for model manipulation operations
 @property (nonatomic, strong, readonly) XLLayoutUndoController *undoController;
 
+/// The layout group selector (preview chooser)
+@property (nonatomic, strong, readonly) NSPopUpButton *layoutGroupSelector;
+
+/// The currently active layout group name
+@property (nonatomic, copy, readonly) NSString *currentLayoutGroup;
+
 /// Show the model creation sheet for a given model type
 - (void)showModelCreationSheetForType:(NSString *)modelType;
 

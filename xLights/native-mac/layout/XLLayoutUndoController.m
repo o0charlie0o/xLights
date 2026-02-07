@@ -474,4 +474,17 @@
     _hasCapture = NO;
 }
 
+#pragma mark - Undo Grouping
+
+- (void)beginUndoGroup:(NSString *)actionName {
+    [_undoManager beginUndoGrouping];
+    if (actionName.length > 0) {
+        [_undoManager setActionName:actionName];
+    }
+}
+
+- (void)endUndoGroup {
+    [_undoManager endUndoGrouping];
+}
+
 @end
