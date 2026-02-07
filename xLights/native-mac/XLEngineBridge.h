@@ -363,6 +363,24 @@
 /// Get list of models contained in a file (for sequence/layout files)
 - (NSArray<NSDictionary *> *)getModelsInFile:(NSString *)filePath;
 
+#pragma mark - RGB Effects File Import
+
+/// Parse an xlights_rgbeffects.xml file and return its contents organized by layout group.
+/// Returns a dictionary with:
+///   @"layoutGroups": NSArray of NSString (layout group names found in file, always includes "Default" and "Unassigned")
+///   @"models": NSArray of NSDictionary, each with: name, type, channels, layoutGroup, isModelGroup (BOOL),
+///              and for model groups: models (comma-separated member names)
+- (NSDictionary *)parseRGBEffectsFile:(NSString *)filePath;
+
+/// Import selected models and model groups from an xlights_rgbeffects.xml file.
+/// @param filePath Path to the xlights_rgbeffects.xml file
+/// @param modelNames Array of model/group names to import
+/// @param targetLayoutGroup The layout group to assign imported models to (nil = keep original)
+/// @return Array of successfully imported model names
+- (NSArray<NSString *> *)importModelsFromRGBEffectsFile:(NSString *)filePath
+                                             modelNames:(NSArray<NSString *> *)modelNames
+                                      targetLayoutGroup:(NSString * _Nullable)targetLayoutGroup;
+
 #pragma mark - Output Operations
 
 - (NSArray<NSString *> *)getControllerNames;

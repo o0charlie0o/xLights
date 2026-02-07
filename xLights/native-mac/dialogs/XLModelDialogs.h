@@ -57,26 +57,60 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Model Dimming Curve Dialog
 
+/// Dimming curve mode matching legacy xLights dialog tabs.
+typedef NS_ENUM(NSInteger, XLDimmingCurveMode) {
+    XLDimmingCurveModeSingleGamma = 0,   // Single brightness/gamma for all channels
+    XLDimmingCurveModeSingleFile,         // Single curve from file for all channels
+    XLDimmingCurveModeRGBGamma,           // Per-channel R/G/B brightness/gamma
+    XLDimmingCurveModeRGBFile,            // Per-channel R/G/B from files
+};
+
 /// Native macOS sheet for configuring model dimming curves.
+/// Matches the legacy ModelDimmingCurveDialog with four modes:
+///   - Single brightness/gamma
+///   - Single curve from file
+///   - Per-channel RGB brightness/gamma
+///   - Per-channel RGB from file
+/// Includes live visual curve preview for R, G, B channels.
 @interface XLModelDimmingCurveDialog : XLBaseSheetController
 
 /// Model name
 @property (nonatomic, copy) NSString *modelName;
 
-/// Dimming curve type (linear, gamma, log, etc.)
-@property (nonatomic, copy) NSString *curveType;
+/// Current dimming curve mode
+@property (nonatomic, assign) XLDimmingCurveMode mode;
 
-/// Gamma value (for gamma curve type)
-@property (nonatomic, assign) double gammaValue;
+/// Single-channel gamma value (0.0 - 50.0, default 1.0)
+@property (nonatomic, assign) double singleGamma;
 
-/// Brightness percentage (0-100)
-@property (nonatomic, assign) NSInteger brightness;
+/// Single-channel brightness adjustment (-100 to 100, default 0)
+@property (nonatomic, assign) NSInteger singleBrightness;
 
-/// Apply to all channels
-@property (nonatomic, assign) BOOL applyToAllChannels;
+/// Single-channel curve file path
+@property (nonatomic, copy, nullable) NSString *singleFilePath;
 
-/// Custom curve data points (x,y pairs from 0-255)
-@property (nonatomic, copy, nullable) NSArray<NSValue *> *customCurvePoints;
+/// Per-channel gamma values (0.0 - 50.0, default 1.0 each)
+@property (nonatomic, assign) double redGamma;
+@property (nonatomic, assign) double greenGamma;
+@property (nonatomic, assign) double blueGamma;
+
+/// Per-channel brightness adjustments (-100 to 100, default 0 each)
+@property (nonatomic, assign) NSInteger redBrightness;
+@property (nonatomic, assign) NSInteger greenBrightness;
+@property (nonatomic, assign) NSInteger blueBrightness;
+
+/// Per-channel curve file paths
+@property (nonatomic, copy, nullable) NSString *redFilePath;
+@property (nonatomic, copy, nullable) NSString *greenFilePath;
+@property (nonatomic, copy, nullable) NSString *blueFilePath;
+
+/// Initialize from a dimming info dictionary (as returned from XLEngineBridge).
+/// Keys are channel names ("all", "red", "green", "blue"), values are dictionaries
+/// with "gamma", "brightness", and/or "filename" keys.
+- (void)initFromDimmingInfo:(NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)dimmingInfo;
+
+/// Export current settings as a dimming info dictionary.
+- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)exportDimmingInfo;
 
 @end
 

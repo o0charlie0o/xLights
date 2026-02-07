@@ -285,7 +285,12 @@ static const CGFloat kLabelWidth = 130.0;
 
 #pragma mark - XLModelDimmingCurveDialog
 
-@interface XLModelDimmingCurveDialog ()
+@interface XLModelDimmingCurveDialog () {
+    NSString *_curveType;
+    double _gammaValue;
+    NSInteger _brightness;
+    BOOL _applyToAllChannels;
+}
 
 @property (nonatomic, strong) NSPopUpButton *curveTypePopup;
 @property (nonatomic, strong) NSSlider *gammaSlider;

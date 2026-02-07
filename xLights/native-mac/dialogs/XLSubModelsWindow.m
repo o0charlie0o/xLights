@@ -1383,8 +1383,54 @@ NSString * const XLSubModelPasteboardType = @"com.xlights.submodel";
 
 - (void)showWithCompletion:(XLSubModelsCompletion)completion {
     _completion = completion;
+    [self loadExistingSubmodels];
+    [self loadModelNodeData];
     [self.window center];
     [self showWindow:nil];
+}
+
+- (void)loadExistingSubmodels {
+    if (!_engineBridge || !_modelName) return;
+
+    NSArray<NSDictionary *> *submodels = [_engineBridge getSubmodels:_modelName];
+    _subModelCount = 0;
+
+    for (NSDictionary *smInfo in submodels) {
+        if (_subModelCount >= _subModelCapacity) break;
+
+        NSString *smName = smInfo[@"name"];
+        if (!smName) continue;
+
+        NSDictionary *def = [_engineBridge getSubmodelDefinition:_modelName submodelName:smName];
+        if (!def) continue;
+
+        XLSubModelInfo *sm = &_subModels[_subModelCount];
+        memset(sm, 0, sizeof(XLSubModelInfo));
+        strncpy(sm->name, smName.UTF8String, sizeof(sm->name) - 1);
+        strncpy(sm->oldName, smName.UTF8String, sizeof(sm->oldName) - 1);
+        sm->isRanges = [def[@"isRanges"] boolValue];
+        sm->vertical = [def[@"vertical"] boolValue];
+
+        NSString *bufStyle = def[@"bufferStyle"] ?: @"Default";
+        strncpy(sm->bufferStyle, bufStyle.UTF8String, sizeof(sm->bufferStyle) - 1);
+
+        NSString *subBuf = def[@"subBuffer"] ?: @"";
+        strncpy(sm->subBuffer, subBuf.UTF8String, sizeof(sm->subBuffer) - 1);
+
+        NSArray<NSString *> *strands = def[@"strands"];
+        int strandCount = (int)MIN(strands.count, (NSUInteger)XL_MAX_STRANDS_PER_SUBMODEL);
+        _strandCounts[_subModelCount] = strandCount;
+        for (int i = 0; i < strandCount; i++) {
+            strncpy(_strandData[_subModelCount][i], [strands[i] UTF8String], XL_MAX_STRAND_LENGTH - 1);
+        }
+
+        _subModelCount++;
+    }
+
+    [_subModelList reloadData];
+    if (_subModelCount > 0) {
+        [_subModelList selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+    }
 }
 
 #pragma mark - NSTableViewDataSource
@@ -1903,9 +1949,57 @@ NSString * const XLSubModelPasteboardType = @"com.xlights.submodel";
 }
 
 - (void)okClicked:(id)sender {
+    if (_hasChanges) {
+        [self saveSubmodelsToEngine];
+    }
     [self.window close];
     if (_completion) {
         _completion(_hasChanges);
+    }
+}
+
+- (void)saveSubmodelsToEngine {
+    if (!_engineBridge || !_modelName) return;
+
+    NSMutableSet<NSString *> *currentNames = [NSMutableSet setWithCapacity:_subModelCount];
+    for (NSInteger i = 0; i < _subModelCount; i++) {
+        [currentNames addObject:[NSString stringWithUTF8String:_subModels[i].name]];
+    }
+
+    NSArray<NSDictionary *> *existingSubmodels = [_engineBridge getSubmodels:_modelName];
+    for (NSDictionary *existing in existingSubmodels) {
+        NSString *existingName = existing[@"name"];
+        if (existingName && ![currentNames containsObject:existingName]) {
+            [_engineBridge deleteSubmodel:_modelName submodelName:existingName];
+        }
+    }
+
+    for (NSInteger i = 0; i < _subModelCount; i++) {
+        XLSubModelInfo *sm = &_subModels[i];
+        NSString *name = [NSString stringWithUTF8String:sm->name];
+        NSString *oldName = [NSString stringWithUTF8String:sm->oldName];
+
+        if (oldName.length > 0 && ![oldName isEqualToString:name]) {
+            if ([_engineBridge hasSubmodel:_modelName submodelName:oldName]) {
+                [_engineBridge renameSubmodel:_modelName oldName:oldName newName:name];
+            }
+        }
+
+        int strandCount = _strandCounts[i];
+        NSMutableArray<NSString *> *strands = [NSMutableArray arrayWithCapacity:strandCount];
+        for (int j = 0; j < strandCount; j++) {
+            [strands addObject:[NSString stringWithUTF8String:_strandData[i][j]]];
+        }
+
+        NSDictionary *definition = @{
+            @"isRanges": @(sm->isRanges),
+            @"vertical": @(sm->vertical),
+            @"bufferStyle": [NSString stringWithUTF8String:sm->bufferStyle],
+            @"subBuffer": [NSString stringWithUTF8String:sm->subBuffer],
+            @"strands": strands,
+        };
+
+        [_engineBridge setSubmodel:_modelName submodelName:name definition:definition];
     }
 }
 

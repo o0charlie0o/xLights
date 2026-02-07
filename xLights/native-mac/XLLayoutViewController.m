@@ -381,6 +381,23 @@ static const NSTimeInterval kNudgeCoalesceInterval = 0.5;
     [self showModelImportSheet];
 }
 
+- (void)modelTree:(XLModelTreeViewController *)controller
+  didRequestReplaceModel:(NSString *)targetModelName
+               withModel:(NSString *)replacementModelName
+                 options:(NSDictionary *)options {
+    NSLog(@"XLLayoutViewController: Replace model '%@' with '%@' requested", targetModelName, replacementModelName);
+
+    BOOL success = [_engineBridge replaceModel:targetModelName
+                                     withModel:replacementModelName
+                                       options:options];
+    if (success) {
+        [_modelTreeController reloadData];
+        [_previewView reloadModels];
+        [self selectModel:targetModelName];
+        [_modelTreeController selectModelWithName:targetModelName];
+    }
+}
+
 #pragma mark - Model Creation and Import
 
 - (void)showModelCreationSheetForType:(NSString *)modelType {
