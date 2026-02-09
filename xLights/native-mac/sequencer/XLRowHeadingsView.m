@@ -224,11 +224,14 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 - (void)layoutRowCellsForceRedraw:(BOOL)forceRedraw {
     CGFloat viewWidth = NSWidth(self.bounds);
     CGFloat viewHeight = NSHeight(self.bounds);
+    NSInteger pinnedCount = _pinnedTimingRowCount;
+    CGFloat pinnedHeight = pinnedCount * _rowHeight;
 
-    NSInteger firstVisible = (NSInteger)floor(_verticalScrollOffset / _rowHeight);
-    NSInteger lastVisible = (NSInteger)ceil((_verticalScrollOffset + viewHeight) / _rowHeight);
-    if (firstVisible < 0) firstVisible = 0;
-    if (lastVisible >= _cachedRowCount) lastVisible = _cachedRowCount - 1;
+    // Scrollable zone: rows below pinned area
+    CGFloat scrollableViewHeight = viewHeight - pinnedHeight;
+    NSInteger firstScrollableVisible = (NSInteger)floor(_verticalScrollOffset / _rowHeight);
+    NSInteger lastScrollableVisible = (NSInteger)ceil((_verticalScrollOffset + scrollableViewHeight) / _rowHeight);
+    if (firstScrollableVisible < 0) firstScrollableVisible = 0;
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -236,17 +239,30 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     for (NSUInteger i = 0; i < _rowCellLayersCount; i++) {
         XLRowCellLayer *cell = _rowCellLayersData[i];
         if (!cell) continue;
-        if ((NSInteger)i >= firstVisible && (NSInteger)i <= lastVisible) {
-            CGFloat y = (CGFloat)i * _rowHeight - _verticalScrollOffset;
+
+        if ((NSInteger)i < pinnedCount) {
+            // Pinned timing row: always visible at fixed position
+            CGFloat y = (CGFloat)i * _rowHeight;
             BOOL wasHidden = cell.hidden;
             cell.frame = CGRectMake(0, y, viewWidth, _rowHeight);
             cell.hidden = NO;
-            // Only redraw if cell was previously hidden (newly visible) or forced
             if (wasHidden || forceRedraw) {
                 [cell setNeedsDisplay];
             }
         } else {
-            cell.hidden = YES;
+            // Scrollable model row
+            NSInteger scrollableIndex = (NSInteger)i - pinnedCount;
+            if (scrollableIndex >= firstScrollableVisible && scrollableIndex <= lastScrollableVisible) {
+                CGFloat y = pinnedHeight + scrollableIndex * _rowHeight - _verticalScrollOffset;
+                BOOL wasHidden = cell.hidden;
+                cell.frame = CGRectMake(0, y, viewWidth, _rowHeight);
+                cell.hidden = NO;
+                if (wasHidden || forceRedraw) {
+                    [cell setNeedsDisplay];
+                }
+            } else {
+                cell.hidden = YES;
+            }
         }
     }
 
@@ -473,8 +489,13 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 #pragma mark - Hit Testing
 
 - (NSInteger)rowAtPoint:(NSPoint)point {
-    CGFloat adjustedY = point.y + _verticalScrollOffset;
-    NSInteger row = (NSInteger)floor(adjustedY / _rowHeight);
+    CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+    NSInteger row;
+    if (_pinnedTimingRowCount > 0 && point.y < pinnedHeight) {
+        row = (NSInteger)floor(point.y / _rowHeight);
+    } else {
+        row = _pinnedTimingRowCount + (NSInteger)floor((point.y - pinnedHeight + _verticalScrollOffset) / _rowHeight);
+    }
     if (row < 0 || row >= _cachedRowCount) return -1;
     return row;
 }

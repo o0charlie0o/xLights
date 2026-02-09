@@ -102,6 +102,7 @@ typedef struct {
    timingMarkValues:(const CGFloat *)timingMarkValues
     timingMarkCount:(NSUInteger)timingMarkCount
 activeTimingColorIndex:(NSInteger)activeTimingColorIndex
+   pinnedTimingRowCount:(NSInteger)pinnedTimingRowCount
       dropIndicator:(BOOL)showDropIndicator
             dropRow:(NSInteger)dropRow
         dropStartMS:(CGFloat)dropStartMS

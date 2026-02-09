@@ -10,6 +10,15 @@
 
 #import "XLEffectsGridRenderer.h"
 #import <simd/simd.h>
+#import <os/log.h>
+#import <os/signpost.h>
+
+static os_log_t _rendererPerfLog;
+
+__attribute__((constructor))
+static void _initRendererPerfLog(void) {
+    _rendererPerfLog = os_log_create("com.xlights.native", "GridRenderer");
+}
 
 // Must match the struct in XLEffectsGridShaders.metal
 typedef struct {
@@ -73,6 +82,8 @@ typedef struct {
     NSInteger selectedEffectID;
     CGFloat playbackPositionMS;
     NSInteger timingRowCount;  // Number of timing track rows at the top of the grid
+    NSInteger pinnedTimingRowCount; // Number of timing rows pinned at top (frozen rows)
+    CGFloat pinnedHeight;      // Pixel height of the pinned zone (pinnedTimingRowCount * rowHeight)
     NSInteger activeTimingColorIndex; // Color index of the active timing track (-1 if none)
     CGFloat contentsScale;     // Backing scale factor (1.0 or 2.0 for retina)
 } XLGridFrameParams;
@@ -506,6 +517,7 @@ typedef struct {
    timingMarkValues:(const CGFloat *)timingMarkValues
     timingMarkCount:(NSUInteger)timingMarkCount
 activeTimingColorIndex:(NSInteger)activeTimingColorIndex
+   pinnedTimingRowCount:(NSInteger)pinnedTimingRowCount
       dropIndicator:(BOOL)showDropIndicator
             dropRow:(NSInteger)dropRow
         dropStartMS:(CGFloat)dropStartMS
@@ -519,11 +531,24 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
 {
     // Wait for a buffer slot to become available (blocks if all 3 are in-flight).
     // This prevents CPU from writing to a buffer the GPU is still reading.
+    CFAbsoluteTime semWaitStart = CFAbsoluteTimeGetCurrent();
     dispatch_semaphore_wait(_frameSemaphore, DISPATCH_TIME_FOREVER);
+    CFAbsoluteTime semWaitEnd = CFAbsoluteTimeGetCurrent();
+    double semWaitMs = (semWaitEnd - semWaitStart) * 1000.0;
+    if (semWaitMs > 1.0) {
+        os_log_info(_rendererPerfLog, "Semaphore wait blocked %.2fms (GPU backpressure)", semWaitMs);
+    }
 
+    CFAbsoluteTime drawableStart = CFAbsoluteTimeGetCurrent();
     id<CAMetalDrawable> drawable = [layer nextDrawable];
+    CFAbsoluteTime drawableEnd = CFAbsoluteTimeGetCurrent();
+    double drawableMs = (drawableEnd - drawableStart) * 1000.0;
+    if (drawableMs > 1.0) {
+        os_log_info(_rendererPerfLog, "nextDrawable blocked %.2fms (drawable stall)", drawableMs);
+    }
+
     if (!drawable) {
-        // Release semaphore if we can't get a drawable
+        os_log_info(_rendererPerfLog, "nextDrawable returned nil — no drawable available");
         dispatch_semaphore_signal(_frameSemaphore);
         return;
     }
@@ -560,6 +585,8 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
         .selectedEffectID = selectedEffectID,
         .playbackPositionMS = playbackPositionMS,
         .timingRowCount = timingRowCount,
+        .pinnedTimingRowCount = pinnedTimingRowCount,
+        .pinnedHeight = pinnedTimingRowCount * rowHeight,
         .activeTimingColorIndex = activeTimingColorIndex,
         .contentsScale = layer.contentsScale,
     };
@@ -638,6 +665,16 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     [commandBuffer commit];
 }
 
+#pragma mark - Coordinate Helpers
+
+/// Calculate the y pixel position for a row, accounting for pinned timing rows.
+static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
+    if (row < fp.pinnedTimingRowCount) {
+        return row * fp.rowHeight;
+    }
+    return fp.pinnedHeight + (row - fp.pinnedTimingRowCount) * fp.rowHeight - fp.scrollOffset.y;
+}
+
 #pragma mark - Grid Lines
 
 - (void)drawGridLinesWithEncoder:(id<MTLRenderCommandEncoder>)encoder
@@ -653,6 +690,8 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     CGFloat rowHeight = fp.rowHeight;
     NSInteger totalRows = fp.totalRows;
     CGFloat sequenceLengthMS = fp.sequenceLengthMS;
+    NSInteger pinnedCount = fp.pinnedTimingRowCount;
+    CGFloat pinnedHeight = fp.pinnedHeight;
 
     // Write directly into pre-allocated buffer for this frame (triple-buffered)
     id<MTLBuffer> gridLineBuffer = _gridLineBuffers[bufferIndex];
@@ -660,16 +699,33 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     NSUInteger vertexCount = 0;
     NSUInteger maxVertices = kGridLineBufferSize / sizeof(SimpleVertex);
 
-    // Horizontal row separator lines
     simd_float4 rowLineColor = simd_make_float4(0.25, 0.25, 0.25, 1.0);
-    CGFloat firstVisibleRow = scrollOffset.y / rowHeight;
-    CGFloat lastVisibleRow = (scrollOffset.y + viewSize.height) / rowHeight;
-    NSInteger startRow = MAX(0, (NSInteger)floor(firstVisibleRow));
-    NSInteger endRow = MIN(totalRows, (NSInteger)ceil(lastVisibleRow) + 1);
 
-    for (NSInteger row = startRow; row <= endRow; row++) {
-        CGFloat y = row * rowHeight - scrollOffset.y;
-        if (y < -1 || y > viewSize.height + 1) continue;
+    // 1) Pinned timing row separator lines (fixed at top, no scroll offset)
+    for (NSInteger row = 0; row <= pinnedCount && row <= totalRows; row++) {
+        CGFloat y = row * rowHeight;
+        if (vertexCount + 2 > maxVertices) break;
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(0, y), rowLineColor };
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(viewSize.width, y), rowLineColor };
+    }
+
+    // 2) Separator line between pinned and scrollable zones
+    if (pinnedCount > 0 && vertexCount + 2 <= maxVertices) {
+        simd_float4 separatorColor = simd_make_float4(0.4, 0.4, 0.4, 1.0);
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(0, pinnedHeight), separatorColor };
+        vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(viewSize.width, pinnedHeight), separatorColor };
+    }
+
+    // 3) Scrollable model row separator lines
+    CGFloat scrollableViewHeight = viewSize.height - pinnedHeight;
+    CGFloat firstScrollableRow = scrollOffset.y / rowHeight;
+    CGFloat lastScrollableRow = (scrollOffset.y + scrollableViewHeight) / rowHeight;
+    NSInteger startRow = MAX(0, (NSInteger)floor(firstScrollableRow));
+    NSInteger endRow = MIN(totalRows - pinnedCount, (NSInteger)ceil(lastScrollableRow) + 1);
+
+    for (NSInteger sRow = startRow; sRow <= endRow; sRow++) {
+        CGFloat y = pinnedHeight + sRow * rowHeight - scrollOffset.y;
+        if (y < pinnedHeight - 1 || y > viewSize.height + 1) continue;
         if (vertexCount + 2 > maxVertices) break;
 
         vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(0, y), rowLineColor };
@@ -724,8 +780,8 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
         } else {
             timingColor = simd_make_float4(0.25, 0.25, 0.25, 0.3);
         }
-        // Start grid lines below timing track rows (they're always at the top)
-        CGFloat timingGridTop = fp.timingRowCount * rowHeight - scrollOffset.y;
+        // Start grid lines below the pinned timing zone (always at pinnedHeight)
+        CGFloat timingGridTop = pinnedHeight;
         for (NSUInteger mi = 0; mi < timingMarkCount; mi++) {
             CGFloat t = timingMarkValues[mi];
             CGFloat x = t * zoomLevel - scrollOffset.x;
@@ -764,8 +820,6 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     CGFloat msPerPixel = 1.0 / zoomLevel;
     CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
     CGFloat visibleEndMS = visibleStartMS + viewSize.width * msPerPixel;
-    CGFloat visibleStartRow = scrollOffset.y / rowHeight;
-    CGFloat visibleEndRow = (scrollOffset.y + viewSize.height) / rowHeight;
 
     // Timing tracks need far fewer vertices than the effects grid —
     // a horizontal line per row + 2 vertices per tick boundary.
@@ -783,17 +837,16 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
         XLEffectRenderInfo info = effects[ei];
         if (!info.isTimingMark) continue;
 
-        // Row visibility culling
-        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
-            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+        // Row visibility culling: pinned rows are always visible
+        CGFloat yTop = rowYPosition(info.row, fp);
+        CGFloat yBot = yTop + rowHeight;
+        if (yBot < -1 || yTop > viewSize.height + 1) continue;
 
         CGFloat cr, cg, cb;
         XLTimingTrackColor(info.timingColorIndex, &cr, &cg, &cb);
         simd_float4 tickColor = simd_make_float4(cr, cg, cb, 0.9);
         simd_float4 lineColor = simd_make_float4(cr * 0.6, cg * 0.6, cb * 0.6, 0.5);
 
-        CGFloat yTop = info.row * rowHeight - scrollOffset.y;
-        CGFloat yBot = yTop + rowHeight;
         CGFloat yMid = yTop + rowHeight * 0.5;
 
         // Draw horizontal center line once per row
@@ -1037,21 +1090,21 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     CGFloat msPerPixel = 1.0 / zoomLevel;
     CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
     CGFloat visibleEndMS = visibleStartMS + viewSize.width * msPerPixel;
-    CGFloat visibleStartRow = scrollOffset.y / rowHeight;
-    CGFloat visibleEndRow = (scrollOffset.y + viewSize.height) / rowHeight;
 
     for (NSUInteger ei = 0; ei < effectCount; ei++) {
         XLEffectRenderInfo info = effects[ei];
 
         // Frustum culling: skip effects outside visible region
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
-        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
-            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        // Y-coordinate with pinned timing row support
+        CGFloat yBase = rowYPosition(info.row, fp);
+        if (yBase + rowHeight < -1 || yBase > viewSize.height + 1) continue;
 
         CGFloat x1 = info.startTimeMS * zoomLevel - scrollOffset.x;
         CGFloat x2 = info.endTimeMS * zoomLevel - scrollOffset.x;
-        CGFloat y1 = info.row * rowHeight - scrollOffset.y + kEffectBlockInset;
-        CGFloat y2 = (info.row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
+        CGFloat y1 = yBase + kEffectBlockInset;
+        CGFloat y2 = yBase + rowHeight - kEffectBlockInset;
 
         // Inset timing mark blocks so tick lines are visible between them
         if (info.isTimingMark) {
@@ -1067,18 +1120,24 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
 
         simd_float4 color;
         if (info.isTimingMark) {
-            // Only draw colored blocks for lyric tracks (multi-layer timing tracks)
-            // Plain timing tracks (1 layer) keep their original tick-only appearance
-            if (info.timingTrackLayerCount <= 1 || info.label[0] == '\0') continue;
-            // Lyric track colors by layer: phrases=emerald, words=electric blue, phonemes=magenta
-            if (info.layer == 0) {
-                color = simd_make_float4(0.1, 0.55, 0.3, 0.85);
-            } else if (info.layer == 1) {
-                color = simd_make_float4(0.15, 0.4, 0.75, 0.85);
-            } else if (info.layer == 2) {
-                color = simd_make_float4(0.7, 0.15, 0.55, 0.85);
+            if (info.timingTrackLayerCount <= 1 || info.label[0] == '\0') {
+                // Single-layer timing track: only draw a block if selected
+                if (!info.selected) continue;
+                // Selected timing mark highlight
+                CGFloat cr, cg, cb;
+                XLTimingTrackColor(info.timingColorIndex, &cr, &cg, &cb);
+                color = simd_make_float4(cr * 0.5, cg * 0.5, cb * 0.5, 0.5);
             } else {
-                color = simd_make_float4(0.4, 0.4, 0.4, 0.85);
+                // Lyric track colors by layer
+                if (info.layer == 0) {
+                    color = simd_make_float4(0.1, 0.55, 0.3, 0.85);
+                } else if (info.layer == 1) {
+                    color = simd_make_float4(0.15, 0.4, 0.75, 0.85);
+                } else if (info.layer == 2) {
+                    color = simd_make_float4(0.7, 0.15, 0.55, 0.85);
+                } else {
+                    color = simd_make_float4(0.4, 0.4, 0.4, 0.85);
+                }
             }
         } else if (info.colorARGB != 0) {
             float a = ((info.colorARGB >> 24) & 0xFF) / 255.0f;
@@ -1164,13 +1223,13 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
 
             // Frustum culling
             if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
-            if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
-                info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+            CGFloat fadeYBase = rowYPosition(info.row, fp);
+            if (fadeYBase + rowHeight < -1 || fadeYBase > viewSize.height + 1) continue;
 
             CGFloat x1 = info.startTimeMS * zoomLevel - scrollOffset.x;
             CGFloat x2 = info.endTimeMS * zoomLevel - scrollOffset.x;
-            CGFloat y1 = info.row * rowHeight - scrollOffset.y + kEffectBlockInset;
-            CGFloat y2 = (info.row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
+            CGFloat y1 = fadeYBase + kEffectBlockInset;
+            CGFloat y2 = fadeYBase + rowHeight - kEffectBlockInset;
             CGFloat blockWidth = x2 - x1;
             if (blockWidth < 2.0) continue;
 
@@ -1230,14 +1289,14 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     if (!_dropIndicatorBuffer) return;
 
     CGSize viewSize = fp.viewSize;
-    CGPoint scrollOffset = fp.scrollOffset;
     CGFloat zoomLevel = fp.zoomLevel;
     CGFloat rowHeight = fp.rowHeight;
 
-    CGFloat x1 = startMS * zoomLevel - scrollOffset.x;
-    CGFloat x2 = endMS * zoomLevel - scrollOffset.x;
-    CGFloat y1 = row * rowHeight - scrollOffset.y + kEffectBlockInset;
-    CGFloat y2 = (row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
+    CGFloat x1 = startMS * zoomLevel - fp.scrollOffset.x;
+    CGFloat x2 = endMS * zoomLevel - fp.scrollOffset.x;
+    CGFloat yBase = rowYPosition(row, fp);
+    CGFloat y1 = yBase + kEffectBlockInset;
+    CGFloat y2 = yBase + rowHeight - kEffectBlockInset;
 
     // Skip if off-screen or invalid
     if (x2 < 0 || x1 > viewSize.width) return;
@@ -1285,14 +1344,14 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     if (!_cellHighlightBuffer) return;
 
     CGSize viewSize = fp.viewSize;
-    CGPoint scrollOffset = fp.scrollOffset;
     CGFloat zoomLevel = fp.zoomLevel;
     CGFloat rowHeight = fp.rowHeight;
 
-    CGFloat x1 = startMS * zoomLevel - scrollOffset.x;
-    CGFloat x2 = endMS * zoomLevel - scrollOffset.x;
-    CGFloat y1 = row * rowHeight - scrollOffset.y + kEffectBlockInset;
-    CGFloat y2 = (row + 1) * rowHeight - scrollOffset.y - kEffectBlockInset;
+    CGFloat x1 = startMS * zoomLevel - fp.scrollOffset.x;
+    CGFloat x2 = endMS * zoomLevel - fp.scrollOffset.x;
+    CGFloat yBase = rowYPosition(row, fp);
+    CGFloat y1 = yBase + kEffectBlockInset;
+    CGFloat y2 = yBase + rowHeight - kEffectBlockInset;
 
     // Skip if off-screen or invalid
     if (x2 < 0 || x1 > viewSize.width) return;
@@ -1437,8 +1496,8 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     CGFloat x = playbackPositionMS * zoomLevel - scrollOffset.x;
     if (x < -2 || x > viewSize.width + 2) return;
 
-    // Red playback line (2px wide) - write directly to pre-allocated buffer
-    simd_float4 playColor = simd_make_float4(1.0, 0.15, 0.15, 0.9);
+    // Blue playback line (2px wide) - write directly to pre-allocated buffer
+    simd_float4 playColor = simd_make_float4(0.2, 0.4, 1.0, 0.9);
     SimpleVertex *vertices = (SimpleVertex *)_playbackBuffer.contents;
     vertices[0] = (SimpleVertex){ simd_make_float2(x - 1, 0), playColor };
     vertices[1] = (SimpleVertex){ simd_make_float2(x + 1, 0), playColor };
@@ -1750,8 +1809,6 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     CGFloat msPerPixel = 1.0 / zoomLevel;
     CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
     CGFloat visibleEndMS = visibleStartMS + viewSize.width * msPerPixel;
-    CGFloat visibleStartRow = scrollOffset.y / rowHeight;
-    CGFloat visibleEndRow = (scrollOffset.y + viewSize.height) / rowHeight;
 
     CGFloat minWidthForIcons = 48.0;  // Minimum effect width to show icon
     CGFloat iconSize = 36.0;          // Icon size in pixels
@@ -1764,8 +1821,8 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
         // Frustum culling
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
-        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
-            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+        CGFloat iconYBase = rowYPosition(info.row, fp);
+        if (iconYBase + rowHeight < -1 || iconYBase > viewSize.height + 1) continue;
 
         CGFloat x1 = info.startTimeMS * zoomLevel - scrollOffset.x;
         CGFloat x2 = info.endTimeMS * zoomLevel - scrollOffset.x;
@@ -1783,7 +1840,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         [self getUVsForAtlasIndex:atlasIndex uvMin:&uvMin uvMax:&uvMax];
 
         // Calculate icon position (centered in effect block)
-        CGFloat y1 = info.row * rowHeight - scrollOffset.y;
+        CGFloat y1 = iconYBase;
         CGFloat centerX = (x1 + x2) / 2.0;
         CGFloat centerY = y1 + rowHeight / 2.0;
 

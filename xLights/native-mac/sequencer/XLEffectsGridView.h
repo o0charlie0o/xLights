@@ -117,6 +117,21 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
                 toRow:(NSInteger)toRow
             toTimeMS:(CGFloat)newStartTimeMS;
 
+/// Batch move: move an effect by engine ID to a new time (same row). No reload — caller handles.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didBatchMoveEffectId:(NSInteger)effectId
+               toTimeMS:(CGFloat)newStartTimeMS;
+
+/// Batch move: move an effect by engine ID to a different row. No reload — caller handles.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didBatchMoveEffectId:(NSInteger)effectId
+               fromRow:(NSInteger)fromRow
+                 toRow:(NSInteger)toRow
+             toTimeMS:(CGFloat)newStartTimeMS;
+
+/// Called after all batch moves complete, before the grid reloads. Delegate should refresh its data source.
+- (void)effectsGridDidCompleteBatchMoves:(XLEffectsGridView *)gridView;
+
 /// An effect was resized (start or end time changed).
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didResizeEffectAtRow:(NSInteger)row
@@ -337,6 +352,10 @@ typedef NS_ENUM(NSInteger, XLAlignmentType) {
 
 /// Color index of the active timing track (-1 if none). Set by VC to color grid extension lines.
 @property (nonatomic, assign) NSInteger activeTimingColorIndex;
+
+/// Number of timing track rows pinned at the top of the grid (frozen rows).
+/// These rows do not scroll vertically. Set by the sequencer VC after sorting rows.
+@property (nonatomic, assign) NSInteger pinnedTimingRowCount;
 
 /// Available symbol names for the "Link to Symbol" context menu.
 /// Set by the view controller; the grid view uses these to populate the submenu.

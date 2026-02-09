@@ -10,6 +10,7 @@
 
 #import "XLSequencerViewController.h"
 #import "input/XLKeyboardHandler.h"
+#import "XLKeyBindingsWindowController.h"
 #import "sequencer/XLTimelineRulerView.h"
 #import "sequencer/XLEffectsGridView.h"
 #import "sequencer/XLEffectPaletteView.h"
@@ -22,6 +23,7 @@
 #import "sequencer/XLAudioLoader.h"
 #import "sequencer/XLAudioPlayer.h"
 #import "XLEngineBridge.h"
+#import "XLAppDelegate.h"
 #import "XLPlaybackController.h"
 #import "XLHousePreviewWindowController.h"
 #import "XLEffectPresetsWindowController.h"
@@ -481,6 +483,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Background auto-render toggle
     BOOL _backgroundRenderEnabled;
+
+    // Number of timing track rows pinned at top of grid (set during sortRowsWithTimingFirst)
+    NSInteger _timingRowCount;
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -696,6 +701,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _effectsGridView.dataSource = self;
     _effectsGridView.delegate = self;
     _effectsGridView.rowHeight = savedRowHeight;  // Sync with row headings
+    // Default snap to YES when the preference hasn't been set yet
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:@"SnapToTiming"] != nil) {
+        _effectsGridView.snapToTimingMarks = [defaults boolForKey:@"SnapToTiming"];
+    } else {
+        _effectsGridView.snapToTimingMarks = YES;
+    }
     [view addSubview:_effectsGridView];
 
     // Undo controller for effect operations
@@ -941,6 +953,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                                                  name:@"XLShowFolderDidChangeNotification"
                                                object:nil];
 
+    // Listen for key bindings changes (from the Key Bindings editor window)
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(keyBindingsDidChange:)
+                                                 name:XLKeyBindingsDidChangeNotification
+                                               object:nil];
+
     // Listen for effect parameter/palette changes to update preview
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(effectDidChange:)
@@ -951,6 +969,16 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleZoomToSelection:)
                                                  name:@"XLZoomToSelection"
+                                               object:nil];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleApplyEffectFromCommandPalette:)
+                                                 name:@"XLApplyEffectFromCommandPalette"
+                                               object:nil];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleSnapEnabledDidChange:)
+                                                 name:@"XLSnapEnabledDidChange"
                                                object:nil];
 
     // Check sequence state and show/hide empty state accordingly.
@@ -1143,15 +1171,27 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             initWithEngineBridge:self.engineBridge];
         _housePreviewController.playbackController = _playbackController;
         _playbackController.previewView = _housePreviewController.previewView;
+
+        // Observe window close so the toolbar button stays in sync
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleHousePreviewWindowDidClose:)
+                                                     name:NSWindowWillCloseNotification
+                                                   object:_housePreviewController.window];
     }
 
     NSWindow *previewWindow = _housePreviewController.window;
     if (previewWindow.isVisible) {
         [previewWindow orderOut:nil];
+        [[XLSwiftUIWindowHelper shared] setHousePreviewVisible:NO];
     } else {
         [previewWindow makeKeyAndOrderFront:nil];
         [_housePreviewController reloadModels];
+        [[XLSwiftUIWindowHelper shared] setHousePreviewVisible:YES];
     }
+}
+
+- (void)handleHousePreviewWindowDidClose:(NSNotification *)note {
+    [[XLSwiftUIWindowHelper shared] setHousePreviewVisible:NO];
 }
 
 /// Responder chain action for the View > Show Preview menu item and toolbar button.
@@ -1230,11 +1270,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
     }
 
-    // Reload grid and row headings
+    // Set pinned timing row count on both views before reloading
     if (_effectsGridView) {
+        _effectsGridView.pinnedTimingRowCount = _timingRowCount;
         [_effectsGridView reloadData];
     }
     if (_rowHeadingsView) {
+        _rowHeadingsView.pinnedTimingRowCount = _timingRowCount;
         [_rowHeadingsView reloadData];
     }
 }
@@ -1372,11 +1414,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         _effectOffsetPerRow[i] = _effectCount;
 
         // Load effects from ALL layers for this element
-        NSLog(@"Loading effects for row %lu: name='%s' originalIndex=%ld layers=%ld",
-              (unsigned long)i, row->name, (long)originalIndex, (long)row->effectLayerCount);
         for (NSInteger layer = 0; layer < row->effectLayerCount; layer++) {
             NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:originalIndex layer:layer];
-            NSLog(@"  Layer %ld: %lu effects", (long)layer, (unsigned long)effects.count);
             for (NSDictionary *eff in effects) {
                 if (_effectCount >= _effectCapacity) {
                     // Grow the array
@@ -1485,12 +1524,25 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         _rowCount = newRowCount;
     }
 
-    NSLog(@"XLSequencerViewController: Loaded %lu rows with %lu effects from real sequence (duration: %.0f ms)",
-          (unsigned long)_rowCount, (unsigned long)_effectCount, _sequenceDurationMS);
+    // Recount timing rows after expansion (layer rows also have XLElementTypeTiming type)
+    _timingRowCount = 0;
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].type == XLElementTypeTiming) {
+            _timingRowCount++;
+        } else {
+            break; // Timing rows are sorted to top, first non-timing ends the run
+        }
+    }
+
+    NSLog(@"XLSequencerViewController: Loaded %lu rows (%ld timing) with %lu effects from real sequence (duration: %.0f ms)",
+          (unsigned long)_rowCount, (long)_timingRowCount, (unsigned long)_effectCount, _sequenceDurationMS);
 }
 
 - (void)sortRowsWithTimingFirst {
-    if (!_rowData || _rowCount < 2) return;
+    if (!_rowData || _rowCount < 2) {
+        _timingRowCount = 0;
+        return;
+    }
 
     // Count timing tracks
     NSUInteger timingCount = 0;
@@ -1499,6 +1551,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             timingCount++;
         }
     }
+
+    _timingRowCount = (NSInteger)timingCount;
 
     if (timingCount == 0 || timingCount == _rowCount) {
         // Nothing to sort - either no timing tracks or all timing tracks
@@ -1652,8 +1706,18 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
     }
 
-    NSLog(@"XLSequencerViewController: Using demo data with %lu rows and %lu effects",
-          (unsigned long)_rowCount, (unsigned long)_effectCount);
+    // Count timing rows at the top
+    _timingRowCount = 0;
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].type == XLElementTypeTiming) {
+            _timingRowCount++;
+        } else {
+            break;
+        }
+    }
+
+    NSLog(@"XLSequencerViewController: Using demo data with %lu rows (%ld timing) and %lu effects",
+          (unsigned long)_rowCount, (long)_timingRowCount, (unsigned long)_effectCount);
 }
 
 - (void)dealloc {
@@ -1786,6 +1850,15 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [self reloadTimingMarksForRuler];
         [_effectsGridView reloadData];  // Refresh snap points
     }
+}
+
+/// Lightweight refresh after timing mark add/split/delete.
+/// Only reloads timing data in grid + ruler without resetting zoom, audio, or playhead.
+- (void)refreshTimingData {
+    [self loadRealSequenceData];
+    [_effectsGridView reloadData];
+    [self reloadTimingMarksForRuler];
+    [_rowHeadingsView reloadData];
 }
 
 - (void)reloadTimingMarksForRuler {
@@ -2102,7 +2175,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // For cross-row moves, we need to delete and recreate on the target row
     if (toRow >= 0 && toRow < (NSInteger)_rowCount && _rowData) {
         NSString *effectType = effectInfo[@"effectType"];
-        NSString *settings = effectInfo[@"settings"];
+        // Get settings/palette as serialized strings (NOT the NSDictionary from effectInfo)
+        NSString *settings = [_engineBridge getEffectSettings:effectId];
+        NSString *palette = [_engineBridge getEffectPalette:effectId];
         NSString *modelName = [NSString stringWithUTF8String:_rowData[toRow].name];
         NSInteger layer = _rowData[toRow].isLayerRow ? _rowData[toRow].layerIndex : 0;
 
@@ -2115,11 +2190,80 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         if (newEffectId >= 0 && settings.length > 0) {
             [_engineBridge setEffectSettings:newEffectId settings:settings];
         }
+        if (newEffectId >= 0 && palette.length > 0) {
+            [_engineBridge setEffectPalette:newEffectId palette:palette];
+        }
         [self reloadSequenceData];
         [gridView reloadData];
     } else {
         [_engineBridge moveEffect:effectId startTimeMS:newStart endTimeMS:newEnd];
     }
+}
+
+// Batch move: same-row, by engine effectId. No reload — caller handles.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didBatchMoveEffectId:(NSInteger)effectId
+               toTimeMS:(CGFloat)newStartTimeMS
+{
+    if (effectId < 0 || !_engineBridge) return;
+
+    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+    if (!effectInfo) return;
+
+    NSInteger origStart = [effectInfo[@"startTimeMS"] integerValue];
+    NSInteger origEnd = [effectInfo[@"endTimeMS"] integerValue];
+    NSInteger duration = origEnd - origStart;
+    NSInteger newStart = (NSInteger)newStartTimeMS;
+    NSInteger newEnd = newStart + duration;
+
+    [_engineBridge moveEffect:effectId startTimeMS:newStart endTimeMS:newEnd];
+}
+
+// Batch move: cross-row, by engine effectId. No reload — caller handles.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didBatchMoveEffectId:(NSInteger)effectId
+               fromRow:(NSInteger)fromRow
+                 toRow:(NSInteger)toRow
+             toTimeMS:(CGFloat)newStartTimeMS
+{
+    if (effectId < 0 || !_engineBridge) return;
+
+    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+    if (!effectInfo) return;
+
+    NSInteger origStart = [effectInfo[@"startTimeMS"] integerValue];
+    NSInteger origEnd = [effectInfo[@"endTimeMS"] integerValue];
+    NSInteger duration = origEnd - origStart;
+    NSInteger newStart = (NSInteger)newStartTimeMS;
+    NSInteger newEnd = newStart + duration;
+
+    if (toRow >= 0 && toRow < (NSInteger)_rowCount && _rowData) {
+        NSString *effectType = effectInfo[@"effectType"];
+        NSString *settings = [_engineBridge getEffectSettings:effectId];
+        NSString *palette = [_engineBridge getEffectPalette:effectId];
+        NSString *modelName = [NSString stringWithUTF8String:_rowData[toRow].name];
+        NSInteger layer = _rowData[toRow].isLayerRow ? _rowData[toRow].layerIndex : 0;
+
+        [_engineBridge deleteEffect:effectId];
+        NSInteger newEffectId = [_engineBridge createEffect:modelName
+                                                      layer:layer
+                                                 effectType:effectType
+                                                startTimeMS:newStart
+                                                  endTimeMS:newEnd];
+        if (newEffectId >= 0 && settings.length > 0) {
+            [_engineBridge setEffectSettings:newEffectId settings:settings];
+        }
+        if (newEffectId >= 0 && palette.length > 0) {
+            [_engineBridge setEffectPalette:newEffectId palette:palette];
+        }
+        // NO reload here — caller handles after all batch moves complete
+    } else {
+        [_engineBridge moveEffect:effectId startTimeMS:newStart endTimeMS:newEnd];
+    }
+}
+
+- (void)effectsGridDidCompleteBatchMoves:(XLEffectsGridView *)gridView {
+    [self reloadSequenceData];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2179,8 +2323,6 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didRequestDeleteEffects:(NSIndexSet *)effectIndices
 {
-    NSLog(@"Delete requested for %lu effects", (unsigned long)effectIndices.count);
-
     if (!_engineBridge || effectIndices.count == 0) return;
 
     // Collect all effect IDs to delete
@@ -2193,6 +2335,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
     }];
 
+    NSLog(@"Delete requested for %lu effects (renderIndices=%@, effectIds=%@)",
+          (unsigned long)effectIndices.count, effectIndices, effectIdsToDelete);
+
     // Delete each effect via engine bridge
     for (NSNumber *effectIdNum in effectIdsToDelete) {
         NSInteger effectId = effectIdNum.integerValue;
@@ -2201,9 +2346,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
     }
 
-    // Reload data to reflect deletions
-    [self reloadSequenceData];
-    [_playbackController renderCurrentFrame];
+    // Lightweight refresh — don't reset playback or zoom
+    [self refreshTimingData];
 
     // Clear selection notification
     NSDictionary *userInfo = @{
@@ -3825,6 +3969,25 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
     }
 
+    // Recount timing rows after expand/collapse (timing track layers change the count)
+    _timingRowCount = 0;
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].type == XLElementTypeTiming) {
+            _timingRowCount++;
+        } else {
+            break;
+        }
+    }
+    _effectsGridView.pinnedTimingRowCount = _timingRowCount;
+    _rowHeadingsView.pinnedTimingRowCount = _timingRowCount;
+
+    // Update max scroll for changed row count
+    if (_scrollCoordinator) {
+        CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
+        CGFloat maxScrollY = _rowCount * _effectsGridView.rowHeight - viewHeight;
+        _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
+    }
+
     [_rowHeadingsView reloadData];
     [_effectsGridView reloadData];
 }
@@ -4582,7 +4745,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
     }
 
-    // Reload the grid views
+    // Set pinned timing row count and reload views
+    _effectsGridView.pinnedTimingRowCount = _timingRowCount;
+    _rowHeadingsView.pinnedTimingRowCount = _timingRowCount;
     [_effectsGridView reloadData];
     [_rowHeadingsView reloadData];
 }
@@ -5129,8 +5294,64 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     }
 }
 
+- (void)keyBindingsDidChange:(NSNotification *)notification {
+    [_keyboardHandler reloadKeyBindings];
+}
+
 - (void)handleZoomToSelection:(NSNotification *)notification {
     [_effectsGridView zoomToSelection];
+}
+
+- (void)handleApplyEffectFromCommandPalette:(NSNotification *)notification {
+    NSString *effectName = notification.userInfo[@"effectName"];
+    if (!effectName) return;
+    [self createEffectOnSelectedCell:effectName settings:nil];
+}
+
+- (BOOL)createEffectOnSelectedCell:(NSString *)effectName settings:(NSString *)settings {
+    if (!_effectsGridView.hasCellSelection) {
+        NSLog(@"XLSequencerViewController: createEffectOnSelectedCell but no cell selected");
+        return NO;
+    }
+
+    NSInteger row = _effectsGridView.cellSelectionRow;
+    CGFloat startMS = _effectsGridView.cellSelectionStartMS;
+    CGFloat endMS = _effectsGridView.cellSelectionEndMS;
+
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) {
+        return NO;
+    }
+
+    if (_rowData[row].type == XLElementTypeTiming) {
+        return NO;
+    }
+
+    if (!_engineBridge || !_usingRealData) {
+        return NO;
+    }
+
+    NSString *modelName = [NSString stringWithUTF8String:_rowData[row].name];
+    NSInteger layer = _rowData[row].isLayerRow ? _rowData[row].layerIndex : 0;
+
+    NSInteger effectId = [_engineBridge createEffect:modelName
+                                               layer:layer
+                                          effectType:effectName
+                                         startTimeMS:(NSInteger)startMS
+                                           endTimeMS:(NSInteger)endMS];
+
+    if (effectId >= 0) {
+        if (settings.length > 0) {
+            [_engineBridge setEffectSettings:effectId settings:settings];
+        }
+        [_effectsGridView clearCellSelection];
+        [self reloadSequenceData];
+        NSLog(@"XLSequencerViewController: Created '%@' effect (id=%ld) at row %ld, %ld-%ld ms",
+              effectName, (long)effectId, (long)row, (long)(NSInteger)startMS, (long)(NSInteger)endMS);
+        return YES;
+    }
+
+    NSLog(@"XLSequencerViewController: FAILED to create '%@' effect", effectName);
+    return NO;
 }
 
 #pragma mark - Timing Keyboard Action Helpers
@@ -5286,6 +5507,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         return YES;
     }
 
+    // Snap toggle
+    if ([actionType isEqualToString:@"SNAP_TOGGLE"]) {
+        [self toggleSnap];
+        return YES;
+    }
+
     // Zoom controls
     if ([actionType isEqualToString:@"ZOOM_IN"]) {
         [self zoomIn:nil];
@@ -5342,61 +5569,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Effect insertion via keyboard shortcut (e.g., 'O' for On effect)
     if ([actionType isEqualToString:@"EFFECT"]) {
-        NSLog(@"XLSequencerViewController: EFFECT action, effectName='%@', hasCellSelection=%d",
-              effectName, _effectsGridView.hasCellSelection);
-        if (!_effectsGridView.hasCellSelection) {
-            NSLog(@"XLSequencerViewController: EFFECT key binding but no cell selected");
-            return NO;
-        }
-
-        NSInteger row = _effectsGridView.cellSelectionRow;
-        CGFloat startMS = _effectsGridView.cellSelectionStartMS;
-        CGFloat endMS = _effectsGridView.cellSelectionEndMS;
-        NSLog(@"XLSequencerViewController: Cell selection: row=%ld, start=%.0f, end=%.0f", (long)row, startMS, endMS);
-
-        if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) {
-            NSLog(@"XLSequencerViewController: Invalid row %ld (rowCount=%lu)", (long)row, (unsigned long)_rowCount);
-            return NO;
-        }
-
-        // Don't place effects on timing tracks
-        if (_rowData[row].type == XLElementTypeTiming) {
-            NSLog(@"XLSequencerViewController: Cannot place effect on timing track row");
-            return NO;
-        }
-
-        if (!_engineBridge || !_usingRealData) {
-            NSLog(@"XLSequencerViewController: No engine bridge (%p) or not using real data (%d)",
-                  _engineBridge, _usingRealData);
-            return NO;
-        }
-
-        NSString *modelName = [NSString stringWithUTF8String:_rowData[row].name];
-        NSInteger layer = _rowData[row].isLayerRow ? _rowData[row].layerIndex : 0;
-
-        NSLog(@"XLSequencerViewController: Creating '%@' on model '%@' layer %ld, time %ld-%ld",
-              effectName, modelName, (long)layer, (long)(NSInteger)startMS, (long)(NSInteger)endMS);
-
-        NSInteger effectId = [_engineBridge createEffect:modelName
-                                                   layer:layer
-                                              effectType:effectName
-                                             startTimeMS:(NSInteger)startMS
-                                               endTimeMS:(NSInteger)endMS];
-
-        if (effectId >= 0) {
-            // Apply effect settings if provided by the key binding
-            if (effectSettings.length > 0) {
-                [_engineBridge setEffectSettings:effectId settings:effectSettings];
-            }
-
-            [_effectsGridView clearCellSelection];
-            [self reloadSequenceData];
-            NSLog(@"XLSequencerViewController: Created '%@' effect (id=%ld) at row %ld, %ld-%ld ms",
-                  effectName, (long)effectId, (long)row, (long)(NSInteger)startMS, (long)(NSInteger)endMS);
-        } else {
-            NSLog(@"XLSequencerViewController: FAILED to create effect - createEffect returned -1");
-        }
-
+        [self createEffectOnSelectedCell:effectName settings:effectSettings];
         return YES;
     }
 
@@ -5413,45 +5586,65 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
 
         NSInteger cursorTimeMS = (NSInteger)_transportBar.currentPositionMS;
-        if (cursorTimeMS < 0) cursorTimeMS = 0;
+        if (cursorTimeMS <= 0) return NO;
+
+        NSInteger snappedCursor = [self roundToFrameBoundary:(double)cursorTimeMS];
+        NSInteger frameTimeMS = (_frameRate > 0) ? (1000 / _frameRate) : 50;
 
         // Determine the layer: use layer 0 (phrase layer) by default
         NSInteger layer = 0;
 
-        // Find the next timing mark time to use as the end time
         NSArray<NSDictionary *> *marks = [_engineBridge getTimingMarks:trackName layer:layer];
-        NSInteger endTimeMS = (NSInteger)_sequenceDurationMS;
 
-        // Find the next mark after cursorTimeMS
+        // Find the timing mark containing the cursor position and split it
         for (NSDictionary *mark in marks) {
             NSInteger markStart = [mark[@"startTimeMS"] integerValue];
-            if (markStart > cursorTimeMS && markStart < endTimeMS) {
+            NSInteger markEnd = [mark[@"endTimeMS"] integerValue];
+            NSInteger markId = [mark[@"id"] integerValue];
+
+            if (snappedCursor > markStart + frameTimeMS && snappedCursor < markEnd - frameTimeMS) {
+                [_undoController beginUndoGroupingWithActionName:@"Add Timing Mark"];
+
+                // Shrink existing mark to end at the split point
+                [_engineBridge moveTimingMark:markId startTimeMS:markStart endTimeMS:snappedCursor];
+
+                // Create new mark from split point to original end
+                NSInteger newMarkId = [_engineBridge createTimingMark:trackName layer:layer
+                                                          startTimeMS:snappedCursor endTimeMS:markEnd
+                                                                label:@""];
+
+                [_undoController endUndoGrouping];
+
+                if (newMarkId >= 0) {
+                    [self refreshTimingData];
+                    NSLog(@"XLSequencerViewController: TIMING_ADD - split mark %ld at %ldms on '%@'",
+                          (long)markId, (long)snappedCursor, trackName);
+                }
+                return YES;
+            }
+        }
+
+        // No existing mark at cursor — try creating in empty space (e.g. sparse timing track)
+        NSInteger endTimeMS = (NSInteger)_sequenceDurationMS;
+        for (NSDictionary *mark in marks) {
+            NSInteger markStart = [mark[@"startTimeMS"] integerValue];
+            if (markStart > snappedCursor && markStart < endTimeMS) {
                 endTimeMS = markStart;
             }
         }
 
-        // Snap to frame boundary
-        NSInteger frameTimeMS = (_frameRate > 0) ? (1000 / _frameRate) : 50;
-        NSInteger snappedStart = [self roundToFrameBoundary:(double)cursorTimeMS];
-        if (endTimeMS - snappedStart < frameTimeMS) {
-            NSLog(@"XLSequencerViewController: TIMING_ADD - not enough space for timing mark");
-            return NO;
-        }
+        if (endTimeMS - snappedCursor >= frameTimeMS) {
+            [_undoController beginUndoGroupingWithActionName:@"Add Timing Mark"];
+            NSInteger newMarkId = [_engineBridge createTimingMark:trackName layer:layer
+                                                      startTimeMS:snappedCursor endTimeMS:endTimeMS
+                                                            label:@""];
+            [_undoController endUndoGrouping];
 
-        [_undoController beginUndoGroupingWithActionName:@"Add Timing Mark"];
-        NSInteger markId = [_engineBridge createTimingMark:trackName
-                                                     layer:layer
-                                               startTimeMS:snappedStart
-                                                 endTimeMS:endTimeMS
-                                                     label:@""];
-        [_undoController endUndoGrouping];
-
-        if (markId >= 0) {
-            [self reloadSequenceData];
-            [_effectsGridView reloadData];
-            [self reloadTimingMarksForRuler];
-            NSLog(@"XLSequencerViewController: TIMING_ADD - created mark %ld at %ldms-%ldms on '%@'",
-                  (long)markId, (long)snappedStart, (long)endTimeMS, trackName);
+            if (newMarkId >= 0) {
+                [self refreshTimingData];
+                NSLog(@"XLSequencerViewController: TIMING_ADD - created mark at %ldms-%ldms on '%@'",
+                      (long)snappedCursor, (long)endTimeMS, trackName);
+            }
         }
         return YES;
     }
@@ -5495,9 +5688,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
                     [_undoController endUndoGrouping];
 
-                    [self reloadSequenceData];
-                    [_effectsGridView reloadData];
-                    [self reloadTimingMarksForRuler];
+                    [self refreshTimingData];
                     NSLog(@"XLSequencerViewController: TIMING_SPLIT - split mark %ld at %ldms (was %ld-%ld, label='%@')",
                           (long)markId, (long)snappedCursor, (long)markStart, (long)markEnd, label);
                     return YES;
@@ -5891,6 +6082,15 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         return YES;
     }
 
+    // RENDER_ALL: Trigger a full sequence render
+    if ([actionType isEqualToString:@"RENDER_ALL"]) {
+        if (_engineBridge) {
+            [_engineBridge renderAll];
+            NSLog(@"XLSequencerViewController: RENDER_ALL - full sequence render triggered");
+        }
+        return YES;
+    }
+
     // MARK: - Clipboard Paste Modes (xlmac-8wd4)
 
     // PASTE_BY_CELL: Set paste mode to "by cell" (relative positioning)
@@ -5936,6 +6136,62 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         // Use the standard NSDocument save mechanism (same as Cmd+S menu)
         [NSApp sendAction:@selector(saveDocument:) to:nil from:self];
         NSLog(@"XLSequencerViewController: SAVE_SEQUENCE - save triggered");
+        return YES;
+    }
+
+    // SAVEAS_SEQUENCE: Save current sequence to a new file
+    if ([actionType isEqualToString:@"SAVEAS_SEQUENCE"]) {
+        [NSApp sendAction:@selector(saveDocumentAs:) to:nil from:self];
+        NSLog(@"XLSequencerViewController: SAVEAS_SEQUENCE - save as triggered");
+        return YES;
+    }
+
+    // SELECT_SHOW_FOLDER: Open folder picker to change show folder (default F9)
+    if ([actionType isEqualToString:@"SELECT_SHOW_FOLDER"]) {
+        XLAppDelegate *appDelegate = (XLAppDelegate *)[NSApp delegate];
+        [appDelegate selectShowFolder:nil];
+        return YES;
+    }
+
+    // BACKUP: Backup show folder (default F10)
+    if ([actionType isEqualToString:@"BACKUP"]) {
+        [[NSApp delegate] performSelector:@selector(backupShowFolder:) withObject:nil];
+        NSLog(@"XLSequencerViewController: BACKUP - backup show folder triggered");
+        return YES;
+    }
+
+    // ALTERNATE_BACKUP: Backup to alternate location (default F11)
+    if ([actionType isEqualToString:@"ALTERNATE_BACKUP"]) {
+        [[NSApp delegate] performSelector:@selector(alternateBackup:) withObject:nil];
+        NSLog(@"XLSequencerViewController: ALTERNATE_BACKUP - alternate backup triggered");
+        return YES;
+    }
+
+    // SAVE_CURRENT_TAB: Save via NSDocument responder chain (same as Cmd+S menu)
+    if ([actionType isEqualToString:@"SAVE_CURRENT_TAB"]) {
+        [NSApp sendAction:@selector(saveDocument:) to:nil from:self];
+        NSLog(@"XLSequencerViewController: SAVE_CURRENT_TAB - save triggered");
+        return YES;
+    }
+
+    // OPEN_SEQUENCE: Forward to XLAppDelegate openSequence:
+    if ([actionType isEqualToString:@"OPEN_SEQUENCE"]) {
+        [[NSApp delegate] performSelector:@selector(openSequence:) withObject:nil];
+        NSLog(@"XLSequencerViewController: OPEN_SEQUENCE - open triggered");
+        return YES;
+    }
+
+    // CLOSE_SEQUENCE: Close via standard NSWindow performClose: (same as Cmd+W menu)
+    if ([actionType isEqualToString:@"CLOSE_SEQUENCE"]) {
+        [NSApp sendAction:@selector(performClose:) to:nil from:self];
+        NSLog(@"XLSequencerViewController: CLOSE_SEQUENCE - close triggered");
+        return YES;
+    }
+
+    // NEW_SEQUENCE: Forward to XLAppDelegate newSequence:
+    if ([actionType isEqualToString:@"NEW_SEQUENCE"]) {
+        [[NSApp delegate] performSelector:@selector(newSequence:) withObject:nil];
+        NSLog(@"XLSequencerViewController: NEW_SEQUENCE - new sequence triggered");
         return YES;
     }
 
@@ -6507,6 +6763,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         return YES;
     }
 
+    // FPP_CONNECT: Show FPP Connect window for device discovery and FSEQ upload
+    if ([actionType isEqualToString:@"FPP_CONNECT"]) {
+        [[NSApp delegate] performSelector:@selector(fppConnect:) withObject:nil];
+        return YES;
+    }
+
     // FOCUS_SEQUENCER: Force keyboard focus to the effects grid
     if ([actionType isEqualToString:@"FOCUS_SEQUENCER"]) {
         [self.view.window makeFirstResponder:_effectsGridView];
@@ -6516,6 +6778,33 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     NSLog(@"XLSequencerViewController: Unhandled key action: %@", actionType);
     return NO;
+}
+
+#pragma mark - Snap Toggle
+
+- (void)toggleSnap {
+    BOOL newState = !_effectsGridView.snapToTimingMarks;
+    _effectsGridView.snapToTimingMarks = newState;
+    [[NSUserDefaults standardUserDefaults] setBool:newState forKey:@"SnapToTiming"];
+    [[XLSwiftUIWindowHelper shared] setSnapEnabled:newState];
+}
+
+- (void)handleSnapEnabledDidChange:(NSNotification *)note {
+    BOOL enabled = [note.userInfo[@"enabled"] boolValue];
+    _effectsGridView.snapToTimingMarks = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"SnapToTiming"];
+}
+
+- (IBAction)toggleSnapToGrid:(id)sender {
+    [self toggleSnap];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    if (menuItem.action == @selector(toggleSnapToGrid:)) {
+        menuItem.state = _effectsGridView.snapToTimingMarks ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    return YES;
 }
 
 #pragma mark - Zoom and Navigation Actions

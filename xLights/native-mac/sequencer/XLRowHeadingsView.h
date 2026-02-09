@@ -89,5 +89,7 @@ typedef NS_ENUM(NSInteger, XLElementType) {
 @property (nonatomic, assign) CGFloat rowHeight;
 @property (nonatomic, assign) CGFloat verticalScrollOffset;
 @property (nonatomic, assign) NSInteger selectedRow;
+/// Number of timing track rows pinned at the top (frozen rows). Set by the sequencer VC.
+@property (nonatomic, assign) NSInteger pinnedTimingRowCount;
 - (void)reloadData;
 @end

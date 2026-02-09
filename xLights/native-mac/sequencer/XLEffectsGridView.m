@@ -12,6 +12,20 @@
 #import "XLEffectsGridRenderer.h"
 #import "XLUndoController.h"
 #import <QuartzCore/CATransaction.h>
+#import <os/log.h>
+#import <os/signpost.h>
+
+// Performance logging for sidebar resize debugging
+static os_log_t _gridPerfLog;
+static os_signpost_id_t _gridResizeSignpost;
+static CFAbsoluteTime _lastResizeTime = 0;
+static int _resizeCount = 0;
+
+__attribute__((constructor))
+static void _initGridPerfLog(void) {
+    _gridPerfLog = os_log_create("com.xlights.native", "EffectsGrid");
+    _gridResizeSignpost = os_signpost_id_generate(_gridPerfLog);
+}
 
 // Pasteboard type for effect drags from the palette
 NSPasteboardType const XLEffectTypePasteboardType = @"com.xlights.effectType";
@@ -31,6 +45,14 @@ static const CGFloat kMinimumEffectWidthMS = 10.0;  // minimum effect width in m
 static const CGFloat kSnapThresholdPixels = 5.0;    // pixel distance for snap-to-grid
 static const CGFloat kDefaultDropDurationMS = 1000.0; // default effect duration for palette drops
 static const CGFloat kGhostAlpha = 0.4;             // alpha for ghost/preview effect during drag
+
+// Multi-selection drag: stores original positions for each selected effect
+typedef struct {
+    NSUInteger renderIndex;
+    CGFloat originalStartMS;
+    CGFloat originalEndMS;
+    NSInteger originalRow;
+} XLMultiDragEntry;
 
 // Context menu item tags
 static const NSInteger kMenuTagCut = 1001;
@@ -113,6 +135,10 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     NSUInteger _selectedEffectsCapacity;
     NSUInteger _selectedEffectsCount;  // cached count for quick access
 
+    // Multi-selection drag: original positions of all selected effects (excluding primary)
+    XLMultiDragEntry *_multiDragEntries;
+    NSUInteger _multiDragCount;
+
     // Icon overlay layer for drawing SF Symbols on effect blocks
     CALayer *_iconOverlayLayer;
 
@@ -161,6 +187,15 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 @property (nonatomic, assign) NSInteger adjacentEffectIndex;
 @property (nonatomic, assign) CGFloat adjacentOriginalStartMS;
 @property (nonatomic, assign) CGFloat adjacentOriginalEndMS;
+
+// Overlap prevention: blocking effect during resize (push/compress)
+@property (nonatomic, assign) NSInteger blockingEffectIndex;
+@property (nonatomic, assign) CGFloat blockingOriginalStartMS;
+@property (nonatomic, assign) CGFloat blockingOriginalEndMS;
+
+// Overlap prevention: move jump-over state
+@property (nonatomic, assign) BOOL mouseHasCrossedBlocker;
+@property (nonatomic, assign) NSInteger crossedBlockerIndex;
 
 // Undo state - captured snapshot at drag/resize start
 @property (nonatomic, assign) XLEffectSnapshot undoSnapshot;
@@ -320,6 +355,15 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _dragCurrentRow = -1;
     _dragCurrentStartMS = 0;
 
+    // Overlap prevention state
+    _blockingEffectIndex = -1;
+    _mouseHasCrossedBlocker = NO;
+    _crossedBlockerIndex = -1;
+
+    // Multi-selection drag state
+    _multiDragEntries = NULL;
+    _multiDragCount = 0;
+
     // Set up Metal layer - must set layer before wantsLayer for layer-hosting views
     _metalLayer = [CAMetalLayer layer];
     _metalLayer.device = MTLCreateSystemDefaultDevice();
@@ -423,6 +467,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _selectedEffects = NULL;
     _selectedEffectsCapacity = 0;
     _selectedEffectsCount = 0;
+    free(_multiDragEntries);
+    _multiDragEntries = NULL;
+    _multiDragCount = 0;
 }
 
 #pragma mark - Selection C Array Helpers
@@ -509,6 +556,14 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 }
 
 - (void)setFrameSize:(NSSize)newSize {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CFAbsoluteTime delta = (now - _lastResizeTime) * 1000.0; // ms since last resize
+    _lastResizeTime = now;
+    _resizeCount++;
+
+    os_signpost_interval_begin(_gridPerfLog, _gridResizeSignpost, "setFrameSize",
+                               "%.0fx%.0f count=%d gap=%.1fms", newSize.width, newSize.height, _resizeCount, delta);
+
     [super setFrameSize:newSize];
 
     // Disable implicit animations during resize to keep Metal and overlay layers in sync
@@ -523,6 +578,13 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     [CATransaction commit];
 
     _needsRedraw = YES;
+
+    CFAbsoluteTime elapsed = (CFAbsoluteTimeGetCurrent() - now) * 1000.0;
+    os_signpost_interval_end(_gridPerfLog, _gridResizeSignpost, "setFrameSize");
+    if (delta < 50.0) { // rapid resize (< 50ms gap = during animation)
+        os_log_info(_gridPerfLog, "EffectsGrid setFrameSize: %.0fx%.0f  elapsed=%.2fms  gap=%.1fms  count=%d (RAPID)",
+                    newSize.width, newSize.height, elapsed, delta, _resizeCount);
+    }
 }
 
 - (BOOL)wantsUpdateLayer {
@@ -636,8 +698,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         }
     }
 
-    // Ensure selection array can accommodate all effects
+    // Ensure selection array can accommodate all effects, then clear stale selections.
+    // Effect indices change on every reload, so old selection indices are invalid.
     [self ensureSelectionCapacity:_renderEffectCount];
+    [self clearAllSelections];
+    _selectedEffectID = -1;
 
     _needsRedraw = YES;
 }
@@ -655,11 +720,21 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     if (!_renderer || !_metalLayer || !self.window) return;
     if (_isDrawing) return;  // Prevent concurrent draws which cause jitter
 
+    CFAbsoluteTime drawStart = CFAbsoluteTimeGetCurrent();
+    static os_signpost_id_t drawSignpost;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ drawSignpost = os_signpost_id_generate(_gridPerfLog); });
+    os_signpost_interval_begin(_gridPerfLog, drawSignpost, "drawGrid");
+
     _isDrawing = YES;
     _needsRedraw = NO;
 
     CGSize viewSize = _metalLayer.drawableSize;
-    if (viewSize.width <= 0 || viewSize.height <= 0) return;
+    if (viewSize.width <= 0 || viewSize.height <= 0) {
+        _isDrawing = NO;
+        os_signpost_interval_end(_gridPerfLog, drawSignpost, "drawGrid");
+        return;
+    }
 
     CGFloat scale = _metalLayer.contentsScale;
     CGPoint scaledScroll = CGPointMake(_scrollOffset.x * scale, _scrollOffset.y * scale);
@@ -680,6 +755,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     // Pass only plain C arrays to the renderer — no ObjC collections.
     // The wxWidgets/C++ heap corruption overwrites ObjC object pointers
     // stored as ivars, so we must never touch NSArray during rendering.
+    CFAbsoluteTime metalStart = CFAbsoluteTimeGetCurrent();
     [_renderer drawInLayer:_metalLayer
                   viewSize:viewSize
               scrollOffset:scaledScroll
@@ -694,28 +770,48 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
          timingMarkValues:_timingMarkValues
           timingMarkCount:_timingMarkCount
   activeTimingColorIndex:_activeTimingColorIndex
+   pinnedTimingRowCount:_pinnedTimingRowCount
             dropIndicator:_isReceivingDrop
                   dropRow:_dropTargetRow
               dropStartMS:_dropTargetStartMS
                 dropEndMS:_dropTargetEndMS
          rubberBandActive:_isRubberBanding
            rubberBandRect:rubberBandRect
-      cellHighlightActive:_hasCellSelection
+      cellHighlightActive:(_hasCellSelection && ![self isTimingRow:_cellSelectionRow])
         cellHighlightRow:_cellSelectionRow
     cellHighlightStartMS:_cellSelectionStartMS
       cellHighlightEndMS:_cellSelectionEndMS];
+    CFAbsoluteTime metalEnd = CFAbsoluteTimeGetCurrent();
 
     // Draw timing mark labels on their own overlay layer
+    CFAbsoluteTime labelsStart = CFAbsoluteTimeGetCurrent();
     [self drawTimingLabels];
+    CFAbsoluteTime labelsEnd = CFAbsoluteTimeGetCurrent();
 
     // Draw effect icons on the overlay layer (can be disabled for performance testing)
+    CFAbsoluteTime iconsStart = CFAbsoluteTimeGetCurrent();
     if (!_disableIconDrawing) {
         [self drawEffectIcons];
     } else {
         _iconOverlayLayer.contents = nil;
     }
+    CFAbsoluteTime iconsEnd = CFAbsoluteTimeGetCurrent();
 
     _isDrawing = NO;
+
+    CFAbsoluteTime totalElapsed = (CFAbsoluteTimeGetCurrent() - drawStart) * 1000.0;
+    os_signpost_interval_end(_gridPerfLog, drawSignpost, "drawGrid");
+
+    // Log if frame took longer than 8ms (half a 60fps frame budget)
+    if (totalElapsed > 8.0) {
+        os_log_info(_gridPerfLog, "drawGrid SLOW: total=%.2fms  metal=%.2fms  labels=%.2fms  icons=%.2fms  effects=%lu  size=%.0fx%.0f",
+                    totalElapsed,
+                    (metalEnd - metalStart) * 1000.0,
+                    (labelsEnd - labelsStart) * 1000.0,
+                    (iconsEnd - iconsStart) * 1000.0,
+                    (unsigned long)_renderEffectCount,
+                    viewSize.width, viewSize.height);
+    }
 }
 
 - (void)drawTimingLabels {
@@ -741,19 +837,25 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     CGFloat msPerPixel = 1.0 / _zoomLevel;
     CGFloat visibleStartMS = _scrollOffset.x * msPerPixel;
     CGFloat visibleEndMS = visibleStartMS + viewWidth * msPerPixel;
-    CGFloat visibleStartRow = _scrollOffset.y / _rowHeight;
-    CGFloat visibleEndRow = (viewHeight + _scrollOffset.y) / _rowHeight;
 
     // Check if we have any visible timing labels at all
     // Only draw labels for lyric tracks (multi-layer timing tracks, not plain timing)
+    // Pinned timing rows are always visible so skip row-based culling for them
     BOOL hasLabels = NO;
     for (NSUInteger i = 0; i < _renderEffectCount; i++) {
         XLEffectRenderInfo info = _renderEffects[i];
         if (!info.isTimingMark || info.label[0] == '\0') continue;
         if (info.timingTrackLayerCount <= 1) continue;
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
-        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
-            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+        // Pinned rows are always visible
+        if (info.row >= _pinnedTimingRowCount) {
+            CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+            CGFloat scrollableStartRow = _scrollOffset.y / _rowHeight;
+            CGFloat scrollableEndRow = (_scrollOffset.y + viewHeight - pinnedHeight) / _rowHeight;
+            NSInteger adjRow = info.row - _pinnedTimingRowCount;
+            if (adjRow < (NSInteger)floor(scrollableStartRow) - 1 ||
+                adjRow > (NSInteger)ceil(scrollableEndRow) + 1) continue;
+        }
         hasLabels = YES;
         break;
     }
@@ -774,15 +876,24 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         NSForegroundColorAttributeName: [NSColor whiteColor],
     };
 
+    CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+
     for (NSUInteger i = 0; i < _renderEffectCount; i++) {
         XLEffectRenderInfo info = _renderEffects[i];
         if (!info.isTimingMark || info.label[0] == '\0') continue;
         if (info.timingTrackLayerCount <= 1) continue; // Skip plain timing tracks
 
-        // Frustum culling
+        // Frustum culling (horizontal)
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
-        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
-            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        // Vertical culling: pinned rows are always visible, scrollable rows need checking
+        if (info.row >= _pinnedTimingRowCount) {
+            CGFloat scrollableStartRow = _scrollOffset.y / _rowHeight;
+            CGFloat scrollableEndRow = (_scrollOffset.y + viewHeight - pinnedHeight) / _rowHeight;
+            NSInteger adjRow = info.row - _pinnedTimingRowCount;
+            if (adjRow < (NSInteger)floor(scrollableStartRow) - 1 ||
+                adjRow > (NSInteger)ceil(scrollableEndRow) + 1) continue;
+        }
 
         CGFloat x1 = info.startTimeMS * _zoomLevel - _scrollOffset.x;
         CGFloat x2 = info.endTimeMS * _zoomLevel - _scrollOffset.x;
@@ -794,8 +905,13 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
         NSSize textSize = [text sizeWithAttributes:textAttrs];
 
-        // View Y is top-left origin (flipped view), NSImage is bottom-left origin
-        CGFloat viewY = info.row * _rowHeight - _scrollOffset.y;
+        // View Y: pinned rows at fixed position, scrollable rows offset by scroll
+        CGFloat viewY;
+        if (info.row < _pinnedTimingRowCount) {
+            viewY = info.row * _rowHeight;
+        } else {
+            viewY = pinnedHeight + (info.row - _pinnedTimingRowCount) * _rowHeight - _scrollOffset.y;
+        }
         CGFloat viewCenterY = viewY + _rowHeight / 2.0;
 
         // Convert to image coordinates (bottom-left origin)
@@ -847,8 +963,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     CGFloat msPerPixel = 1.0 / _zoomLevel;
     CGFloat visibleStartMS = _scrollOffset.x * msPerPixel;
     CGFloat visibleEndMS = visibleStartMS + self.bounds.size.width * msPerPixel;
-    CGFloat visibleStartRow = _scrollOffset.y / _rowHeight;
-    CGFloat visibleEndRow = (self.bounds.size.height + _scrollOffset.y) / _rowHeight;
+    CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+    CGFloat scrollableStartRow = _scrollOffset.y / _rowHeight;
+    CGFloat scrollableEndRow = (_scrollOffset.y + self.bounds.size.height - pinnedHeight) / _rowHeight;
 
     // Draw icons for visible effects (skip timing marks — they have text labels instead)
     for (NSUInteger i = 0; i < _renderEffectCount; i++) {
@@ -857,8 +974,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
         // Skip effects outside visible region
         if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
-        if (info.row < (NSInteger)floor(visibleStartRow) - 1 ||
-            info.row > (NSInteger)ceil(visibleEndRow) + 1) continue;
+
+        // Row visibility: model rows are always in scrollable zone (row >= pinnedTimingRowCount)
+        NSInteger adjRow = info.row - _pinnedTimingRowCount;
+        if (adjRow < (NSInteger)floor(scrollableStartRow) - 1 ||
+            adjRow > (NSInteger)ceil(scrollableEndRow) + 1) continue;
 
         // Calculate effect block position
         CGFloat x1 = info.startTimeMS * _zoomLevel - _scrollOffset.x;
@@ -868,10 +988,13 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         // Skip if effect is too narrow for an icon
         if (effectWidth < minWidthForIcons) continue;
 
-        // Calculate Y in view coordinates (flipped: row 0 at top)
-        // Our view is flipped (top-left origin), but NSImage is not (bottom-left origin)
-        // So we need to convert: imageY = viewHeight - viewY - height
-        CGFloat viewY = info.row * _rowHeight - _scrollOffset.y;
+        // Calculate Y in view coordinates: pinned rows at fixed position, scrollable rows offset
+        CGFloat viewY;
+        if (info.row < _pinnedTimingRowCount) {
+            viewY = info.row * _rowHeight;
+        } else {
+            viewY = pinnedHeight + (info.row - _pinnedTimingRowCount) * _rowHeight - _scrollOffset.y;
+        }
         CGFloat centerX = (x1 + x2) / 2.0;
 
         // Get the SF Symbol for this effect type
@@ -925,13 +1048,24 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         *outTimeMS = (viewPoint.x + _scrollOffset.x) / _zoomLevel;
     }
     if (outRow) {
-        *outRow = (NSInteger)floor((viewPoint.y + _scrollOffset.y) / _rowHeight);
+        CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+        if (_pinnedTimingRowCount > 0 && viewPoint.y < pinnedHeight) {
+            *outRow = (NSInteger)floor(viewPoint.y / _rowHeight);
+        } else {
+            *outRow = (NSInteger)floor((viewPoint.y - pinnedHeight + _scrollOffset.y) / _rowHeight) + _pinnedTimingRowCount;
+        }
     }
 }
 
 - (NSPoint)pointForTimeMS:(CGFloat)timeMS row:(NSInteger)row {
     CGFloat x = timeMS * _zoomLevel - _scrollOffset.x;
-    CGFloat y = row * _rowHeight - _scrollOffset.y;
+    CGFloat y;
+    if (row < _pinnedTimingRowCount) {
+        y = row * _rowHeight;
+    } else {
+        CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+        y = pinnedHeight + (row - _pinnedTimingRowCount) * _rowHeight - _scrollOffset.y;
+    }
     return NSMakePoint(x, y);
 }
 
@@ -966,6 +1100,24 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
 #pragma mark - Snap-to-Grid
 
+/// Returns the current grid line interval in ms, matching the renderer's visible grid lines.
+- (CGFloat)currentGridIntervalMS {
+    static const CGFloat gridIntervals[] = { 50, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000 };
+    static const NSInteger numIntervals = sizeof(gridIntervals) / sizeof(gridIntervals[0]);
+    static const CGFloat targetPixelsPerMark = 80.0;
+
+    CGFloat scale = _metalLayer ? _metalLayer.contentsScale : 1.0;
+    CGFloat scaledZoom = _zoomLevel * scale;
+    CGFloat intervalMS = gridIntervals[numIntervals - 1];
+    for (NSInteger i = 0; i < numIntervals; i++) {
+        if (gridIntervals[i] * scaledZoom >= targetPixelsPerMark) {
+            intervalMS = gridIntervals[i];
+            break;
+        }
+    }
+    return intervalMS;
+}
+
 - (CGFloat)snapTimeMS:(CGFloat)timeMS {
     if (!_snapToTimingMarks) return timeMS;
 
@@ -980,6 +1132,17 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         if (dist < bestDistance) {
             bestDistance = dist;
             bestSnap = markMS;
+        }
+    }
+
+    // Snap to grid lines (visible vertical time divisions)
+    CGFloat gridIntervalMS = [self currentGridIntervalMS];
+    if (gridIntervalMS > 0) {
+        CGFloat nearestGridLine = round(timeMS / gridIntervalMS) * gridIntervalMS;
+        CGFloat gridDist = fabs(timeMS - nearestGridLine);
+        if (gridDist < bestDistance) {
+            bestDistance = gridDist;
+            bestSnap = nearestGridLine;
         }
     }
 
@@ -1008,6 +1171,35 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         if (interval > 0) return interval;
     }
     return 0;
+}
+
+/// Rebuild _timingMarkValues from current _renderEffects.
+/// Called during timing mark drags to keep grid lines in sync.
+- (void)rebuildTimingMarkValuesFromRenderEffects {
+    NSUInteger count = 0;
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        if (_renderEffects[i].isTimingMark &&
+            _renderEffects[i].timingColorIndex == _activeTimingColorIndex &&
+            _renderEffects[i].layer == 0) {
+            count++;
+        }
+    }
+    if (count == 0) return;
+
+    free(_timingMarkValues);
+    _timingMarkValues = (CGFloat *)malloc(count * sizeof(CGFloat));
+    if (!_timingMarkValues) {
+        _timingMarkCount = 0;
+        return;
+    }
+    _timingMarkCount = 0;
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        if (_renderEffects[i].isTimingMark &&
+            _renderEffects[i].timingColorIndex == _activeTimingColorIndex &&
+            _renderEffects[i].layer == 0) {
+            _timingMarkValues[_timingMarkCount++] = _renderEffects[i].startTimeMS;
+        }
+    }
 }
 
 #pragma mark - Selection Management
@@ -1062,28 +1254,19 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         *outEnd = nextMark;
     } else {
         // No timing track active — use the visible grid line interval (zoom-dependent).
-        // This mirrors the grid line spacing from XLEffectsGridRenderer so the cell
-        // selection matches the drawn grid columns.
-        // IMPORTANT: The renderer receives scaledZoom (zoomLevel * contentsScale) in physical
-        // pixels, so we must apply the same scale factor here to match its grid intervals.
-        static const CGFloat gridIntervals[] = { 50, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000 };
-        static const NSInteger numIntervals = sizeof(gridIntervals) / sizeof(gridIntervals[0]);
-        static const CGFloat targetPixelsPerMark = 80.0;
-
-        CGFloat scale = _metalLayer ? _metalLayer.contentsScale : 1.0;
-        CGFloat scaledZoom = _zoomLevel * scale;
-        CGFloat intervalMS = gridIntervals[numIntervals - 1];
-        for (NSInteger i = 0; i < numIntervals; i++) {
-            if (gridIntervals[i] * scaledZoom >= targetPixelsPerMark) {
-                intervalMS = gridIntervals[i];
-                break;
-            }
-        }
-
+        CGFloat intervalMS = [self currentGridIntervalMS];
         CGFloat snappedStart = floor(timeMS / intervalMS) * intervalMS;
         *outStart = snappedStart;
         *outEnd = snappedStart + intervalMS;
     }
+}
+
+/// Check if a row is a timing track row (has any timing mark effects).
+- (BOOL)isTimingRow:(NSInteger)row {
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        if (_renderEffects[i].row == row && _renderEffects[i].isTimingMark) return YES;
+    }
+    return NO;
 }
 
 - (void)selectAllEffectsInRow:(NSInteger)row {
@@ -1164,6 +1347,100 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         return _renderEffects[index].effectId;
     }
     return -1;
+}
+
+#pragma mark - Effect Overlap Prevention Helpers
+
+/// Find the nearest non-timing-mark effect on the given row in the specified direction.
+/// @param direction +1 = search right (effects starting after timeMS), -1 = search left (effects ending before timeMS)
+/// @return Index in _renderEffects or -1 if none found.
+- (NSInteger)findBlockingEffectOnRow:(NSInteger)row
+                         inDirection:(int)direction
+                          fromTimeMS:(CGFloat)timeMS
+                      excludingIndex:(NSInteger)excludeIdx
+{
+    NSInteger bestIdx = -1;
+    CGFloat bestDistance = CGFLOAT_MAX;
+
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        if ((NSInteger)i == excludeIdx) continue;
+        XLEffectRenderInfo info = _renderEffects[i];
+        if (info.row != row) continue;
+        if (info.isTimingMark) continue;
+
+        if (direction > 0) {
+            // Looking right: find effect starting at or after timeMS
+            if (info.startTimeMS >= timeMS - 1.0) {
+                CGFloat dist = info.startTimeMS - timeMS;
+                if (dist < bestDistance) {
+                    bestDistance = dist;
+                    bestIdx = (NSInteger)i;
+                }
+            }
+        } else {
+            // Looking left: find effect ending at or before timeMS
+            if (info.endTimeMS <= timeMS + 1.0) {
+                CGFloat dist = timeMS - info.endTimeMS;
+                if (dist < bestDistance) {
+                    bestDistance = dist;
+                    bestIdx = (NSInteger)i;
+                }
+            }
+        }
+    }
+    return bestIdx;
+}
+
+/// Find the first non-timing-mark effect on the row that overlaps [startMS, endMS].
+/// @param excludeSelected If YES, skip all currently selected effects (for multi-drag).
+/// @return Index in _renderEffects or -1 if no overlap.
+- (NSInteger)findOverlappingEffectOnRow:(NSInteger)row
+                                startMS:(CGFloat)startMS
+                                  endMS:(CGFloat)endMS
+                         excludingIndex:(NSInteger)excludeIdx
+                       excludeSelected:(BOOL)excludeSelected
+{
+    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+        if ((NSInteger)i == excludeIdx) continue;
+        if (excludeSelected && i < _selectedEffectsCapacity && _selectedEffects[i]) continue;
+        XLEffectRenderInfo info = _renderEffects[i];
+        if (info.row != row) continue;
+        if (info.isTimingMark) continue;
+        if (startMS < info.endTimeMS && endMS > info.startTimeMS) {
+            return (NSInteger)i;
+        }
+    }
+    return -1;
+}
+
+/// Convenience: find overlap excluding a single index (no selection awareness).
+- (NSInteger)findOverlappingEffectOnRow:(NSInteger)row
+                                startMS:(CGFloat)startMS
+                                  endMS:(CGFloat)endMS
+                         excludingIndex:(NSInteger)excludeIdx
+{
+    return [self findOverlappingEffectOnRow:row startMS:startMS endMS:endMS
+                            excludingIndex:excludeIdx excludeSelected:NO];
+}
+
+/// Walk rows in direction to find one where [startMS, endMS] doesn't overlap any effect.
+/// @return First clear row, or startRow if already clear or all rows blocked.
+- (NSInteger)findNonBlockedRowFrom:(NSInteger)startRow
+                       inDirection:(int)direction
+                        forStartMS:(CGFloat)startMS
+                             endMS:(CGFloat)endMS
+                    excludingIndex:(NSInteger)excludeIdx
+{
+    NSInteger row = startRow;
+    while (row >= 0 && row < _totalRows) {
+        NSInteger overlap = [self findOverlappingEffectOnRow:row
+                                                    startMS:startMS
+                                                      endMS:endMS
+                                             excludingIndex:excludeIdx];
+        if (overlap < 0) return row;
+        row += direction;
+    }
+    return startRow;
 }
 
 #pragma mark - Mouse Events
@@ -1281,6 +1558,31 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                 _undoSnapshot.renderDisabled = info.renderDisabled;
                 _hasUndoSnapshot = YES;
             }
+
+            // Build multi-drag entries for all other selected effects
+            free(_multiDragEntries);
+            _multiDragEntries = NULL;
+            _multiDragCount = 0;
+            if (_selectedEffectsCount > 1) {
+                _multiDragEntries = calloc(_selectedEffectsCount, sizeof(XLMultiDragEntry));
+                NSLog(@"[MULTIDRAG] mouseDown: building multi-drag entries. primary=%ld row=%ld start=%.1f end=%.1f selectedCount=%lu",
+                      (long)hitEffectIndex, (long)_renderEffects[hitEffectIndex].row,
+                      _dragOriginalStartMS, _dragOriginalEndMS, (unsigned long)_selectedEffectsCount);
+                for (NSUInteger i = 0; i < _renderEffectCount && i < _selectedEffectsCapacity; i++) {
+                    if (!_selectedEffects[i]) continue;
+                    if ((NSInteger)i == hitEffectIndex) continue;
+                    XLMultiDragEntry entry;
+                    entry.renderIndex = i;
+                    entry.originalStartMS = _renderEffects[i].startTimeMS;
+                    entry.originalEndMS = _renderEffects[i].endTimeMS;
+                    entry.originalRow = _renderEffects[i].row;
+                    _multiDragEntries[_multiDragCount++] = entry;
+                    NSLog(@"[MULTIDRAG]   entry[%lu]: renderIdx=%lu row=%ld start=%.1f end=%.1f",
+                          (unsigned long)(_multiDragCount - 1), (unsigned long)i,
+                          (long)entry.originalRow, entry.originalStartMS, entry.originalEndMS);
+                }
+                NSLog(@"[MULTIDRAG] mouseDown: total multi-drag entries=%lu", (unsigned long)_multiDragCount);
+            }
         }
         // Find adjacent timing mark for slip-drag
         _adjacentEffectIndex = -1;
@@ -1317,6 +1619,31 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             }
         }
 
+        // Find blocking effect for regular effect overlap prevention
+        _blockingEffectIndex = -1;
+        _mouseHasCrossedBlocker = NO;
+        _crossedBlockerIndex = -1;
+        if (hitEffectIndex >= 0 && (NSUInteger)hitEffectIndex < _renderEffectCount &&
+            !_renderEffects[hitEffectIndex].isTimingMark) {
+            NSInteger dragRow = _renderEffects[hitEffectIndex].row;
+
+            if (hitLoc == XLEffectHitLocationLeftEdge) {
+                _blockingEffectIndex = [self findBlockingEffectOnRow:dragRow
+                                                        inDirection:-1
+                                                         fromTimeMS:_dragOriginalStartMS
+                                                     excludingIndex:hitEffectIndex];
+            } else if (hitLoc == XLEffectHitLocationRightEdge) {
+                _blockingEffectIndex = [self findBlockingEffectOnRow:dragRow
+                                                        inDirection:+1
+                                                         fromTimeMS:_dragOriginalEndMS
+                                                     excludingIndex:hitEffectIndex];
+            }
+            if (_blockingEffectIndex >= 0) {
+                _blockingOriginalStartMS = _renderEffects[_blockingEffectIndex].startTimeMS;
+                _blockingOriginalEndMS = _renderEffects[_blockingEffectIndex].endTimeMS;
+            }
+        }
+
         _dragStartTimeMS = timeMS;
     } else {
         // Clicked on empty area
@@ -1328,13 +1655,16 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             [_delegate effectsGrid:self didClickAtTimeMS:timeMS row:row];
         }
 
-        // Set cell selection for keyboard effect insertion
-        CGFloat cellStart, cellEnd;
-        [self computeCellBoundsForTimeMS:timeMS startMS:&cellStart endMS:&cellEnd];
-        _hasCellSelection = YES;
-        _cellSelectionRow = row;
-        _cellSelectionStartMS = cellStart;
-        _cellSelectionEndMS = cellEnd;
+        // Set cell selection for keyboard effect insertion — but NOT on timing rows.
+        // Timing rows use timing mark selection, not cell selection.
+        if (![self isTimingRow:row]) {
+            CGFloat cellStart, cellEnd;
+            [self computeCellBoundsForTimeMS:timeMS startMS:&cellStart endMS:&cellEnd];
+            _hasCellSelection = YES;
+            _cellSelectionRow = row;
+            _cellSelectionStartMS = cellStart;
+            _cellSelectionEndMS = cellEnd;
+        }
         _needsRedraw = YES;
 
         // Start rubber band selection
@@ -1353,8 +1683,8 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         return;
     }
 
-    BOOL optionDown = (event.modifierFlags & NSEventModifierFlagOption) != 0;
-    BOOL snapEnabled = _snapToTimingMarks && !optionDown;
+    BOOL controlDown = (event.modifierFlags & NSEventModifierFlagControl) != 0;
+    BOOL snapEnabled = _snapToTimingMarks && !controlDown;
 
     if (_mouseDownEffectIndex >= 0 && !_isDragging && !_isResizing) {
         if (_mouseDownHitLocation == XLEffectHitLocationLeftEdge ||
@@ -1391,6 +1721,28 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                     _renderEffects[_adjacentEffectIndex].endTimeMS = newStart;
                 }
             }
+            // Regular effect overlap prevention: push/compress blocker to the left
+            if (_blockingEffectIndex >= 0 && (NSUInteger)_blockingEffectIndex < _renderEffectCount &&
+                !_renderEffects[_mouseDownEffectIndex].isTimingMark) {
+                if (_renderEffects[_blockingEffectIndex].locked) {
+                    // Locked blocker: hard stop at its original position
+                    if (newStart < _blockingOriginalEndMS) {
+                        newStart = _blockingOriginalEndMS;
+                    }
+                } else if (newStart < _blockingOriginalEndMS) {
+                    // Past the blocker's original edge: push it
+                    CGFloat newBlockerEnd = newStart;
+                    CGFloat blockerMinEnd = _blockingOriginalStartMS + kMinimumEffectWidthMS;
+                    if (newBlockerEnd < blockerMinEnd) {
+                        newBlockerEnd = blockerMinEnd;
+                        newStart = blockerMinEnd;
+                    }
+                    _renderEffects[_blockingEffectIndex].endTimeMS = newBlockerEnd;
+                } else {
+                    // Retreated past the blocker's original edge: restore it
+                    _renderEffects[_blockingEffectIndex].endTimeMS = _blockingOriginalEndMS;
+                }
+            }
         } else {
             newEnd = _dragOriginalEndMS + deltaMS;
             newEnd = MAX(newStart + kMinimumEffectWidthMS, MIN(newEnd, _sequenceLengthMS));
@@ -1406,12 +1758,39 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                     _renderEffects[_adjacentEffectIndex].startTimeMS = newEnd;
                 }
             }
+            // Regular effect overlap prevention: push/compress blocker to the right
+            if (_blockingEffectIndex >= 0 && (NSUInteger)_blockingEffectIndex < _renderEffectCount &&
+                !_renderEffects[_mouseDownEffectIndex].isTimingMark) {
+                if (_renderEffects[_blockingEffectIndex].locked) {
+                    // Locked blocker: hard stop at its original position
+                    if (newEnd > _blockingOriginalStartMS) {
+                        newEnd = _blockingOriginalStartMS;
+                    }
+                } else if (newEnd > _blockingOriginalStartMS) {
+                    // Past the blocker's original edge: push it
+                    CGFloat newBlockerStart = newEnd;
+                    CGFloat blockerMaxStart = _blockingOriginalEndMS - kMinimumEffectWidthMS;
+                    if (newBlockerStart > blockerMaxStart) {
+                        newBlockerStart = blockerMaxStart;
+                        newEnd = blockerMaxStart;
+                    }
+                    _renderEffects[_blockingEffectIndex].startTimeMS = newBlockerStart;
+                } else {
+                    // Retreated past the blocker's original edge: restore it
+                    _renderEffects[_blockingEffectIndex].startTimeMS = _blockingOriginalStartMS;
+                }
+            }
         }
 
         // Update the C array directly for visual feedback — immune to heap corruption
         if ((NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
             _renderEffects[_mouseDownEffectIndex].startTimeMS = newStart;
             _renderEffects[_mouseDownEffectIndex].endTimeMS = newEnd;
+
+            // Keep grid extension lines in sync when dragging timing marks
+            if (_renderEffects[_mouseDownEffectIndex].isTimingMark) {
+                [self rebuildTimingMarkValuesFromRenderEffects];
+            }
         }
 
         _needsRedraw = YES;
@@ -1440,14 +1819,264 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
         }
 
+        BOOL isRegularEffect = ((NSUInteger)_mouseDownEffectIndex < _renderEffectCount &&
+                                !_renderEffects[_mouseDownEffectIndex].isTimingMark);
+        BOOL isMultiDrag = (_multiDragCount > 0);
+
+        // Overlap prevention: same-row jump-over
+        // For multi-drag, exclude all selected effects from collision checks
+        if (isRegularEffect) {
+            CGFloat newEnd = newStart + duration;
+            NSInteger overlapIdx = [self findOverlappingEffectOnRow:targetRow
+                                                           startMS:newStart
+                                                             endMS:newEnd
+                                                    excludingIndex:_mouseDownEffectIndex
+                                                   excludeSelected:isMultiDrag];
+            if (isMultiDrag) {
+                NSLog(@"[MULTIDRAG] primary overlap check: row=%ld start=%.1f end=%.1f overlapIdx=%ld excludeSelected=%d",
+                      (long)targetRow, newStart, newEnd, (long)overlapIdx, isMultiDrag);
+            }
+            if (overlapIdx >= 0) {
+                XLEffectRenderInfo blocker = _renderEffects[overlapIdx];
+                CGFloat mouseTimeMS = timeMS;
+
+                if (_mouseHasCrossedBlocker && _crossedBlockerIndex == overlapIdx) {
+                    // Already crossed this blocker: stay on the far side
+                    if (deltaMS > 0) {
+                        newStart = blocker.endTimeMS;
+                    } else {
+                        newStart = blocker.startTimeMS - duration;
+                    }
+                } else {
+                    // Haven't crossed yet: check if mouse has now crossed to the far side
+                    if (deltaMS > 0 && mouseTimeMS > blocker.endTimeMS) {
+                        _mouseHasCrossedBlocker = YES;
+                        _crossedBlockerIndex = overlapIdx;
+                        newStart = blocker.endTimeMS;
+                    } else if (deltaMS < 0 && mouseTimeMS < blocker.startTimeMS) {
+                        _mouseHasCrossedBlocker = YES;
+                        _crossedBlockerIndex = overlapIdx;
+                        newStart = blocker.startTimeMS - duration;
+                    } else {
+                        // Snap to near side of blocker
+                        if (deltaMS > 0) {
+                            newStart = blocker.startTimeMS - duration;
+                        } else {
+                            newStart = blocker.endTimeMS;
+                        }
+                    }
+                }
+                newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
+
+                // After jumping, check for overlap on the new position too (chain of effects)
+                newEnd = newStart + duration;
+                NSInteger secondOverlap = [self findOverlappingEffectOnRow:targetRow
+                                                                  startMS:newStart
+                                                                    endMS:newEnd
+                                                           excludingIndex:_mouseDownEffectIndex
+                                                          excludeSelected:isMultiDrag];
+                if (secondOverlap >= 0) {
+                    // Can't place here either; revert to the near-side position
+                    if (deltaMS > 0) {
+                        newStart = blocker.startTimeMS - duration;
+                    } else {
+                        newStart = blocker.endTimeMS;
+                    }
+                    _mouseHasCrossedBlocker = NO;
+                    _crossedBlockerIndex = -1;
+                    newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
+                }
+            } else {
+                // No overlap at current position: reset crossing state
+                if (_mouseHasCrossedBlocker) {
+                    _mouseHasCrossedBlocker = NO;
+                    _crossedBlockerIndex = -1;
+                }
+            }
+            if (isMultiDrag) {
+                NSLog(@"[MULTIDRAG] after primary jump-over: newStart=%.1f (delta=%.1f)", newStart, newStart - _dragOriginalStartMS);
+            }
+        }
+
+        // Overlap prevention: cross-row skip blocked rows
+        if (isRegularEffect && targetRow != _mouseDownRow) {
+            CGFloat newEnd = newStart + duration;
+            NSInteger overlapIdx = [self findOverlappingEffectOnRow:targetRow
+                                                           startMS:newStart
+                                                             endMS:newEnd
+                                                    excludingIndex:_mouseDownEffectIndex
+                                                   excludeSelected:isMultiDrag];
+            if (overlapIdx >= 0) {
+                int direction = (targetRow > _dragCurrentRow) ? +1 : -1;
+                if (_dragCurrentRow < 0) direction = (targetRow > _mouseDownRow) ? +1 : -1;
+                NSInteger origTarget = targetRow;
+                targetRow = [self findNonBlockedRowFrom:targetRow
+                                           inDirection:direction
+                                            forStartMS:newStart
+                                                 endMS:newEnd
+                                        excludingIndex:_mouseDownEffectIndex];
+                if (isMultiDrag) {
+                    NSLog(@"[MULTIDRAG] cross-row skip: wanted row=%ld blocked by idx=%ld, skipped to row=%ld (dir=%d)",
+                          (long)origTarget, (long)overlapIdx, (long)targetRow, direction);
+                }
+            }
+        }
+
+        // Multi-drag: validate ALL selected effects for collisions and constrain
+        if (isMultiDrag && isRegularEffect) {
+            CGFloat candidateDelta = newStart - _dragOriginalStartMS;
+            NSInteger rowDelta = targetRow - _mouseDownRow;
+            BOOL constrained = NO;
+
+            NSLog(@"[MULTIDRAG] validation start: candidateDelta=%.1f rowDelta=%ld targetRow=%ld",
+                  candidateDelta, (long)rowDelta, (long)targetRow);
+
+            for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                CGFloat cStart = _multiDragEntries[m].originalStartMS + candidateDelta;
+                CGFloat cEnd = _multiDragEntries[m].originalEndMS + candidateDelta;
+                NSInteger cRow = _multiDragEntries[m].originalRow + rowDelta;
+                cRow = MAX(0, MIN(cRow, _totalRows - 1));
+
+                NSInteger overlap = [self findOverlappingEffectOnRow:cRow
+                                                            startMS:cStart
+                                                              endMS:cEnd
+                                                     excludingIndex:(NSInteger)_multiDragEntries[m].renderIndex
+                                                    excludeSelected:YES];
+                NSLog(@"[MULTIDRAG]   entry[%lu] renderIdx=%lu: candidateRow=%ld start=%.1f end=%.1f overlapIdx=%ld",
+                      (unsigned long)m, (unsigned long)_multiDragEntries[m].renderIndex,
+                      (long)cRow, cStart, cEnd, (long)overlap);
+                if (overlap >= 0) {
+                    XLEffectRenderInfo blocker = _renderEffects[overlap];
+                    CGFloat effDuration = _multiDragEntries[m].originalEndMS - _multiDragEntries[m].originalStartMS;
+                    NSLog(@"[MULTIDRAG]     blocker: renderIdx=%ld row=%ld start=%.1f end=%.1f (effDur=%.1f)",
+                          (long)overlap, (long)blocker.row, blocker.startTimeMS, blocker.endTimeMS, effDuration);
+                    if (candidateDelta > 0) {
+                        // Moving right: pull delta back so this effect's end <= blocker's start
+                        CGFloat maxDelta = blocker.startTimeMS - _multiDragEntries[m].originalEndMS;
+                        NSLog(@"[MULTIDRAG]     moving right: maxDelta=%.1f (blocker.start %.1f - origEnd %.1f)",
+                              maxDelta, blocker.startTimeMS, _multiDragEntries[m].originalEndMS);
+                        if (maxDelta < candidateDelta) {
+                            candidateDelta = MAX(0, maxDelta);
+                            constrained = YES;
+                            NSLog(@"[MULTIDRAG]     CONSTRAINED delta to %.1f", candidateDelta);
+                        }
+                    } else if (candidateDelta < 0) {
+                        // Moving left: push delta forward so this effect's start >= blocker's end
+                        CGFloat minDelta = blocker.endTimeMS - _multiDragEntries[m].originalStartMS;
+                        NSLog(@"[MULTIDRAG]     moving left: minDelta=%.1f (blocker.end %.1f - origStart %.1f)",
+                              minDelta, blocker.endTimeMS, _multiDragEntries[m].originalStartMS);
+                        if (minDelta > candidateDelta) {
+                            candidateDelta = MIN(0, minDelta);
+                            constrained = YES;
+                            NSLog(@"[MULTIDRAG]     CONSTRAINED delta to %.1f", candidateDelta);
+                        }
+                    }
+                }
+            }
+
+            if (constrained) {
+                newStart = _dragOriginalStartMS + candidateDelta;
+                newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
+                NSLog(@"[MULTIDRAG] after constraint: newStart=%.1f candidateDelta=%.1f", newStart, candidateDelta);
+                // Also re-check the primary effect at the constrained position
+                CGFloat pEnd = newStart + duration;
+                NSInteger pOverlap = [self findOverlappingEffectOnRow:targetRow
+                                                             startMS:newStart
+                                                               endMS:pEnd
+                                                      excludingIndex:_mouseDownEffectIndex
+                                                     excludeSelected:YES];
+                NSLog(@"[MULTIDRAG] primary re-check: row=%ld start=%.1f end=%.1f overlapIdx=%ld",
+                      (long)targetRow, newStart, pEnd, (long)pOverlap);
+                if (pOverlap >= 0) {
+                    XLEffectRenderInfo blocker = _renderEffects[pOverlap];
+                    if (candidateDelta > 0) {
+                        CGFloat maxDelta = blocker.startTimeMS - _dragOriginalEndMS;
+                        candidateDelta = MAX(0, MIN(candidateDelta, maxDelta));
+                    } else {
+                        CGFloat minDelta = blocker.endTimeMS - _dragOriginalStartMS;
+                        candidateDelta = MIN(0, MAX(candidateDelta, minDelta));
+                    }
+                    newStart = _dragOriginalStartMS + candidateDelta;
+                    newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
+                    NSLog(@"[MULTIDRAG] primary also constrained: newStart=%.1f candidateDelta=%.1f", newStart, candidateDelta);
+                }
+            } else {
+                NSLog(@"[MULTIDRAG] no constraints from secondary effects");
+            }
+        }
+
         _dragCurrentRow = targetRow;
         _dragCurrentStartMS = newStart;
+
+        // Compute the delta from the primary effect's original position
+        CGFloat timeDelta = newStart - _dragOriginalStartMS;
+        NSInteger rowDelta = targetRow - _mouseDownRow;
+
+        if (_multiDragCount > 0) {
+            NSLog(@"[MULTIDRAG] FINAL: timeDelta=%.1f rowDelta=%ld", timeDelta, (long)rowDelta);
+        }
 
         // Update the C array directly for visual feedback — immune to heap corruption
         if ((NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
             _renderEffects[_mouseDownEffectIndex].startTimeMS = newStart;
             _renderEffects[_mouseDownEffectIndex].endTimeMS = newStart + duration;
             _renderEffects[_mouseDownEffectIndex].row = targetRow;
+            if (_multiDragCount > 0) {
+                NSLog(@"[MULTIDRAG]   primary renderIdx=%ld -> row=%ld start=%.1f end=%.1f",
+                      (long)_mouseDownEffectIndex, (long)targetRow, newStart, newStart + duration);
+            }
+        }
+
+        // Also move all other selected effects by the same delta
+        for (NSUInteger m = 0; m < _multiDragCount; m++) {
+            NSUInteger idx = _multiDragEntries[m].renderIndex;
+            if (idx < _renderEffectCount) {
+                CGFloat mStart = _multiDragEntries[m].originalStartMS + timeDelta;
+                CGFloat mEnd = _multiDragEntries[m].originalEndMS + timeDelta;
+                NSInteger mRow = _multiDragEntries[m].originalRow + rowDelta;
+                _renderEffects[idx].startTimeMS = mStart;
+                _renderEffects[idx].endTimeMS = mEnd;
+                _renderEffects[idx].row = mRow;
+                NSLog(@"[MULTIDRAG]   entry[%lu] renderIdx=%lu -> row=%ld start=%.1f end=%.1f",
+                      (unsigned long)m, (unsigned long)idx, (long)mRow, mStart, mEnd);
+            }
+        }
+
+        // Post-write overlap verification: check every selected effect against non-selected
+        if (_multiDragCount > 0) {
+            // Check primary
+            if ((NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
+                XLEffectRenderInfo pi = _renderEffects[_mouseDownEffectIndex];
+                for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+                    if ((NSInteger)i == _mouseDownEffectIndex) continue;
+                    if (i < _selectedEffectsCapacity && _selectedEffects[i]) continue;
+                    XLEffectRenderInfo other = _renderEffects[i];
+                    if (other.row != pi.row || other.isTimingMark) continue;
+                    if (pi.startTimeMS < other.endTimeMS && pi.endTimeMS > other.startTimeMS) {
+                        NSLog(@"[MULTIDRAG] *** OVERLAP DETECTED *** primary renderIdx=%ld [%.1f-%.1f] row=%ld overlaps renderIdx=%lu [%.1f-%.1f]",
+                              (long)_mouseDownEffectIndex, pi.startTimeMS, pi.endTimeMS, (long)pi.row,
+                              (unsigned long)i, other.startTimeMS, other.endTimeMS);
+                    }
+                }
+            }
+            // Check each secondary
+            for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                NSUInteger idx = _multiDragEntries[m].renderIndex;
+                if (idx >= _renderEffectCount) continue;
+                XLEffectRenderInfo si = _renderEffects[idx];
+                for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+                    if (i == idx) continue;
+                    if ((NSInteger)i == _mouseDownEffectIndex) continue; // skip primary (both selected)
+                    if (i < _selectedEffectsCapacity && _selectedEffects[i]) continue;
+                    XLEffectRenderInfo other = _renderEffects[i];
+                    if (other.row != si.row || other.isTimingMark) continue;
+                    if (si.startTimeMS < other.endTimeMS && si.endTimeMS > other.startTimeMS) {
+                        NSLog(@"[MULTIDRAG] *** OVERLAP DETECTED *** entry[%lu] renderIdx=%lu [%.1f-%.1f] row=%ld overlaps renderIdx=%lu [%.1f-%.1f]",
+                              (unsigned long)m, (unsigned long)idx, si.startTimeMS, si.endTimeMS, (long)si.row,
+                              (unsigned long)i, other.startTimeMS, other.endTimeMS);
+                    }
+                }
+            }
         }
 
         _needsRedraw = YES;
@@ -1468,8 +2097,36 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     if (_isResizing && _mouseDownEffectIndex >= 0 && (NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
         XLEffectRenderInfo info = _renderEffects[_mouseDownEffectIndex];
 
-        // Register undo action for resize
-        if (_undoController && _hasUndoSnapshot) {
+        // Check if the blocking effect was actually modified
+        BOOL blockerChanged = NO;
+        if (_blockingEffectIndex >= 0 && (NSUInteger)_blockingEffectIndex < _renderEffectCount) {
+            XLEffectRenderInfo blockerInfo = _renderEffects[_blockingEffectIndex];
+            blockerChanged = (fabs(blockerInfo.startTimeMS - _blockingOriginalStartMS) > 0.5 ||
+                              fabs(blockerInfo.endTimeMS - _blockingOriginalEndMS) > 0.5);
+        }
+
+        // Use undo grouping if both the primary and blocker changed
+        if (_undoController && _hasUndoSnapshot && blockerChanged) {
+            [_undoController beginUndoGroupingWithActionName:@"Resize Effect"];
+            [_undoController captureEffectToBeResized:_undoSnapshot actionName:@"Resize Effect"];
+
+            // Capture undo for the blocker
+            XLEffectRenderInfo blockerInfo = _renderEffects[_blockingEffectIndex];
+            XLEffectSnapshot blockerSnapshot;
+            blockerSnapshot.effectID = _blockingEffectIndex;
+            blockerSnapshot.row = blockerInfo.row;
+            blockerSnapshot.layer = blockerInfo.layer;
+            blockerSnapshot.startTimeMS = _blockingOriginalStartMS;
+            blockerSnapshot.endTimeMS = _blockingOriginalEndMS;
+            blockerSnapshot.effectTypeIndex = blockerInfo.effectIndex;
+            blockerSnapshot.colorARGB = blockerInfo.colorARGB;
+            blockerSnapshot.selected = blockerInfo.selected;
+            blockerSnapshot.locked = blockerInfo.locked;
+            blockerSnapshot.renderDisabled = blockerInfo.renderDisabled;
+            [_undoController captureEffectToBeResized:blockerSnapshot actionName:@"Resize Effect"];
+
+            [_undoController endUndoGrouping];
+        } else if (_undoController && _hasUndoSnapshot) {
             [_undoController captureEffectToBeResized:_undoSnapshot actionName:@"Resize Effect"];
         }
 
@@ -1489,33 +2146,130 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                         newStartTimeMS:adjInfo.startTimeMS
                           newEndTimeMS:adjInfo.endTimeMS];
             }
+
+            // Also commit the pushed/compressed blocking effect
+            if (blockerChanged) {
+                XLEffectRenderInfo blockerInfo = _renderEffects[_blockingEffectIndex];
+                [_delegate effectsGrid:self
+                   didResizeEffectAtRow:blockerInfo.row
+                          effectIndex:_blockingEffectIndex
+                        newStartTimeMS:blockerInfo.startTimeMS
+                          newEndTimeMS:blockerInfo.endTimeMS];
+            }
         }
     } else if (_isDragging && _mouseDownEffectIndex >= 0 && (NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
         XLEffectRenderInfo info = _renderEffects[_mouseDownEffectIndex];
+        CGFloat timeDelta = info.startTimeMS - _dragOriginalStartMS;
+        NSInteger rowDelta = _dragCurrentRow - _mouseDownRow;
+        BOOL isMultiMove = (_multiDragCount > 0);
 
-        // Register undo action for move
+        // Pre-resolve ALL effectIds BEFORE any commits.
+        // Cross-row moves delete+recreate effects and call reloadData, which invalidates render indices.
+        NSInteger primaryEffectId = [self effectIdAtRenderIndex:(NSUInteger)_mouseDownEffectIndex];
+        NSInteger *secondaryEffectIds = NULL;
+        if (isMultiMove) {
+            secondaryEffectIds = calloc(_multiDragCount, sizeof(NSInteger));
+            for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                secondaryEffectIds[m] = [self effectIdAtRenderIndex:_multiDragEntries[m].renderIndex];
+            }
+        }
+
+        // Register undo for all moved effects as a group
         if (_undoController && _hasUndoSnapshot) {
-            [_undoController captureEffectToBeMoved:_undoSnapshot actionName:@"Move Effect"];
+            if (isMultiMove) {
+                [_undoController beginUndoGroupingWithActionName:@"Move Effects"];
+                [_undoController captureEffectToBeMoved:_undoSnapshot actionName:@"Move Effects"];
+                for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                    NSUInteger idx = _multiDragEntries[m].renderIndex;
+                    if (idx < _renderEffectCount) {
+                        XLEffectRenderInfo minfo = _renderEffects[idx];
+                        XLEffectSnapshot snap;
+                        snap.effectID = (NSInteger)idx;
+                        snap.row = _multiDragEntries[m].originalRow;
+                        snap.layer = minfo.layer;
+                        snap.startTimeMS = _multiDragEntries[m].originalStartMS;
+                        snap.endTimeMS = _multiDragEntries[m].originalEndMS;
+                        snap.effectTypeIndex = minfo.effectIndex;
+                        snap.colorARGB = minfo.colorARGB;
+                        snap.selected = minfo.selected;
+                        snap.locked = minfo.locked;
+                        snap.renderDisabled = minfo.renderDisabled;
+                        [_undoController captureEffectToBeMoved:snap actionName:@"Move Effects"];
+                    }
+                }
+                [_undoController endUndoGrouping];
+            } else {
+                [_undoController captureEffectToBeMoved:_undoSnapshot actionName:@"Move Effect"];
+            }
         }
 
-        if (_dragCurrentRow != _mouseDownRow) {
-            // Cross-row move
-            if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toRow:toTimeMS:)]) {
-                [_delegate effectsGrid:self
-                  didMoveEffectAtRow:_mouseDownRow
-                        effectIndex:_mouseDownEffectIndex
-                              toRow:_dragCurrentRow
-                          toTimeMS:info.startTimeMS];
+        if (isMultiMove) {
+            // Multi-move: use batch methods (effectId-based, no reload between commits)
+            BOOL hasBatchSameRow = [_delegate respondsToSelector:@selector(effectsGrid:didBatchMoveEffectId:toTimeMS:)];
+            BOOL hasBatchCrossRow = [_delegate respondsToSelector:@selector(effectsGrid:didBatchMoveEffectId:fromRow:toRow:toTimeMS:)];
+
+            // Commit primary
+            if (primaryEffectId >= 0) {
+                if (rowDelta != 0 && hasBatchCrossRow) {
+                    [_delegate effectsGrid:self
+                      didBatchMoveEffectId:primaryEffectId
+                                   fromRow:_mouseDownRow
+                                     toRow:_dragCurrentRow
+                                 toTimeMS:info.startTimeMS];
+                } else if (hasBatchSameRow) {
+                    [_delegate effectsGrid:self
+                      didBatchMoveEffectId:primaryEffectId
+                                 toTimeMS:info.startTimeMS];
+                }
             }
+
+            // Commit all secondary effects
+            for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                NSInteger effId = secondaryEffectIds[m];
+                if (effId < 0) continue;
+                NSInteger origRow = _multiDragEntries[m].originalRow;
+                NSInteger newRow = origRow + rowDelta;
+                CGFloat newStartMS = _multiDragEntries[m].originalStartMS + timeDelta;
+
+                if (rowDelta != 0 && hasBatchCrossRow) {
+                    [_delegate effectsGrid:self
+                      didBatchMoveEffectId:effId
+                                   fromRow:origRow
+                                     toRow:newRow
+                                 toTimeMS:newStartMS];
+                } else if (hasBatchSameRow) {
+                    [_delegate effectsGrid:self
+                      didBatchMoveEffectId:effId
+                                 toTimeMS:newStartMS];
+                }
+            }
+
+            // Notify delegate to refresh data source, then reload
+            if ([_delegate respondsToSelector:@selector(effectsGridDidCompleteBatchMoves:)]) {
+                [_delegate effectsGridDidCompleteBatchMoves:self];
+            }
+            [self reloadData];
         } else {
-            // Same-row move
-            if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toTimeMS:)]) {
-                [_delegate effectsGrid:self
-                  didMoveEffectAtRow:_mouseDownRow
-                        effectIndex:_mouseDownEffectIndex
-                          toTimeMS:info.startTimeMS];
+            // Single effect move: use existing delegate methods (which handle reload)
+            if (rowDelta != 0) {
+                if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toRow:toTimeMS:)]) {
+                    [_delegate effectsGrid:self
+                      didMoveEffectAtRow:_mouseDownRow
+                            effectIndex:_mouseDownEffectIndex
+                                  toRow:_dragCurrentRow
+                              toTimeMS:info.startTimeMS];
+                }
+            } else {
+                if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveEffectAtRow:effectIndex:toTimeMS:)]) {
+                    [_delegate effectsGrid:self
+                      didMoveEffectAtRow:_mouseDownRow
+                            effectIndex:_mouseDownEffectIndex
+                              toTimeMS:info.startTimeMS];
+                }
             }
         }
+
+        free(secondaryEffectIds);
     } else if (_isRubberBanding) {
         CGFloat startTimeMS, endTimeMS;
         NSInteger startRow, endRow;
@@ -1550,7 +2304,13 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _isRubberBanding = NO;
     _dragCurrentRow = -1;
     _adjacentEffectIndex = -1;
+    _blockingEffectIndex = -1;
+    _mouseHasCrossedBlocker = NO;
+    _crossedBlockerIndex = -1;
     _hasUndoSnapshot = NO;
+    free(_multiDragEntries);
+    _multiDragEntries = NULL;
+    _multiDragCount = 0;
     _needsRedraw = YES;
 }
 
@@ -3252,10 +4012,16 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     // Cancel any existing edit
     [self cancelLabelEditing];
 
-    // Calculate the editor rect in view coordinates
+    // Calculate the editor rect in view coordinates (accounting for pinned timing rows)
     CGFloat x1 = startMS * _zoomLevel - _scrollOffset.x;
     CGFloat x2 = endMS * _zoomLevel - _scrollOffset.x;
-    CGFloat y = row * _rowHeight - _scrollOffset.y;
+    CGFloat y;
+    if (row < _pinnedTimingRowCount) {
+        y = row * _rowHeight;
+    } else {
+        CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+        y = pinnedHeight + (row - _pinnedTimingRowCount) * _rowHeight - _scrollOffset.y;
+    }
 
     // Ensure minimum width for the editor
     CGFloat width = MAX(x2 - x1, 60.0);
