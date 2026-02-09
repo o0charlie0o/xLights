@@ -329,6 +329,9 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     // Row background — timing tracks always use their track color (brighter when selected)
     BOOL isEvenRow = (cell.row % 2 == 0);
     if (cell.elementType == XLElementTypeTiming) {
+        // Opaque background first so scrollable rows don't bleed through pinned layers
+        CGContextSetRGBFillColor(ctx, 0.14, 0.14, 0.14, 1.0);
+        CGContextFillRect(ctx, bounds);
         CGFloat cr, cg, cb;
         XLTimingTrackColor(cell.timingColorIndex, &cr, &cg, &cb);
         CGFloat alpha = cell.isSelected ? 0.7 : 0.45;
