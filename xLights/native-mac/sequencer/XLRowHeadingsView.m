@@ -241,10 +241,11 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         if (!cell) continue;
 
         if ((NSInteger)i < pinnedCount) {
-            // Pinned timing row: always visible at fixed position
+            // Pinned timing row: always visible at fixed position, above scrollable rows
             CGFloat y = (CGFloat)i * _rowHeight;
             BOOL wasHidden = cell.hidden;
             cell.frame = CGRectMake(0, y, viewWidth, _rowHeight);
+            cell.zPosition = 1.0;
             cell.hidden = NO;
             if (wasHidden || forceRedraw) {
                 [cell setNeedsDisplay];
@@ -256,6 +257,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
                 CGFloat y = pinnedHeight + scrollableIndex * _rowHeight - _verticalScrollOffset;
                 BOOL wasHidden = cell.hidden;
                 cell.frame = CGRectMake(0, y, viewWidth, _rowHeight);
+                cell.zPosition = 0.0;
                 cell.hidden = NO;
                 if (wasHidden || forceRedraw) {
                     [cell setNeedsDisplay];
