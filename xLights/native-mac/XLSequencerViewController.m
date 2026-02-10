@@ -28,6 +28,7 @@
 #import "XLHousePreviewWindowController.h"
 #import "XLEffectPresetsWindowController.h"
 #import "XLSymbolLibraryManager.h"
+#import <objc/runtime.h>
 #import "XLEffectPropertiesViewController.h"
 #import "dialogs/XLNewTimingDialog.h"
 #import "dialogs/XLTimingImportDialog.h"
@@ -75,6 +76,7 @@ typedef struct {
     BOOL renderDisabled;
     CGFloat fadeInMS;
     CGFloat fadeOutMS;
+    BOOL isLinkedToSymbol;
 } XLEffectEntry;
 
 /// Compute a consistent hash for a string (matching Swift's simple hash for color generation)
@@ -468,6 +470,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Symbol library manager
     XLSymbolLibraryManager *_symbolLibraryManager;
+    BOOL _symbolPropagating;
 
     // Find/replace state for timing labels
     NSString *_timingSearchText;
@@ -486,6 +489,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Number of timing track rows pinned at top of grid (set during sortRowsWithTimingFirst)
     NSInteger _timingRowCount;
+
+    // Multi-cell range selection state (from rubber band selection)
+    BOOL _cellRangeSelected;
+    NSInteger _rangeStartRow;
+    NSInteger _rangeEndRow;
+    CGFloat _rangeStartTimeMS;
+    CGFloat _rangeEndTimeMS;
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -530,6 +540,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _markedPositionMS = -1;
     _pasteByCellMode = YES;  // Default to paste-by-cell
     _backgroundRenderEnabled = YES;
+    _cellRangeSelected = NO;
+    _rangeStartRow = -1;
+    _rangeEndRow = -1;
+    _rangeStartTimeMS = 0;
+    _rangeEndTimeMS = 0;
 
     // Try to load real data, fall back to demo
     [self reloadSequenceData];
@@ -1131,6 +1146,33 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [_effectsGridView setNeedsDisplay:YES];
     _renderProgressIndicator.animating = YES;
     [_playbackController renderCurrentFrame];
+
+    if (!_symbolPropagating && _symbolLibraryManager && _engineBridge) {
+        NSInteger selectedRenderIdx = _effectsGridView.selectedEffectID;
+        if (selectedRenderIdx >= 0) {
+            NSInteger effectId = [_effectsGridView effectIdAtRenderIndex:(NSUInteger)selectedRenderIdx];
+            if (effectId >= 0) {
+                NSString *symbolId = [_symbolLibraryManager symbolIdForEffect:effectId];
+                if (symbolId) {
+                    _symbolPropagating = YES;
+                    [_symbolLibraryManager updateSymbol:symbolId fromEffect:effectId];
+                    NSMutableArray<NSNumber *> *linkedEffects = [NSMutableArray array];
+                    for (NSUInteger i = 0; i < _effectCount; i++) {
+                        if (_effectData[i].isLinkedToSymbol && _effectData[i].effectIndex != effectId) {
+                            NSString *otherSymId = [_symbolLibraryManager symbolIdForEffect:_effectData[i].effectIndex];
+                            if ([otherSymId isEqualToString:symbolId]) {
+                                [linkedEffects addObject:@(_effectData[i].effectIndex)];
+                            }
+                        }
+                    }
+                    if (linkedEffects.count > 0) {
+                        [_symbolLibraryManager propagateSymbol:symbolId toEffects:linkedEffects];
+                    }
+                    _symbolPropagating = NO;
+                }
+            }
+        }
+    }
 }
 
 - (void)clearSequenceData {
@@ -1460,6 +1502,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                 entry->renderDisabled = NO;
                 entry->fadeInMS = [eff[@"fadeInMS"] doubleValue];
                 entry->fadeOutMS = [eff[@"fadeOutMS"] doubleValue];
+
+                entry->isLinkedToSymbol = NO;
+                if (_symbolLibraryManager && _symbolLibraryManager.symbolCount > 0) {
+                    entry->isLinkedToSymbol = [_symbolLibraryManager isEffectLinked:entry->effectIndex];
+                }
 
                 _effectCount++;
             }
@@ -1979,6 +2026,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             info.renderDisabled = eff->renderDisabled;
             info.fadeInMS = eff->fadeInMS;
             info.fadeOutMS = eff->fadeOutMS;
+            info.isLinkedToSymbol = eff->isLinkedToSymbol;
             info.isTimingMark = (rowEntry->type == XLElementTypeTiming);
             info.timingTrackLayerCount = rowEntry->effectLayerCount;
             info.timingColorIndex = rowEntry->timingColorIndex;
@@ -2039,6 +2087,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     didSelectEffectAtRow:(NSInteger)row
           effectIndex:(NSInteger)effectIndex
 {
+    _cellRangeSelected = NO;
+
     // Use -1 as sentinel for "no effect" since 0 can be a valid effect ID
     NSInteger effectId = -1;
     NSString *effectType = nil;
@@ -2112,6 +2162,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     didClickAtTimeMS:(CGFloat)timeMS
                  row:(NSInteger)row
 {
+    _cellRangeSelected = NO;
     NSLog(@"Clicked at time %.0fms, row %ld", timeMS, (long)row);
 
     // Clicking on empty area clears selection (use -1 as "no effect" sentinel)
@@ -2362,6 +2413,21 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
+    didSelectRangeFromRow:(NSInteger)startRow
+                    toRow:(NSInteger)endRow
+              fromTimeMS:(CGFloat)startTimeMS
+                toTimeMS:(CGFloat)endTimeMS
+{
+    _cellRangeSelected = YES;
+    _rangeStartRow = startRow;
+    _rangeEndRow = endRow;
+    _rangeStartTimeMS = startTimeMS;
+    _rangeEndTimeMS = endTimeMS;
+    NSLog(@"XLSequencerViewController: Range selected rows %ld-%ld, time %ld-%ld ms",
+          (long)startRow, (long)endRow, (long)(NSInteger)startTimeMS, (long)(NSInteger)endTimeMS);
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
     didChangeZoomLevel:(CGFloat)zoomLevel
 {
     // Use scroll coordinator for synchronized zoom
@@ -2422,6 +2488,260 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     }
 }
 
+#pragma mark - Directional Effect Duplication
+
+- (BOOL)hasConflictOnModel:(NSString *)modelName
+                     layer:(NSInteger)layer
+                   startMS:(NSInteger)startMS
+                     endMS:(NSInteger)endMS
+                excludeIds:(NSSet<NSNumber *> *)excludeIds
+{
+    NSArray<NSDictionary *> *existing = [_engineBridge getEffectsForLayer:modelName layer:layer];
+    for (NSDictionary *eff in existing) {
+        NSInteger eId = [eff[@"id"] integerValue];
+        if ([excludeIds containsObject:@(eId)]) continue;
+        NSInteger eStart = [eff[@"startTimeMS"] integerValue];
+        NSInteger eEnd = [eff[@"endTimeMS"] integerValue];
+        if (startMS < eEnd && endMS > eStart) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+- (NSInteger)gridRowForModelName:(NSString *)modelName {
+    for (NSUInteger r = 0; r < _rowCount; r++) {
+        if (_rowData[r].isLayerRow) continue;
+        if (_rowData[r].type == XLElementTypeTiming) continue;
+        NSString *rowName = [NSString stringWithUTF8String:_rowData[r].name];
+        if ([rowName isEqualToString:modelName]) {
+            return (NSInteger)r;
+        }
+    }
+    return -1;
+}
+
+- (NSInteger)findTargetRow:(NSInteger)startRow direction:(NSInteger)direction steps:(NSInteger)steps {
+    NSInteger found = 0;
+    if (direction == 3) {
+        for (NSInteger r = startRow - 1; r >= 0; r--) {
+            if (_rowData[r].type != XLElementTypeTiming && !_rowData[r].isLayerRow) {
+                found++;
+                if (found >= steps) return r;
+            }
+        }
+    } else {
+        for (NSUInteger r = (NSUInteger)(startRow + 1); r < _rowCount; r++) {
+            if (_rowData[r].type != XLElementTypeTiming && !_rowData[r].isLayerRow) {
+                found++;
+                if (found >= steps) return (NSInteger)r;
+            }
+        }
+    }
+    return -1;
+}
+
+- (void)duplicateSelectedEffects:(NSIndexSet *)selected direction:(NSInteger)direction {
+    if (!_engineBridge || selected.count == 0) return;
+
+    NSMutableArray<NSDictionary *> *effectInfos = [NSMutableArray arrayWithCapacity:selected.count];
+    NSMutableSet<NSNumber *> *sourceIds = [NSMutableSet setWithCapacity:selected.count];
+
+    [selected enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSInteger effectId = [self->_effectsGridView effectIdAtRenderIndex:idx];
+        if (effectId < 0) return;
+
+        NSDictionary *info = [self->_engineBridge getEffect:effectId];
+        if (!info) return;
+
+        NSInteger gridRow = [self->_effectsGridView rowForRenderIndex:idx];
+
+        NSMutableDictionary *entry = [info mutableCopy];
+        entry[@"_sourceId"] = @(effectId);
+        entry[@"_gridRow"] = @(gridRow);
+        [effectInfos addObject:entry];
+        [sourceIds addObject:@(effectId)];
+    }];
+
+    if (effectInfos.count == 0) return;
+
+    NSMutableDictionary<NSNumber *, NSMutableArray<NSDictionary *> *> *rowGroups = [NSMutableDictionary new];
+    for (NSDictionary *info in effectInfos) {
+        NSNumber *rowKey = info[@"_gridRow"];
+        if (!rowGroups[rowKey]) {
+            rowGroups[rowKey] = [NSMutableArray new];
+        }
+        [rowGroups[rowKey] addObject:info];
+    }
+
+    for (NSNumber *rowKey in rowGroups) {
+        [rowGroups[rowKey] sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [@([a[@"startTimeMS"] integerValue]) compare:@([b[@"startTimeMS"] integerValue])];
+        }];
+    }
+
+    [_undoController beginUndoGroupingWithActionName:@"Duplicate Effects"];
+    BOOL anyCreated = NO;
+
+    if (direction == 1 || direction == 2) {
+        NSInteger globalLeftmost = NSIntegerMax;
+        NSInteger globalRightmost = NSIntegerMin;
+        for (NSDictionary *info in effectInfos) {
+            NSInteger s = [info[@"startTimeMS"] integerValue];
+            NSInteger e = [info[@"endTimeMS"] integerValue];
+            if (s < globalLeftmost) globalLeftmost = s;
+            if (e > globalRightmost) globalRightmost = e;
+        }
+        NSInteger rangeWidth = globalRightmost - globalLeftmost;
+
+        for (NSDictionary *info in effectInfos) {
+            NSString *modelName = info[@"modelName"];
+            NSString *effectType = info[@"effectType"];
+            NSInteger layer = [info[@"layerIndex"] integerValue];
+            NSInteger startMS = [info[@"startTimeMS"] integerValue];
+            NSInteger endMS = [info[@"endTimeMS"] integerValue];
+            NSInteger durationMS = endMS - startMS;
+            NSInteger sourceId = [info[@"_sourceId"] integerValue];
+
+            NSInteger newStartMS, newEndMS;
+            if (direction == 1) {
+                NSInteger offset = startMS - globalLeftmost;
+                newStartMS = globalRightmost + offset;
+                newEndMS = newStartMS + durationMS;
+            } else {
+                NSInteger offset = startMS - globalLeftmost;
+                newStartMS = globalLeftmost - rangeWidth + offset;
+                newEndMS = newStartMS + durationMS;
+            }
+
+            if (newStartMS < 0) {
+                NSInteger shift = -newStartMS;
+                newStartMS += shift;
+                newEndMS += shift;
+            }
+            if (newEndMS > (NSInteger)_sequenceDurationMS) {
+                continue;
+            }
+
+            if ([self hasConflictOnModel:modelName layer:layer
+                                 startMS:newStartMS endMS:newEndMS
+                              excludeIds:sourceIds]) {
+                NSLog(@"Duplicate %@: conflict on %@ layer %ld at [%ld-%ld], skipping",
+                      direction == 1 ? @"Right" : @"Left",
+                      modelName, (long)layer, (long)newStartMS, (long)newEndMS);
+                continue;
+            }
+
+            NSInteger newId = [_engineBridge createEffect:modelName
+                                                    layer:layer
+                                               effectType:effectType
+                                              startTimeMS:newStartMS
+                                                endTimeMS:newEndMS];
+            if (newId >= 0) {
+                NSString *settings = [_engineBridge getEffectSettings:sourceId];
+                NSString *palette = [_engineBridge getEffectPalette:sourceId];
+                if (settings) [_engineBridge setEffectSettings:newId settings:settings];
+                if (palette) [_engineBridge setEffectPalette:newId palette:palette];
+                anyCreated = YES;
+            }
+        }
+
+        if (anyCreated && _effectsGridView.hasCellSelection) {
+            NSInteger cellRow = _effectsGridView.cellSelectionRow;
+            CGFloat cellStart = _effectsGridView.cellSelectionStartMS;
+            CGFloat cellEnd = _effectsGridView.cellSelectionEndMS;
+            CGFloat cellWidth = cellEnd - cellStart;
+            if (direction == 1) {
+                [_effectsGridView setCellSelectionRow:cellRow
+                                             startMS:cellStart + cellWidth
+                                               endMS:cellEnd + cellWidth];
+            } else {
+                [_effectsGridView setCellSelectionRow:cellRow
+                                             startMS:cellStart - cellWidth
+                                               endMS:cellEnd - cellWidth];
+            }
+        }
+
+    } else {
+        NSArray<NSNumber *> *sortedRows = [[rowGroups allKeys] sortedArrayUsingSelector:@selector(compare:)];
+        NSInteger minRow = sortedRows.firstObject.integerValue;
+        NSInteger maxRow = sortedRows.lastObject.integerValue;
+
+        NSInteger distinctRowCount = (NSInteger)sortedRows.count;
+        if (distinctRowCount < 1) distinctRowCount = 1;
+
+        BOOL allTargetsValid = YES;
+        NSMutableDictionary<NSNumber *, NSNumber *> *rowMapping = [NSMutableDictionary new];
+
+        for (NSNumber *srcRowNum in sortedRows) {
+            NSInteger srcRow = srcRowNum.integerValue;
+            NSInteger rowOffsetFromEdge = srcRow - minRow;
+
+            NSInteger targetRow;
+            if (direction == 3) {
+                targetRow = [self findTargetRow:minRow direction:3 steps:(distinctRowCount - rowOffsetFromEdge)];
+            } else {
+                targetRow = [self findTargetRow:maxRow direction:4 steps:(rowOffsetFromEdge + 1)];
+            }
+
+            if (targetRow < 0) {
+                allTargetsValid = NO;
+                break;
+            }
+            rowMapping[srcRowNum] = @(targetRow);
+        }
+
+        if (!allTargetsValid) {
+            NSLog(@"Duplicate %@: not enough rows available", direction == 3 ? @"Up" : @"Down");
+            [_undoController endUndoGrouping];
+            return;
+        }
+
+        for (NSNumber *srcRowNum in sortedRows) {
+            NSInteger targetRow = [rowMapping[srcRowNum] integerValue];
+            NSString *targetModel = [NSString stringWithUTF8String:_rowData[targetRow].name];
+
+            for (NSDictionary *info in rowGroups[srcRowNum]) {
+                NSString *effectType = info[@"effectType"];
+                NSInteger layer = [info[@"layerIndex"] integerValue];
+                NSInteger startMS = [info[@"startTimeMS"] integerValue];
+                NSInteger endMS = [info[@"endTimeMS"] integerValue];
+                NSInteger sourceId = [info[@"_sourceId"] integerValue];
+
+                if ([self hasConflictOnModel:targetModel layer:layer
+                                     startMS:startMS endMS:endMS
+                                  excludeIds:sourceIds]) {
+                    NSLog(@"Duplicate %@: conflict on %@ layer %ld at [%ld-%ld], skipping",
+                          direction == 3 ? @"Up" : @"Down",
+                          targetModel, (long)layer, (long)startMS, (long)endMS);
+                    continue;
+                }
+
+                NSInteger newId = [_engineBridge createEffect:targetModel
+                                                        layer:layer
+                                                   effectType:effectType
+                                                  startTimeMS:startMS
+                                                    endTimeMS:endMS];
+                if (newId >= 0) {
+                    NSString *settings = [_engineBridge getEffectSettings:sourceId];
+                    NSString *palette = [_engineBridge getEffectPalette:sourceId];
+                    if (settings) [_engineBridge setEffectSettings:newId settings:settings];
+                    if (palette) [_engineBridge setEffectPalette:newId palette:palette];
+                    anyCreated = YES;
+                }
+            }
+        }
+    }
+
+    [_undoController endUndoGrouping];
+
+    if (anyCreated) {
+        [self reloadSequenceData];
+        [_playbackController renderCurrentFrame];
+        [_effectsGridView reloadData];
+    }
+}
+
 #pragma mark - XLEffectsGridDelegate (Effect Operations)
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2464,58 +2784,18 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     didRequestDuplicateEffectAtIndex:(NSInteger)effectIndex
                           direction:(NSInteger)direction
 {
-    NSInteger effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
-    if (effectId < 0 || !_engineBridge) return;
+    if (!_engineBridge) return;
 
-    NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
-    if (!effectInfo) return;
-
-    NSString *modelName = effectInfo[@"modelName"];
-    NSString *effectType = effectInfo[@"effectType"];
-    NSInteger layer = [effectInfo[@"layerIndex"] integerValue];
-    NSInteger startMS = [effectInfo[@"startTimeMS"] integerValue];
-    NSInteger endMS = [effectInfo[@"endTimeMS"] integerValue];
-    NSInteger durationMS = endMS - startMS;
-
-    NSInteger newStartMS = startMS;
-    NSInteger newEndMS = endMS;
-
-    // direction: 0=same position, 1=right, 2=left, 3=up, 4=down
-    switch (direction) {
-        case 1: // Right
-            newStartMS = endMS;
-            newEndMS = endMS + durationMS;
-            break;
-        case 2: // Left
-            newStartMS = startMS - durationMS;
-            newEndMS = startMS;
-            if (newStartMS < 0) {
-                newStartMS = 0;
-                newEndMS = durationMS;
-            }
-            break;
-        case 3: // Up - TODO: needs row mapping to determine model above
-        case 4: // Down - TODO: needs row mapping to determine model below
-            NSLog(@"Duplicate Up/Down not yet implemented - requires row-to-model mapping");
-            return;
-        default: // Same position (basic duplicate)
-            newStartMS = endMS;
-            newEndMS = endMS + durationMS;
-            break;
+    // Build an index set from the context menu effect (or current multi-selection)
+    NSIndexSet *selected = gridView.selectedEffectIndices;
+    if (selected.count == 0 && effectIndex >= 0) {
+        selected = [NSIndexSet indexSetWithIndex:(NSUInteger)effectIndex];
     }
+    if (selected.count == 0) return;
 
-    // TODO: Copy effect settings/palette from original to the new effect
-    NSInteger newId = [_engineBridge createEffect:modelName
-                                           layer:layer
-                                      effectType:effectType
-                                     startTimeMS:newStartMS
-                                       endTimeMS:newEndMS];
-
-    if (newId >= 0) {
-        [self reloadSequenceData];
-        [_playbackController renderCurrentFrame];
-        [gridView reloadData];
-    }
+    // Direction 0 (basic duplicate) maps to right
+    NSInteger dir = (direction == 0) ? 1 : direction;
+    [self duplicateSelectedEffects:selected direction:dir];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2701,6 +2981,35 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             }
         }
     }];
+}
+
+#pragma mark - XLEffectsGridDelegate (Smart Tool)
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSetSmartToolParameter:(NSString *)key
+                              value:(NSString *)value
+                       forEffectId:(NSInteger)effectId
+{
+    if (!self.engineBridge || effectId < 0 || !key || !value) return;
+    [self.engineBridge setEffectParameter:effectId key:key value:value];
+}
+
+- (NSString *)effectsGrid:(XLEffectsGridView *)gridView
+    smartToolParameterValue:(NSString *)key
+               forEffectId:(NSInteger)effectId
+{
+    if (!self.engineBridge || effectId < 0 || !key) return nil;
+    return [self.engineBridge getEffectParameter:effectId key:key];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didCompleteSmartToolDragForEffectIds:(NSArray<NSNumber *> *)effectIds
+                               parameter:(NSString *)parameterKey
+{
+    // Trigger render and reload sequence data so changes are reflected
+    [_playbackController renderCurrentFrame];
+    [self reloadSequenceData];
+    [gridView reloadData];
 }
 
 #pragma mark - XLEffectsGridDelegate (Timing Track Operations)
@@ -3843,6 +4152,153 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [self reloadSequenceData];
         [gridView reloadData];
     }
+}
+
+#pragma mark - Symbol Library Menu Actions
+
+- (void)showSymbolLibrary:(id)sender {
+    [self ensureSymbolLibraryManager];
+    [_symbolLibraryManager reloadSymbols];
+    NSArray<NSDictionary *> *symbols = [_symbolLibraryManager allSymbols];
+
+    if (symbols.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Effect Symbol Library";
+        alert.informativeText = @"No symbols defined.\n\nRight-click an effect and choose \"Create Symbol from Effect...\" to create one.";
+        alert.alertStyle = NSAlertStyleInformational;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Effect Symbol Library";
+    alert.alertStyle = NSAlertStyleInformational;
+    [alert addButtonWithTitle:@"Done"];
+    [alert addButtonWithTitle:@"Rename"];
+    [alert addButtonWithTitle:@"Delete"];
+    alert.informativeText = [NSString stringWithFormat:@"%lu symbol(s) defined. Select a symbol then click Rename or Delete.", (unsigned long)symbols.count];
+
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 400, 200)];
+    scrollView.hasVerticalScroller = YES;
+    scrollView.borderType = NSBezelBorder;
+    NSTableView *tableView = [[NSTableView alloc] initWithFrame:scrollView.bounds];
+    tableView.usesAlternatingRowBackgroundColors = YES;
+    tableView.rowHeight = 22;
+    NSTableColumn *nameCol = [[NSTableColumn alloc] initWithIdentifier:@"name"];
+    nameCol.title = @"Symbol Name";
+    nameCol.width = 200;
+    [tableView addTableColumn:nameCol];
+    NSTableColumn *typeCol = [[NSTableColumn alloc] initWithIdentifier:@"type"];
+    typeCol.title = @"Effect Type";
+    typeCol.width = 120;
+    [tableView addTableColumn:typeCol];
+    scrollView.documentView = tableView;
+
+    NSMutableArray<NSDictionary *> *mutableSymbols = [symbols mutableCopy];
+    objc_setAssociatedObject(self, @selector(showSymbolLibrary:), mutableSymbols, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    tableView.tag = 9999;
+    tableView.dataSource = (id<NSTableViewDataSource>)self;
+    tableView.delegate = (id<NSTableViewDelegate>)self;
+    alert.accessoryView = scrollView;
+    [tableView reloadData];
+
+    NSModalResponse response = [alert runModal];
+
+    if (response == NSAlertSecondButtonReturn) {
+        NSInteger selectedRow = tableView.selectedRow;
+        if (selectedRow >= 0 && selectedRow < (NSInteger)mutableSymbols.count) {
+            NSDictionary *sym = mutableSymbols[(NSUInteger)selectedRow];
+            NSAlert *renameAlert = [[NSAlert alloc] init];
+            renameAlert.messageText = @"Rename Symbol";
+            [renameAlert addButtonWithTitle:@"Rename"];
+            [renameAlert addButtonWithTitle:@"Cancel"];
+            NSTextField *nameField = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+            nameField.stringValue = sym[@"name"] ?: @"";
+            renameAlert.accessoryView = nameField;
+            if ([renameAlert runModal] == NSAlertFirstButtonReturn && nameField.stringValue.length > 0) {
+                [_symbolLibraryManager renameSymbol:sym[@"symbolId"] toName:nameField.stringValue];
+                [self updateAvailableSymbolNames];
+            }
+        }
+    } else if (response == NSAlertThirdButtonReturn) {
+        NSInteger selectedRow = tableView.selectedRow;
+        if (selectedRow >= 0 && selectedRow < (NSInteger)mutableSymbols.count) {
+            NSDictionary *sym = mutableSymbols[(NSUInteger)selectedRow];
+            NSString *symbolName = sym[@"name"] ?: @"Unknown";
+            NSAlert *confirmAlert = [[NSAlert alloc] init];
+            confirmAlert.messageText = @"Delete Symbol?";
+            confirmAlert.informativeText = [NSString stringWithFormat:@"Delete \"%@\"?\n\nLinked effects keep settings but are no longer linked.", symbolName];
+            [confirmAlert addButtonWithTitle:@"Delete"];
+            [confirmAlert addButtonWithTitle:@"Cancel"];
+            confirmAlert.alertStyle = NSAlertStyleWarning;
+            if ([confirmAlert runModal] == NSAlertFirstButtonReturn) {
+                [_symbolLibraryManager deleteSymbol:sym[@"symbolId"]];
+                [self updateAvailableSymbolNames];
+                [self reloadSequenceData];
+                [_effectsGridView reloadData];
+            }
+        }
+    }
+    objc_setAssociatedObject(self, @selector(showSymbolLibrary:), nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+- (void)convertAllSymbolsToEffects:(id)sender {
+    [self ensureSymbolLibraryManager];
+    if (_symbolLibraryManager.symbolCount == 0) {
+        NSAlert *a = [[NSAlert alloc] init];
+        a.messageText = @"No Symbols";
+        a.informativeText = @"There are no effect symbols to convert.";
+        [a addButtonWithTitle:@"OK"];
+        [a runModal];
+        return;
+    }
+    NSAlert *confirm = [[NSAlert alloc] init];
+    confirm.messageText = @"Convert All Symbols to Effects?";
+    confirm.informativeText = @"This will unlink all effects and delete all symbol definitions.\nEffects keep their current settings.";
+    [confirm addButtonWithTitle:@"Convert"];
+    [confirm addButtonWithTitle:@"Cancel"];
+    confirm.alertStyle = NSAlertStyleWarning;
+    if ([confirm runModal] != NSAlertFirstButtonReturn) return;
+
+    NSInteger unlinkedCount = 0;
+    for (NSUInteger i = 0; i < _effectCount; i++) {
+        if (_effectData[i].isLinkedToSymbol) {
+            [_symbolLibraryManager unlinkEffect:_effectData[i].effectIndex];
+            unlinkedCount++;
+        }
+    }
+    NSArray<NSDictionary *> *allSymbols = [[_symbolLibraryManager allSymbols] copy];
+    for (NSDictionary *sym in allSymbols) {
+        [_symbolLibraryManager deleteSymbol:sym[@"symbolId"]];
+    }
+    [self updateAvailableSymbolNames];
+    [self reloadSequenceData];
+    [_effectsGridView reloadData];
+    NSLog(@"Converted all symbols: unlinked %ld effects, deleted %lu symbols", (long)unlinkedCount, (unsigned long)allSymbols.count);
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    if (tableView.tag == 9999) {
+        NSArray *syms = objc_getAssociatedObject(self, @selector(showSymbolLibrary:));
+        return (NSInteger)syms.count;
+    }
+    return 0;
+}
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    if (tableView.tag != 9999) return nil;
+    NSArray<NSDictionary *> *syms = objc_getAssociatedObject(self, @selector(showSymbolLibrary:));
+    if (row < 0 || row >= (NSInteger)syms.count) return nil;
+    NSDictionary *sym = syms[(NSUInteger)row];
+    NSTextField *cell = [NSTextField labelWithString:@""];
+    cell.lineBreakMode = NSLineBreakByTruncatingTail;
+    if ([tableColumn.identifier isEqualToString:@"name"]) {
+        cell.stringValue = sym[@"name"] ?: @"Unnamed";
+    } else if ([tableColumn.identifier isEqualToString:@"type"]) {
+        cell.stringValue = sym[@"effectType"] ?: @"Unknown";
+    }
+    return cell;
 }
 
 #pragma mark - XLRowHeadingsDataSource
@@ -5354,6 +5810,138 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     return NO;
 }
 
+#pragma mark - Multi-Cell Preset Paste
+
+- (BOOL)applyPresetToSelectedCell:(NSDictionary *)presetData {
+    if (!presetData || !_effectsGridView.hasCellSelection) return NO;
+    if (!_engineBridge || !_usingRealData) return NO;
+
+    NSString *effectType = presetData[@"effectType"];
+    NSString *settings = presetData[@"settings"];
+    NSString *palette = presetData[@"palette"];
+    if (!effectType) return NO;
+
+    NSInteger row = _effectsGridView.cellSelectionRow;
+    CGFloat startMS = _effectsGridView.cellSelectionStartMS;
+    CGFloat endMS = _effectsGridView.cellSelectionEndMS;
+
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return NO;
+    if (_rowData[row].type == XLElementTypeTiming) return NO;
+
+    NSString *modelName = [NSString stringWithUTF8String:_rowData[row].name];
+    NSInteger layer = _rowData[row].isLayerRow ? _rowData[row].layerIndex : 0;
+
+    NSInteger effectId = [_engineBridge createEffect:modelName
+                                               layer:layer
+                                          effectType:effectType
+                                         startTimeMS:(NSInteger)startMS
+                                           endTimeMS:(NSInteger)endMS];
+    if (effectId < 0) return NO;
+
+    if (settings.length > 0) {
+        [_engineBridge setEffectSettings:effectId settings:settings];
+    }
+    if (palette.length > 0) {
+        [_engineBridge setEffectPalette:effectId palette:palette];
+    }
+
+    [_effectsGridView clearCellSelection];
+    [self reloadSequenceData];
+    return YES;
+}
+
+- (NSInteger)applyPresetToMultiCellRange:(NSDictionary *)presetData {
+    if (!presetData || !_cellRangeSelected) return 0;
+    if (!_engineBridge || !_usingRealData) return 0;
+
+    NSString *effectType = presetData[@"effectType"];
+    NSString *settings = presetData[@"settings"];
+    NSString *palette = presetData[@"palette"];
+    if (!effectType) return 0;
+
+    NSInteger row1 = _rangeStartRow;
+    NSInteger row2 = _rangeEndRow;
+    if (row1 > row2) { NSInteger tmp = row1; row1 = row2; row2 = tmp; }
+
+    CGFloat timeStart = _rangeStartTimeMS;
+    CGFloat timeEnd = _rangeEndTimeMS;
+    if (timeStart > timeEnd) { CGFloat tmp = timeStart; timeStart = timeEnd; timeEnd = tmp; }
+
+    NSString *trackName = [self activeTimingTrackForOperation];
+    NSInteger effectsCreated = 0;
+
+    if (trackName && _pasteByCellMode) {
+        NSArray<NSDictionary *> *marks = [_engineBridge getTimingMarks:trackName layer:0];
+        if (!marks) return 0;
+
+        marks = [marks sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [@([a[@"startTimeMS"] integerValue]) compare:@([b[@"startTimeMS"] integerValue])];
+        }];
+
+        for (NSDictionary *mark in marks) {
+            NSInteger cellStart = [mark[@"startTimeMS"] integerValue];
+            NSInteger cellEnd = [mark[@"endTimeMS"] integerValue];
+
+            if (cellEnd <= (NSInteger)timeStart || cellStart >= (NSInteger)timeEnd) continue;
+
+            for (NSInteger row = row1; row <= row2; row++) {
+                if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) continue;
+                if (_rowData[row].type == XLElementTypeTiming) continue;
+
+                NSString *modelName = [NSString stringWithUTF8String:_rowData[row].name];
+                NSInteger layer = _rowData[row].isLayerRow ? _rowData[row].layerIndex : 0;
+
+                NSInteger effectId = [_engineBridge createEffect:modelName
+                                                           layer:layer
+                                                      effectType:effectType
+                                                     startTimeMS:cellStart
+                                                       endTimeMS:cellEnd];
+                if (effectId >= 0) {
+                    if (settings.length > 0) {
+                        [_engineBridge setEffectSettings:effectId settings:settings];
+                    }
+                    if (palette.length > 0) {
+                        [_engineBridge setEffectPalette:effectId palette:palette];
+                    }
+                    effectsCreated++;
+                }
+            }
+        }
+    } else {
+        for (NSInteger row = row1; row <= row2; row++) {
+            if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) continue;
+            if (_rowData[row].type == XLElementTypeTiming) continue;
+
+            NSString *modelName = [NSString stringWithUTF8String:_rowData[row].name];
+            NSInteger layer = _rowData[row].isLayerRow ? _rowData[row].layerIndex : 0;
+
+            NSInteger effectId = [_engineBridge createEffect:modelName
+                                                       layer:layer
+                                                  effectType:effectType
+                                                 startTimeMS:(NSInteger)timeStart
+                                                   endTimeMS:(NSInteger)timeEnd];
+            if (effectId >= 0) {
+                if (settings.length > 0) {
+                    [_engineBridge setEffectSettings:effectId settings:settings];
+                }
+                if (palette.length > 0) {
+                    [_engineBridge setEffectPalette:effectId palette:palette];
+                }
+                effectsCreated++;
+            }
+        }
+    }
+
+    if (effectsCreated > 0) {
+        _cellRangeSelected = NO;
+        [self reloadSequenceData];
+        NSLog(@"XLSequencerViewController: Applied preset '%@' to %ld cells across rows %ld-%ld",
+              effectType, (long)effectsCreated, (long)row1, (long)row2);
+    }
+
+    return effectsCreated;
+}
+
 #pragma mark - Timing Keyboard Action Helpers
 
 /// Divide the currently selected timing mark(s) into N equal parts.
@@ -6204,19 +6792,39 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         return YES;
     }
 
-    // APPLY_SELECTED_PRESET: Apply the currently selected preset to selected effects
+    // APPLY_SELECTED_PRESET: Apply the currently selected preset
     if ([actionType isEqualToString:@"APPLY_SELECTED_PRESET"]) {
         if (!_presetsWindowController || !_engineBridge) {
             NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - no presets window or engine");
             return YES;
         }
-        NSArray<NSNumber *> *selectedIds = [_engineBridge getSelectedEffectIds];
-        if (selectedIds.count == 0) {
-            NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - no effects selected");
+        NSDictionary *presetData = [_presetsWindowController selectedPresetData];
+        if (!presetData) {
+            NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - no preset selected in panel");
             return YES;
         }
-        // TODO: Get selected preset name from presets window controller and apply
-        NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - not yet fully implemented");
+
+        if (_cellRangeSelected) {
+            NSInteger count = [self applyPresetToMultiCellRange:presetData];
+            NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - applied to %ld cells in range",
+                  (long)count);
+        } else if (_effectsGridView.hasCellSelection) {
+            [self applyPresetToSelectedCell:presetData];
+            NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - applied to selected cell");
+        } else {
+            NSString *presetName = [_presetsWindowController selectedPresetName];
+            NSArray<NSNumber *> *selectedIds = [_engineBridge getSelectedEffectIds];
+            if (selectedIds.count > 0 && presetName) {
+                for (NSNumber *eid in selectedIds) {
+                    [_presetsWindowController applyPreset:presetName toEffect:[eid integerValue]];
+                }
+                [self reloadSequenceData];
+                NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - applied '%@' to %lu effect(s)",
+                      presetName, (unsigned long)selectedIds.count);
+            } else {
+                NSLog(@"XLSequencerViewController: APPLY_SELECTED_PRESET - no cells or effects selected");
+            }
+        }
         return YES;
     }
 
@@ -6307,92 +6915,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         else if ([actionType isEqualToString:@"DUPLICATE_UP"])   direction = 3;
         else                                                      direction = 4;
 
-        [_undoController beginUndoGroupingWithActionName:@"Duplicate Effects"];
-
-        [selected enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-            NSInteger effectId = [self->_effectsGridView effectIdAtRenderIndex:idx];
-            if (effectId < 0) return;
-
-            NSDictionary *effectInfo = [self->_engineBridge getEffect:effectId];
-            if (!effectInfo) return;
-
-            NSString *modelName = effectInfo[@"modelName"];
-            NSString *effectType = effectInfo[@"effectType"];
-            NSInteger layer = [effectInfo[@"layerIndex"] integerValue];
-            NSInteger startMS = [effectInfo[@"startTimeMS"] integerValue];
-            NSInteger endMS = [effectInfo[@"endTimeMS"] integerValue];
-            NSInteger durationMS = endMS - startMS;
-
-            NSInteger newStartMS = startMS;
-            NSInteger newEndMS = endMS;
-            NSString *targetModel = modelName;
-
-            switch (direction) {
-                case 1: // Right
-                    newStartMS = endMS;
-                    newEndMS = endMS + durationMS;
-                    break;
-                case 2: // Left
-                    newStartMS = startMS - durationMS;
-                    newEndMS = startMS;
-                    if (newStartMS < 0) {
-                        newStartMS = 0;
-                        newEndMS = durationMS;
-                    }
-                    break;
-                case 3: // Up - find previous non-timing row
-                case 4: { // Down - find next non-timing row
-                    NSInteger currentRow = -1;
-                    for (NSUInteger r = 0; r < self->_rowCount; r++) {
-                        NSString *rowName = [NSString stringWithUTF8String:self->_rowData[r].name];
-                        if ([rowName isEqualToString:modelName] && !self->_rowData[r].isLayerRow) {
-                            currentRow = (NSInteger)r;
-                            break;
-                        }
-                    }
-                    if (currentRow < 0) return;
-
-                    NSInteger targetRow = -1;
-                    if (direction == 3) { // Up
-                        for (NSInteger r = currentRow - 1; r >= 0; r--) {
-                            if (self->_rowData[r].type != XLElementTypeTiming && !self->_rowData[r].isLayerRow) {
-                                targetRow = r;
-                                break;
-                            }
-                        }
-                    } else { // Down
-                        for (NSUInteger r = (NSUInteger)(currentRow + 1); r < self->_rowCount; r++) {
-                            if (self->_rowData[r].type != XLElementTypeTiming && !self->_rowData[r].isLayerRow) {
-                                targetRow = (NSInteger)r;
-                                break;
-                            }
-                        }
-                    }
-                    if (targetRow < 0) return;
-                    targetModel = [NSString stringWithUTF8String:self->_rowData[targetRow].name];
-                    break;
-                }
-                default:
-                    break;
-            }
-
-            NSInteger newId = [self->_engineBridge createEffect:targetModel
-                                                         layer:layer
-                                                    effectType:effectType
-                                                   startTimeMS:newStartMS
-                                                     endTimeMS:newEndMS];
-            if (newId >= 0) {
-                NSString *settings = [self->_engineBridge getEffectSettings:effectId];
-                NSString *palette = [self->_engineBridge getEffectPalette:effectId];
-                if (settings) [self->_engineBridge setEffectSettings:newId settings:settings];
-                if (palette) [self->_engineBridge setEffectPalette:newId palette:palette];
-            }
-        }];
-
-        [_undoController endUndoGrouping];
-        [self reloadSequenceData];
-        [_playbackController renderCurrentFrame];
-        [_effectsGridView reloadData];
+        [self duplicateSelectedEffects:selected direction:direction];
         return YES;
     }
 

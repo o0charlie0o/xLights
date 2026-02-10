@@ -30,6 +30,11 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
     XLEffectHitLocationLeftEdge,
     XLEffectHitLocationCenter,
     XLEffectHitLocationRightEdge,
+    // Smart Tool zones (Option/Alt held)
+    XLEffectHitLocationSmartFadeIn,
+    XLEffectHitLocationSmartFadeOut,
+    XLEffectHitLocationSmartBrightness,
+    XLEffectHitLocationSmartSparkles,
 };
 
 /// Provides effect/element data for the grid to render.
@@ -117,12 +122,12 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
                 toRow:(NSInteger)toRow
             toTimeMS:(CGFloat)newStartTimeMS;
 
-/// Batch move: move an effect by engine ID to a new time (same row). No reload — caller handles.
+/// Batch move: move an effect by engine ID to a new time (same row). No reload -- caller handles.
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didBatchMoveEffectId:(NSInteger)effectId
                toTimeMS:(CGFloat)newStartTimeMS;
 
-/// Batch move: move an effect by engine ID to a different row. No reload — caller handles.
+/// Batch move: move an effect by engine ID to a different row. No reload -- caller handles.
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didBatchMoveEffectId:(NSInteger)effectId
                fromRow:(NSInteger)fromRow
@@ -213,6 +218,24 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 /// Request to edit an effect's timing (start/end time).
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didRequestEditTimingForEffectAtIndex:(NSInteger)effectIndex;
+
+// --- Smart Tool Operations ---
+
+/// Smart Tool: set a parameter on an effect during drag (fade, brightness, sparkles).
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestSetSmartToolParameter:(NSString *)key
+                              value:(NSString *)value
+                       forEffectId:(NSInteger)effectId;
+
+/// Smart Tool: get a parameter value from an effect.
+- (NSString *)effectsGrid:(XLEffectsGridView *)gridView
+    smartToolParameterValue:(NSString *)key
+               forEffectId:(NSInteger)effectId;
+
+/// Smart Tool: notify delegate that smart tool drag completed.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didCompleteSmartToolDragForEffectIds:(NSArray<NSNumber *> *)effectIds
+                               parameter:(NSString *)parameterKey;
 
 // --- Timing Track Operations ---
 
@@ -417,5 +440,18 @@ typedef NS_ENUM(NSInteger, XLAlignmentType) {
 
 /// Clear the cell selection highlight.
 - (void)clearCellSelection;
+
+/// Set the cell selection to a specific row and time range.
+/// Used after duplication to move the selection to the duplicated area.
+- (void)setCellSelectionRow:(NSInteger)row startMS:(CGFloat)startMS endMS:(CGFloat)endMS;
+
+/// Return the row for a render effect at the given index, or -1 if invalid.
+- (NSInteger)rowForRenderIndex:(NSUInteger)index;
+
+/// Return the start time in ms for a render effect at the given index, or -1 if invalid.
+- (CGFloat)startMSForRenderIndex:(NSUInteger)index;
+
+/// Return the end time in ms for a render effect at the given index, or -1 if invalid.
+- (CGFloat)endMSForRenderIndex:(NSUInteger)index;
 
 @end

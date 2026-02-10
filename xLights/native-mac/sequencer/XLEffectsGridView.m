@@ -153,7 +153,23 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     CGFloat _contextMenuTimeMS;
     NSInteger _contextMenuEffectIndex;
     NSInteger _contextMenuRow;
+
+    // Smart Tool state (Option/Alt + drag for fade/brightness/sparkles)
+    BOOL _isSmartToolDragging;
+    XLEffectHitLocation _smartToolZone;
+    NSPoint _smartToolDragStart;
+    CGFloat _smartToolInitialValue;
+    NSInteger _smartToolEffectIndex;
 }
+
+// Smart Tool forward declarations (needed by mouseMoved/flagsChanged before definition)
+- (void)hitTestPoint:(NSPoint)viewPoint
+         effectIndex:(NSInteger *)outEffectIndex
+         hitLocation:(XLEffectHitLocation *)outHitLocation
+       modifierFlags:(NSEventModifierFlags)modifiers;
+- (void)updateCursorForHitLocation:(XLEffectHitLocation)hitLoc;
+- (void)handleSmartToolDragToPoint:(NSPoint)loc;
+- (void)completeSmartToolDrag;
 
 @property (nonatomic, strong) CAMetalLayer *metalLayer;
 @property (nonatomic, strong) XLEffectsGridRenderer *renderer;
@@ -1235,6 +1251,35 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     }
 }
 
+- (void)setCellSelectionRow:(NSInteger)row startMS:(CGFloat)startMS endMS:(CGFloat)endMS {
+    _hasCellSelection = YES;
+    _cellSelectionRow = row;
+    _cellSelectionStartMS = startMS;
+    _cellSelectionEndMS = endMS;
+    _needsRedraw = YES;
+}
+
+- (NSInteger)rowForRenderIndex:(NSUInteger)index {
+    if (index < _renderEffectCount) {
+        return _renderEffects[index].row;
+    }
+    return -1;
+}
+
+- (CGFloat)startMSForRenderIndex:(NSUInteger)index {
+    if (index < _renderEffectCount) {
+        return _renderEffects[index].startTimeMS;
+    }
+    return -1;
+}
+
+- (CGFloat)endMSForRenderIndex:(NSUInteger)index {
+    if (index < _renderEffectCount) {
+        return _renderEffects[index].endTimeMS;
+    }
+    return -1;
+}
+
 - (void)computeCellBoundsForTimeMS:(CGFloat)timeMS
                            startMS:(CGFloat *)outStart
                              endMS:(CGFloat *)outEnd
@@ -1478,13 +1523,58 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _mouseDownRow = row;
     _dragCurrentRow = row;
 
-    // Find effect at click location
+    // Find effect at click location (use modifier-aware version for Smart Tool detection)
     NSInteger hitEffectIndex = -1;
     XLEffectHitLocation hitLoc = XLEffectHitLocationNone;
-    [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc];
+    [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc modifierFlags:event.modifierFlags];
 
     _mouseDownEffectIndex = hitEffectIndex;
     _mouseDownHitLocation = hitLoc;
+
+    // Smart Tool: Option/Alt held over an effect enters smart adjustment mode
+    if (hitEffectIndex >= 0 &&
+        hitLoc >= XLEffectHitLocationSmartFadeIn &&
+        hitLoc <= XLEffectHitLocationSmartSparkles) {
+        _smartToolZone = hitLoc;
+        _smartToolDragStart = loc;
+        _smartToolEffectIndex = hitEffectIndex;
+        _isSmartToolDragging = NO;
+
+        // Read the initial value from the engine so we can compute deltas
+        NSInteger effectId = [self effectIdAtRenderIndex:(NSUInteger)hitEffectIndex];
+        NSString *key = nil;
+        switch (hitLoc) {
+            case XLEffectHitLocationSmartFadeIn:
+                key = @"T_TEXTCTRL_Fadein";
+                break;
+            case XLEffectHitLocationSmartFadeOut:
+                key = @"T_TEXTCTRL_Fadeout";
+                break;
+            case XLEffectHitLocationSmartBrightness: {
+                // Check if this is an On effect — uses different key
+                XLEffectRenderInfo info = _renderEffects[hitEffectIndex];
+                if (strncmp(info.effectTypeName, "On", XL_EFFECT_TYPE_NAME_MAX) == 0) {
+                    key = @"E_TEXTCTRL_Eff_On_Start";
+                } else {
+                    key = @"C_SLIDER_Brightness";
+                }
+                break;
+            }
+            case XLEffectHitLocationSmartSparkles:
+                key = @"C_SLIDER_SparkleFrequency";
+                break;
+            default:
+                break;
+        }
+        if (key && effectId >= 0 &&
+            [_delegate respondsToSelector:@selector(effectsGrid:smartToolParameterValue:forEffectId:)]) {
+            NSString *val = [_delegate effectsGrid:self smartToolParameterValue:key forEffectId:effectId];
+            _smartToolInitialValue = val ? [val doubleValue] : 0.0;
+        } else {
+            _smartToolInitialValue = 0.0;
+        }
+        return;
+    }
 
     BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
@@ -1678,6 +1768,17 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     CGFloat dx = loc.x - _mouseDownPoint.x;
     CGFloat dy = loc.y - _mouseDownPoint.y;
     CGFloat distance = sqrt(dx * dx + dy * dy);
+
+    // Smart Tool: intercept drag when in smart tool zone
+    if (_smartToolZone >= XLEffectHitLocationSmartFadeIn &&
+        _smartToolZone <= XLEffectHitLocationSmartSparkles) {
+        if (distance < kDragThreshold && !_isSmartToolDragging) {
+            return;
+        }
+        _isSmartToolDragging = YES;
+        [self handleSmartToolDragToPoint:loc];
+        return;
+    }
 
     if (distance < kDragThreshold && !_isDragging && !_isResizing && !_isRubberBanding) {
         return;
@@ -2093,6 +2194,19 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
     BOOL shiftDown = (event.modifierFlags & NSEventModifierFlagShift) != 0;
     BOOL cmdDown = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+
+    // Smart Tool: complete the smart tool drag
+    if (_isSmartToolDragging || (_smartToolZone >= XLEffectHitLocationSmartFadeIn &&
+                                  _smartToolZone <= XLEffectHitLocationSmartSparkles)) {
+        if (_isSmartToolDragging) {
+            [self completeSmartToolDrag];
+        }
+        _isSmartToolDragging = NO;
+        _smartToolZone = XLEffectHitLocationNone;
+        _smartToolEffectIndex = -1;
+        _needsRedraw = YES;
+        return;
+    }
 
     if (_isResizing && _mouseDownEffectIndex >= 0 && (NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
         XLEffectRenderInfo info = _renderEffects[_mouseDownEffectIndex];
@@ -2727,7 +2841,17 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                                                   keyEquivalent:@""];
     unlinkSymbol.tag = kMenuTagUnlinkSymbol;
     unlinkSymbol.target = self;
-    unlinkSymbol.enabled = hasSelection;
+    // Only enable unlink if at least one selected effect is linked to a symbol
+    BOOL hasLinkedEffect = NO;
+    if (hasSelection) {
+        for (NSUInteger idx = 0; idx < _renderEffectCount; idx++) {
+            if ([self isEffectSelected:idx] && _renderEffects[idx].isLinkedToSymbol) {
+                hasLinkedEffect = YES;
+                break;
+            }
+        }
+    }
+    unlinkSymbol.enabled = hasLinkedEffect;
     [menu addItem:unlinkSymbol];
 
     // Link to Symbol submenu - populated dynamically from availableSymbolNames
@@ -3258,7 +3382,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                 @"row": @(info.row),
                 @"startTimeMS": @(info.startTimeMS),
                 @"endTimeMS": @(info.endTimeMS),
-                @"effectIndex": @(info.effectIndex)
+                @"effectIndex": @(info.effectIndex),
+                @"effectId": @(info.effectId),
+                @"isLinkedToSymbol": @(info.isLinkedToSymbol)
             };
             [effectInfoArray addObject:dict];
         }
@@ -3428,21 +3554,10 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
     NSInteger hitEffectIndex = -1;
     XLEffectHitLocation hitLoc;
-    [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc];
+    [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc modifierFlags:event.modifierFlags];
 
-    // Update cursor based on hit location
-    switch (hitLoc) {
-        case XLEffectHitLocationLeftEdge:
-        case XLEffectHitLocationRightEdge:
-            [[NSCursor resizeLeftRightCursor] set];
-            break;
-        case XLEffectHitLocationCenter:
-            [[NSCursor openHandCursor] set];
-            break;
-        default:
-            [[NSCursor arrowCursor] set];
-            break;
-    }
+    // Update cursor based on hit location (including Smart Tool zones)
+    [self updateCursorForHitLocation:hitLoc];
 
     // Notify delegate of cursor position for waveform sync
     CGFloat timeMS;
@@ -3450,6 +3565,16 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     if ([_delegate respondsToSelector:@selector(effectsGrid:didMoveCursorToTimeMS:)]) {
         [_delegate effectsGrid:self didMoveCursorToTimeMS:timeMS];
     }
+}
+
+- (void)flagsChanged:(NSEvent *)event {
+    // When Option/Alt is pressed or released, update the cursor to reflect smart tool availability
+    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger hitEffectIndex = -1;
+    XLEffectHitLocation hitLoc;
+    [self hitTestPoint:loc effectIndex:&hitEffectIndex hitLocation:&hitLoc modifierFlags:event.modifierFlags];
+    [self updateCursorForHitLocation:hitLoc];
+    [super flagsChanged:event];
 }
 
 - (void)mouseExited:(NSEvent *)event {
@@ -3816,6 +3941,240 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             *outHitLocation = XLEffectHitLocationCenter;
         }
         return;
+    }
+}
+
+#pragma mark - Smart Tool (Option/Alt + Drag)
+
+/// Modifier-aware hit test: when Option is held, maps hit locations to smart tool zones.
+- (void)hitTestPoint:(NSPoint)viewPoint
+         effectIndex:(NSInteger *)outEffectIndex
+         hitLocation:(XLEffectHitLocation *)outHitLocation
+       modifierFlags:(NSEventModifierFlags)modifiers
+{
+    // Start with the normal hit test
+    [self hitTestPoint:viewPoint effectIndex:outEffectIndex hitLocation:outHitLocation];
+
+    // If Option is not held, or no effect was hit, return normal result
+    BOOL optionDown = (modifiers & NSEventModifierFlagOption) != 0;
+    if (!optionDown || *outEffectIndex < 0) return;
+
+    NSUInteger idx = (NSUInteger)*outEffectIndex;
+    if (idx >= _renderEffectCount) return;
+
+    // Don't apply smart tool to timing marks
+    if (_renderEffects[idx].isTimingMark) return;
+
+    // Compute dynamic edge width: max(12px, effectWidth/5)
+    CGFloat x1 = _renderEffects[idx].startTimeMS * _zoomLevel - _scrollOffset.x;
+    CGFloat x2 = _renderEffects[idx].endTimeMS * _zoomLevel - _scrollOffset.x;
+    CGFloat effectWidth = x2 - x1;
+    CGFloat edgeWidth = fmax(12.0, effectWidth / 5.0);
+
+    CGFloat relX = viewPoint.x - x1;
+
+    BOOL shiftDown = (modifiers & NSEventModifierFlagShift) != 0;
+
+    if (relX < edgeWidth) {
+        *outHitLocation = XLEffectHitLocationSmartFadeIn;
+    } else if (relX > (effectWidth - edgeWidth)) {
+        *outHitLocation = XLEffectHitLocationSmartFadeOut;
+    } else if (shiftDown) {
+        *outHitLocation = XLEffectHitLocationSmartSparkles;
+    } else {
+        *outHitLocation = XLEffectHitLocationSmartBrightness;
+    }
+}
+
+/// Update the mouse cursor to match the current hit location (including Smart Tool zones).
+- (void)updateCursorForHitLocation:(XLEffectHitLocation)hitLoc {
+    switch (hitLoc) {
+        case XLEffectHitLocationSmartFadeIn:
+        case XLEffectHitLocationSmartFadeOut:
+            [[NSCursor resizeLeftRightCursor] set];
+            break;
+        case XLEffectHitLocationSmartBrightness:
+        case XLEffectHitLocationSmartSparkles:
+            [[NSCursor resizeUpDownCursor] set];
+            break;
+        case XLEffectHitLocationLeftEdge:
+        case XLEffectHitLocationRightEdge:
+            [[NSCursor resizeLeftRightCursor] set];
+            break;
+        case XLEffectHitLocationCenter:
+            [[NSCursor openHandCursor] set];
+            break;
+        default:
+            [[NSCursor arrowCursor] set];
+            break;
+    }
+}
+
+/// Handle smart tool drag: compute delta and apply to effect parameters via delegate.
+- (void)handleSmartToolDragToPoint:(NSPoint)loc {
+    if (_smartToolEffectIndex < 0 || (NSUInteger)_smartToolEffectIndex >= _renderEffectCount) return;
+
+    CGFloat dxPixels = loc.x - _smartToolDragStart.x;
+    CGFloat dyPixels = loc.y - _smartToolDragStart.y; // AppKit: positive Y = up
+
+    // Iterate all selected effects (or just the primary if single-select)
+    for (NSUInteger i = 0; i < _renderEffectCount && i < _selectedEffectsCapacity; i++) {
+        BOOL isTarget = (i == (NSUInteger)_smartToolEffectIndex) ||
+                        (_selectedEffects && i < _selectedEffectsCapacity && _selectedEffects[i]);
+        if (!isTarget) continue;
+        if (_renderEffects[i].isTimingMark) continue;
+
+        NSInteger effectId = [self effectIdAtRenderIndex:i];
+        if (effectId < 0) continue;
+
+        switch (_smartToolZone) {
+            case XLEffectHitLocationSmartFadeIn: {
+                // Horizontal drag → fade in time: 100 pixels/second sensitivity
+                CGFloat deltaSeconds = dxPixels / 100.0;
+                CGFloat newValue = _smartToolInitialValue + deltaSeconds;
+                newValue = fmax(0.0, fmin(newValue, 10.0)); // 0-10 seconds
+
+                // Update the render info for visual feedback
+                _renderEffects[i].fadeInMS = newValue * 1000.0;
+
+                NSString *valStr = [NSString stringWithFormat:@"%.2f", newValue];
+                if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetSmartToolParameter:value:forEffectId:)]) {
+                    [_delegate effectsGrid:self
+                        didRequestSetSmartToolParameter:@"T_TEXTCTRL_Fadein"
+                                                  value:valStr
+                                           forEffectId:effectId];
+                }
+                break;
+            }
+            case XLEffectHitLocationSmartFadeOut: {
+                // Horizontal drag → fade out time: 100 pixels/second, INVERTED (drag left = more fade)
+                CGFloat deltaSeconds = -dxPixels / 100.0;
+                CGFloat newValue = _smartToolInitialValue + deltaSeconds;
+                newValue = fmax(0.0, fmin(newValue, 10.0));
+
+                _renderEffects[i].fadeOutMS = newValue * 1000.0;
+
+                NSString *valStr = [NSString stringWithFormat:@"%.2f", newValue];
+                if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetSmartToolParameter:value:forEffectId:)]) {
+                    [_delegate effectsGrid:self
+                        didRequestSetSmartToolParameter:@"T_TEXTCTRL_Fadeout"
+                                                  value:valStr
+                                           forEffectId:effectId];
+                }
+                break;
+            }
+            case XLEffectHitLocationSmartBrightness: {
+                // Vertical drag → brightness: 2 pixels/% sensitivity (up = brighter in AppKit coords)
+                CGFloat deltaPct = dyPixels / 2.0;
+
+                // Check for value curve — skip if active
+                if ([_delegate respondsToSelector:@selector(effectsGrid:smartToolParameterValue:forEffectId:)]) {
+                    NSString *vcStr = [_delegate effectsGrid:self
+                                     smartToolParameterValue:@"C_VALUECURVE_Brightness"
+                                                forEffectId:effectId];
+                    if (vcStr && [vcStr containsString:@"Active=TRUE"]) continue;
+                }
+
+                // Check if this is an On effect
+                BOOL isOnEffect = (strncmp(_renderEffects[i].effectTypeName, "On", XL_EFFECT_TYPE_NAME_MAX) == 0);
+                NSString *key;
+                if (isOnEffect) {
+                    key = @"E_TEXTCTRL_Eff_On_Start";
+                } else {
+                    key = @"C_SLIDER_Brightness";
+                }
+
+                CGFloat newValue = _smartToolInitialValue + deltaPct;
+                newValue = fmax(0.0, fmin(newValue, 100.0));
+
+                NSString *valStr = [NSString stringWithFormat:@"%d", (int)round(newValue)];
+                if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetSmartToolParameter:value:forEffectId:)]) {
+                    [_delegate effectsGrid:self
+                        didRequestSetSmartToolParameter:key
+                                                  value:valStr
+                                           forEffectId:effectId];
+
+                    // For On effect, also set End to match
+                    if (isOnEffect) {
+                        [_delegate effectsGrid:self
+                            didRequestSetSmartToolParameter:@"E_TEXTCTRL_Eff_On_End"
+                                                      value:valStr
+                                               forEffectId:effectId];
+                    }
+                }
+                break;
+            }
+            case XLEffectHitLocationSmartSparkles: {
+                // Vertical drag → sparkle frequency: 1 pixel/unit (up = more sparkle)
+                CGFloat deltaUnits = dyPixels / 1.0;
+
+                // Check for value curve — skip if active
+                if ([_delegate respondsToSelector:@selector(effectsGrid:smartToolParameterValue:forEffectId:)]) {
+                    NSString *vcStr = [_delegate effectsGrid:self
+                                     smartToolParameterValue:@"C_VALUECURVE_SparkleFrequency"
+                                                forEffectId:effectId];
+                    if (vcStr && [vcStr containsString:@"Active=TRUE"]) continue;
+                }
+
+                CGFloat newValue = _smartToolInitialValue + deltaUnits;
+                newValue = fmax(0.0, fmin(newValue, 200.0));
+
+                NSString *valStr = [NSString stringWithFormat:@"%d", (int)round(newValue)];
+                if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestSetSmartToolParameter:value:forEffectId:)]) {
+                    [_delegate effectsGrid:self
+                        didRequestSetSmartToolParameter:@"C_SLIDER_SparkleFrequency"
+                                                  value:valStr
+                                           forEffectId:effectId];
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    _needsRedraw = YES;
+}
+
+/// Complete the smart tool drag and notify the delegate to finalize changes.
+- (void)completeSmartToolDrag {
+    // Collect all affected effect IDs
+    NSMutableArray<NSNumber *> *affectedIds = [NSMutableArray array];
+    for (NSUInteger i = 0; i < _renderEffectCount && i < _selectedEffectsCapacity; i++) {
+        BOOL isTarget = (i == (NSUInteger)_smartToolEffectIndex) ||
+                        (_selectedEffects && i < _selectedEffectsCapacity && _selectedEffects[i]);
+        if (!isTarget) continue;
+        if (_renderEffects[i].isTimingMark) continue;
+        NSInteger effectId = [self effectIdAtRenderIndex:i];
+        if (effectId >= 0) {
+            [affectedIds addObject:@(effectId)];
+        }
+    }
+
+    // Determine parameter key for the completed operation
+    NSString *paramKey = nil;
+    switch (_smartToolZone) {
+        case XLEffectHitLocationSmartFadeIn:
+            paramKey = @"T_TEXTCTRL_Fadein";
+            break;
+        case XLEffectHitLocationSmartFadeOut:
+            paramKey = @"T_TEXTCTRL_Fadeout";
+            break;
+        case XLEffectHitLocationSmartBrightness:
+            paramKey = @"C_SLIDER_Brightness";
+            break;
+        case XLEffectHitLocationSmartSparkles:
+            paramKey = @"C_SLIDER_SparkleFrequency";
+            break;
+        default:
+            break;
+    }
+
+    if (affectedIds.count > 0 && paramKey &&
+        [_delegate respondsToSelector:@selector(effectsGrid:didCompleteSmartToolDragForEffectIds:parameter:)]) {
+        [_delegate effectsGrid:self
+            didCompleteSmartToolDragForEffectIds:affectedIds
+                                      parameter:paramKey];
     }
 }
 
