@@ -12,9 +12,6 @@
 #import "XLStemData.h"
 #import "XLAudioLoader.h"
 
-static const CGFloat kLabelLeftPadding = 4.0;
-static const CGFloat kLabelFontSize = 9.0;
-
 @implementation XLMiniWaveformView
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -100,15 +97,7 @@ static const CGFloat kLabelFontSize = 9.0;
 
     NSArray<NSValue *> *buckets = stem.overviewBuckets;
 
-    if (stem.isLoading) {
-        [self drawLabel:[NSString stringWithFormat:@"%@ (loading...)", stem.name]
-              inContext:ctx width:width height:height color:stem.waveformColor];
-        return;
-    }
-
-    if (!buckets || buckets.count == 0) {
-        [self drawLabel:[NSString stringWithFormat:@"%@ (no data)", stem.name]
-              inContext:ctx width:width height:height color:stem.waveformColor];
+    if (stem.isLoading || !buckets || buckets.count == 0) {
         return;
     }
 
@@ -127,9 +116,6 @@ static const CGFloat kLabelFontSize = 9.0;
                          centerY:centerY
                       halfHeight:halfHeight
                       durationMS:stem.durationMS];
-
-    // Draw stem name label
-    [self drawLabel:stem.name inContext:ctx width:width height:height color:stem.waveformColor];
 
     // Draw playhead
     if (_playbackPositionMS >= 0) {
@@ -192,32 +178,6 @@ static const CGFloat kLabelFontSize = 9.0;
 
         CGContextFillRect(ctx, CGRectMake((CGFloat)px, fmin(y1, y2), 1.0, fabs(y2 - y1)));
     }
-}
-
-- (void)drawLabel:(NSString *)label
-        inContext:(CGContextRef)ctx
-            width:(CGFloat)width
-           height:(CGFloat)height
-            color:(NSColor *)color
-{
-    if (!label) return;
-
-    NSDictionary *attrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:kLabelFontSize weight:NSFontWeightMedium],
-        NSForegroundColorAttributeName: color ?: [NSColor whiteColor]
-    };
-    NSAttributedString *attrStr = [[NSAttributedString alloc] initWithString:label attributes:attrs];
-    NSSize textSize = [attrStr size];
-
-    CGFloat textY = (height - textSize.height) / 2.0;
-    CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.6);
-    CGContextFillRect(ctx, CGRectMake(0, textY - 1, textSize.width + kLabelLeftPadding * 2 + 2, textSize.height + 2));
-
-    NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
-    [NSGraphicsContext saveGraphicsState];
-    [NSGraphicsContext setCurrentContext:gc];
-    [attrStr drawAtPoint:NSMakePoint(kLabelLeftPadding, textY)];
-    [NSGraphicsContext restoreGraphicsState];
 }
 
 @end

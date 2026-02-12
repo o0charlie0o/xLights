@@ -16,6 +16,9 @@
 static NSString *const kDefaultsCollapsedKey = @"StemsPanel.collapsed";
 static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight";
 
+static const CGFloat kRowHeaderFontSize = 11.0;
+static const CGFloat kRowHeaderLeftPadding = 8.0;
+
 #pragma mark - Resize Handle View
 
 @interface XLStemsResizeHandle : NSView
@@ -39,7 +42,6 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 
 - (void)drawRect:(NSRect)dirtyRect {
     [super drawRect:dirtyRect];
-    // Draw grip dots (3 dots in the center)
     CGFloat cx = NSMidX(self.bounds);
     CGFloat cy = NSMidY(self.bounds);
     [[NSColor colorWithWhite:0.45 alpha:1.0] setFill];
@@ -61,7 +63,6 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 
 - (void)mouseDragged:(NSEvent *)event {
     if (!_isDragging) return;
-    // Window coords: Y increases upward. Dragging handle down = lower Y = increase height.
     CGFloat delta = _dragStartPoint.y - event.locationInWindow.y;
     CGFloat newHeight = _dragStartHeight + delta;
     newHeight = fmax(kStemsMinExpandedHeight, fmin(newHeight, kStemsMaxExpandedHeight));
@@ -70,7 +71,6 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         [_container.delegate stemsContainer:_container didChangeHeight:newHeight];
     }
 
-    // Persist the expanded height
     [[NSUserDefaults standardUserDefaults] setDouble:newHeight forKey:kDefaultsExpandedHeightKey];
 }
 
@@ -89,6 +89,81 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 - (BOOL)isFlipped { return YES; }
 @end
 
+#pragma mark - Stem Row Header View (draws one stem name)
+
+@interface XLStemRowHeaderView : NSView
+@property (nonatomic, copy) NSString *stemName;
+@property (nonatomic, strong) NSColor *stemColor;
+@end
+
+@implementation XLStemRowHeaderView
+
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return YES; }
+
+- (void)drawRect:(NSRect)dirtyRect {
+    CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
+    if (!ctx) return;
+
+    CGFloat w = NSWidth(self.bounds);
+    CGFloat h = NSHeight(self.bounds);
+
+    // Background matching row headings style
+    CGContextSetRGBFillColor(ctx, 0.14, 0.14, 0.14, 1.0);
+    CGContextFillRect(ctx, CGRectMake(0, 0, w, h));
+
+    // Bottom separator line
+    CGContextSetRGBStrokeColor(ctx, 0.25, 0.25, 0.25, 1.0);
+    CGContextSetLineWidth(ctx, 0.5);
+    CGContextMoveToPoint(ctx, 0, h - 0.25);
+    CGContextAddLineToPoint(ctx, w, h - 0.25);
+    CGContextStrokePath(ctx);
+
+    // Right edge separator (matching row headings)
+    CGContextSetRGBStrokeColor(ctx, 0.25, 0.25, 0.25, 1.0);
+    CGContextMoveToPoint(ctx, w - 0.25, 0);
+    CGContextAddLineToPoint(ctx, w - 0.25, h);
+    CGContextStrokePath(ctx);
+
+    // Small color indicator bar on the left
+    if (_stemColor) {
+        CGFloat r, g, b, a;
+        [[_stemColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace] getRed:&r green:&g blue:&b alpha:&a];
+        CGContextSetRGBFillColor(ctx, r, g, b, 0.8);
+        CGContextFillRect(ctx, CGRectMake(0, 2, 3, h - 4));
+    }
+
+    // Stem name label
+    if (_stemName.length > 0) {
+        NSColor *textColor = _stemColor ?: [NSColor labelColor];
+        NSDictionary *attrs = @{
+            NSFontAttributeName: [NSFont systemFontOfSize:kRowHeaderFontSize weight:NSFontWeightMedium],
+            NSForegroundColorAttributeName: textColor,
+        };
+        NSAttributedString *attrStr = [[NSAttributedString alloc] initWithString:_stemName attributes:attrs];
+        NSSize textSize = [attrStr size];
+        CGFloat textY = (h - textSize.height) / 2.0;
+
+        // Truncate to fit
+        CGFloat maxWidth = w - kRowHeaderLeftPadding - 6;
+        NSRect textRect = NSMakeRect(kRowHeaderLeftPadding, textY, maxWidth, textSize.height);
+
+        NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
+        [NSGraphicsContext saveGraphicsState];
+        [NSGraphicsContext setCurrentContext:gc];
+
+        // Clip to available width for truncation
+        CGContextSaveGState(ctx);
+        CGContextClipToRect(ctx, CGRectMake(kRowHeaderLeftPadding, 0, maxWidth, h));
+        [attrStr drawAtPoint:NSMakePoint(kRowHeaderLeftPadding, textY)];
+        CGContextRestoreGState(ctx);
+
+        [NSGraphicsContext restoreGraphicsState];
+    }
+}
+
+@end
+
 #pragma mark - Stems Container View
 
 @implementation XLStemsContainerView {
@@ -98,18 +173,29 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     NSButton *_importButton;
     NSButton *_importFolderButton;
 
+    // Row headers (left side)
+    NSScrollView *_rowHeadersScrollView;
+    NSView *_rowHeadersDocView;
+    NSMutableArray<XLStemRowHeaderView *> *_rowHeaderViews;
+
+    // Waveforms (right side)
     NSScrollView *_scrollView;
-    NSView *_stackDocumentView;  // Holds the mini waveform views vertically
+    NSView *_stackDocumentView;
 
     XLStemsResizeHandle *_resizeHandle;
 
     NSMutableArray<XLMiniWaveformView *> *_miniWaveformViews;
+
+    NSLayoutConstraint *_rowHeadersWidthConstraint;
+    NSLayoutConstraint *_scrollViewLeadingConstraint;
 
     CGFloat _savedExpandedHeight;
     CGFloat _scrollOffsetX;
     CGFloat _zoomLevel;
     CGFloat _sequenceLengthMS;
     CGFloat _playbackPositionMS;
+
+    BOOL _syncingScroll;
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -121,11 +207,12 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         self.translatesAutoresizingMaskIntoConstraints = NO;
 
         _miniWaveformViews = [NSMutableArray array];
+        _rowHeaderViews = [NSMutableArray array];
         _zoomLevel = 0.1;
         _sequenceLengthMS = 60000;
         _playbackPositionMS = -1;
+        _rowHeaderWidth = 180.0;  // Default, overridden by sequencer VC
 
-        // Restore persisted state
         NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         _collapsed = [defaults boolForKey:kDefaultsCollapsedKey];
         _savedExpandedHeight = [defaults doubleForKey:kDefaultsExpandedHeightKey];
@@ -134,11 +221,11 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         }
 
         [self setupHeader];
+        [self setupRowHeaders];
         [self setupScrollView];
         [self setupResizeHandle];
         [self setupConstraints];
 
-        // Observe stem manager changes
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(stemManagerDidChange:)
                                                      name:XLStemManagerDidChangeNotification
@@ -164,7 +251,6 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     _headerView.layer.backgroundColor = [[NSColor colorWithWhite:0.16 alpha:1.0] CGColor];
     [self addSubview:_headerView];
 
-    // Chevron button (disclosure triangle)
     _chevronButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"chevron.right"
                                                          accessibilityDescription:@"Expand"]
                                         target:self
@@ -179,14 +265,12 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     _chevronButton.contentTintColor = [NSColor secondaryLabelColor];
     [_headerView addSubview:_chevronButton];
 
-    // Title label
     _titleLabel = [NSTextField labelWithString:@"Stems"];
     _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     _titleLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
     _titleLabel.textColor = [NSColor secondaryLabelColor];
     [_headerView addSubview:_titleLabel];
 
-    // Import button
     _importButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"plus.circle"
                                                        accessibilityDescription:@"Import stems"]
                                        target:self
@@ -198,7 +282,6 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     _importButton.toolTip = @"Import audio stems";
     [_headerView addSubview:_importButton];
 
-    // Import from folder button
     _importFolderButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"folder.badge.plus"
                                                                accessibilityDescription:@"Import stems from folder"]
                                              target:self
@@ -209,6 +292,22 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     _importFolderButton.contentTintColor = [NSColor secondaryLabelColor];
     _importFolderButton.toolTip = @"Import stems from folder (Demucs/Spleeter output)";
     [_headerView addSubview:_importFolderButton];
+}
+
+- (void)setupRowHeaders {
+    _rowHeadersScrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    _rowHeadersScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    _rowHeadersScrollView.hasVerticalScroller = NO;
+    _rowHeadersScrollView.hasHorizontalScroller = NO;
+    _rowHeadersScrollView.borderType = NSNoBorder;
+    _rowHeadersScrollView.backgroundColor = [NSColor colorWithWhite:0.14 alpha:1.0];
+    _rowHeadersScrollView.drawsBackground = YES;
+
+    _rowHeadersDocView = [[XLFlippedDocumentView alloc] initWithFrame:NSZeroRect];
+    _rowHeadersDocView.wantsLayer = YES;
+    _rowHeadersScrollView.documentView = _rowHeadersDocView;
+
+    [self addSubview:_rowHeadersScrollView];
 }
 
 - (void)setupScrollView {
@@ -223,10 +322,16 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 
     _stackDocumentView = [[XLFlippedDocumentView alloc] initWithFrame:NSZeroRect];
     _stackDocumentView.wantsLayer = YES;
-    // Frame-based layout for document view (more reliable in NSScrollView)
     _scrollView.documentView = _stackDocumentView;
 
     [self addSubview:_scrollView];
+
+    // Sync row headers scroll with waveform scroll
+    _scrollView.contentView.postsBoundsChangedNotifications = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(waveformScrollDidChange:)
+                                                 name:NSViewBoundsDidChangeNotification
+                                               object:_scrollView.contentView];
 }
 
 - (void)setupResizeHandle {
@@ -237,6 +342,8 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 }
 
 - (void)setupConstraints {
+    _rowHeadersWidthConstraint = [_rowHeadersScrollView.widthAnchor constraintEqualToConstant:_rowHeaderWidth];
+
     [NSLayoutConstraint activateConstraints:@[
         // Header: top, full width, fixed height
         [_headerView.topAnchor constraintEqualToAnchor:self.topAnchor],
@@ -244,17 +351,17 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         [_headerView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [_headerView.heightAnchor constraintEqualToConstant:kStemsHeaderHeight],
 
-        // Chevron button: left of header
+        // Chevron button
         [_chevronButton.leadingAnchor constraintEqualToAnchor:_headerView.leadingAnchor constant:6],
         [_chevronButton.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
         [_chevronButton.widthAnchor constraintEqualToConstant:18],
         [_chevronButton.heightAnchor constraintEqualToConstant:18],
 
-        // Title label: right of chevron
+        // Title label
         [_titleLabel.leadingAnchor constraintEqualToAnchor:_chevronButton.trailingAnchor constant:4],
         [_titleLabel.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
 
-        // Import from folder button: right side of header
+        // Import from folder button: right side
         [_importFolderButton.trailingAnchor constraintEqualToAnchor:_headerView.trailingAnchor constant:-6],
         [_importFolderButton.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
         [_importFolderButton.widthAnchor constraintEqualToConstant:20],
@@ -266,18 +373,42 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         [_importButton.widthAnchor constraintEqualToConstant:20],
         [_importButton.heightAnchor constraintEqualToConstant:20],
 
-        // Scroll view: below header, above resize handle
-        [_scrollView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
-        [_scrollView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
-        [_scrollView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        // Row headers scroll view: left side, below header, above resize handle
+        [_rowHeadersScrollView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
+        [_rowHeadersScrollView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_rowHeadersScrollView.bottomAnchor constraintEqualToAnchor:_resizeHandle.topAnchor],
+        _rowHeadersWidthConstraint,
 
-        // Resize handle: bottom, full width, fixed height
-        [_resizeHandle.topAnchor constraintEqualToAnchor:_scrollView.bottomAnchor],
+        // Waveform scroll view: right of row headers, below header, above resize handle
+        [_scrollView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
+        [_scrollView.leadingAnchor constraintEqualToAnchor:_rowHeadersScrollView.trailingAnchor],
+        [_scrollView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_scrollView.bottomAnchor constraintEqualToAnchor:_resizeHandle.topAnchor],
+
+        // Resize handle: bottom, full width
         [_resizeHandle.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
         [_resizeHandle.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [_resizeHandle.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
         [_resizeHandle.heightAnchor constraintEqualToConstant:kStemsResizeHandleHeight],
     ]];
+}
+
+#pragma mark - Row Header Width
+
+- (void)setRowHeaderWidth:(CGFloat)rowHeaderWidth {
+    _rowHeaderWidth = rowHeaderWidth;
+    _rowHeadersWidthConstraint.constant = rowHeaderWidth;
+}
+
+#pragma mark - Vertical Scroll Sync
+
+- (void)waveformScrollDidChange:(NSNotification *)note {
+    if (_syncingScroll) return;
+    _syncingScroll = YES;
+    NSPoint origin = _scrollView.contentView.bounds.origin;
+    [_rowHeadersScrollView.contentView scrollToPoint:NSMakePoint(0, origin.y)];
+    [_rowHeadersScrollView reflectScrolledClipView:_rowHeadersScrollView.contentView];
+    _syncingScroll = NO;
 }
 
 #pragma mark - Collapse/Expand
@@ -316,25 +447,24 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 }
 
 - (void)reloadStems {
-    // Remove old mini waveform views
+    // Remove old views
     for (XLMiniWaveformView *mv in _miniWaveformViews) {
         [mv removeFromSuperview];
     }
     [_miniWaveformViews removeAllObjects];
 
+    for (XLStemRowHeaderView *rh in _rowHeaderViews) {
+        [rh removeFromSuperview];
+    }
+    [_rowHeaderViews removeAllObjects];
+
     NSArray<XLStemData *> *stems = _stemManager.stems;
-    NSLog(@"[Stems] reloadStems: %lu stems, collapsed=%d", (unsigned long)stems.count, _collapsed);
-    NSLog(@"[Stems]   container frame=%@ bounds=%@",
-          NSStringFromRect(self.frame), NSStringFromRect(self.bounds));
-    NSLog(@"[Stems]   scrollView frame=%@ bounds=%@",
-          NSStringFromRect(_scrollView.frame), NSStringFromRect(_scrollView.bounds));
 
     // Update title
     if (stems.count > 0) {
         _titleLabel.stringValue = [NSString stringWithFormat:@"Stems (%lu)", (unsigned long)stems.count];
     } else {
         _titleLabel.stringValue = @"Stems";
-        // No stems — collapse to header only
         _collapsed = YES;
         [self updateChevronImage];
         if ([_delegate respondsToSelector:@selector(stemsContainer:didChangeHeight:)]) {
@@ -343,51 +473,43 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         return;
     }
 
-    // Create mini waveform views (frame-based layout for NSScrollView reliability)
-    CGFloat width = NSWidth(_scrollView.bounds);
-    if (width < 100) width = 800;
+    // Create mini waveform views and row header views
+    CGFloat waveWidth = NSWidth(_scrollView.bounds);
+    if (waveWidth < 100) waveWidth = 800;
     CGFloat y = 0;
 
-    NSLog(@"[Stems]   creating views with width=%.0f", width);
-
     for (XLStemData *stem in stems) {
-        XLMiniWaveformView *mv = [[XLMiniWaveformView alloc] initWithFrame:NSMakeRect(0, y, width, kMiniWaveformHeight)];
-        mv.autoresizingMask = NSViewWidthSizable;
+        // Row header (left side)
+        XLStemRowHeaderView *rh = [[XLStemRowHeaderView alloc] initWithFrame:NSMakeRect(0, y, _rowHeaderWidth, kMiniWaveformHeight)];
+        rh.autoresizingMask = NSViewWidthSizable;
+        rh.stemName = stem.name;
+        rh.stemColor = stem.waveformColor;
+        [_rowHeadersDocView addSubview:rh];
+        [_rowHeaderViews addObject:rh];
 
-        // Add to view hierarchy FIRST so layer is in the tree
+        // Mini waveform (right side)
+        XLMiniWaveformView *mv = [[XLMiniWaveformView alloc] initWithFrame:NSMakeRect(0, y, waveWidth, kMiniWaveformHeight)];
+        mv.autoresizingMask = NSViewWidthSizable;
         [_stackDocumentView addSubview:mv];
         [_miniWaveformViews addObject:mv];
 
-        // Now set properties (triggers setNeedsDisplay on an in-tree layer)
         mv.stemData = stem;
         mv.zoomLevel = _zoomLevel;
         mv.scrollOffsetX = _scrollOffsetX;
         mv.sequenceLengthMS = _sequenceLengthMS;
         mv.playbackPositionMS = _playbackPositionMS;
 
-        NSLog(@"[Stems]   view for '%@': frame=%@ loading=%d buckets=%lu duration=%.0fms",
-              stem.name, NSStringFromRect(mv.frame), stem.isLoading,
-              (unsigned long)stem.overviewBuckets.count, stem.durationMS);
-
         y += kMiniWaveformHeight;
     }
 
-    // Set document view frame for scrollable content size
-    [_stackDocumentView setFrame:NSMakeRect(0, 0, width, y)];
-
-    // Ensure all views get a display pass
-    for (XLMiniWaveformView *mv in _miniWaveformViews) {
-        [mv setNeedsDisplay:YES];
-    }
-    NSLog(@"[Stems]   docView frame=%@ subviews=%lu",
-          NSStringFromRect(_stackDocumentView.frame),
-          (unsigned long)_stackDocumentView.subviews.count);
+    // Set document view frames for scrollable content size
+    [_stackDocumentView setFrame:NSMakeRect(0, 0, waveWidth, y)];
+    [_rowHeadersDocView setFrame:NSMakeRect(0, 0, _rowHeaderWidth, y)];
 
     // Auto-expand if stems were just added and panel is collapsed
     if (stems.count > 0 && _collapsed) {
         self.collapsed = NO;
         CGFloat targetHeight = _savedExpandedHeight;
-        NSLog(@"[Stems]   auto-expanding to height=%.0f", targetHeight);
         if ([_delegate respondsToSelector:@selector(stemsContainer:didChangeHeight:)]) {
             [_delegate stemsContainer:self didChangeHeight:targetHeight];
         }

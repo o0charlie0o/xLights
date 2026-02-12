@@ -36,7 +36,4 @@ static const CGFloat kMiniWaveformHeight = 30.0;
 /// Current playback position in milliseconds (for playhead line).
 @property (nonatomic, assign) CGFloat playbackPositionMS;
 
-/// Request a redraw on the next display cycle.
-- (void)setNeedsRedraw;
-
 @end

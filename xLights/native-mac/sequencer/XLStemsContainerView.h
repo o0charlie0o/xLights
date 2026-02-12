@@ -46,7 +46,7 @@ static const CGFloat kStemsMaxExpandedHeight = 400.0;
 
 /// Container view sitting between the waveform and effects grid.
 /// Contains a header bar (collapse/expand, label, import button),
-/// a scrollable area of mini waveforms, and a resize handle.
+/// row headers on the left, a scrollable area of mini waveforms, and a resize handle.
 @interface XLStemsContainerView : NSView
 
 /// The stem manager providing data.
@@ -57,6 +57,9 @@ static const CGFloat kStemsMaxExpandedHeight = 400.0;
 
 /// Whether the panel is collapsed.
 @property (nonatomic, assign) BOOL collapsed;
+
+/// Width of the left-side row headers area (should match kRowHeaderWidth).
+@property (nonatomic, assign) CGFloat rowHeaderWidth;
 
 /// Toggle collapse/expand with animation.
 - (void)toggleCollapsed;

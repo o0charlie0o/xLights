@@ -64,6 +64,9 @@ typedef struct {
     NSInteger layerIndex;    // -1 for main element row, 0+ for specific layer rows
     BOOL isLayerRow;         // YES if this is a layer sub-row (not the main element)
     NSInteger timingColorIndex;  // Sequential color index for timing tracks (0, 1, 2...)
+    BOOL isFolder;           // YES if this row is a track folder header
+    BOOL folderCollapsed;    // YES if folder is collapsed (children hidden)
+    char folderName[256];    // For folder rows: the folder name; for children: parent folder name
 } XLRowEntry;
 
 // Effect data stored as plain C struct for real sequence effects
@@ -763,6 +766,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _stemsContainerView = [[XLStemsContainerView alloc] initWithFrame:NSZeroRect];
     _stemsContainerView.stemManager = _stemManager;
     _stemsContainerView.delegate = self;
+    _stemsContainerView.rowHeaderWidth = kRowHeaderWidth;
     [_stemsContainerView setSequenceLengthMS:_sequenceDurationMS];
     [_stemsContainerView setZoomLevel:_effectsGridView.zoomLevel];
     [view addSubview:_stemsContainerView];
@@ -1598,6 +1602,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // This is the standard xLights behavior - timing tracks are always first
     [self sortRowsWithTimingFirst];
 
+    // Insert track folder headers and group elements
+    [self insertTrackFolderRows:elements];
+
     // Expand all rows with multiple layers by default
     // Iterate backwards so inserted rows don't shift indices of rows we haven't processed yet
     for (NSInteger r = (NSInteger)_rowCount - 1; r >= 0; r--) {
@@ -1711,6 +1718,134 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     free(otherRows);
 
     NSLog(@"XLSequencerViewController: Sorted %lu timing tracks to top", (unsigned long)timingCount);
+}
+
+- (void)insertTrackFolderRows:(NSArray<NSDictionary *> *)elements {
+    // Get track folders from the engine
+    NSArray<NSDictionary *> *folders = [self.engineBridge getTrackFolders];
+    if (folders.count == 0) return;
+
+    // Build a lookup: folder name -> folder info
+    NSMutableDictionary<NSString *, NSDictionary *> *folderLookup = [NSMutableDictionary dictionary];
+    for (NSDictionary *f in folders) {
+        folderLookup[f[@"name"]] = f;
+    }
+
+    // Build element-name -> folder-name mapping from the elements array
+    NSMutableDictionary<NSString *, NSString *> *elementFolderMap = [NSMutableDictionary dictionary];
+    for (NSDictionary *elem in elements) {
+        NSString *folder = elem[@"folder"];
+        if (folder && folder.length > 0) {
+            elementFolderMap[elem[@"name"]] = folder;
+        }
+    }
+
+    if (elementFolderMap.count == 0) return;
+
+    // Set folderName on existing rows (non-timing only)
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        XLRowEntry *row = &_rowData[i];
+        if (row->type == XLElementTypeTiming) continue;
+
+        NSString *rowName = [NSString stringWithUTF8String:row->name];
+        NSString *folder = elementFolderMap[rowName];
+        if (folder) {
+            strncpy(row->folderName, [folder UTF8String], sizeof(row->folderName) - 1);
+            row->folderName[sizeof(row->folderName) - 1] = '\0';
+            row->indent = 1;
+        }
+    }
+
+    // Now we need to group elements by folder and insert folder header rows.
+    // Strategy: scan non-timing rows and when we see a new folder group, insert
+    // a header row before the first element of that group.
+
+    // Collect the ordered folder names (in the order they first appear)
+    NSMutableArray<NSString *> *orderedFolders = [NSMutableArray array];
+    NSMutableSet<NSString *> *seenFolders = [NSMutableSet set];
+    for (NSUInteger i = _timingRowCount; i < _rowCount; i++) {
+        XLRowEntry *row = &_rowData[i];
+        if (row->folderName[0] != '\0') {
+            NSString *fn = [NSString stringWithUTF8String:row->folderName];
+            if (![seenFolders containsObject:fn]) {
+                [orderedFolders addObject:fn];
+                [seenFolders addObject:fn];
+            }
+        }
+    }
+
+    if (orderedFolders.count == 0) return;
+
+    // Re-sort non-timing rows: folders appear inline at the position of their first member.
+    // Scan original order, and when we encounter the first element of a folder, emit
+    // the folder header + all its children. Subsequent elements of that folder are skipped
+    // (already emitted with the header). Ungrouped elements are emitted in their original position.
+    NSUInteger nonTimingCount = _rowCount - _timingRowCount;
+    XLRowEntry *sortedNonTiming = (XLRowEntry *)calloc(nonTimingCount + orderedFolders.count, sizeof(XLRowEntry));
+    NSUInteger writeIdx = 0;
+
+    NSMutableSet<NSString *> *emittedFolders = [NSMutableSet set];
+
+    for (NSUInteger i = _timingRowCount; i < _rowCount; i++) {
+        XLRowEntry *row = &_rowData[i];
+
+        if (row->folderName[0] != '\0') {
+            NSString *fn = [NSString stringWithUTF8String:row->folderName];
+            if ([emittedFolders containsObject:fn]) {
+                // Already emitted this folder and its children — skip
+                continue;
+            }
+            [emittedFolders addObject:fn];
+
+            const char *fnCStr = [fn UTF8String];
+
+            // Insert folder header row at this position
+            XLRowEntry *folderRow = &sortedNonTiming[writeIdx++];
+            memset(folderRow, 0, sizeof(XLRowEntry));
+            strncpy(folderRow->name, fnCStr, sizeof(folderRow->name) - 1);
+            folderRow->name[sizeof(folderRow->name) - 1] = '\0';
+            strncpy(folderRow->folderName, fnCStr, sizeof(folderRow->folderName) - 1);
+            folderRow->folderName[sizeof(folderRow->folderName) - 1] = '\0';
+            folderRow->type = XLElementTypeModel;
+            folderRow->isFolder = YES;
+            folderRow->expandable = YES;
+            folderRow->indent = 0;
+            folderRow->elementIndex = -1;
+            folderRow->layerIndex = -1;
+
+            NSDictionary *fInfo = folderLookup[fn];
+            BOOL collapsed = [fInfo[@"collapsed"] boolValue];
+            folderRow->folderCollapsed = collapsed;
+            folderRow->expanded = !collapsed;
+
+            // Insert ALL children of this folder (if not collapsed)
+            if (!collapsed) {
+                for (NSUInteger j = _timingRowCount; j < _rowCount; j++) {
+                    if (strcmp(_rowData[j].folderName, fnCStr) == 0) {
+                        sortedNonTiming[writeIdx++] = _rowData[j];
+                    }
+                }
+            }
+        } else {
+            // Ungrouped element — emit in its original position
+            sortedNonTiming[writeIdx++] = *row;
+        }
+    }
+
+    // Ensure capacity for the new total row count
+    NSUInteger newRowCount = _timingRowCount + writeIdx;
+    if (newRowCount > _rowCapacity) {
+        _rowCapacity = newRowCount + 32;
+        _rowData = (XLRowEntry *)realloc(_rowData, _rowCapacity * sizeof(XLRowEntry));
+    }
+
+    // Copy sorted non-timing rows back after timing rows
+    memcpy(&_rowData[_timingRowCount], sortedNonTiming, writeIdx * sizeof(XLRowEntry));
+    _rowCount = newRowCount;
+
+    free(sortedNonTiming);
+
+    NSLog(@"XLSequencerViewController: Inserted %lu track folder headers", (unsigned long)orderedFolders.count);
 }
 
 - (void)buildDemoData {
@@ -4480,6 +4615,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     XLRowEntry *rowEntry = &_rowData[row];
     NSString *name = [NSString stringWithUTF8String:rowEntry->name];
 
+    // Folder rows just show folder name
+    if (rowEntry->isFolder) return name;
+
     // For main rows (not layer sub-rows), append layer count if > 1
     if (!rowEntry->isLayerRow && rowEntry->effectLayerCount > 1) {
         return [NSString stringWithFormat:@"%@ [%ld]", name, (long)rowEntry->effectLayerCount];
@@ -4513,12 +4651,28 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     return _rowData[row].timingColorIndex;
 }
 
+- (BOOL)rowHeadings:(XLRowHeadingsView *)view isFolderAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return NO;
+    return _rowData[row].isFolder;
+}
+
+- (BOOL)rowHeadings:(XLRowHeadingsView *)view isFolderCollapsedAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return NO;
+    return _rowData[row].folderCollapsed;
+}
+
 #pragma mark - XLRowHeadingsDelegate
 
 - (void)rowHeadings:(XLRowHeadingsView *)view didToggleExpandAtRow:(NSInteger)row {
     if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
 
     XLRowEntry *mainRow = &_rowData[row];
+
+    // Handle folder expand/collapse
+    if (mainRow->isFolder) {
+        [self toggleFolderAtRow:row];
+        return;
+    }
 
     // Only allow expand/collapse on main element rows with multiple layers
     if (mainRow->isLayerRow || !mainRow->expandable) return;
@@ -4527,6 +4681,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     mainRow->expanded = !wasExpanded;
 
     NSLog(@"Toggled expand for row %ld: %s (layers: %ld)", (long)row, mainRow->name, (long)mainRow->effectLayerCount);
+
+    // Compute indent for layer rows based on whether parent is in a folder
+    NSInteger layerIndent = (mainRow->folderName[0] != '\0') ? 2 : 1;
 
     if (!wasExpanded) {
         // EXPANDING: Insert layer rows after the main row
@@ -4561,9 +4718,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             layerRow->timingColorIndex = mainRow->timingColorIndex;
             layerRow->layerIndex = i + 1;  // Layer 1, 2, 3, etc.
             layerRow->isLayerRow = YES;
-            layerRow->indent = 1;
+            layerRow->indent = layerIndent;
             layerRow->expandable = NO;
             layerRow->expanded = NO;
+            // Inherit folder membership
+            strncpy(layerRow->folderName, mainRow->folderName, sizeof(layerRow->folderName));
         }
 
         _rowCount = newRowCount;
@@ -4627,24 +4786,115 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     if (fromRow < 0 || fromRow >= (NSInteger)_rowCount) return;
     if (toRow < 0 || toRow > (NSInteger)_rowCount) return;
 
-    // Save the row being moved
-    XLRowEntry moved = _rowData[fromRow];
+    XLRowEntry *sourceEntry = &_rowData[fromRow];
 
-    // Shift elements to fill the gap
-    NSInteger insertIdx = (toRow > fromRow) ? toRow - 1 : toRow;
-    if (insertIdx > (NSInteger)_rowCount - 1) insertIdx = (NSInteger)_rowCount - 1;
+    if (sourceEntry->isFolder) {
+        // Moving an entire folder — count children that follow
+        NSInteger childCount = 0;
+        const char *fn = sourceEntry->folderName;
+        for (NSInteger i = fromRow + 1; i < (NSInteger)_rowCount; i++) {
+            if (!_rowData[i].isFolder && strcmp(_rowData[i].folderName, fn) == 0) {
+                childCount++;
+            } else {
+                break;
+            }
+        }
 
-    if (fromRow < insertIdx) {
-        // Moving down: shift elements up
-        memmove(&_rowData[fromRow], &_rowData[fromRow + 1],
-                (insertIdx - fromRow) * sizeof(XLRowEntry));
-    } else if (fromRow > insertIdx) {
-        // Moving up: shift elements down
-        memmove(&_rowData[insertIdx + 1], &_rowData[insertIdx],
-                (fromRow - insertIdx) * sizeof(XLRowEntry));
+        NSInteger blockSize = 1 + childCount;
+
+        // Prevent dropping inside the folder's own range
+        if (toRow > fromRow && toRow <= fromRow + blockSize) return;
+
+        // Save the block
+        XLRowEntry *block = (XLRowEntry *)malloc((size_t)blockSize * sizeof(XLRowEntry));
+        memcpy(block, &_rowData[fromRow], (size_t)blockSize * sizeof(XLRowEntry));
+
+        // Calculate adjusted insert position
+        NSInteger adjustedTo = (toRow > fromRow) ? toRow - blockSize : toRow;
+        if (adjustedTo < 0) adjustedTo = 0;
+        if (adjustedTo > (NSInteger)_rowCount - blockSize)
+            adjustedTo = (NSInteger)_rowCount - blockSize;
+
+        // Remove block from old position
+        if (fromRow + blockSize < (NSInteger)_rowCount) {
+            memmove(&_rowData[fromRow], &_rowData[fromRow + blockSize],
+                    (_rowCount - (NSUInteger)(fromRow + blockSize)) * sizeof(XLRowEntry));
+        }
+        _rowCount -= (NSUInteger)blockSize;
+
+        // Insert block at new position
+        if (adjustedTo < (NSInteger)_rowCount) {
+            memmove(&_rowData[adjustedTo + blockSize], &_rowData[adjustedTo],
+                    (_rowCount - (NSUInteger)adjustedTo) * sizeof(XLRowEntry));
+        }
+        memcpy(&_rowData[adjustedTo], block, (size_t)blockSize * sizeof(XLRowEntry));
+        _rowCount += (NSUInteger)blockSize;
+
+        free(block);
+    } else if (sourceEntry->folderName[0] != '\0' && !sourceEntry->isLayerRow) {
+        // Moving a child element — check if it's leaving its folder
+        const char *currentFolderCStr = sourceEntry->folderName;
+
+        // Find the folder header row
+        NSInteger folderHeaderRow = -1;
+        for (NSInteger i = fromRow - 1; i >= 0; i--) {
+            if (_rowData[i].isFolder && strcmp(_rowData[i].folderName, currentFolderCStr) == 0) {
+                folderHeaderRow = i;
+                break;
+            }
+        }
+
+        // Find the last child in the folder
+        NSInteger lastFolderChild = fromRow;
+        if (folderHeaderRow >= 0) {
+            for (NSInteger i = folderHeaderRow + 1; i < (NSInteger)_rowCount; i++) {
+                if (!_rowData[i].isFolder && strcmp(_rowData[i].folderName, currentFolderCStr) == 0) {
+                    lastFolderChild = i;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // If dropping outside the folder range, ungroup
+        BOOL leavingFolder = (toRow <= folderHeaderRow || toRow > lastFolderChild + 1);
+        if (leavingFolder) {
+            NSString *elemName = [NSString stringWithUTF8String:sourceEntry->name];
+            [self.engineBridge setElement:elemName folder:nil];
+            sourceEntry->folderName[0] = '\0';
+            sourceEntry->indent = 0;
+        }
+
+        // Standard single-row reorder
+        XLRowEntry moved = _rowData[fromRow];
+        NSInteger insertIdx = (toRow > fromRow) ? toRow - 1 : toRow;
+        if (insertIdx > (NSInteger)_rowCount - 1) insertIdx = (NSInteger)_rowCount - 1;
+        if (insertIdx < 0) insertIdx = 0;
+
+        if (fromRow < insertIdx) {
+            memmove(&_rowData[fromRow], &_rowData[fromRow + 1],
+                    (size_t)(insertIdx - fromRow) * sizeof(XLRowEntry));
+        } else if (fromRow > insertIdx) {
+            memmove(&_rowData[insertIdx + 1], &_rowData[insertIdx],
+                    (size_t)(fromRow - insertIdx) * sizeof(XLRowEntry));
+        }
+        _rowData[insertIdx] = moved;
+    } else {
+        // Standard single-row reorder (no folder involvement)
+        XLRowEntry moved = _rowData[fromRow];
+        NSInteger insertIdx = (toRow > fromRow) ? toRow - 1 : toRow;
+        if (insertIdx > (NSInteger)_rowCount - 1) insertIdx = (NSInteger)_rowCount - 1;
+        if (insertIdx < 0) insertIdx = 0;
+
+        if (fromRow < insertIdx) {
+            memmove(&_rowData[fromRow], &_rowData[fromRow + 1],
+                    (size_t)(insertIdx - fromRow) * sizeof(XLRowEntry));
+        } else if (fromRow > insertIdx) {
+            memmove(&_rowData[insertIdx + 1], &_rowData[insertIdx],
+                    (size_t)(fromRow - insertIdx) * sizeof(XLRowEntry));
+        }
+        _rowData[insertIdx] = moved;
     }
-
-    _rowData[insertIdx] = moved;
 
     [_rowHeadingsView reloadData];
     [_effectsGridView reloadData];
@@ -4934,6 +5184,291 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)rowHeadingsCollapseAllLayers:(XLRowHeadingsView *)view {
     // Same as collapse all models - layers are model sub-rows
     [self rowHeadingsCollapseAllModels:view];
+}
+
+- (void)toggleFolderAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+
+    XLRowEntry *folderRow = &_rowData[row];
+    if (!folderRow->isFolder) return;
+
+    NSString *folderName = [NSString stringWithUTF8String:folderRow->folderName];
+    BOOL wasCollapsed = folderRow->folderCollapsed;
+
+    if (wasCollapsed) {
+        // EXPANDING: Insert child rows from engine data
+        folderRow->folderCollapsed = NO;
+        folderRow->expanded = YES;
+        [self.engineBridge setTrackFolderCollapsed:folderName collapsed:NO];
+
+        // Get all elements from the engine and find those in this folder
+        NSArray<NSDictionary *> *allElements = [self.engineBridge getSequenceElements];
+        NSMutableArray<NSDictionary *> *folderElements = [NSMutableArray array];
+        for (NSDictionary *elem in allElements) {
+            NSString *ef = elem[@"folder"];
+            if ([ef isEqualToString:folderName]) {
+                [folderElements addObject:elem];
+            }
+        }
+
+        if (folderElements.count == 0) return;
+
+        // Count total rows to insert (element + expanded layers)
+        NSUInteger rowsToInsert = folderElements.count;
+
+        // Ensure capacity
+        NSUInteger newRowCount = _rowCount + rowsToInsert;
+        if (newRowCount > _rowCapacity) {
+            _rowCapacity = newRowCount + 32;
+            _rowData = (XLRowEntry *)realloc(_rowData, _rowCapacity * sizeof(XLRowEntry));
+            folderRow = &_rowData[row]; // pointer may have moved
+        }
+
+        // Shift rows down
+        NSInteger insertPos = row + 1;
+        if (insertPos < (NSInteger)_rowCount) {
+            memmove(&_rowData[insertPos + rowsToInsert], &_rowData[insertPos],
+                    (_rowCount - (NSUInteger)insertPos) * sizeof(XLRowEntry));
+        }
+
+        // Insert child rows
+        for (NSUInteger ci = 0; ci < folderElements.count; ci++) {
+            NSDictionary *elem = folderElements[ci];
+            XLRowEntry *childRow = &_rowData[insertPos + ci];
+            memset(childRow, 0, sizeof(XLRowEntry));
+
+            NSString *name = elem[@"name"];
+            strncpy(childRow->name, [name UTF8String], sizeof(childRow->name) - 1);
+            childRow->name[sizeof(childRow->name) - 1] = '\0';
+            strncpy(childRow->folderName, [folderName UTF8String], sizeof(childRow->folderName) - 1);
+            childRow->folderName[sizeof(childRow->folderName) - 1] = '\0';
+
+            BOOL isGroup = [elem[@"isGroup"] boolValue];
+            NSString *typeStr = elem[@"type"];
+            if (isGroup || [typeStr isEqualToString:@"group"]) {
+                childRow->type = XLElementTypeModelGroup;
+            } else {
+                childRow->type = XLElementTypeModel;
+            }
+
+            childRow->effectLayerCount = [elem[@"effectLayerCount"] integerValue];
+            childRow->elementIndex = [elem[@"index"] integerValue];
+            childRow->indent = 1;
+            childRow->layerIndex = -1;
+            childRow->isLayerRow = NO;
+            childRow->expandable = (childRow->effectLayerCount > 1);
+            childRow->expanded = NO;
+        }
+
+        _rowCount = newRowCount;
+    } else {
+        // COLLAPSING: Remove all child rows (and their layer sub-rows)
+        folderRow->folderCollapsed = YES;
+        folderRow->expanded = NO;
+        [self.engineBridge setTrackFolderCollapsed:folderName collapsed:YES];
+
+        const char *fn = [folderName UTF8String];
+        NSInteger rowsToRemove = 0;
+        for (NSInteger i = row + 1; i < (NSInteger)_rowCount; i++) {
+            // Child rows and their layer sub-rows share the same folderName
+            if (strcmp(_rowData[i].folderName, fn) == 0 && !_rowData[i].isFolder) {
+                rowsToRemove++;
+            } else {
+                break;
+            }
+        }
+
+        if (rowsToRemove > 0) {
+            NSInteger removeStart = row + 1;
+            NSInteger removeEnd = removeStart + rowsToRemove;
+            if (removeEnd < (NSInteger)_rowCount) {
+                memmove(&_rowData[removeStart], &_rowData[removeEnd],
+                        (_rowCount - (NSUInteger)removeEnd) * sizeof(XLRowEntry));
+            }
+            _rowCount -= (NSUInteger)rowsToRemove;
+        }
+    }
+
+    // Update max scroll and reload
+    if (_scrollCoordinator) {
+        CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
+        CGFloat maxScrollY = _rowCount * _effectsGridView.rowHeight - viewHeight;
+        _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
+    }
+
+    [_rowHeadingsView reloadData];
+    [_effectsGridView reloadData];
+}
+
+- (void)rowHeadingsCollapseAllFolders:(XLRowHeadingsView *)view {
+    BOOL changed = NO;
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].isFolder && !_rowData[i].folderCollapsed) {
+            // Collapse by toggling
+            [self toggleFolderAtRow:(NSInteger)i];
+            changed = YES;
+            // After collapsing, children are removed, continue from same index
+            // since the next row is now different
+            i--; // Re-check this index since toggleFolderAtRow shifts rows
+            // Actually we just need to continue scanning from current position
+            i++; // Undo the decrement, the folder row itself stays
+        }
+    }
+    if (changed) {
+        [_rowHeadingsView reloadData];
+        [_effectsGridView reloadData];
+    }
+}
+
+- (void)rowHeadingsExpandAllFolders:(XLRowHeadingsView *)view {
+    BOOL changed = NO;
+    for (NSUInteger i = 0; i < _rowCount; i++) {
+        if (_rowData[i].isFolder && _rowData[i].folderCollapsed) {
+            [self toggleFolderAtRow:(NSInteger)i];
+            changed = YES;
+        }
+    }
+    if (changed) {
+        [_rowHeadingsView reloadData];
+        [_effectsGridView reloadData];
+    }
+}
+
+#pragma mark - Track Folder Operations
+
+- (void)createTrackFolderFromSelection {
+    // Collect selected model row names (non-timing, non-folder, non-layer rows)
+    NSMutableArray<NSString *> *selectedNames = [NSMutableArray array];
+    NSIndexSet *selectedRows = _rowHeadingsView.selectedRows;
+
+    [selectedRows enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if (idx >= self->_rowCount) return;
+        XLRowEntry *row = &self->_rowData[idx];
+        if (!row->isFolder && !row->isLayerRow && row->type != XLElementTypeTiming) {
+            [selectedNames addObject:[NSString stringWithUTF8String:row->name]];
+        }
+    }];
+
+    if (selectedNames.count == 0) return;
+
+    // Ask for folder name
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Create Track Folder";
+    alert.informativeText = @"Enter a name for the new track folder:";
+    [alert addButtonWithTitle:@"Create"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+    input.stringValue = @"New Folder";
+    alert.accessoryView = input;
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *folderName = input.stringValue;
+    if (folderName.length == 0) return;
+
+    [self.engineBridge createTrackFolder:folderName];
+    for (NSString *name in selectedNames) {
+        [self.engineBridge setElement:name folder:folderName];
+    }
+
+    [self loadRealSequenceData];
+    [_rowHeadingsView reloadData];
+    [_effectsGridView reloadData];
+}
+
+- (void)moveElementAtRow:(NSInteger)row toFolder:(NSString *)folderName {
+    if (row < 0 || row >= (NSInteger)_rowCount) return;
+
+    // If this row is part of a multi-selection, move all selected eligible rows
+    NSIndexSet *selectedRows = _rowHeadingsView.selectedRows;
+    if (selectedRows.count > 1 && [selectedRows containsIndex:(NSUInteger)row]) {
+        [selectedRows enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+            if (idx >= self->_rowCount) return;
+            XLRowEntry *entry = &self->_rowData[idx];
+            if (entry->isFolder || entry->isLayerRow || entry->type == XLElementTypeTiming) return;
+            NSString *elemName = [NSString stringWithUTF8String:entry->name];
+            [self.engineBridge setElement:elemName folder:folderName];
+        }];
+    } else {
+        XLRowEntry *entry = &_rowData[row];
+        if (entry->isFolder || entry->isLayerRow || entry->type == XLElementTypeTiming) return;
+        NSString *elemName = [NSString stringWithUTF8String:entry->name];
+        [self.engineBridge setElement:elemName folder:folderName];
+    }
+
+    [self loadRealSequenceData];
+    [_rowHeadingsView reloadData];
+    [_effectsGridView reloadData];
+}
+
+- (void)removeElementFromFolderAtRow:(NSInteger)row {
+    [self moveElementAtRow:row toFolder:nil];
+}
+
+- (void)renameFolderAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount) return;
+    XLRowEntry *entry = &_rowData[row];
+    if (!entry->isFolder) return;
+
+    NSString *oldName = [NSString stringWithUTF8String:entry->folderName];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Rename Track Folder";
+    alert.informativeText = @"Enter the new name:";
+    [alert addButtonWithTitle:@"Rename"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+    input.stringValue = oldName;
+    alert.accessoryView = input;
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *newName = input.stringValue;
+    if (newName.length == 0 || [newName isEqualToString:oldName]) return;
+
+    [self.engineBridge renameTrackFolder:oldName toName:newName];
+
+    [self loadRealSequenceData];
+    [_rowHeadingsView reloadData];
+    [_effectsGridView reloadData];
+}
+
+- (void)deleteFolderAtRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)_rowCount) return;
+    XLRowEntry *entry = &_rowData[row];
+    if (!entry->isFolder) return;
+
+    NSString *folderName = [NSString stringWithUTF8String:entry->folderName];
+
+    [self.engineBridge deleteTrackFolder:folderName];
+
+    [self loadRealSequenceData];
+    [_rowHeadingsView reloadData];
+    [_effectsGridView reloadData];
+}
+
+#pragma mark - Track Folder Delegate Methods
+
+- (void)rowHeadings:(XLRowHeadingsView *)view createFolderFromRow:(NSInteger)row {
+    [self createTrackFolderFromSelection];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view moveRowToFolder:(NSInteger)row folderName:(NSString *)folderName {
+    [self moveElementAtRow:row toFolder:folderName];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view removeFromFolderAtRow:(NSInteger)row {
+    [self removeElementFromFolderAtRow:row];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view renameFolderAtRow:(NSInteger)row {
+    [self renameFolderAtRow:row];
+}
+
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteFolderAtRow:(NSInteger)row {
+    [self deleteFolderAtRow:row];
 }
 
 #pragma mark - Model Operations (Row Heading Context Menu)
