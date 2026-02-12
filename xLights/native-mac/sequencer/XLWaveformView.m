@@ -40,6 +40,17 @@ static const NSUInteger kMaxOverviewBuckets = 65536;
 
 @interface XLWaveformView () {
     CVDisplayLinkRef _displayLink;
+
+    // Visible-region waveform cache: covers viewport + padding.
+    // Rebuilt when scrolling outside cached region, or on zoom/height/data change.
+    // Rendered at contentsScale resolution for crisp Retina display.
+    CGImageRef _cachedWaveformImage;
+    CGFloat _cacheZoomLevel;
+    CGFloat _cacheScrollX;     // left edge of cached region in zoomed-pixel coordinates
+    CGFloat _cacheWidthPts;    // width of cached region in points
+    CGFloat _cacheHeightPts;   // height in points when cached
+    CGFloat _cacheScale;       // backing scale factor when cached
+    BOOL _cacheStereo;         // stereo mode when cached
 }
 
 @property (nonatomic, strong) XLAudioSampleData *audioData;
@@ -51,13 +62,6 @@ static const NSUInteger kMaxOverviewBuckets = 65536;
 @property (nonatomic, assign) NSPoint mouseDownPoint;
 @property (nonatomic, assign) CGFloat dragStartMS;
 @property (nonatomic, assign) BOOL isDragSelecting;
-
-// Cached waveform path for efficient redraw
-@property (nonatomic, assign) CGMutablePathRef cachedWaveformPath;
-@property (nonatomic, assign) CGFloat cachedZoomLevel;
-@property (nonatomic, assign) CGFloat cachedScrollOffsetX;
-@property (nonatomic, assign) CGFloat cachedWidth;
-@property (nonatomic, assign) CGFloat cachedHeight;
 
 @end
 
@@ -120,12 +124,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     _loopRegionStartMS = -1;
     _loopRegionEndMS = -1;
 
-    // Waveform path cache
-    _cachedWaveformPath = NULL;
-    _cachedZoomLevel = 0;
-    _cachedScrollOffsetX = -1;
-    _cachedWidth = 0;
-    _cachedHeight = 0;
+    _cachedWaveformImage = NULL;
 
     self.wantsLayer = YES;
 
@@ -149,10 +148,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
         CVDisplayLinkRelease(_displayLink);
         _displayLink = NULL;
     }
-    if (_cachedWaveformPath) {
-        CGPathRelease(_cachedWaveformPath);
-        _cachedWaveformPath = NULL;
-    }
+    CGImageRelease(_cachedWaveformImage);
 }
 
 #pragma mark - Layer Backing
@@ -177,6 +173,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     [super viewDidChangeBackingProperties];
     CGFloat scale = self.window.backingScaleFactor ?: 1.0;
     self.layer.contentsScale = scale;
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
 }
 
@@ -197,17 +194,14 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     if (self.window) {
         CGFloat scale = self.window.backingScaleFactor;
         self.layer.contentsScale = scale;
+        [self invalidateWaveformCache];
         _needsRedraw = YES;
     }
 }
 
 - (void)setFrameSize:(NSSize)newSize {
     [super setFrameSize:newSize];
-    // Invalidate cached path when view size changes
-    if (_cachedWaveformPath) {
-        CGPathRelease(_cachedWaveformPath);
-        _cachedWaveformPath = NULL;
-    }
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
 }
 
@@ -223,12 +217,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)loadAudioData:(XLAudioSampleData *)audioData {
     _audioData = audioData;
-
-    // Invalidate cached waveform path
-    if (_cachedWaveformPath) {
-        CGPathRelease(_cachedWaveformPath);
-        _cachedWaveformPath = NULL;
-    }
+    [self invalidateWaveformCache];
 
     if (!audioData || audioData.sampleCount == 0) {
         _overviewBuckets = nil;
@@ -254,6 +243,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)clearWaveform {
     _audioData = nil;
     _overviewBuckets = nil;
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
 }
 
@@ -262,22 +252,13 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)setZoomLevel:(CGFloat)zoomLevel {
     if (fabs(zoomLevel - _zoomLevel) < 0.00001) return;
     _zoomLevel = zoomLevel;
-    // Invalidate cached path when zoom changes
-    if (_cachedWaveformPath) {
-        CGPathRelease(_cachedWaveformPath);
-        _cachedWaveformPath = NULL;
-    }
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
 }
 
 - (void)setScrollOffsetX:(CGFloat)scrollOffsetX {
     if (fabs(scrollOffsetX - _scrollOffsetX) < 0.01) return;
     _scrollOffsetX = scrollOffsetX;
-    // Invalidate cached path when scroll position changes
-    if (_cachedWaveformPath) {
-        CGPathRelease(_cachedWaveformPath);
-        _cachedWaveformPath = NULL;
-    }
     _needsRedraw = YES;
     // Trigger immediate redraw for smooth synchronized scrolling
     [self.layer setNeedsDisplay];
@@ -292,11 +273,13 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)setSequenceLengthMS:(CGFloat)sequenceLengthMS {
     _sequenceLengthMS = sequenceLengthMS;
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
 }
 
 - (void)setShowStereo:(BOOL)showStereo {
     _showStereo = showStereo;
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
 }
 
@@ -338,6 +321,350 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     return (timeMS * _zoomLevel) - _scrollOffsetX;
 }
 
+#pragma mark - Waveform Cache
+
+- (void)invalidateWaveformCache {
+    CGImageRelease(_cachedWaveformImage);
+    _cachedWaveformImage = NULL;
+}
+
+- (void)rebuildWaveformCacheIfNeeded {
+    NSUInteger bucketCount = _overviewBuckets.count;
+    if (bucketCount == 0 || _sequenceLengthMS <= 0) return;
+
+    CGFloat height = CGRectGetHeight(self.layer.bounds);
+    CGFloat viewWidth = CGRectGetWidth(self.layer.bounds);
+    if (height < 1 || viewWidth < 1) return;
+
+    CGFloat scale = self.layer.contentsScale ?: 2.0;
+
+    // Check if existing cache covers the visible region
+    if (_cachedWaveformImage &&
+        fabs(_cacheZoomLevel - _zoomLevel) < 0.00001 &&
+        fabs(_cacheHeightPts - height) < 0.5 &&
+        fabs(_cacheScale - scale) < 0.01 &&
+        _cacheStereo == _showStereo &&
+        _scrollOffsetX >= _cacheScrollX &&
+        (_scrollOffsetX + viewWidth) <= (_cacheScrollX + _cacheWidthPts + 0.5)) {
+        return;
+    }
+
+    // Cache viewport + 1x padding on each side (3x total)
+    CGFloat padding = viewWidth;
+    CGFloat cacheStartX = fmax(0, _scrollOffsetX - padding);
+    CGFloat fullZoomedWidth = _sequenceLengthMS * _zoomLevel;
+    CGFloat cacheWidthPts = viewWidth + 2 * padding;
+    if (cacheStartX + cacheWidthPts > fullZoomedWidth) {
+        cacheWidthPts = fullZoomedWidth - cacheStartX;
+    }
+    if (cacheWidthPts < 1) return;
+
+    // Create bitmap at Retina resolution
+    NSUInteger pixelWidth = (NSUInteger)(cacheWidthPts * scale);
+    NSUInteger pixelHeight = (NSUInteger)(height * scale);
+    if (pixelWidth == 0 || pixelHeight == 0) return;
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef bctx = CGBitmapContextCreate(NULL, pixelWidth, pixelHeight, 8,
+                                               pixelWidth * 4, cs,
+                                               kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
+    CGColorSpaceRelease(cs);
+    if (!bctx) return;
+
+    CGContextClearRect(bctx, CGRectMake(0, 0, pixelWidth, pixelHeight));
+
+    // Determine waveform color
+    CGFloat wR = kWaveR, wG = kWaveG, wB = kWaveB;
+    if (_waveformColor) {
+        CGFloat r, g, b, a;
+        NSColor *calibrated = [_waveformColor colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+        if (calibrated) {
+            [calibrated getRed:&r green:&g blue:&b alpha:&a];
+            wR = r; wG = g; wB = b;
+        }
+    }
+
+    double msPerBucket = _sequenceLengthMS / (double)bucketCount;
+
+    // Determine rendering mode: raw samples at high zoom, buckets at low zoom
+    CGFloat msPerPixel = 1.0 / (_zoomLevel * scale);
+    BOOL useSamples = NO;
+    float *samples = NULL;
+    NSUInteger sampleCount = 0;
+    NSUInteger channelCount = 0;
+    double sampleRate = 0;
+
+    if (_audioData && msPerPixel < msPerBucket * 2.0) {
+        useSamples = YES;
+        samples = _audioData.samples;
+        sampleCount = _audioData.sampleCount;
+        channelCount = _audioData.channelCount;
+        sampleRate = _audioData.sampleRate;
+    }
+
+    // Pre-extract bucket data to C array for fast access
+    XLWaveformBucket *bucketData = NULL;
+    if (!useSamples) {
+        bucketData = (XLWaveformBucket *)malloc(bucketCount * sizeof(XLWaveformBucket));
+        for (NSUInteger i = 0; i < bucketCount; i++) {
+            [_overviewBuckets[i] getValue:&bucketData[i]];
+        }
+    }
+
+    CGFloat usableHeightPx = pixelHeight - kVerticalPadding * 2.0 * scale;
+
+    if (_showStereo) {
+        // Stereo: top half = left channel, bottom half = right channel
+        CGFloat halfChannelHeightPx = usableHeightPx / 4.0;  // each channel gets half of usable
+        CGFloat leftCenterPx = kVerticalPadding * scale + usableHeightPx / 4.0;
+        CGFloat rightCenterPx = kVerticalPadding * scale + usableHeightPx * 3.0 / 4.0;
+
+        // Separator line between channels
+        CGFloat sepYPx = kVerticalPadding * scale + usableHeightPx / 2.0;
+        CGContextSetGrayStrokeColor(bctx, kCenterLineGray, 0.6);
+        CGContextSetLineWidth(bctx, 0.5 * scale);
+        CGContextBeginPath(bctx);
+        CGContextMoveToPoint(bctx, 0, sepYPx);
+        CGContextAddLineToPoint(bctx, pixelWidth, sepYPx);
+        CGContextStrokePath(bctx);
+
+        // Left channel
+        CGContextSetRGBFillColor(bctx, wR, wG, wB, 0.7);
+        [self renderChannelToBitmap:bctx pixelWidth:pixelWidth scale:scale
+                        cacheStartX:cacheStartX centerYPx:leftCenterPx halfHeightPx:halfChannelHeightPx
+                         useLeft:YES useSamples:useSamples samples:samples
+                        sampleCount:sampleCount channelCount:channelCount sampleRate:sampleRate
+                         bucketData:bucketData bucketCount:bucketCount msPerBucket:msPerBucket];
+
+        // Right channel
+        CGContextSetRGBFillColor(bctx, wR, wG, wB, 0.7);
+        [self renderChannelToBitmap:bctx pixelWidth:pixelWidth scale:scale
+                        cacheStartX:cacheStartX centerYPx:rightCenterPx halfHeightPx:halfChannelHeightPx
+                         useLeft:NO useSamples:useSamples samples:samples
+                        sampleCount:sampleCount channelCount:channelCount sampleRate:sampleRate
+                         bucketData:bucketData bucketCount:bucketCount msPerBucket:msPerBucket];
+    } else {
+        // Mono/combined: full height
+        CGFloat centerPx = pixelHeight / 2.0;
+        CGFloat halfHeightPx = usableHeightPx / 2.0;
+
+        // Fill
+        CGContextSetRGBFillColor(bctx, wR, wG, wB, 0.7);
+        [self renderChannelToBitmap:bctx pixelWidth:pixelWidth scale:scale
+                        cacheStartX:cacheStartX centerYPx:centerPx halfHeightPx:halfHeightPx
+                         useLeft:YES useSamples:useSamples samples:samples
+                        sampleCount:sampleCount channelCount:channelCount sampleRate:sampleRate
+                         bucketData:bucketData bucketCount:bucketCount msPerBucket:msPerBucket];
+
+        // Stroke outline in brighter white
+        CGContextSetRGBStrokeColor(bctx, 1.0, 1.0, 1.0, 0.3);
+        CGContextSetLineWidth(bctx, 0.5 * scale);
+        [self strokeChannelToBitmap:bctx pixelWidth:pixelWidth scale:scale
+                        cacheStartX:cacheStartX centerYPx:centerPx halfHeightPx:halfHeightPx
+                         useLeft:YES useSamples:useSamples samples:samples
+                        sampleCount:sampleCount channelCount:channelCount sampleRate:sampleRate
+                         bucketData:bucketData bucketCount:bucketCount msPerBucket:msPerBucket];
+    }
+
+    free(bucketData);
+
+    CGImageRelease(_cachedWaveformImage);
+    _cachedWaveformImage = CGBitmapContextCreateImage(bctx);
+    CGContextRelease(bctx);
+
+    _cacheZoomLevel = _zoomLevel;
+    _cacheScrollX = cacheStartX;
+    _cacheWidthPts = cacheWidthPts;
+    _cacheHeightPts = height;
+    _cacheScale = scale;
+    _cacheStereo = _showStereo;
+}
+
+- (void)renderChannelToBitmap:(CGContextRef)bctx
+                   pixelWidth:(NSUInteger)pixelWidth
+                        scale:(CGFloat)scale
+                  cacheStartX:(CGFloat)cacheStartX
+                    centerYPx:(CGFloat)centerYPx
+                  halfHeightPx:(CGFloat)halfHeightPx
+                      useLeft:(BOOL)useLeft
+                   useSamples:(BOOL)useSamples
+                      samples:(float *)samples
+                  sampleCount:(NSUInteger)sampleCount
+                 channelCount:(NSUInteger)channelCount
+                   sampleRate:(double)sampleRate
+                   bucketData:(XLWaveformBucket *)bucketData
+                  bucketCount:(NSUInteger)bucketCount
+                  msPerBucket:(double)msPerBucket
+{
+    CGFloat durationMS = _sequenceLengthMS;
+
+    for (NSUInteger px = 0; px < pixelWidth; px++) {
+        CGFloat zoomedPt = cacheStartX + (CGFloat)px / scale;
+        CGFloat timeMS1 = zoomedPt / _zoomLevel;
+        CGFloat timeMS2 = (zoomedPt + 1.0 / scale) / _zoomLevel;
+        if (timeMS1 < 0) continue;
+        if (timeMS1 >= durationMS) break;
+        if (timeMS2 > durationMS) timeMS2 = durationMS;
+
+        float minVal = 1.0f, maxVal = -1.0f;
+
+        if (useSamples) {
+            NSUInteger startFrame = (NSUInteger)(timeMS1 / 1000.0 * sampleRate);
+            NSUInteger endFrame = (NSUInteger)(timeMS2 / 1000.0 * sampleRate);
+            if (startFrame >= sampleCount) startFrame = sampleCount - 1;
+            if (endFrame >= sampleCount) endFrame = sampleCount - 1;
+
+            for (NSUInteger f = startFrame; f <= endFrame; f++) {
+                float val;
+                if (useLeft) {
+                    val = samples[f * channelCount];
+                } else {
+                    val = (channelCount > 1) ? samples[f * channelCount + 1] : samples[f * channelCount];
+                }
+                if (val < minVal) minVal = val;
+                if (val > maxVal) maxVal = val;
+            }
+        } else {
+            NSUInteger bi1 = (NSUInteger)(timeMS1 / msPerBucket);
+            if (bi1 >= bucketCount) bi1 = bucketCount - 1;
+            NSUInteger bi2 = (NSUInteger)(timeMS2 / msPerBucket);
+            if (bi2 >= bucketCount) bi2 = bucketCount - 1;
+
+            for (NSUInteger bi = bi1; bi <= bi2; bi++) {
+                float bMin, bMax;
+                if (useLeft) {
+                    bMin = bucketData[bi].minL;
+                    bMax = bucketData[bi].maxL;
+                } else {
+                    bMin = bucketData[bi].minR;
+                    bMax = bucketData[bi].maxR;
+                }
+                if (bMin < minVal) minVal = bMin;
+                if (bMax > maxVal) maxVal = bMax;
+            }
+        }
+
+        // Non-flipped bitmap (y=0 is bottom): positive values go up from center
+        CGFloat y1 = centerYPx + minVal * halfHeightPx;
+        CGFloat y2 = centerYPx + maxVal * halfHeightPx;
+        if (fabs(y2 - y1) < 1.0) {
+            y1 = centerYPx - 0.5;
+            y2 = centerYPx + 0.5;
+        }
+
+        CGContextFillRect(bctx, CGRectMake(px, fmin(y1, y2), 1.0, fabs(y2 - y1)));
+    }
+}
+
+- (void)strokeChannelToBitmap:(CGContextRef)bctx
+                   pixelWidth:(NSUInteger)pixelWidth
+                        scale:(CGFloat)scale
+                  cacheStartX:(CGFloat)cacheStartX
+                    centerYPx:(CGFloat)centerYPx
+                  halfHeightPx:(CGFloat)halfHeightPx
+                      useLeft:(BOOL)useLeft
+                   useSamples:(BOOL)useSamples
+                      samples:(float *)samples
+                  sampleCount:(NSUInteger)sampleCount
+                 channelCount:(NSUInteger)channelCount
+                   sampleRate:(double)sampleRate
+                   bucketData:(XLWaveformBucket *)bucketData
+                  bucketCount:(NSUInteger)bucketCount
+                  msPerBucket:(double)msPerBucket
+{
+    CGFloat durationMS = _sequenceLengthMS;
+
+    // Top outline (min values)
+    CGContextBeginPath(bctx);
+    BOOL firstPoint = YES;
+
+    for (NSUInteger px = 0; px < pixelWidth; px++) {
+        CGFloat zoomedPt = cacheStartX + (CGFloat)px / scale;
+        CGFloat timeMS1 = zoomedPt / _zoomLevel;
+        CGFloat timeMS2 = (zoomedPt + 1.0 / scale) / _zoomLevel;
+        if (timeMS1 < 0) continue;
+        if (timeMS1 >= durationMS) break;
+        if (timeMS2 > durationMS) timeMS2 = durationMS;
+
+        float minVal = 1.0f;
+
+        if (useSamples) {
+            NSUInteger startFrame = (NSUInteger)(timeMS1 / 1000.0 * sampleRate);
+            NSUInteger endFrame = (NSUInteger)(timeMS2 / 1000.0 * sampleRate);
+            if (startFrame >= sampleCount) startFrame = sampleCount - 1;
+            if (endFrame >= sampleCount) endFrame = sampleCount - 1;
+            for (NSUInteger f = startFrame; f <= endFrame; f++) {
+                float val = useLeft ? samples[f * channelCount]
+                    : ((channelCount > 1) ? samples[f * channelCount + 1] : samples[f * channelCount]);
+                if (val < minVal) minVal = val;
+            }
+        } else {
+            NSUInteger bi1 = (NSUInteger)(timeMS1 / msPerBucket);
+            if (bi1 >= bucketCount) bi1 = bucketCount - 1;
+            NSUInteger bi2 = (NSUInteger)(timeMS2 / msPerBucket);
+            if (bi2 >= bucketCount) bi2 = bucketCount - 1;
+            for (NSUInteger bi = bi1; bi <= bi2; bi++) {
+                float bMin = useLeft ? bucketData[bi].minL : bucketData[bi].minR;
+                if (bMin < minVal) minVal = bMin;
+            }
+        }
+
+        CGFloat y = centerYPx + minVal * halfHeightPx;
+        if (firstPoint) {
+            CGContextMoveToPoint(bctx, px, y);
+            firstPoint = NO;
+        } else {
+            CGContextAddLineToPoint(bctx, px, y);
+        }
+    }
+    CGContextStrokePath(bctx);
+
+    // Bottom outline (max values)
+    CGContextBeginPath(bctx);
+    firstPoint = YES;
+
+    for (NSUInteger px = 0; px < pixelWidth; px++) {
+        CGFloat zoomedPt = cacheStartX + (CGFloat)px / scale;
+        CGFloat timeMS1 = zoomedPt / _zoomLevel;
+        CGFloat timeMS2 = (zoomedPt + 1.0 / scale) / _zoomLevel;
+        if (timeMS1 < 0) continue;
+        if (timeMS1 >= durationMS) break;
+        if (timeMS2 > durationMS) timeMS2 = durationMS;
+
+        float maxVal = -1.0f;
+
+        if (useSamples) {
+            NSUInteger startFrame = (NSUInteger)(timeMS1 / 1000.0 * sampleRate);
+            NSUInteger endFrame = (NSUInteger)(timeMS2 / 1000.0 * sampleRate);
+            if (startFrame >= sampleCount) startFrame = sampleCount - 1;
+            if (endFrame >= sampleCount) endFrame = sampleCount - 1;
+            for (NSUInteger f = startFrame; f <= endFrame; f++) {
+                float val = useLeft ? samples[f * channelCount]
+                    : ((channelCount > 1) ? samples[f * channelCount + 1] : samples[f * channelCount]);
+                if (val > maxVal) maxVal = val;
+            }
+        } else {
+            NSUInteger bi1 = (NSUInteger)(timeMS1 / msPerBucket);
+            if (bi1 >= bucketCount) bi1 = bucketCount - 1;
+            NSUInteger bi2 = (NSUInteger)(timeMS2 / msPerBucket);
+            if (bi2 >= bucketCount) bi2 = bucketCount - 1;
+            for (NSUInteger bi = bi1; bi <= bi2; bi++) {
+                float bMax = useLeft ? bucketData[bi].maxL : bucketData[bi].maxR;
+                if (bMax > maxVal) maxVal = bMax;
+            }
+        }
+
+        CGFloat y = centerYPx + maxVal * halfHeightPx;
+        if (firstPoint) {
+            CGContextMoveToPoint(bctx, px, y);
+            firstPoint = NO;
+        } else {
+            CGContextAddLineToPoint(bctx, px, y);
+        }
+    }
+    CGContextStrokePath(bctx);
+}
+
 #pragma mark - CALayerDelegate
 
 - (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)ctx {
@@ -368,9 +695,33 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     CGContextAddLineToPoint(ctx, width, centerY);
     CGContextStrokePath(ctx);
 
-    // Draw waveform data if available
+    // Draw cached waveform if available
     if (_overviewBuckets.count > 0 && _sequenceLengthMS > 0) {
-        [self drawWaveformInContext:ctx bounds:bounds];
+        [self rebuildWaveformCacheIfNeeded];
+
+        if (_cachedWaveformImage) {
+            CGFloat offsetInCache = _scrollOffsetX - _cacheScrollX;
+            CGFloat availableWidth = _cacheWidthPts - offsetInCache;
+            CGFloat blitWidth = fmin(width, availableWidth);
+
+            if (blitWidth > 0) {
+                CGFloat srcPixelX = offsetInCache * _cacheScale;
+                CGFloat srcPixelW = blitWidth * _cacheScale;
+                CGFloat srcPixelH = (CGFloat)CGImageGetHeight(_cachedWaveformImage);
+
+                CGRect srcRect = CGRectMake(srcPixelX, 0, srcPixelW, srcPixelH);
+                CGRect dstRect = CGRectMake(0, 0, blitWidth, height);
+
+                // Flip for CGImage drawing (CGImage is non-flipped, context is flipped)
+                CGContextSaveGState(ctx);
+                CGContextTranslateCTM(ctx, 0, height);
+                CGContextScaleCTM(ctx, 1.0, -1.0);
+                CGImageRef subImage = CGImageCreateWithImageInRect(_cachedWaveformImage, srcRect);
+                CGContextDrawImage(ctx, dstRect, subImage);
+                CGImageRelease(subImage);
+                CGContextRestoreGState(ctx);
+            }
+        }
     }
 
     // Draw loop region selection overlay
@@ -439,211 +790,6 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
             CGContextFillRect(ctx, CGRectMake(seqEndX, 0, width - seqEndX, height));
         }
     }
-}
-
-- (void)drawWaveformInContext:(CGContextRef)ctx bounds:(CGRect)bounds {
-    CGFloat width = CGRectGetWidth(bounds);
-    CGFloat height = CGRectGetHeight(bounds);
-    NSUInteger bucketCount = _overviewBuckets.count;
-
-    // Determine waveform color
-    CGFloat wR = kWaveR, wG = kWaveG, wB = kWaveB;
-    if (_waveformColor) {
-        CGFloat r, g, b, a;
-        NSColor *calibrated = [_waveformColor colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
-        if (calibrated) {
-            [calibrated getRed:&r green:&g blue:&b alpha:&a];
-            wR = r; wG = g; wB = b;
-        }
-    }
-
-    CGFloat usableHeight = height - kVerticalPadding * 2.0;
-
-    if (_showStereo) {
-        // Stereo: top half = left, bottom half = right
-        CGFloat halfHeight = usableHeight / 2.0;
-        CGFloat leftCenterY = kVerticalPadding + halfHeight / 2.0;
-        CGFloat rightCenterY = kVerticalPadding + halfHeight + halfHeight / 2.0;
-
-        // Draw separator line between channels
-        CGFloat sepY = kVerticalPadding + halfHeight;
-        CGContextSetGrayStrokeColor(ctx, kCenterLineGray, 0.6);
-        CGContextSetLineWidth(ctx, 0.5);
-        CGContextBeginPath(ctx);
-        CGContextMoveToPoint(ctx, 0, sepY);
-        CGContextAddLineToPoint(ctx, width, sepY);
-        CGContextStrokePath(ctx);
-
-        // Left channel waveform
-        CGContextSetRGBFillColor(ctx, wR, wG, wB, 0.7);
-        [self drawChannelInContext:ctx
-                             width:width
-                          centerY:leftCenterY
-                       halfHeight:halfHeight / 2.0
-                       useLeftChannel:YES];
-
-        // Right channel waveform
-        CGContextSetRGBFillColor(ctx, wR, wG, wB, 0.7);
-        [self drawChannelInContext:ctx
-                             width:width
-                          centerY:rightCenterY
-                       halfHeight:halfHeight / 2.0
-                       useLeftChannel:NO];
-    } else {
-        // Mono/combined: centered in full height
-        CGFloat centerY = height / 2.0;
-        CGFloat halfAmplitude = usableHeight / 2.0;
-
-        CGContextSetRGBFillColor(ctx, wR, wG, wB, 0.7);
-        [self drawChannelInContext:ctx
-                             width:width
-                          centerY:centerY
-                       halfHeight:halfAmplitude
-                       useLeftChannel:YES];
-
-        // Outline in brighter white
-        CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.3);
-        CGContextSetLineWidth(ctx, 0.5);
-        [self strokeChannelInContext:ctx
-                               width:width
-                            centerY:centerY
-                         halfHeight:halfAmplitude
-                         useLeftChannel:YES];
-    }
-}
-
-- (void)drawChannelInContext:(CGContextRef)ctx
-                       width:(CGFloat)width
-                    centerY:(CGFloat)centerY
-                 halfHeight:(CGFloat)halfHeight
-                 useLeftChannel:(BOOL)useLeft
-{
-    NSUInteger bucketCount = _overviewBuckets.count;
-    if (bucketCount == 0 || _sequenceLengthMS <= 0) return;
-
-    double msPerBucket = _sequenceLengthMS / (double)bucketCount;
-
-    for (NSUInteger px = 0; px < (NSUInteger)width; px++) {
-        CGFloat timeMS = [self timeMSForPointX:(CGFloat)px];
-        if (timeMS < 0 || timeMS >= _sequenceLengthMS) continue;
-
-        // Find the bucket index for this pixel
-        NSUInteger bucketIndex = (NSUInteger)(timeMS / msPerBucket);
-        if (bucketIndex >= bucketCount) bucketIndex = bucketCount - 1;
-
-        // For wider zoom levels, aggregate multiple buckets per pixel
-        CGFloat timeMS2 = [self timeMSForPointX:(CGFloat)(px + 1)];
-        NSUInteger bucketIndex2 = (NSUInteger)(timeMS2 / msPerBucket);
-        if (bucketIndex2 >= bucketCount) bucketIndex2 = bucketCount - 1;
-
-        float minVal = 1.0f, maxVal = -1.0f;
-
-        for (NSUInteger bi = bucketIndex; bi <= bucketIndex2; bi++) {
-            XLWaveformBucket bucket;
-            [_overviewBuckets[bi] getValue:&bucket];
-
-            float bMin, bMax;
-            if (useLeft) {
-                bMin = bucket.minL;
-                bMax = bucket.maxL;
-            } else {
-                bMin = bucket.minR;
-                bMax = bucket.maxR;
-            }
-
-            if (bMin < minVal) minVal = bMin;
-            if (bMax > maxVal) maxVal = bMax;
-        }
-
-        CGFloat y1 = centerY + minVal * halfHeight;
-        CGFloat y2 = centerY + maxVal * halfHeight;
-
-        // Ensure at least 1px visible
-        if (fabs(y2 - y1) < 1.0) {
-            y1 = centerY - 0.5;
-            y2 = centerY + 0.5;
-        }
-
-        CGContextFillRect(ctx, CGRectMake((CGFloat)px, fmin(y1, y2), 1.0, fabs(y2 - y1)));
-    }
-}
-
-- (void)strokeChannelInContext:(CGContextRef)ctx
-                         width:(CGFloat)width
-                      centerY:(CGFloat)centerY
-                   halfHeight:(CGFloat)halfHeight
-                   useLeftChannel:(BOOL)useLeft
-{
-    NSUInteger bucketCount = _overviewBuckets.count;
-    if (bucketCount == 0 || _sequenceLengthMS <= 0) return;
-
-    double msPerBucket = _sequenceLengthMS / (double)bucketCount;
-
-    // Draw top outline
-    CGContextBeginPath(ctx);
-    BOOL firstPoint = YES;
-
-    for (NSUInteger px = 0; px < (NSUInteger)width; px++) {
-        CGFloat timeMS = [self timeMSForPointX:(CGFloat)px];
-        if (timeMS < 0 || timeMS >= _sequenceLengthMS) continue;
-
-        NSUInteger bucketIndex = (NSUInteger)(timeMS / msPerBucket);
-        if (bucketIndex >= bucketCount) bucketIndex = bucketCount - 1;
-
-        CGFloat timeMS2 = [self timeMSForPointX:(CGFloat)(px + 1)];
-        NSUInteger bucketIndex2 = (NSUInteger)(timeMS2 / msPerBucket);
-        if (bucketIndex2 >= bucketCount) bucketIndex2 = bucketCount - 1;
-
-        float minVal = 1.0f;
-        for (NSUInteger bi = bucketIndex; bi <= bucketIndex2; bi++) {
-            XLWaveformBucket bucket;
-            [_overviewBuckets[bi] getValue:&bucket];
-            float bMin = useLeft ? bucket.minL : bucket.minR;
-            if (bMin < minVal) minVal = bMin;
-        }
-
-        CGFloat y = centerY + minVal * halfHeight;
-        if (firstPoint) {
-            CGContextMoveToPoint(ctx, (CGFloat)px, y);
-            firstPoint = NO;
-        } else {
-            CGContextAddLineToPoint(ctx, (CGFloat)px, y);
-        }
-    }
-    CGContextStrokePath(ctx);
-
-    // Draw bottom outline
-    CGContextBeginPath(ctx);
-    firstPoint = YES;
-
-    for (NSUInteger px = 0; px < (NSUInteger)width; px++) {
-        CGFloat timeMS = [self timeMSForPointX:(CGFloat)px];
-        if (timeMS < 0 || timeMS >= _sequenceLengthMS) continue;
-
-        NSUInteger bucketIndex = (NSUInteger)(timeMS / msPerBucket);
-        if (bucketIndex >= bucketCount) bucketIndex = bucketCount - 1;
-
-        CGFloat timeMS2 = [self timeMSForPointX:(CGFloat)(px + 1)];
-        NSUInteger bucketIndex2 = (NSUInteger)(timeMS2 / msPerBucket);
-        if (bucketIndex2 >= bucketCount) bucketIndex2 = bucketCount - 1;
-
-        float maxVal = -1.0f;
-        for (NSUInteger bi = bucketIndex; bi <= bucketIndex2; bi++) {
-            XLWaveformBucket bucket;
-            [_overviewBuckets[bi] getValue:&bucket];
-            float bMax = useLeft ? bucket.maxL : bucket.maxR;
-            if (bMax > maxVal) maxVal = bMax;
-        }
-
-        CGFloat y = centerY + maxVal * halfHeight;
-        if (firstPoint) {
-            CGContextMoveToPoint(ctx, (CGFloat)px, y);
-            firstPoint = NO;
-        } else {
-            CGContextAddLineToPoint(ctx, (CGFloat)px, y);
-        }
-    }
-    CGContextStrokePath(ctx);
 }
 
 #pragma mark - Keyboard Events
@@ -776,6 +922,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
         CGFloat newZoom = _zoomLevel * factor;
         newZoom = fmax(0.001, fmin(newZoom, 10.0));
         _zoomLevel = newZoom;
+        [self invalidateWaveformCache];
 
         // Adjust scroll to keep time under cursor stable
         CGFloat newX = timeAtCursor * _zoomLevel - loc.x;
@@ -825,6 +972,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     CGFloat newZoom = _zoomLevel * factor;
     newZoom = fmax(0.001, fmin(newZoom, 10.0));
     _zoomLevel = newZoom;
+    [self invalidateWaveformCache];
 
     // Adjust scroll to keep time under cursor stable
     CGFloat newX = timeAtCursor * _zoomLevel - loc.x;
@@ -936,6 +1084,7 @@ static const NSInteger kMenuTagDoubleHeight = 300;
     }
 
     _waveformType = newType;
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
     [self.layer setNeedsDisplay];
 
@@ -992,6 +1141,7 @@ static const NSInteger kMenuTagDoubleHeight = 300;
         _customLowNote = low;
         _customHighNote = high;
         _waveformType = XLWaveformTypeCustom;
+        [self invalidateWaveformCache];
         _needsRedraw = YES;
         [self.layer setNeedsDisplay];
 
@@ -1003,6 +1153,7 @@ static const NSInteger kMenuTagDoubleHeight = 300;
 
 - (void)contextMenuDoubleHeight:(NSMenuItem *)sender {
     _doubleHeight = !_doubleHeight;
+    [self invalidateWaveformCache];
     _needsRedraw = YES;
     [self.layer setNeedsDisplay];
 
