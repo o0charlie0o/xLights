@@ -767,6 +767,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _stemsContainerView.stemManager = _stemManager;
     _stemsContainerView.delegate = self;
     _stemsContainerView.rowHeaderWidth = kRowHeaderWidth;
+    _stemsContainerView.scrollCoordinator = _scrollCoordinator;
     [_stemsContainerView setSequenceLengthMS:_sequenceDurationMS];
     [_stemsContainerView setZoomLevel:_effectsGridView.zoomLevel];
     [view addSubview:_stemsContainerView];

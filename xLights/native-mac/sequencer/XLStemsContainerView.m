@@ -12,6 +12,7 @@
 #import "XLMiniWaveformView.h"
 #import "XLStemManager.h"
 #import "XLStemData.h"
+#import "XLScrollCoordinator.h"
 
 static NSString *const kDefaultsCollapsedKey = @"StemsPanel.collapsed";
 static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight";
@@ -87,6 +88,34 @@ static const CGFloat kRowHeaderLeftPadding = 8.0;
 
 @implementation XLFlippedDocumentView
 - (BOOL)isFlipped { return YES; }
+@end
+
+#pragma mark - Vertical-Only Scroll View
+
+/// NSScrollView subclass that only handles vertical scrolling.
+/// Horizontal scroll, Cmd+scroll (zoom), and Shift+scroll are forwarded to the superview.
+@interface XLVerticalOnlyScrollView : NSScrollView
+@end
+
+@implementation XLVerticalOnlyScrollView
+
+- (void)scrollWheel:(NSEvent *)event {
+    // Cmd+scroll = zoom, Shift+scroll = horizontal — forward to container
+    if (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagShift)) {
+        [self.superview scrollWheel:event];
+        return;
+    }
+
+    // If primarily horizontal, forward to container
+    if (fabs(event.scrollingDeltaX) > fabs(event.scrollingDeltaY)) {
+        [self.superview scrollWheel:event];
+        return;
+    }
+
+    // Vertical scrolling — handle normally
+    [super scrollWheel:event];
+}
+
 @end
 
 #pragma mark - Stem Row Header View (draws one stem name)
@@ -311,7 +340,7 @@ static const CGFloat kRowHeaderLeftPadding = 8.0;
 }
 
 - (void)setupScrollView {
-    _scrollView = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    _scrollView = [[XLVerticalOnlyScrollView alloc] initWithFrame:NSZeroRect];
     _scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     _scrollView.hasVerticalScroller = YES;
     _scrollView.hasHorizontalScroller = NO;
@@ -544,6 +573,43 @@ static const CGFloat kRowHeaderLeftPadding = 8.0;
     for (XLMiniWaveformView *mv in _miniWaveformViews) {
         mv.playbackPositionMS = positionMS;
     }
+}
+
+#pragma mark - Scroll Forwarding to Scroll Coordinator
+
+- (void)scrollWheel:(NSEvent *)event {
+    XLScrollCoordinator *sc = _scrollCoordinator;
+    if (!sc) {
+        [super scrollWheel:event];
+        return;
+    }
+
+    if (event.modifierFlags & NSEventModifierFlagCommand) {
+        // Cmd+scroll = zoom
+        NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+        CGFloat pointX = loc.x - _rowHeaderWidth;  // Adjust for row headers
+        CGFloat factor = 1.0 + event.scrollingDeltaY * 0.05;
+        factor = fmax(0.5, fmin(factor, 2.0));
+        CGFloat newZoom = sc.zoomLevel * factor;
+        [sc setZoomLevel:newZoom centeredOnPointX:pointX];
+        return;
+    }
+
+    if (event.modifierFlags & NSEventModifierFlagShift) {
+        // Shift+scroll = horizontal scroll
+        CGFloat dx = event.scrollingDeltaY;
+        [sc setHorizontalScrollOffset:sc.horizontalScrollOffset - dx];
+        return;
+    }
+
+    // Normal horizontal scroll
+    CGFloat dx = event.scrollingDeltaX;
+    if (fabs(dx) > 0.01) {
+        [sc setHorizontalScrollOffset:sc.horizontalScrollOffset - dx];
+        return;
+    }
+
+    [super scrollWheel:event];
 }
 
 #pragma mark - Actions

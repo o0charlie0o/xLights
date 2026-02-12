@@ -13,6 +13,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class XLStemManager;
+@class XLScrollCoordinator;
 @class XLStemsContainerView;
 
 /// Header bar height.
@@ -60,6 +61,9 @@ static const CGFloat kStemsMaxExpandedHeight = 400.0;
 
 /// Width of the left-side row headers area (should match kRowHeaderWidth).
 @property (nonatomic, assign) CGFloat rowHeaderWidth;
+
+/// Scroll coordinator for forwarding horizontal scroll/zoom events.
+@property (nonatomic, weak) XLScrollCoordinator *scrollCoordinator;
 
 /// Toggle collapse/expand with animation.
 - (void)toggleCollapsed;
