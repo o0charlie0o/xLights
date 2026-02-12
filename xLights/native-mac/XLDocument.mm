@@ -213,7 +213,9 @@
     }
 
     if (bridge) {
+        NSLog(@"[STEMS] XLDocument.writeToURL: saving via bridge to %@", url.path);
         BOOL success = [bridge saveSequence:url.path];
+        NSLog(@"[STEMS] XLDocument.writeToURL: bridge save result=%@", success ? @"YES" : @"NO");
         if (!success && outError) {
             *outError = [NSError errorWithDomain:NSCocoaErrorDomain
                                             code:NSFileWriteUnknownError
@@ -223,6 +225,7 @@
     }
 
     // Fallback: direct engine save (no metadata like stems)
+    NSLog(@"[STEMS] XLDocument.writeToURL: WARNING - no bridge found, falling back to direct engine save (no stems!)");
     if (!_sequenceEngine) {
         if (outError) {
             *outError = [NSError errorWithDomain:NSCocoaErrorDomain

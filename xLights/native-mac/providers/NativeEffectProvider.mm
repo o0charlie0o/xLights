@@ -69,6 +69,9 @@ struct NativeElement {
     // For submodels/strands
     std::string parentElementName;
 
+    // Track folder membership (empty = not in a folder)
+    std::string folder;
+
     NativeElement() = default;
 
     size_t getEffectCount() const {
@@ -205,13 +208,12 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
             return false;
         }
 
-        // Parse sequence length from xsequence element
-        NSArray* xseqElems = [root nodesForXPath:@"//xsequence" error:nil];
-        if (xseqElems.count > 0) {
-            NSXMLElement* xseq = xseqElems[0];
-            NSXMLNode* durationAttr = [xseq attributeForName:@"Duration"];
-            if (durationAttr) {
-                _sequenceLengthMS = [durationAttr.stringValue intValue];
+        // Parse sequence length from <head><sequenceDuration> element
+        NSArray* durationElems = [root nodesForXPath:@"//head/sequenceDuration" error:nil];
+        if (durationElems.count > 0) {
+            double durationSec = [[durationElems[0] stringValue] doubleValue];
+            if (durationSec > 0) {
+                _sequenceLengthMS = (int)(durationSec * 1000.0);
             }
         }
 
@@ -290,6 +292,11 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
 
             NSXMLNode* colAttr = [elemNode attributeForName:@"collapsed"];
             element->collapsed = colAttr ? [colAttr.stringValue boolValue] : NO;
+
+            NSXMLNode* folderAttr = [elemNode attributeForName:@"folder"];
+            if (folderAttr && folderAttr.stringValue.length > 0) {
+                element->folder = std::string([folderAttr.stringValue UTF8String]);
+            }
 
             // Parse effect layers
             NSArray* layerNodes = [elemNode nodesForXPath:@"EffectLayer" error:nil];
@@ -391,6 +398,19 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
             _elements.push_back(std::move(element));
         }
 
+        // Parse track folders
+        NSArray* folderNodes = [root nodesForXPath:@"//TrackFolders/Folder" error:nil];
+        for (NSXMLElement* folderNode in folderNodes) {
+            TrackFolder folder;
+            NSXMLNode* fnameAttr = [folderNode attributeForName:@"name"];
+            folder.name = fnameAttr ? std::string([fnameAttr.stringValue UTF8String]) : "";
+            NSXMLNode* fcollAttr = [folderNode attributeForName:@"collapsed"];
+            folder.collapsed = fcollAttr ? [fcollAttr.stringValue boolValue] : NO;
+            if (!folder.name.empty()) {
+                _trackFolders.push_back(folder);
+            }
+        }
+
         // Parse song structure regions
         NSArray* regionNodes = [root nodesForXPath:@"//SongStructure/Region" error:nil];
         for (NSXMLElement* regionNode in regionNodes) {
@@ -466,9 +486,12 @@ std::string NativeEffectProvider::exportToSequenceXML(const SequenceMetadata& me
     if (!metadata.author.empty()) {
         xml << "    <author>" << metadata.author << "</author>\n";
     }
+    NSLog(@"[STEMS] exportToSequenceXML: metadata.audioStems.size=%lu", (unsigned long)metadata.audioStems.size());
     if (!metadata.audioStems.empty()) {
         xml << "    <audioStems>\n";
         for (const auto& stem : metadata.audioStems) {
+            NSLog(@"[STEMS]   writing stem: name=%s, relativePath=%s, color=%s",
+                  stem.name.c_str(), stem.relativePath.c_str(), stem.color.c_str());
             xml << "      <stem name=\"" << stem.name
                 << "\" relativePath=\"" << stem.relativePath
                 << "\" color=\"" << stem.color << "\"/>\n";
@@ -491,6 +514,7 @@ std::string NativeEffectProvider::exportToSequenceXML(const SequenceMetadata& me
         xml << "\"";
         if (!elem->visible) xml << " visible=\"0\"";
         if (elem->collapsed) xml << " collapsed=\"1\"";
+        if (!elem->folder.empty()) xml << " folder=\"" << elem->folder << "\"";
         if (elem->type == SequenceElementType::Timing) {
             if (elem->fixedTiming > 0) xml << " fixed=\"" << elem->fixedTiming << "\"";
             if (!elem->isActive) xml << " Active=\"0\"";
@@ -559,6 +583,17 @@ std::string NativeEffectProvider::exportToSequenceXML(const SequenceMetadata& me
 
     xml << "  </ElementEffects>\n";
 
+    // Write track folders
+    if (!_trackFolders.empty()) {
+        xml << "  <TrackFolders>\n";
+        for (const auto& folder : _trackFolders) {
+            xml << "    <Folder name=\"" << folder.name << "\"";
+            xml << " collapsed=\"" << (folder.collapsed ? "1" : "0") << "\"";
+            xml << "/>\n";
+        }
+        xml << "  </TrackFolders>\n";
+    }
+
     // Write song structure regions
     if (!_songRegions.empty()) {
         xml << "  <SongStructure>\n";
@@ -614,6 +649,7 @@ void NativeEffectProvider::clear()
     _undoStack.clear();
     _redoStack.clear();
     _currentUndoGroup.reset();
+    _trackFolders.clear();
     _songRegions.clear();
     _nextRegionId = 1;
     _nextEffectId = 1;
@@ -2036,6 +2072,132 @@ void NativeEffectProvider::clearSongStructure()
     std::lock_guard<std::recursive_mutex> lock(_mutex);
     _songRegions.clear();
     incrementChangeCount();
+}
+
+// --- Track Folder Operations ---
+
+std::vector<TrackFolder> NativeEffectProvider::getTrackFolders() const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    return _trackFolders;
+}
+
+bool NativeEffectProvider::createTrackFolder(const std::string& name)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    if (name.empty()) return false;
+
+    for (const auto& f : _trackFolders) {
+        if (f.name == name) return false;
+    }
+
+    TrackFolder folder;
+    folder.name = name;
+    folder.collapsed = false;
+    _trackFolders.push_back(folder);
+    incrementChangeCount();
+    return true;
+}
+
+bool NativeEffectProvider::deleteTrackFolder(const std::string& name)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    auto it = std::find_if(_trackFolders.begin(), _trackFolders.end(),
+        [&name](const TrackFolder& f) { return f.name == name; });
+    if (it == _trackFolders.end()) return false;
+
+    _trackFolders.erase(it);
+
+    // Ungroup all elements in this folder
+    for (auto& elem : _elements) {
+        if (elem->folder == name) {
+            elem->folder.clear();
+        }
+    }
+
+    incrementChangeCount();
+    return true;
+}
+
+bool NativeEffectProvider::renameTrackFolder(const std::string& oldName, const std::string& newName)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    if (newName.empty()) return false;
+
+    // Check new name doesn't conflict
+    for (const auto& f : _trackFolders) {
+        if (f.name == newName) return false;
+    }
+
+    auto it = std::find_if(_trackFolders.begin(), _trackFolders.end(),
+        [&oldName](const TrackFolder& f) { return f.name == oldName; });
+    if (it == _trackFolders.end()) return false;
+
+    it->name = newName;
+
+    // Update all elements referencing the old folder name
+    for (auto& elem : _elements) {
+        if (elem->folder == oldName) {
+            elem->folder = newName;
+        }
+    }
+
+    incrementChangeCount();
+    return true;
+}
+
+bool NativeEffectProvider::setElementFolder(const std::string& elementName, const std::string& folderName)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    auto nameIt = _elementsByName.find(elementName);
+    if (nameIt == _elementsByName.end()) return false;
+
+    NativeElement* elem = _elements[nameIt->second].get();
+
+    // Don't allow timing tracks in folders
+    if (elem->type == SequenceElementType::Timing) return false;
+
+    // If assigning to a folder, verify it exists (or create it)
+    if (!folderName.empty()) {
+        bool found = false;
+        for (const auto& f : _trackFolders) {
+            if (f.name == folderName) { found = true; break; }
+        }
+        if (!found) {
+            createTrackFolder(folderName);
+        }
+    }
+
+    elem->folder = folderName;
+    incrementChangeCount();
+    return true;
+}
+
+std::string NativeEffectProvider::getElementFolder(const std::string& elementName) const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    auto nameIt = _elementsByName.find(elementName);
+    if (nameIt == _elementsByName.end()) return "";
+
+    return _elements[nameIt->second]->folder;
+}
+
+bool NativeEffectProvider::setTrackFolderCollapsed(const std::string& name, bool collapsed)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    for (auto& f : _trackFolders) {
+        if (f.name == name) {
+            f.collapsed = collapsed;
+            return true;
+        }
+    }
+    return false;
 }
 
 void NativeEffectProvider::setModified(bool modified)

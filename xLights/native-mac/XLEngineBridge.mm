@@ -452,8 +452,9 @@ static XLEngineBridge *_sharedBridge = nil;
 
         // Build metadata (includes audio stems) and write XML via effect provider
         auto meta = [self buildSequenceMetadata];
+        NSLog(@"[STEMS] saveSequence: path=%s, meta.audioStems.size=%lu", savePath.c_str(), (unsigned long)meta.audioStems.size());
         bool result = _nativeEffectProvider->saveToSequenceFile(savePath, meta);
-        NSLog(@"XLEngineBridge: saveSequence(%@) = %s", path ?: @"<current>", result ? "YES" : "NO");
+        NSLog(@"[STEMS] saveSequence: saveToSequenceFile result=%s", result ? "YES" : "NO");
         return result ? YES : NO;
     } @catch (NSException *exception) {
         NSLog(@"XLEngineBridge: Exception saving sequence '%@': %@ - %@",
@@ -748,9 +749,11 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
         if (_nativeSequenceProvider) {
             auto metadata = _nativeSequenceProvider->getMetadata();
+            NSLog(@"[STEMS] getSequenceInfo: provider metadata has %lu audioStems", (unsigned long)metadata.audioStems.size());
             if (!metadata.audioStems.empty()) {
                 NSMutableArray *stemDicts = [NSMutableArray array];
                 for (const auto& stem : metadata.audioStems) {
+                    NSLog(@"[STEMS]   provider stem: name=%s, relativePath=%s", stem.name.c_str(), stem.relativePath.c_str());
                     [stemDicts addObject:@{
                         @"name": [NSString stringWithUTF8String:stem.name.c_str()],
                         @"relativePath": [NSString stringWithUTF8String:stem.relativePath.c_str()],
@@ -4817,6 +4820,14 @@ static XLEngineBridge *_sharedBridge = nil;
 
 #pragma mark - Auto-Save
 
+- (void)setAudioStemDicts:(NSArray<NSDictionary<NSString *,NSString *> *> *)audioStemDicts {
+    _audioStemDicts = [audioStemDicts copy];
+    if (_audioStemDicts.count > 0) {
+        NSLog(@"[STEMS] setAudioStemDicts: %lu stems, scheduling auto-save", (unsigned long)_audioStemDicts.count);
+        [self scheduleAutoSave];
+    }
+}
+
 - (void)scheduleAutoSave {
     // Invalidate pre-rendered data immediately so the live preview path
     // is used instead of stale renderAll output.
@@ -4848,11 +4859,13 @@ static XLEngineBridge *_sharedBridge = nil;
         meta.sequenceType = seqType.empty() ? "Animation" : seqType;
     }
     // Include audio stems
+    NSLog(@"[STEMS] buildSequenceMetadata: _audioStemDicts count=%lu", (unsigned long)_audioStemDicts.count);
     for (NSDictionary *dict in _audioStemDicts) {
         xlEngine::NativeEffectProvider::StemReference ref;
         ref.name = [dict[@"name"] UTF8String] ?: "";
         ref.relativePath = [dict[@"relativePath"] UTF8String] ?: "";
         ref.color = [dict[@"color"] UTF8String] ?: "";
+        NSLog(@"[STEMS]   meta stem: name=%@, relativePath=%@", dict[@"name"], dict[@"relativePath"]);
         meta.audioStems.push_back(ref);
     }
     return meta;

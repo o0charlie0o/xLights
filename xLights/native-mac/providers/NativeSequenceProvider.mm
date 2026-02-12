@@ -562,9 +562,12 @@ bool NativeSequenceProvider::parseSequenceXML(const std::string& filePath)
         // Audio stems
         _metadata.audioStems.clear();
         NSArray<NSXMLElement*>* stemsElements = [head elementsForName:@"audioStems"];
+        NSLog(@"[STEMS] NativeSequenceProvider parse: found %lu <audioStems> elements in <head>",
+              (unsigned long)stemsElements.count);
         if (stemsElements.count > 0) {
             NSXMLElement* stemsRoot = stemsElements[0];
             NSArray<NSXMLElement*>* stemElements = [stemsRoot elementsForName:@"stem"];
+            NSLog(@"[STEMS]   found %lu <stem> children", (unsigned long)stemElements.count);
             for (NSXMLElement* stemElem in stemElements) {
                 xlEngine::NativeStemReference ref;
                 NSXMLNode* nameAttr = [stemElem attributeForName:@"name"];
@@ -573,10 +576,12 @@ bool NativeSequenceProvider::parseSequenceXML(const std::string& filePath)
                 if (nameAttr) ref.name = nameAttr.stringValue.UTF8String;
                 if (pathAttr) ref.relativePath = pathAttr.stringValue.UTF8String;
                 if (colorAttr) ref.color = colorAttr.stringValue.UTF8String;
+                NSLog(@"[STEMS]   parsed stem: name=%s, relativePath=%s, color=%s",
+                      ref.name.c_str(), ref.relativePath.c_str(), ref.color.c_str());
                 _metadata.audioStems.push_back(ref);
             }
-            NSLog(@"NativeSequenceProvider: Parsed %lu audio stem references",
-                  (unsigned long)_metadata.audioStems.size());
+        } else {
+            NSLog(@"[STEMS] NativeSequenceProvider parse: no <audioStems> block in XML");
         }
     }
 
@@ -780,13 +785,16 @@ void NativeSequenceProvider::loadAudioMedia(const std::string& mediaPath)
         player.playbackRate = (CGFloat)_playbackRate.load();
         player.volume = (CGFloat)_volume.load();
 
-        // Update duration from audio file if not set
+        // Update duration from audio file — use the longer of XML duration and audio length
         {
             std::lock_guard<std::mutex> lock(_metadataMutex);
-            if (_metadata.durationSeconds <= 0 && player.durationMS > 0) {
-                _metadata.durationSeconds = player.durationMS / 1000.0;
-                NSLog(@"NativeSequenceProvider: Got duration from audio: %.1f sec",
-                      _metadata.durationSeconds);
+            if (player.durationMS > 0) {
+                double audioDuration = player.durationMS / 1000.0;
+                if (audioDuration > _metadata.durationSeconds) {
+                    NSLog(@"NativeSequenceProvider: Updating duration from audio: %.1f sec (was %.1f sec)",
+                          audioDuration, _metadata.durationSeconds);
+                    _metadata.durationSeconds = audioDuration;
+                }
             }
         }
 

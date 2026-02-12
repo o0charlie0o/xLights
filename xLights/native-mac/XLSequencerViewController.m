@@ -1125,9 +1125,15 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Check if the loaded sequence has audio stem references
     NSDictionary *seqInfo = [self.engineBridge getSequenceInfo];
     NSArray *stemDicts = seqInfo[@"audioStems"];
+    NSLog(@"[STEMS] loadStemsForSequence: seqInfo has audioStems key=%@, count=%lu",
+          stemDicts ? @"YES" : @"NO", (unsigned long)(stemDicts ? stemDicts.count : 0));
     if (stemDicts && [stemDicts isKindOfClass:[NSArray class]] && stemDicts.count > 0) {
+        for (NSDictionary *d in stemDicts) {
+            NSLog(@"[STEMS]   loaded stem: name=%@, relativePath=%@, color=%@", d[@"name"], d[@"relativePath"], d[@"color"]);
+        }
         [_stemManager restoreFromDicts:stemDicts];
     } else {
+        NSLog(@"[STEMS] loadStemsForSequence: no stems found, clearing");
         [_stemManager removeAllStems];
     }
 
@@ -1137,7 +1143,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (void)stemManagerDidChange:(NSNotification *)note {
     // Keep engine bridge's stem dicts in sync for save
-    self.engineBridge.audioStemDicts = [_stemManager serializeToDicts];
+    NSArray *dicts = [_stemManager serializeToDicts];
+    NSLog(@"[STEMS] stemManagerDidChange: %lu stems, setting audioStemDicts on bridge", (unsigned long)dicts.count);
+    for (NSDictionary *d in dicts) {
+        NSLog(@"[STEMS]   stem: name=%@, relativePath=%@, color=%@", d[@"name"], d[@"relativePath"], d[@"color"]);
+    }
+    self.engineBridge.audioStemDicts = dicts;
 }
 
 #pragma mark - Empty State
