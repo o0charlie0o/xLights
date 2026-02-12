@@ -767,7 +767,6 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _stemsContainerView.stemManager = _stemManager;
     _stemsContainerView.delegate = self;
     _stemsContainerView.rowHeaderWidth = kRowHeaderWidth;
-    _stemsContainerView.scrollCoordinator = _scrollCoordinator;
     [_stemsContainerView setSequenceLengthMS:_sequenceDurationMS];
     [_stemsContainerView setZoomLevel:_effectsGridView.zoomLevel];
     [view addSubview:_stemsContainerView];
@@ -910,6 +909,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _scrollCoordinator.rowHeadingsView = _rowHeadingsView;
     _scrollCoordinator.stemsContainerView = _stemsContainerView;
     _scrollCoordinator.delegate = self;
+    _stemsContainerView.scrollCoordinator = _scrollCoordinator;
 
     // Set up playback controller for coordinated audio and preview playback
     _playbackController = [[XLPlaybackController alloc] init];
