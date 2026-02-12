@@ -13,12 +13,15 @@
 #import "XLAudioLoader.h"
 
 @implementation XLMiniWaveformView {
-    // Cached full-width waveform rendered at current zoom level.
-    // Only regenerated when stem data or zoom changes — scroll just blits a portion.
-    CGImageRef _cachedWaveformImage;
+    // Visible-region cache: covers viewport + padding on each side.
+    // Rebuilt when scrolling outside cached region, or on zoom/height/data change.
+    // Rendered at backingScaleFactor resolution for crisp Retina display.
+    CGImageRef _cachedImage;
     CGFloat _cachedZoomLevel;
-    CGFloat _cachedImageWidth;
-    CGFloat _cachedImageHeight;
+    CGFloat _cachedScrollX;    // left edge of cached region in zoomed-pixel coordinates
+    CGFloat _cachedWidthPts;   // width of cached region in points
+    CGFloat _cachedHeightPts;  // height in points when cached
+    CGFloat _cachedScale;      // backing scale factor when cached
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
@@ -33,7 +36,7 @@
 }
 
 - (void)dealloc {
-    CGImageRelease(_cachedWaveformImage);
+    CGImageRelease(_cachedImage);
 }
 
 - (BOOL)isFlipped {
@@ -42,6 +45,18 @@
 
 - (BOOL)isOpaque {
     return YES;
+}
+
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    [self invalidateCache];
+    [self setNeedsDisplay:YES];
+}
+
+- (void)viewDidChangeBackingProperties {
+    [super viewDidChangeBackingProperties];
+    [self invalidateCache];
+    [self setNeedsDisplay:YES];
 }
 
 #pragma mark - Property Setters
@@ -56,7 +71,7 @@
 - (void)setScrollOffsetX:(CGFloat)scrollOffsetX {
     if (fabs(_scrollOffsetX - scrollOffsetX) < 0.01) return;
     _scrollOffsetX = scrollOffsetX;
-    [self setNeedsDisplay:YES];  // No cache invalidation — just blits a different portion
+    [self setNeedsDisplay:YES];  // drawRect checks if cache still covers viewport
 }
 
 - (void)setPlaybackPositionMS:(CGFloat)playbackPositionMS {
@@ -85,8 +100,8 @@
 #pragma mark - Waveform Cache
 
 - (void)invalidateCache {
-    CGImageRelease(_cachedWaveformImage);
-    _cachedWaveformImage = NULL;
+    CGImageRelease(_cachedImage);
+    _cachedImage = NULL;
 }
 
 - (void)rebuildCacheIfNeeded {
@@ -97,39 +112,45 @@
     if (!buckets || buckets.count == 0) return;
 
     CGFloat height = NSHeight(self.bounds);
-    if (height < 1) return;
+    CGFloat viewWidth = NSWidth(self.bounds);
+    if (height < 1 || viewWidth < 1) return;
 
-    // Calculate full waveform width at current zoom
-    CGFloat fullWidth = stem.durationMS * _zoomLevel;
-    if (fullWidth < 1) return;
+    CGFloat scale = self.window.backingScaleFactor ?: 2.0;
+    CGFloat durationMS = stem.durationMS;
+    if (durationMS <= 0) return;
 
-    // Cap at a reasonable max to avoid huge allocations (e.g., 32K pixels)
-    CGFloat maxCacheWidth = 32768.0;
-    CGFloat cacheWidth = fmin(fullWidth, maxCacheWidth);
-
-    // If cache is still valid, skip
-    if (_cachedWaveformImage &&
+    // Check if existing cache covers the visible region
+    if (_cachedImage &&
         fabs(_cachedZoomLevel - _zoomLevel) < 0.00001 &&
-        fabs(_cachedImageHeight - height) < 0.5) {
+        fabs(_cachedHeightPts - height) < 0.5 &&
+        fabs(_cachedScale - scale) < 0.01 &&
+        _scrollOffsetX >= _cachedScrollX &&
+        (_scrollOffsetX + viewWidth) <= (_cachedScrollX + _cachedWidthPts + 0.5)) {
         return;
     }
 
-    _cachedZoomLevel = _zoomLevel;
-    _cachedImageWidth = cacheWidth;
-    _cachedImageHeight = height;
+    // Cache viewport + 1x padding on each side (3x total)
+    CGFloat padding = viewWidth;
+    CGFloat cacheStartX = fmax(0, _scrollOffsetX - padding);
+    CGFloat fullZoomedWidth = durationMS * _zoomLevel;
+    CGFloat cacheWidthPts = viewWidth + 2 * padding;
+    if (cacheStartX + cacheWidthPts > fullZoomedWidth) {
+        cacheWidthPts = fullZoomedWidth - cacheStartX;
+    }
+    if (cacheWidthPts < 1) return;
 
-    // Create bitmap context
-    NSUInteger pixelWidth = (NSUInteger)cacheWidth;
-    NSUInteger pixelHeight = (NSUInteger)height;
+    // Create bitmap at Retina resolution
+    NSUInteger pixelWidth = (NSUInteger)(cacheWidthPts * scale);
+    NSUInteger pixelHeight = (NSUInteger)(height * scale);
+    if (pixelWidth == 0 || pixelHeight == 0) return;
+
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef bctx = CGBitmapContextCreate(NULL, pixelWidth, pixelHeight, 8,
-                                               pixelWidth * 4,
-                                               cs,
+                                               pixelWidth * 4, cs,
                                                kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host);
     CGColorSpaceRelease(cs);
     if (!bctx) return;
 
-    // Transparent background (the view draws its own background)
     CGContextClearRect(bctx, CGRectMake(0, 0, pixelWidth, pixelHeight));
 
     // Waveform color
@@ -138,56 +159,100 @@
     [[color colorUsingColorSpace:NSColorSpace.sRGBColorSpace] getRed:&r green:&g blue:&b alpha:&a];
     CGContextSetRGBFillColor(bctx, r, g, b, 0.8);
 
-    // Render waveform into bitmap (non-flipped: y=0 is bottom)
-    CGFloat centerY = height / 2.0;
-    CGFloat halfHeight = (height - 4.0) / 2.0;
+    // Render in raw pixel coordinates (non-flipped: y=0 is bottom)
+    CGFloat centerYPx = pixelHeight / 2.0;
+    CGFloat halfHeightPx = (pixelHeight - 4.0 * scale) / 2.0;
 
     NSUInteger bucketCount = buckets.count;
-    CGFloat durationMS = stem.durationMS;
     double msPerBucket = durationMS / (double)bucketCount;
 
-    // Pre-extract bucket data to C array for fast access
-    XLWaveformBucket *bucketData = (XLWaveformBucket *)malloc(bucketCount * sizeof(XLWaveformBucket));
-    for (NSUInteger i = 0; i < bucketCount; i++) {
-        [buckets[i] getValue:&bucketData[i]];
+    // Determine rendering mode: raw samples at high zoom, buckets at low zoom.
+    // Switch to samples when each bucket spans more than ~2 pixels.
+    CGFloat msPerPixel = 1.0 / (_zoomLevel * scale);
+    BOOL useSamples = NO;
+    float *samples = NULL;
+    NSUInteger sampleCount = 0;
+    NSUInteger channelCount = 0;
+    double sampleRate = 0;
+
+    if (stem.audioData && msPerPixel < msPerBucket * 2.0) {
+        useSamples = YES;
+        samples = stem.audioData.samples;
+        sampleCount = stem.audioData.sampleCount;
+        channelCount = stem.audioData.channelCount;
+        sampleRate = stem.audioData.sampleRate;
+    }
+
+    // Pre-extract bucket data to C array for fast access (only when using buckets)
+    XLWaveformBucket *bucketData = NULL;
+    if (!useSamples) {
+        bucketData = (XLWaveformBucket *)malloc(bucketCount * sizeof(XLWaveformBucket));
+        for (NSUInteger i = 0; i < bucketCount; i++) {
+            [buckets[i] getValue:&bucketData[i]];
+        }
     }
 
     for (NSUInteger px = 0; px < pixelWidth; px++) {
-        // This pixel corresponds to time: px / zoomLevel
-        CGFloat timeMS = (CGFloat)px / _zoomLevel;
-        if (timeMS >= durationMS) break;
-
-        NSUInteger bi1 = (NSUInteger)(timeMS / msPerBucket);
-        if (bi1 >= bucketCount) bi1 = bucketCount - 1;
-
-        CGFloat timeMS2 = (CGFloat)(px + 1) / _zoomLevel;
-        NSUInteger bi2 = (NSUInteger)(timeMS2 / msPerBucket);
-        if (bi2 >= bucketCount) bi2 = bucketCount - 1;
+        // Map each bitmap pixel to a time range
+        CGFloat zoomedPt = cacheStartX + (CGFloat)px / scale;
+        CGFloat timeMS1 = zoomedPt / _zoomLevel;
+        CGFloat timeMS2 = (zoomedPt + 1.0 / scale) / _zoomLevel;
+        if (timeMS1 >= durationMS) break;
+        if (timeMS2 > durationMS) timeMS2 = durationMS;
 
         float minVal = 1.0f, maxVal = -1.0f;
-        for (NSUInteger bi = bi1; bi <= bi2; bi++) {
-            float bMin = fminf(bucketData[bi].minL, bucketData[bi].minR);
-            float bMax = fmaxf(bucketData[bi].maxL, bucketData[bi].maxR);
-            if (bMin < minVal) minVal = bMin;
-            if (bMax > maxVal) maxVal = bMax;
+
+        if (useSamples) {
+            // High zoom: compute min/max from raw PCM samples
+            NSUInteger startFrame = (NSUInteger)(timeMS1 / 1000.0 * sampleRate);
+            NSUInteger endFrame = (NSUInteger)(timeMS2 / 1000.0 * sampleRate);
+            if (startFrame >= sampleCount) startFrame = sampleCount - 1;
+            if (endFrame >= sampleCount) endFrame = sampleCount - 1;
+
+            for (NSUInteger f = startFrame; f <= endFrame; f++) {
+                float sL = samples[f * channelCount];
+                float sR = (channelCount > 1) ? samples[f * channelCount + 1] : sL;
+                float sMin = fminf(sL, sR);
+                float sMax = fmaxf(sL, sR);
+                if (sMin < minVal) minVal = sMin;
+                if (sMax > maxVal) maxVal = sMax;
+            }
+        } else {
+            // Low zoom: compute min/max from overview buckets
+            NSUInteger bi1 = (NSUInteger)(timeMS1 / msPerBucket);
+            if (bi1 >= bucketCount) bi1 = bucketCount - 1;
+            NSUInteger bi2 = (NSUInteger)(timeMS2 / msPerBucket);
+            if (bi2 >= bucketCount) bi2 = bucketCount - 1;
+
+            for (NSUInteger bi = bi1; bi <= bi2; bi++) {
+                float bMin = fminf(bucketData[bi].minL, bucketData[bi].minR);
+                float bMax = fmaxf(bucketData[bi].maxL, bucketData[bi].maxR);
+                if (bMin < minVal) minVal = bMin;
+                if (bMax > maxVal) maxVal = bMax;
+            }
         }
 
-        // Non-flipped bitmap: flip Y
-        CGFloat y1 = centerY - maxVal * halfHeight;
-        CGFloat y2 = centerY - minVal * halfHeight;
+        CGFloat y1 = centerYPx - maxVal * halfHeightPx;
+        CGFloat y2 = centerYPx - minVal * halfHeightPx;
         if (fabs(y2 - y1) < 1.0) {
-            y1 = centerY - 0.5;
-            y2 = centerY + 0.5;
+            y1 = centerYPx - 0.5;
+            y2 = centerYPx + 0.5;
         }
 
-        CGContextFillRect(bctx, CGRectMake((CGFloat)px, fmin(y1, y2), 1.0, fabs(y2 - y1)));
+        CGContextFillRect(bctx, CGRectMake(px, fmin(y1, y2), 1.0, fabs(y2 - y1)));
     }
 
     free(bucketData);
 
-    CGImageRelease(_cachedWaveformImage);
-    _cachedWaveformImage = CGBitmapContextCreateImage(bctx);
+    CGImageRelease(_cachedImage);
+    _cachedImage = CGBitmapContextCreateImage(bctx);
     CGContextRelease(bctx);
+
+    _cachedZoomLevel = _zoomLevel;
+    _cachedScrollX = cacheStartX;
+    _cachedWidthPts = cacheWidthPts;
+    _cachedHeightPts = height;
+    _cachedScale = scale;
 }
 
 #pragma mark - Drawing
@@ -214,25 +279,28 @@
     if (!stem || stem.isLoading) return;
     if (!stem.overviewBuckets || stem.overviewBuckets.count == 0) return;
 
-    // Rebuild cache if needed (only on data/zoom/height change)
+    // Rebuild cache if needed (checks zoom, height, scale, and scroll coverage)
     [self rebuildCacheIfNeeded];
 
-    if (_cachedWaveformImage) {
-        // Blit the visible portion of the cached waveform image
-        // Source rect in image coords (non-flipped: origin at bottom-left)
-        CGFloat srcX = _scrollOffsetX;
-        CGFloat srcWidth = fmin(width, _cachedImageWidth - srcX);
-        if (srcWidth <= 0) goto playhead;
+    if (_cachedImage) {
+        CGFloat offsetInCache = _scrollOffsetX - _cachedScrollX;
+        CGFloat availableWidth = _cachedWidthPts - offsetInCache;
+        CGFloat blitWidth = fmin(width, availableWidth);
+        if (blitWidth <= 0) goto playhead;
 
-        CGRect srcRect = CGRectMake(srcX, 0, srcWidth, _cachedImageHeight);
-        // Destination rect in view coords (flipped context)
-        CGRect dstRect = CGRectMake(0, 0, srcWidth, height);
+        // Source rect in pixel coordinates of the cached image
+        CGFloat srcPixelX = offsetInCache * _cachedScale;
+        CGFloat srcPixelW = blitWidth * _cachedScale;
+        CGFloat srcPixelH = (CGFloat)CGImageGetHeight(_cachedImage);
 
-        // Save state and flip for CGImage drawing (CGImage draws non-flipped)
+        CGRect srcRect = CGRectMake(srcPixelX, 0, srcPixelW, srcPixelH);
+        CGRect dstRect = CGRectMake(0, 0, blitWidth, height);
+
+        // Flip for CGImage drawing (CGImage is non-flipped, our context is flipped)
         CGContextSaveGState(ctx);
         CGContextTranslateCTM(ctx, 0, height);
         CGContextScaleCTM(ctx, 1.0, -1.0);
-        CGImageRef subImage = CGImageCreateWithImageInRect(_cachedWaveformImage, srcRect);
+        CGImageRef subImage = CGImageCreateWithImageInRect(_cachedImage, srcRect);
         CGContextDrawImage(ctx, dstRect, subImage);
         CGImageRelease(subImage);
         CGContextRestoreGState(ctx);
