@@ -96,7 +96,6 @@ static NSString *XLStemNameFromFilename(NSString *filename) {
 #pragma mark - Import
 
 - (void)importStemFiles:(NSArray<NSURL *> *)fileURLs completion:(void (^)(void))completion {
-    NSLog(@"[Stems] importStemFiles: %lu files", (unsigned long)fileURLs.count);
     if (fileURLs.count == 0) {
         if (completion) completion();
         return;
@@ -113,12 +112,10 @@ static NSString *XLStemNameFromFilename(NSString *filename) {
         stem.relativePath = [self relativePathForFile:url.path];
         stem.waveformColor = XLStemColorPalette(baseIndex + i);
         stem.isLoading = YES;
-        NSLog(@"[Stems]   stem '%@' path=%@", stem.name, stem.filePath);
         [newStems addObject:stem];
     }
 
     [_stems addObjectsFromArray:newStems];
-    NSLog(@"[Stems] Total stems now: %lu, posting notification", (unsigned long)_stems.count);
     [self postChangeNotification];
 
     dispatch_group_t group = dispatch_group_create();
@@ -126,18 +123,12 @@ static NSString *XLStemNameFromFilename(NSString *filename) {
     for (XLStemData *stem in newStems) {
         dispatch_group_enter(group);
         dispatch_async(_loadQueue, ^{
-            NSLog(@"[Stems] Loading audio for '%@' from %@", stem.name, stem.filePath);
             XLAudioSampleData *audioData = [XLAudioLoader loadAudioFile:stem.filePath];
             NSArray<NSValue *> *buckets = nil;
             CGFloat durationMS = 0;
             if (audioData) {
                 buckets = [XLAudioLoader generateWaveformOverview:audioData bucketCount:kStemBucketCount];
                 durationMS = audioData.duration * 1000.0;
-                NSLog(@"[Stems] Loaded '%@': %lu samples, %lu buckets, %.0fms",
-                      stem.name, (unsigned long)audioData.sampleCount,
-                      (unsigned long)buckets.count, durationMS);
-            } else {
-                NSLog(@"[Stems] FAILED to load audio for '%@'", stem.name);
             }
 
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -145,8 +136,6 @@ static NSString *XLStemNameFromFilename(NSString *filename) {
                 stem.overviewBuckets = buckets;
                 stem.durationMS = durationMS;
                 stem.isLoading = NO;
-                NSLog(@"[Stems] Stem '%@' ready: buckets=%lu duration=%.0fms",
-                      stem.name, (unsigned long)(stem.overviewBuckets.count), stem.durationMS);
                 [self postChangeNotification];
             });
             dispatch_group_leave(group);
@@ -154,7 +143,6 @@ static NSString *XLStemNameFromFilename(NSString *filename) {
     }
 
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        NSLog(@"[Stems] All %lu stems finished loading", (unsigned long)newStems.count);
         if (completion) completion();
     });
 }

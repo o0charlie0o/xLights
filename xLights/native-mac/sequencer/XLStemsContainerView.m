@@ -585,9 +585,8 @@ static const CGFloat kRowHeaderLeftPadding = 8.0;
     }
 
     if (event.modifierFlags & NSEventModifierFlagCommand) {
-        // Cmd+scroll = zoom
         NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
-        CGFloat pointX = loc.x - _rowHeaderWidth;  // Adjust for row headers
+        CGFloat pointX = loc.x - _rowHeaderWidth;
         CGFloat factor = 1.0 + event.scrollingDeltaY * 0.05;
         factor = fmax(0.5, fmin(factor, 2.0));
         CGFloat newZoom = sc.zoomLevel * factor;
@@ -596,13 +595,11 @@ static const CGFloat kRowHeaderLeftPadding = 8.0;
     }
 
     if (event.modifierFlags & NSEventModifierFlagShift) {
-        // Shift+scroll = horizontal scroll
         CGFloat dx = event.scrollingDeltaY;
         [sc setHorizontalScrollOffset:sc.horizontalScrollOffset - dx];
         return;
     }
 
-    // Normal horizontal scroll
     CGFloat dx = event.scrollingDeltaX;
     if (fabs(dx) > 0.01) {
         [sc setHorizontalScrollOffset:sc.horizontalScrollOffset - dx];
