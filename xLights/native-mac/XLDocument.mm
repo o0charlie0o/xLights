@@ -1,5 +1,6 @@
 #import "XLDocument.h"
 #import "XLMainWindowController.h"
+#import "XLEngineBridge.h"
 #import "../engine/SequenceEngine.h"
 #import <string>
 
@@ -192,21 +193,41 @@
 #pragma mark - NSDocument Overrides - Writing
 
 - (BOOL)writeToURL:(NSURL *)url ofType:(NSString *)typeName error:(NSError **)outError {
-    if (!_sequenceEngine) {
-        if (outError) {
-            *outError = [NSError errorWithDomain:NSCocoaErrorDomain
-                                            code:NSFileWriteUnknownError
-                                        userInfo:@{NSLocalizedDescriptionKey: @"Sequence engine not initialized"}];
-        }
-        return NO;
-    }
-
     // Only sequences can be written, not show folders
     if ([typeName isEqualToString:@"Show Folder"]) {
         if (outError) {
             *outError = [NSError errorWithDomain:NSCocoaErrorDomain
                                             code:NSFileWriteUnknownError
                                         userInfo:@{NSLocalizedDescriptionKey: @"Cannot save show folder directly"}];
+        }
+        return NO;
+    }
+
+    // Save through the engine bridge so metadata (including audio stems) is included
+    XLEngineBridge *bridge = nil;
+    for (NSWindowController *wc in self.windowControllers) {
+        if ([wc isKindOfClass:[XLMainWindowController class]]) {
+            bridge = ((XLMainWindowController *)wc).engineBridge;
+            break;
+        }
+    }
+
+    if (bridge) {
+        BOOL success = [bridge saveSequence:url.path];
+        if (!success && outError) {
+            *outError = [NSError errorWithDomain:NSCocoaErrorDomain
+                                            code:NSFileWriteUnknownError
+                                        userInfo:@{NSLocalizedDescriptionKey: @"Failed to save sequence file"}];
+        }
+        return success;
+    }
+
+    // Fallback: direct engine save (no metadata like stems)
+    if (!_sequenceEngine) {
+        if (outError) {
+            *outError = [NSError errorWithDomain:NSCocoaErrorDomain
+                                            code:NSFileWriteUnknownError
+                                        userInfo:@{NSLocalizedDescriptionKey: @"Sequence engine not initialized"}];
         }
         return NO;
     }

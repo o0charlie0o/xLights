@@ -382,12 +382,18 @@ static XLEngineBridge *_sharedBridge = nil;
                 NSLog(@"XLEngineBridge: loadFromSequenceFile = %s", effectsLoaded ? "YES" : "NO");
             }
 
-            // Update render provider with sequence timing
-            if (_nativeRenderProvider && _nativeSequenceProvider) {
+            // Update render provider and effect provider with sequence timing
+            if (_nativeSequenceProvider) {
                 int frameMSVal = _nativeSequenceProvider->getFrameMS();
                 int durationMSVal = (int)(_nativeSequenceProvider->getSequenceDuration() * 1000.0);
                 if (frameMSVal > 0 && durationMSVal > 0) {
-                    _nativeRenderProvider->setSequenceInfo(frameMSVal, durationMSVal);
+                    if (_nativeRenderProvider) {
+                        _nativeRenderProvider->setSequenceInfo(frameMSVal, durationMSVal);
+                    }
+                }
+                // Sync duration to effect provider (may be longer than XML if audio is longer)
+                if (_nativeEffectProvider && durationMSVal > 0) {
+                    _nativeEffectProvider->setSequenceLengthMS(durationMSVal);
                 }
             }
 
@@ -429,8 +435,24 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 
     @try {
-        std::string stdPath = path ? [path UTF8String] : "";
-        bool result = _sequenceEngine->saveSequence(stdPath);
+        // Resolve save path
+        std::string savePath = path ? [path UTF8String] : "";
+        if (savePath.empty() && _nativeSequenceProvider) {
+            savePath = _nativeSequenceProvider->getSequencePath();
+        }
+        if (savePath.empty()) {
+            NSLog(@"XLEngineBridge: Cannot save sequence - no file path");
+            return NO;
+        }
+
+        // Update the sequence provider's stored path
+        if (_nativeSequenceProvider) {
+            _nativeSequenceProvider->setSequencePath(savePath);
+        }
+
+        // Build metadata (includes audio stems) and write XML via effect provider
+        auto meta = [self buildSequenceMetadata];
+        bool result = _nativeEffectProvider->saveToSequenceFile(savePath, meta);
         NSLog(@"XLEngineBridge: saveSequence(%@) = %s", path ?: @"<current>", result ? "YES" : "NO");
         return result ? YES : NO;
     } @catch (NSException *exception) {
@@ -545,7 +567,10 @@ static XLEngineBridge *_sharedBridge = nil;
         // Matches legacy AddAllModelsToSequence(): groups first, then individual models.
         if (_nativeEffectProvider) {
             _nativeEffectProvider->clear();
-            _nativeEffectProvider->setSequenceLengthMS((int)durationMS);
+            // Use actual duration from sequence provider (may be updated from audio file)
+            int actualDurationMS = (int)(_nativeSequenceProvider->getSequenceDuration() * 1000.0);
+            if (actualDurationMS <= 0) actualDurationMS = (int)durationMS;
+            _nativeEffectProvider->setSequenceLengthMS(actualDurationMS);
 
             // Add a default timing track
             size_t timingIdx = _nativeEffectProvider->addElement(
@@ -4074,6 +4099,9 @@ static XLEngineBridge *_sharedBridge = nil;
         BOOL isGroup = (_groupNames.find(elemInfo.name) != _groupNames.end()) ? YES : NO;
         NSString* elementType = isGroup ? @"group" : typeString;
 
+        std::string folderStr = _nativeEffectProvider->getElementFolder(elemInfo.name);
+        NSString* folder = folderStr.empty() ? @"" : [NSString stringWithUTF8String:folderStr.c_str()];
+
         return @{
             @"index": @(idx),
             @"name": [NSString stringWithUTF8String:elemInfo.name.c_str()],
@@ -4087,6 +4115,7 @@ static XLEngineBridge *_sharedBridge = nil;
             @"hasStrands": @NO,
             @"submodelCount": @0,
             @"strandCount": @0,
+            @"folder": folder,
         };
     };
 
@@ -5551,6 +5580,86 @@ static XLEngineBridge *_sharedBridge = nil;
 #endif
 }
 
+#pragma mark - Track Folders
+
+- (NSArray<NSDictionary *> *)getTrackFolders {
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeEffectProvider) return @[];
+
+    auto folders = _nativeEffectProvider->getTrackFolders();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:folders.size()];
+    for (const auto& folder : folders) {
+        [result addObject:@{
+            @"name": [NSString stringWithUTF8String:folder.name.c_str()],
+            @"collapsed": @(folder.collapsed),
+        }];
+    }
+    return result;
+#else
+    return @[];
+#endif
+}
+
+- (BOOL)createTrackFolder:(NSString *)name {
+#ifdef XLIGHTS_NATIVE
+    if (!name || !_nativeEffectProvider) return NO;
+    return _nativeEffectProvider->createTrackFolder(std::string([name UTF8String])) ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)deleteTrackFolder:(NSString *)name {
+#ifdef XLIGHTS_NATIVE
+    if (!name || !_nativeEffectProvider) return NO;
+    return _nativeEffectProvider->deleteTrackFolder(std::string([name UTF8String])) ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)renameTrackFolder:(NSString *)oldName toName:(NSString *)newName {
+#ifdef XLIGHTS_NATIVE
+    if (!oldName || !newName || !_nativeEffectProvider) return NO;
+    return _nativeEffectProvider->renameTrackFolder(
+        std::string([oldName UTF8String]),
+        std::string([newName UTF8String])) ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (BOOL)setElement:(NSString *)elementName folder:(NSString *)folderName {
+#ifdef XLIGHTS_NATIVE
+    if (!elementName || !_nativeEffectProvider) return NO;
+    std::string folder = folderName ? std::string([folderName UTF8String]) : "";
+    return _nativeEffectProvider->setElementFolder(
+        std::string([elementName UTF8String]), folder) ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
+- (NSString *)getElementFolder:(NSString *)elementName {
+#ifdef XLIGHTS_NATIVE
+    if (!elementName || !_nativeEffectProvider) return nil;
+    std::string folder = _nativeEffectProvider->getElementFolder(std::string([elementName UTF8String]));
+    return folder.empty() ? nil : [NSString stringWithUTF8String:folder.c_str()];
+#else
+    return nil;
+#endif
+}
+
+- (BOOL)setTrackFolderCollapsed:(NSString *)name collapsed:(BOOL)collapsed {
+#ifdef XLIGHTS_NATIVE
+    if (!name || !_nativeEffectProvider) return NO;
+    return _nativeEffectProvider->setTrackFolderCollapsed(
+        std::string([name UTF8String]), collapsed) ? YES : NO;
+#else
+    return NO;
+#endif
+}
+
 #pragma mark - Song Structure Regions
 
 - (NSArray<NSDictionary *> *)getSongStructureRegions {
@@ -5578,6 +5687,7 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
     if (_nativeEffectProvider) {
         _nativeEffectProvider->addSongStructureBoundary((int)timeMS);
+        [self scheduleAutoSave];
     }
 #endif
 }
@@ -5586,6 +5696,7 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
     if (_nativeEffectProvider) {
         _nativeEffectProvider->moveSongStructureBoundary((size_t)idx, (int)newTimeMS);
+        [self scheduleAutoSave];
     }
 #endif
 }
@@ -5594,6 +5705,7 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
     if (_nativeEffectProvider) {
         _nativeEffectProvider->deleteSongStructureBoundary((size_t)idx);
+        [self scheduleAutoSave];
     }
 #endif
 }
@@ -5603,6 +5715,7 @@ static XLEngineBridge *_sharedBridge = nil;
     if (_nativeEffectProvider) {
         std::string nameStr = name ? std::string([name UTF8String]) : "";
         _nativeEffectProvider->updateSongStructureRegion((int64_t)regionId, nameStr, colorARGB);
+        [self scheduleAutoSave];
     }
 #endif
 }
@@ -5611,6 +5724,7 @@ static XLEngineBridge *_sharedBridge = nil;
 #ifdef XLIGHTS_NATIVE
     if (_nativeEffectProvider) {
         _nativeEffectProvider->clearSongStructure();
+        [self scheduleAutoSave];
     }
 #endif
 }
