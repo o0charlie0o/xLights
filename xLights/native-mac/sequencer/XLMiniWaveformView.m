@@ -15,16 +15,11 @@
 static const CGFloat kLabelLeftPadding = 4.0;
 static const CGFloat kLabelFontSize = 9.0;
 
-@implementation XLMiniWaveformView {
-    BOOL _needsRedraw;
-}
+@implementation XLMiniWaveformView
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
-        self.wantsLayer = YES;
-        self.layer.delegate = (id<CALayerDelegate>)self;
-        self.layerContentsRedrawPolicy = NSViewLayerContentsRedrawOnSetNeedsDisplay;
         _zoomLevel = 0.1;
         _scrollOffsetX = 0;
         _sequenceLengthMS = 60000;
@@ -37,33 +32,37 @@ static const CGFloat kLabelFontSize = 9.0;
     return YES;
 }
 
+- (BOOL)isOpaque {
+    return YES;
+}
+
 #pragma mark - Property Setters
 
 - (void)setZoomLevel:(CGFloat)zoomLevel {
     if (fabs(_zoomLevel - zoomLevel) < 0.00001) return;
     _zoomLevel = zoomLevel;
-    [self setNeedsRedraw];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)setScrollOffsetX:(CGFloat)scrollOffsetX {
     if (fabs(_scrollOffsetX - scrollOffsetX) < 0.01) return;
     _scrollOffsetX = scrollOffsetX;
-    [self setNeedsRedraw];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)setPlaybackPositionMS:(CGFloat)playbackPositionMS {
     _playbackPositionMS = playbackPositionMS;
-    [self setNeedsRedraw];
+    [self setNeedsDisplay:YES];
 }
 
 - (void)setStemData:(XLStemData *)stemData {
     _stemData = stemData;
-    [self setNeedsRedraw];
+    [self setNeedsDisplay:YES];
 }
 
-- (void)setNeedsRedraw {
-    _needsRedraw = YES;
-    [self.layer setNeedsDisplay];
+- (void)setSequenceLengthMS:(CGFloat)sequenceLengthMS {
+    _sequenceLengthMS = sequenceLengthMS;
+    [self setNeedsDisplay:YES];
 }
 
 #pragma mark - Coordinate Conversion
@@ -76,22 +75,14 @@ static const CGFloat kLabelFontSize = 9.0;
     return (timeMS * _zoomLevel) - _scrollOffsetX;
 }
 
-#pragma mark - CALayerDelegate Drawing
+#pragma mark - Drawing
 
-- (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)ctx {
+- (void)drawRect:(NSRect)dirtyRect {
+    CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
+    if (!ctx) return;
+
     CGFloat width = NSWidth(self.bounds);
     CGFloat height = NSHeight(self.bounds);
-
-    static int drawCount = 0;
-    if (drawCount < 30) {
-        NSLog(@"[Stems] drawLayer '%@': bounds=%.0fx%.0f frame=%@ stem=%@ loading=%d buckets=%lu",
-              _stemData.name ?: @"(nil)", width, height,
-              NSStringFromRect(self.frame),
-              _stemData ? @"YES" : @"NO",
-              _stemData.isLoading,
-              (unsigned long)_stemData.overviewBuckets.count);
-        drawCount++;
-    }
 
     // Dark background
     CGContextSetRGBFillColor(ctx, 0.10, 0.10, 0.10, 1.0);
@@ -110,7 +101,6 @@ static const CGFloat kLabelFontSize = 9.0;
     NSArray<NSValue *> *buckets = stem.overviewBuckets;
 
     if (stem.isLoading) {
-        // Show loading text
         [self drawLabel:[NSString stringWithFormat:@"%@ (loading...)", stem.name]
               inContext:ctx width:width height:height color:stem.waveformColor];
         return;
@@ -212,7 +202,6 @@ static const CGFloat kLabelFontSize = 9.0;
 {
     if (!label) return;
 
-    // Draw semi-transparent background behind label
     NSDictionary *attrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:kLabelFontSize weight:NSFontWeightMedium],
         NSForegroundColorAttributeName: color ?: [NSColor whiteColor]
@@ -224,7 +213,6 @@ static const CGFloat kLabelFontSize = 9.0;
     CGContextSetRGBFillColor(ctx, 0.0, 0.0, 0.0, 0.6);
     CGContextFillRect(ctx, CGRectMake(0, textY - 1, textSize.width + kLabelLeftPadding * 2 + 2, textSize.height + 2));
 
-    // Push graphics state for NSAttributedString drawing
     NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
     [NSGraphicsContext saveGraphicsState];
     [NSGraphicsContext setCurrentContext:gc];

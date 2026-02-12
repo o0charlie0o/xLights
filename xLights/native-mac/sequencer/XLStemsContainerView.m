@@ -375,9 +375,9 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     // Set document view frame for scrollable content size
     [_stackDocumentView setFrame:NSMakeRect(0, 0, width, y)];
 
-    // Ensure all layers get a display pass
+    // Ensure all views get a display pass
     for (XLMiniWaveformView *mv in _miniWaveformViews) {
-        [mv.layer setNeedsDisplay];
+        [mv setNeedsDisplay:YES];
     }
     NSLog(@"[Stems]   docView frame=%@ subviews=%lu",
           NSStringFromRect(_stackDocumentView.frame),
