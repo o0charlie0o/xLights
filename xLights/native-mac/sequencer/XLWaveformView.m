@@ -257,6 +257,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)setScrollOffsetX:(CGFloat)scrollOffsetX {
+    scrollOffsetX = [self clampScrollOffset:scrollOffsetX];
     if (fabs(scrollOffsetX - _scrollOffsetX) < 0.01) return;
     _scrollOffsetX = scrollOffsetX;
     _needsRedraw = YES;
@@ -309,6 +310,14 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     if ([_delegate respondsToSelector:@selector(waveformViewDidClearLoopRegion:)]) {
         [_delegate waveformViewDidClearLoopRegion:self];
     }
+}
+
+#pragma mark - Scroll Clamping
+
+- (CGFloat)clampScrollOffset:(CGFloat)offset {
+    CGFloat maxScroll = _sequenceLengthMS * _zoomLevel - NSWidth(self.bounds);
+    if (maxScroll < 0) maxScroll = 0;
+    return fmax(0, fmin(offset, maxScroll));
 }
 
 #pragma mark - Coordinate Conversion
@@ -926,7 +935,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
         // Adjust scroll to keep time under cursor stable
         CGFloat newX = timeAtCursor * _zoomLevel - loc.x;
-        _scrollOffsetX = fmax(0, newX);
+        _scrollOffsetX = [self clampScrollOffset:newX];
         _needsRedraw = YES;
 
         if ([_delegate respondsToSelector:@selector(waveformView:didChangeZoomLevel:centeredOnPointX:)]) {
@@ -942,7 +951,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
     if (event.modifierFlags & NSEventModifierFlagShift) {
         // Shift+Scroll = horizontal scroll
         CGFloat dx = event.scrollingDeltaY;
-        _scrollOffsetX = fmax(0, _scrollOffsetX - dx);
+        _scrollOffsetX = [self clampScrollOffset:_scrollOffsetX - dx];
         _needsRedraw = YES;
 
         if ([_delegate respondsToSelector:@selector(waveformView:didChangeScrollOffset:)]) {
@@ -952,7 +961,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
         // Normal horizontal scroll
         CGFloat dx = event.scrollingDeltaX;
         if (fabs(dx) > 0.01) {
-            _scrollOffsetX = fmax(0, _scrollOffsetX - dx);
+            _scrollOffsetX = [self clampScrollOffset:_scrollOffsetX - dx];
             _needsRedraw = YES;
 
             if ([_delegate respondsToSelector:@selector(waveformView:didChangeScrollOffset:)]) {
@@ -976,7 +985,7 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
     // Adjust scroll to keep time under cursor stable
     CGFloat newX = timeAtCursor * _zoomLevel - loc.x;
-    _scrollOffsetX = fmax(0, newX);
+    _scrollOffsetX = [self clampScrollOffset:newX];
     _needsRedraw = YES;
 
     if ([_delegate respondsToSelector:@selector(waveformView:didChangeZoomLevel:centeredOnPointX:)]) {
