@@ -323,6 +323,11 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     [_miniWaveformViews removeAllObjects];
 
     NSArray<XLStemData *> *stems = _stemManager.stems;
+    NSLog(@"[Stems] reloadStems: %lu stems, collapsed=%d", (unsigned long)stems.count, _collapsed);
+    NSLog(@"[Stems]   container frame=%@ bounds=%@",
+          NSStringFromRect(self.frame), NSStringFromRect(self.bounds));
+    NSLog(@"[Stems]   scrollView frame=%@ bounds=%@",
+          NSStringFromRect(_scrollView.frame), NSStringFromRect(_scrollView.bounds));
 
     // Update title
     if (stems.count > 0) {
@@ -343,27 +348,46 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     if (width < 100) width = 800;
     CGFloat y = 0;
 
+    NSLog(@"[Stems]   creating views with width=%.0f", width);
+
     for (XLStemData *stem in stems) {
         XLMiniWaveformView *mv = [[XLMiniWaveformView alloc] initWithFrame:NSMakeRect(0, y, width, kMiniWaveformHeight)];
         mv.autoresizingMask = NSViewWidthSizable;
+
+        // Add to view hierarchy FIRST so layer is in the tree
+        [_stackDocumentView addSubview:mv];
+        [_miniWaveformViews addObject:mv];
+
+        // Now set properties (triggers setNeedsDisplay on an in-tree layer)
         mv.stemData = stem;
         mv.zoomLevel = _zoomLevel;
         mv.scrollOffsetX = _scrollOffsetX;
         mv.sequenceLengthMS = _sequenceLengthMS;
         mv.playbackPositionMS = _playbackPositionMS;
 
-        [_stackDocumentView addSubview:mv];
-        [_miniWaveformViews addObject:mv];
+        NSLog(@"[Stems]   view for '%@': frame=%@ loading=%d buckets=%lu duration=%.0fms",
+              stem.name, NSStringFromRect(mv.frame), stem.isLoading,
+              (unsigned long)stem.overviewBuckets.count, stem.durationMS);
+
         y += kMiniWaveformHeight;
     }
 
     // Set document view frame for scrollable content size
     [_stackDocumentView setFrame:NSMakeRect(0, 0, width, y)];
 
+    // Ensure all layers get a display pass
+    for (XLMiniWaveformView *mv in _miniWaveformViews) {
+        [mv.layer setNeedsDisplay];
+    }
+    NSLog(@"[Stems]   docView frame=%@ subviews=%lu",
+          NSStringFromRect(_stackDocumentView.frame),
+          (unsigned long)_stackDocumentView.subviews.count);
+
     // Auto-expand if stems were just added and panel is collapsed
     if (stems.count > 0 && _collapsed) {
         self.collapsed = NO;
         CGFloat targetHeight = _savedExpandedHeight;
+        NSLog(@"[Stems]   auto-expanding to height=%.0f", targetHeight);
         if ([_delegate respondsToSelector:@selector(stemsContainer:didChangeHeight:)]) {
             [_delegate stemsContainer:self didChangeHeight:targetHeight];
         }

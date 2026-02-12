@@ -82,6 +82,17 @@ static const CGFloat kLabelFontSize = 9.0;
     CGFloat width = NSWidth(self.bounds);
     CGFloat height = NSHeight(self.bounds);
 
+    static int drawCount = 0;
+    if (drawCount < 30) {
+        NSLog(@"[Stems] drawLayer '%@': bounds=%.0fx%.0f frame=%@ stem=%@ loading=%d buckets=%lu",
+              _stemData.name ?: @"(nil)", width, height,
+              NSStringFromRect(self.frame),
+              _stemData ? @"YES" : @"NO",
+              _stemData.isLoading,
+              (unsigned long)_stemData.overviewBuckets.count);
+        drawCount++;
+    }
+
     // Dark background
     CGContextSetRGBFillColor(ctx, 0.10, 0.10, 0.10, 1.0);
     CGContextFillRect(ctx, CGRectMake(0, 0, width, height));
