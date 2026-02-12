@@ -558,6 +558,26 @@ bool NativeSequenceProvider::parseSequenceXML(const std::string& filePath)
         if (artist && artist.length > 0) {
             _metadata.artist = artist.UTF8String;
         }
+
+        // Audio stems
+        _metadata.audioStems.clear();
+        NSArray<NSXMLElement*>* stemsElements = [head elementsForName:@"audioStems"];
+        if (stemsElements.count > 0) {
+            NSXMLElement* stemsRoot = stemsElements[0];
+            NSArray<NSXMLElement*>* stemElements = [stemsRoot elementsForName:@"stem"];
+            for (NSXMLElement* stemElem in stemElements) {
+                xlEngine::NativeStemReference ref;
+                NSXMLNode* nameAttr = [stemElem attributeForName:@"name"];
+                NSXMLNode* pathAttr = [stemElem attributeForName:@"relativePath"];
+                NSXMLNode* colorAttr = [stemElem attributeForName:@"color"];
+                if (nameAttr) ref.name = nameAttr.stringValue.UTF8String;
+                if (pathAttr) ref.relativePath = pathAttr.stringValue.UTF8String;
+                if (colorAttr) ref.color = colorAttr.stringValue.UTF8String;
+                _metadata.audioStems.push_back(ref);
+            }
+            NSLog(@"NativeSequenceProvider: Parsed %lu audio stem references",
+                  (unsigned long)_metadata.audioStems.size());
+        }
     }
 
     // Fallback: check root element attributes for metadata (older native save format)

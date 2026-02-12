@@ -91,6 +91,11 @@
 ///                  numChannels, numFrames, author, song, artist, album, comment
 - (NSDictionary *)getSequenceInfo;
 
+/// Audio stem references for XML persistence.
+/// Set by the sequencer view controller when stems are imported/removed.
+/// Array of dicts with keys: name, relativePath, color (#RRGGBB).
+@property (nonatomic, copy) NSArray<NSDictionary<NSString *, NSString *> *> *audioStemDicts;
+
 /// Update sequence metadata (author, song info, comments, etc.).
 /// Only modifies fields present in the dictionary; omitted keys are left unchanged.
 /// Supported keys: author, song, artist, album, comment
@@ -797,6 +802,30 @@
 /// Get phonemes for a word using the phoneme dictionary
 /// Returns array of phoneme strings (e.g. @[@"AI", @"etc", @"rest"]) or empty array if unknown
 - (NSArray<NSString *> *)getPhonemesForWord:(NSString *)word;
+
+#pragma mark - Song Structure Regions
+
+/// Get all song structure regions.
+/// Returns array of dictionaries with: regionId, startTimeMS, endTimeMS, name, colorARGB
+- (NSArray<NSDictionary *> *)getSongStructureRegions;
+
+/// Add a boundary at the given time (splits the region containing it).
+/// If no regions exist, creates two regions spanning the full sequence.
+- (void)addSongStructureBoundaryAtTimeMS:(NSInteger)timeMS;
+
+/// Move an internal boundary to a new position.
+/// @param idx 0-based index of boundary between regions (boundary 0 is between region 0 and 1)
+/// @param newTimeMS New boundary position in milliseconds
+- (void)moveSongStructureBoundary:(NSInteger)idx toTimeMS:(NSInteger)newTimeMS;
+
+/// Delete an internal boundary, merging two adjacent regions (keeps left name/color).
+- (void)deleteSongStructureBoundary:(NSInteger)idx;
+
+/// Update a region's name and color.
+- (void)setSongStructureRegion:(NSInteger)regionId name:(NSString *)name colorARGB:(uint32_t)colorARGB;
+
+/// Remove all song structure regions.
+- (void)clearSongStructure;
 
 #pragma mark - Audio Operations
 

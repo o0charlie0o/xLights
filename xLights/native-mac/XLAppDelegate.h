@@ -25,4 +25,7 @@
 /// Open an existing sequence.
 - (IBAction)openSequence:(id)sender;
 
+/// Prompt user to select a show folder.
+- (IBAction)selectShowFolder:(id)sender;
+
 @end

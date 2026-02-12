@@ -13,6 +13,7 @@
 #import "XLTimelineRulerView.h"
 #import "XLWaveformView.h"
 #import "XLRowHeadingsView.h"
+#import "XLStemsContainerView.h"
 
 static const CGFloat kDefaultMinZoom = 0.001;
 static const CGFloat kDefaultMaxZoom = 10.0;
@@ -238,6 +239,10 @@ static const CGFloat kDefaultZoom = 0.1;
         _waveformView.scrollOffsetX = _horizontalScrollOffset;
     }
 
+    if (_stemsContainerView) {
+        [_stemsContainerView setScrollOffsetX:_horizontalScrollOffset];
+    }
+
     [CATransaction commit];
 
     _isUpdatingViews = NO;
@@ -290,6 +295,10 @@ static const CGFloat kDefaultZoom = 0.1;
 
     if (_waveformView && _waveformView != exceptView) {
         _waveformView.zoomLevel = _zoomLevel;
+    }
+
+    if (_stemsContainerView) {
+        [_stemsContainerView setZoomLevel:_zoomLevel];
     }
 
     [CATransaction commit];

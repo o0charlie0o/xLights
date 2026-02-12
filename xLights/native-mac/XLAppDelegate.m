@@ -15,6 +15,7 @@
 #import "XLFPPConnectWindowController.h"
 #import "XLScriptRunnerWindowController.h"
 #import "XLSetupViewController.h"
+#import "XLMCPServer.h"
 #import "setup/XLMultiControllerUploadDialogController.h"
 #import "layout/XLModelImportSheet.h"
 
@@ -48,6 +49,7 @@ void XLSetCommandPaletteVisible(bool visible) {
 @property (nonatomic, strong) XLConvertDialog *convertDialog;
 @property (nonatomic, strong) XLModelImportSheet *activeImportSheet;
 @property (nonatomic, strong) XLMultiControllerUploadDialogController *multiUploadDialog;
+@property (nonatomic, strong) XLMCPServer *mcpServer;
 
 @end
 
@@ -171,6 +173,10 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    // Stop MCP server
+    [_mcpServer stop];
+    _mcpServer = nil;
+
     // Save last show folder to user defaults
     // This will be set by XLDocument when opening show folders
 }
@@ -244,6 +250,15 @@ void XLSetCommandPaletteVisible(bool visible) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"XLShowFolderDidChangeNotification"
                                                                 object:self
                                                               userInfo:@{@"path": path}];
+            // Start MCP server if not already running
+            if (!_mcpServer) {
+                _mcpServer = [[XLMCPServer alloc] initWithEngineBridge:engineBridge];
+                if ([_mcpServer start]) {
+                    NSLog(@"XLAppDelegate: MCP server started on port %u", _mcpServer.port);
+                } else {
+                    NSLog(@"XLAppDelegate: MCP server failed to start");
+                }
+            }
         } else {
             NSLog(@"XLAppDelegate: Failed to load show folder");
             // Prompt for a different folder
@@ -603,6 +618,23 @@ void XLSetCommandPaletteVisible(bool visible) {
     if (engineBridge) {
         [engineBridge setAudioVolume:volumePercent];
     }
+}
+
+#pragma mark - Audio Stems Menu Actions
+
+- (IBAction)importAudioStems:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc importAudioStems:sender];
+}
+
+- (IBAction)importStemsFromFolder:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc importStemsFromFolder:sender];
+}
+
+- (IBAction)removeAllAudioStems:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc removeAllAudioStems:sender];
 }
 
 #pragma mark - Tools Menu Actions

@@ -110,6 +110,14 @@
 /// Toggle the floating house preview window.
 - (void)toggleHousePreview;
 
+#pragma mark - Audio Stems
+/// Import audio stem files via file picker.
+- (void)importAudioStems:(id)sender;
+/// Import stems from a folder (e.g., Demucs output).
+- (void)importStemsFromFolder:(id)sender;
+/// Remove all audio stems (with confirmation).
+- (void)removeAllAudioStems:(id)sender;
+
 /// Whether real sequence data is currently loaded (vs demo data).
 @property (nonatomic, readonly) BOOL isUsingRealData;
 

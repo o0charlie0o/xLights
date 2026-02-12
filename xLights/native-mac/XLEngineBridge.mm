@@ -704,7 +704,7 @@ static XLEngineBridge *_sharedBridge = nil;
         NSString *album = info.album.empty() ? @"" : [NSString stringWithUTF8String:info.album.c_str()];
         NSString *comment = info.comment.empty() ? @"" : [NSString stringWithUTF8String:info.comment.c_str()];
 
-        return @{
+        NSMutableDictionary *result = [@{
             @"name": name,
             @"mediaFile": mediaFile,
             @"sequenceType": sequenceType,
@@ -717,7 +717,27 @@ static XLEngineBridge *_sharedBridge = nil;
             @"artist": artist,
             @"album": album,
             @"comment": comment,
-        };
+        } mutableCopy];
+
+        // Include audio stem references from loaded sequence metadata
+#ifdef XLIGHTS_NATIVE
+        if (_nativeSequenceProvider) {
+            auto metadata = _nativeSequenceProvider->getMetadata();
+            if (!metadata.audioStems.empty()) {
+                NSMutableArray *stemDicts = [NSMutableArray array];
+                for (const auto& stem : metadata.audioStems) {
+                    [stemDicts addObject:@{
+                        @"name": [NSString stringWithUTF8String:stem.name.c_str()],
+                        @"relativePath": [NSString stringWithUTF8String:stem.relativePath.c_str()],
+                        @"color": [NSString stringWithUTF8String:stem.color.c_str()],
+                    }];
+                }
+                result[@"audioStems"] = stemDicts;
+            }
+        }
+#endif
+
+        return [result copy];
     } @catch (NSException *exception) {
         NSLog(@"XLEngineBridge: Exception getting sequence info: %@ - %@",
               exception.name, exception.reason);
@@ -4798,6 +4818,14 @@ static XLEngineBridge *_sharedBridge = nil;
         std::string seqType = _nativeSequenceProvider->getSequenceType();
         meta.sequenceType = seqType.empty() ? "Animation" : seqType;
     }
+    // Include audio stems
+    for (NSDictionary *dict in _audioStemDicts) {
+        xlEngine::NativeEffectProvider::StemReference ref;
+        ref.name = [dict[@"name"] UTF8String] ?: "";
+        ref.relativePath = [dict[@"relativePath"] UTF8String] ?: "";
+        ref.color = [dict[@"color"] UTF8String] ?: "";
+        meta.audioStems.push_back(ref);
+    }
     return meta;
 }
 
@@ -5519,6 +5547,70 @@ static XLEngineBridge *_sharedBridge = nil;
         NSLog(@"XLEngineBridge: Exception getting phonemes for word '%@': %@ - %@",
               word, exception.name, exception.reason);
         return @[];
+    }
+#endif
+}
+
+#pragma mark - Song Structure Regions
+
+- (NSArray<NSDictionary *> *)getSongStructureRegions {
+#ifdef XLIGHTS_NATIVE
+    if (!_nativeEffectProvider) return @[];
+
+    auto regions = _nativeEffectProvider->getSongStructureRegions();
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:regions.size()];
+    for (const auto& region : regions) {
+        [result addObject:@{
+            @"regionId": @(region.regionId),
+            @"startTimeMS": @(region.startTimeMS),
+            @"endTimeMS": @(region.endTimeMS),
+            @"name": [NSString stringWithUTF8String:region.name.c_str()],
+            @"colorARGB": @(region.colorARGB),
+        }];
+    }
+    return result;
+#else
+    return @[];
+#endif
+}
+
+- (void)addSongStructureBoundaryAtTimeMS:(NSInteger)timeMS {
+#ifdef XLIGHTS_NATIVE
+    if (_nativeEffectProvider) {
+        _nativeEffectProvider->addSongStructureBoundary((int)timeMS);
+    }
+#endif
+}
+
+- (void)moveSongStructureBoundary:(NSInteger)idx toTimeMS:(NSInteger)newTimeMS {
+#ifdef XLIGHTS_NATIVE
+    if (_nativeEffectProvider) {
+        _nativeEffectProvider->moveSongStructureBoundary((size_t)idx, (int)newTimeMS);
+    }
+#endif
+}
+
+- (void)deleteSongStructureBoundary:(NSInteger)idx {
+#ifdef XLIGHTS_NATIVE
+    if (_nativeEffectProvider) {
+        _nativeEffectProvider->deleteSongStructureBoundary((size_t)idx);
+    }
+#endif
+}
+
+- (void)setSongStructureRegion:(NSInteger)regionId name:(NSString *)name colorARGB:(uint32_t)colorARGB {
+#ifdef XLIGHTS_NATIVE
+    if (_nativeEffectProvider) {
+        std::string nameStr = name ? std::string([name UTF8String]) : "";
+        _nativeEffectProvider->updateSongStructureRegion((int64_t)regionId, nameStr, colorARGB);
+    }
+#endif
+}
+
+- (void)clearSongStructure {
+#ifdef XLIGHTS_NATIVE
+    if (_nativeEffectProvider) {
+        _nativeEffectProvider->clearSongStructure();
     }
 #endif
 }

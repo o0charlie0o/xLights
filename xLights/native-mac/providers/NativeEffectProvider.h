@@ -33,6 +33,7 @@
 // - Changes can be saved back with saveToSequenceXML()
 
 #include "../../engine/interfaces/IEffectProvider.h"
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -47,6 +48,15 @@ struct NativeEffect;
 struct NativeEffectLayer;
 struct NativeElement;
 struct UndoAction;
+
+/// Song structure region for annotating sections of the sequence (Intro, Verse, Chorus, etc.)
+struct SongStructureRegion {
+    int64_t regionId = 0;
+    int startTimeMS = 0;
+    int endTimeMS = 0;
+    std::string name;
+    uint32_t colorARGB = 0x404488CC; // 0xAARRGGBB
+};
 
 /// NativeEffectProvider: Standalone IEffectProvider implementation for native macOS.
 ///
@@ -85,6 +95,13 @@ public:
     /// @return true if loading succeeded, false otherwise
     bool loadFromSequenceFile(const std::string& filePath);
 
+    /// Reference to an audio stem file for XML persistence.
+    struct StemReference {
+        std::string name;
+        std::string relativePath;
+        std::string color;  // "#RRGGBB"
+    };
+
     /// Sequence metadata for saving to XML (written into <head> section).
     struct SequenceMetadata {
         double durationSeconds;
@@ -92,6 +109,7 @@ public:
         std::string sequenceType;  // "Animation" or "Media"
         std::string mediaFile;     // relative or absolute path to audio/media
         std::string author;
+        std::vector<StemReference> audioStems;
         SequenceMetadata() : durationSeconds(0.0), frameMS(50) {}
     };
 
@@ -295,6 +313,28 @@ public:
     /// Deactivate all timing tracks.
     void deactivateAllTimingTracks();
 
+    // --- Song Structure Regions ---
+
+    /// Get all song structure regions (sorted by start time).
+    std::vector<SongStructureRegion> getSongStructureRegions() const;
+
+    /// Add a boundary at the given time, splitting the region that contains it.
+    /// If no regions exist, creates two regions [0, timeMS] and [timeMS, duration].
+    void addSongStructureBoundary(int timeMS);
+
+    /// Move an internal boundary. idx is the 0-based index of boundaries between regions
+    /// (boundary 0 is between region 0 and region 1, etc.).
+    void moveSongStructureBoundary(size_t idx, int newTimeMS);
+
+    /// Delete an internal boundary, merging the two adjacent regions (keeps left name/color).
+    void deleteSongStructureBoundary(size_t idx);
+
+    /// Update a region's name and/or color.
+    void updateSongStructureRegion(int64_t regionId, const std::string& name, uint32_t colorARGB);
+
+    /// Remove all song structure regions.
+    void clearSongStructure();
+
     /// Mark the sequence as modified.
     void setModified(bool modified);
 
@@ -345,6 +385,10 @@ private:
     std::deque<std::unique_ptr<UndoGroup>> _redoStack;
     std::unique_ptr<UndoGroup> _currentUndoGroup;
     static constexpr size_t kMaxUndoLevels = 100;
+
+    // Song structure regions
+    std::vector<SongStructureRegion> _songRegions;
+    int64_t _nextRegionId = 1;
 
     // State
     int64_t _nextEffectId = 1;

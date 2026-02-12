@@ -58,6 +58,13 @@ typedef void* NSXMLElement;
 
 namespace xlEngine {
 
+/// Reference to an audio stem file parsed from sequence XML.
+struct NativeStemReference {
+    std::string name;
+    std::string relativePath;
+    std::string color;  // "#RRGGBB"
+};
+
 /// Sequence metadata parsed from .xLights XML files.
 /// This structure holds the essential metadata needed for playback without
 /// requiring the full wxWidgets-based xLightsXmlFile parser.
@@ -71,6 +78,7 @@ struct NativeSequenceMetadata {
     std::string author;              // Author metadata
     std::string song;                // Song name metadata
     std::string artist;              // Artist metadata
+    std::vector<NativeStemReference> audioStems;  // Audio stem references
 
     /// Calculate frame count from duration and frame interval.
     int getFrameCount() const {

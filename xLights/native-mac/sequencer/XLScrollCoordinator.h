@@ -14,6 +14,7 @@
 @class XLTimelineRulerView;
 @class XLWaveformView;
 @class XLRowHeadingsView;
+@class XLStemsContainerView;
 @class XLScrollCoordinator;
 
 /// Protocol for receiving scroll/zoom change notifications.
@@ -62,6 +63,9 @@
 
 /// The row headings view (vertical scroll only).
 @property (nonatomic, weak) XLRowHeadingsView *rowHeadingsView;
+
+/// The stems container view (horizontal scroll + zoom, no vertical).
+@property (nonatomic, weak) XLStemsContainerView *stemsContainerView;
 
 /// Delegate for receiving scroll/zoom change notifications.
 @property (nonatomic, weak) id<XLScrollCoordinatorDelegate> delegate;

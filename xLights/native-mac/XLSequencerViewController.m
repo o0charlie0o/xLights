@@ -21,6 +21,10 @@
 #import "sequencer/XLScrollCoordinator.h"
 #import "sequencer/XLUndoController.h"
 #import "sequencer/XLAudioLoader.h"
+#import "sequencer/XLStemsContainerView.h"
+#import "sequencer/XLStemManager.h"
+#import "sequencer/XLStemData.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import "sequencer/XLAudioPlayer.h"
 #import "XLEngineBridge.h"
 #import "XLAppDelegate.h"
@@ -32,6 +36,7 @@
 #import "XLEffectPropertiesViewController.h"
 #import "dialogs/XLNewTimingDialog.h"
 #import "dialogs/XLTimingImportDialog.h"
+#import "XLSongRegionEditPopover.h"
 
 // Import Swift generated header for XLSwiftUIWindowHelper
 #if __has_include("xLights_Native-Swift.h")
@@ -439,7 +444,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                                           XLRowHeadingsDataSource,
                                           XLRowHeadingsDelegate,
                                           XLScrollCoordinatorDelegate,
-                                          XLPlaybackControllerDelegate> {
+                                          XLPlaybackControllerDelegate,
+                                          XLStemsContainerDelegate> {
     // C array of row data - immune to heap corruption
     XLRowEntry *_rowData;
     NSUInteger _rowCount;
@@ -496,6 +502,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSInteger _rangeEndRow;
     CGFloat _rangeStartTimeMS;
     CGFloat _rangeEndTimeMS;
+
+    // Audio stems panel
+    XLStemsContainerView *_stemsContainerView;
+    XLStemManager *_stemManager;
+    NSView *_stemsLeftSpacer;
+    NSLayoutConstraint *_stemsHeightConstraint;
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -739,6 +751,22 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _waveformView.playbackPositionMS = -1;
     [view addSubview:_waveformView];
 
+    // Audio stems container (between waveform and effects grid)
+    _stemManager = [[XLStemManager alloc] init];
+    _stemManager.showFolderPath = [self.engineBridge getShowFolderPath];
+
+    _stemsContainerView = [[XLStemsContainerView alloc] initWithFrame:NSZeroRect];
+    _stemsContainerView.stemManager = _stemManager;
+    _stemsContainerView.delegate = self;
+    [_stemsContainerView setSequenceLengthMS:_sequenceDurationMS];
+    [_stemsContainerView setZoomLevel:_effectsGridView.zoomLevel];
+    [view addSubview:_stemsContainerView];
+
+    // Left-side spacer that matches stems container height (keeps row headings aligned)
+    _stemsLeftSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
+    _stemsLeftSpacer.translatesAutoresizingMaskIntoConstraints = NO;
+    [view addSubview:_stemsLeftSpacer];
+
     // Transport bar at the bottom
     _transportBar = [[XLTransportBarView alloc] initWithFrame:NSZeroRect];
     _transportBar.translatesAutoresizingMaskIntoConstraints = NO;
@@ -873,6 +901,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _scrollCoordinator.effectsGridView = _effectsGridView;
     _scrollCoordinator.waveformView = _waveformView;
     _scrollCoordinator.rowHeadingsView = _rowHeadingsView;
+    _scrollCoordinator.stemsContainerView = _stemsContainerView;
     _scrollCoordinator.delegate = self;
 
     // Set up playback controller for coordinated audio and preview playback
@@ -890,8 +919,14 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Layout order from top to bottom:
     // 1. Track height slider (left) | Timeline ruler (right)
     // 2. View selector (left) | Waveform (right) - waveform aligned with timeline
-    // 3. Row headings (left) | Effects grid (right)
-    // 4. Transport bar (full width)
+    // 3. Stems left spacer (left) | Stems container (right) - optional, variable height
+    // 4. Row headings (left) | Effects grid (right)
+    // 5. Transport bar (full width)
+
+    // Create the stems height constraint (starts at 0 = collapsed)
+    _stemsHeightConstraint = [_stemsContainerView.heightAnchor constraintEqualToConstant:
+                              _stemsContainerView.collapsed ? 0 : [_stemsContainerView currentHeight]];
+
     [NSLayoutConstraint activateConstraints:@[
         // Track height slider container: top-left corner
         [_trackHeightSliderContainer.topAnchor constraintEqualToAnchor:view.topAnchor],
@@ -917,14 +952,26 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [_waveformView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         [_waveformView.heightAnchor constraintEqualToConstant:kWaveformHeight],
 
-        // Row headings: left side, below view selector, above transport bar
-        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_viewSelectorContainer.bottomAnchor],
+        // Stems container: below waveform, right side (aligned with timeline)
+        [_stemsContainerView.topAnchor constraintEqualToAnchor:_waveformView.bottomAnchor],
+        [_stemsContainerView.leadingAnchor constraintEqualToAnchor:_viewSelectorContainer.trailingAnchor],
+        [_stemsContainerView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        _stemsHeightConstraint,
+
+        // Stems left spacer: matches stems container height, below view selector
+        [_stemsLeftSpacer.topAnchor constraintEqualToAnchor:_viewSelectorContainer.bottomAnchor],
+        [_stemsLeftSpacer.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_stemsLeftSpacer.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
+        [_stemsLeftSpacer.heightAnchor constraintEqualToAnchor:_stemsContainerView.heightAnchor],
+
+        // Row headings: left side, below stems left spacer, above transport bar
+        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_stemsLeftSpacer.bottomAnchor],
         [_rowHeadingsView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [_rowHeadingsView.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
         [_rowHeadingsView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
 
-        // Effects grid: main area, right of row headings, below waveform, above transport bar
-        [_effectsGridView.topAnchor constraintEqualToAnchor:_waveformView.bottomAnchor],
+        // Effects grid: main area, right of row headings, below stems container, above transport bar
+        [_effectsGridView.topAnchor constraintEqualToAnchor:_stemsContainerView.bottomAnchor],
         [_effectsGridView.leadingAnchor constraintEqualToAnchor:_rowHeadingsView.trailingAnchor],
         [_effectsGridView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         [_effectsGridView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
@@ -935,8 +982,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [_transportBar.bottomAnchor constraintEqualToAnchor:view.bottomAnchor],
         [_transportBar.heightAnchor constraintEqualToConstant:kTransportBarHeight],
 
-        // Empty state overlay: covers the row headings + effects grid area
-        [_emptyStateView.topAnchor constraintEqualToAnchor:_waveformView.bottomAnchor],
+        // Empty state overlay: covers the stems + row headings + effects grid area
+        [_emptyStateView.topAnchor constraintEqualToAnchor:_stemsContainerView.bottomAnchor],
         [_emptyStateView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [_emptyStateView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         [_emptyStateView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
@@ -994,6 +1041,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleSnapEnabledDidChange:)
                                                  name:@"XLSnapEnabledDidChange"
+                                               object:nil];
+
+    // Listen for stem manager changes to sync with engine bridge
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(stemManagerDidChange:)
+                                                 name:XLStemManagerDidChangeNotification
                                                object:nil];
 
     // Check sequence state and show/hide empty state accordingly.
@@ -1056,6 +1109,34 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)clearAudioDisplay {
     self.audioSampleData = nil;
     [_waveformView clearWaveform];
+}
+
+#pragma mark - Audio Stems Loading
+
+- (void)loadStemsForSequence {
+    _stemManager.showFolderPath = [self.engineBridge getShowFolderPath];
+
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        [_stemManager removeAllStems];
+        return;
+    }
+
+    // Check if the loaded sequence has audio stem references
+    NSDictionary *seqInfo = [self.engineBridge getSequenceInfo];
+    NSArray *stemDicts = seqInfo[@"audioStems"];
+    if (stemDicts && [stemDicts isKindOfClass:[NSArray class]] && stemDicts.count > 0) {
+        [_stemManager restoreFromDicts:stemDicts];
+    } else {
+        [_stemManager removeAllStems];
+    }
+
+    // Update sequence length on stems container
+    [_stemsContainerView setSequenceLengthMS:_sequenceDurationMS];
+}
+
+- (void)stemManagerDidChange:(NSNotification *)note {
+    // Keep engine bridge's stem dicts in sync for save
+    self.engineBridge.audioStemDicts = [_stemManager serializeToDicts];
 }
 
 #pragma mark - Empty State
@@ -1266,6 +1347,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Load audio for the sequence
     [self loadAudioForSequence];
 
+    // Load audio stems for the sequence
+    [self loadStemsForSequence];
+
     // Load saved zoom level for this sequence (if any)
     [self loadZoomLevelForCurrentSequence];
 
@@ -1288,6 +1372,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         _timelineRuler.sequenceDuration = _sequenceDurationMS / 1000.0;
         _timelineRuler.frameRate = _frameRate;
         [self reloadTimingMarksForRuler];
+        [self reloadSongRegionsForRuler];
     }
 
     // Update waveform view
@@ -1899,6 +1984,51 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     }
 }
 
+#pragma mark - Song Structure Region Delegate
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestAddSongRegionBoundaryAtTimeMS:(NSInteger)timeMS {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) return;
+    [_engineBridge addSongStructureBoundaryAtTimeMS:timeMS];
+    [self reloadSongRegionsForRuler];
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didMoveSongRegionBoundaryAtIndex:(NSInteger)idx toTimeMS:(NSInteger)timeMS {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) return;
+    [_engineBridge moveSongStructureBoundary:idx toTimeMS:timeMS];
+    [self reloadSongRegionsForRuler];
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestDeleteSongRegionBoundaryAtIndex:(NSInteger)idx {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) return;
+    [_engineBridge deleteSongStructureBoundary:idx];
+    [self reloadSongRegionsForRuler];
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didEditSongRegionId:(NSInteger)regionId name:(NSString *)name color:(NSColor *)color {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) return;
+
+    // Convert NSColor to 0xAARRGGBB
+    NSColor *rgb = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+    uint32_t a = (uint32_t)(rgb.alphaComponent * 255.0) & 0xFF;
+    uint32_t r = (uint32_t)(rgb.redComponent * 255.0) & 0xFF;
+    uint32_t g = (uint32_t)(rgb.greenComponent * 255.0) & 0xFF;
+    uint32_t b = (uint32_t)(rgb.blueComponent * 255.0) & 0xFF;
+    uint32_t argb = (a << 24) | (r << 16) | (g << 8) | b;
+
+    [_engineBridge setSongStructureRegion:regionId name:name colorARGB:argb];
+    [self reloadSongRegionsForRuler];
+}
+
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didSelectSongRegionId:(NSInteger)regionId {
+    _timelineRuler.selectedSongRegionId = regionId;
+}
+
+- (void)timelineRulerDidRequestClearSongStructure:(XLTimelineRulerView *)ruler {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) return;
+    [_engineBridge clearSongStructure];
+    [self reloadSongRegionsForRuler];
+}
+
 /// Lightweight refresh after timing mark add/split/delete.
 /// Only reloads timing data in grid + ruler without resetting zoom, audio, or playhead.
 - (void)refreshTimingData {
@@ -1927,6 +2057,47 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSArray<NSDictionary *> *fullMarks = [_engineBridge getTimingMarks:activeTrack layer:0];
 
     _timelineRuler.timingMarks = fullMarks ?: @[];
+}
+
+- (void)reloadSongRegionsForRuler {
+    if (!_engineBridge || ![_engineBridge isSequenceLoaded]) {
+        [_timelineRuler setSongRegions:NULL count:0];
+        return;
+    }
+
+    NSArray<NSDictionary *> *regions = [_engineBridge getSongStructureRegions];
+    if (!regions || regions.count == 0) {
+        [_timelineRuler setSongRegions:NULL count:0];
+        return;
+    }
+
+    NSInteger count = (NSInteger)regions.count;
+    XLSongRegion *cRegions = (XLSongRegion *)calloc(count, sizeof(XLSongRegion));
+
+    for (NSInteger i = 0; i < count; i++) {
+        NSDictionary *d = regions[i];
+        cRegions[i].regionId = [d[@"regionId"] integerValue];
+        cRegions[i].startTimeMS = [d[@"startTimeMS"] integerValue];
+        cRegions[i].endTimeMS = [d[@"endTimeMS"] integerValue];
+
+        uint32_t argb = (uint32_t)[d[@"colorARGB"] unsignedIntValue];
+        CGFloat a = ((argb >> 24) & 0xFF) / 255.0;
+        CGFloat r = ((argb >> 16) & 0xFF) / 255.0;
+        CGFloat g = ((argb >> 8) & 0xFF) / 255.0;
+        CGFloat b = (argb & 0xFF) / 255.0;
+        cRegions[i].colorR = r;
+        cRegions[i].colorG = g;
+        cRegions[i].colorB = b;
+        cRegions[i].colorA = a;
+
+        NSString *name = d[@"name"];
+        if (name) {
+            strlcpy(cRegions[i].name, [name UTF8String], sizeof(cRegions[i].name));
+        }
+    }
+
+    [_timelineRuler setSongRegions:cRegions count:count];
+    free(cRegions);
 }
 
 #pragma mark - XLEffectsGridDataSource
@@ -5692,6 +5863,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _timelineRuler.playbackPosition = positionMS / 1000.0;
     _waveformView.playbackPositionMS = (CGFloat)positionMS;
     [_effectsGridView setPlaybackPositionMS:(CGFloat)positionMS animated:NO];
+    [_stemsContainerView setPlaybackPositionMS:(CGFloat)positionMS];
 }
 
 - (void)playbackController:(XLPlaybackController *)controller didRenderFrameAtMS:(NSInteger)timeMS {
@@ -7415,6 +7587,82 @@ static const CGFloat kZoomFactor = 1.5;
 
 - (void)renderAll {
     [_engineBridge renderAll];
+}
+
+#pragma mark - XLStemsContainerDelegate
+
+- (void)stemsContainer:(XLStemsContainerView *)container didChangeHeight:(CGFloat)newHeight {
+    _stemsHeightConstraint.constant = newHeight;
+    [self.view layoutSubtreeIfNeeded];
+}
+
+- (void)stemsContainerDidRequestImport:(XLStemsContainerView *)container {
+    [self importAudioStems:nil];
+}
+
+- (void)stemsContainerDidRequestImportFromFolder:(XLStemsContainerView *)container {
+    [self importStemsFromFolder:nil];
+}
+
+#pragma mark - Audio Stems Import
+
+- (void)importAudioStems:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = YES;
+    panel.allowedContentTypes = @[
+        [UTType typeWithFilenameExtension:@"wav"],
+        [UTType typeWithFilenameExtension:@"mp3"],
+        [UTType typeWithFilenameExtension:@"m4a"],
+        [UTType typeWithFilenameExtension:@"aac"],
+        [UTType typeWithFilenameExtension:@"aiff"],
+        [UTType typeWithFilenameExtension:@"flac"],
+    ];
+    panel.title = @"Import Audio Stems";
+    panel.message = @"Select audio stem files (vocals, drums, bass, etc.)";
+
+    [panel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK) {
+            [self->_stemManager importStemFiles:panel.URLs completion:nil];
+        }
+    }];
+}
+
+- (void)importStemsFromFolder:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    panel.title = @"Import Stems from Folder";
+    panel.message = @"Select a folder containing audio stems (e.g., Demucs or Spleeter output)";
+
+    [panel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URLs.count > 0) {
+            [self->_stemManager importStemsFromFolder:panel.URLs.firstObject completion:nil];
+        }
+    }];
+}
+
+- (void)removeAllAudioStems:(id)sender {
+    if (_stemManager.stems.count == 0) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Remove All Audio Stems?";
+    alert.informativeText = [NSString stringWithFormat:@"This will remove all %lu audio stems from the sequence.",
+                             (unsigned long)_stemManager.stems.count];
+    [alert addButtonWithTitle:@"Remove"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+
+    [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            [self->_stemManager removeAllStems];
+            self->_stemsContainerView.collapsed = YES;
+            self->_stemsHeightConstraint.constant = 0;
+            [self.view layoutSubtreeIfNeeded];
+        }
+    }];
 }
 
 @end

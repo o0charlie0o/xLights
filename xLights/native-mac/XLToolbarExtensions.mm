@@ -274,6 +274,10 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [findMenu addItemWithTitle:@"Use Selection for Find" action:@selector(performFindPanelAction:) keyEquivalent:@"e"].tag = NSTextFinderActionSetSearchString;
     findItem.submenu = findMenu;
 
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"Effect Symbol Library…" action:@selector(showSymbolLibrary:) keyEquivalent:@""];
+    [editMenu addItemWithTitle:@"Convert All Symbols to Effects" action:@selector(convertAllSymbolsToEffects:) keyEquivalent:@""];
+
     editMenuItem.submenu = editMenu;
 }
 
@@ -520,6 +524,13 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
 
     NSMenuItem *silentItem = [audioMenu addItemWithTitle:@"Silent" action:@selector(setVolume:) keyEquivalent:@""];
     silentItem.tag = 0;
+
+    [audioMenu addItem:[NSMenuItem separatorItem]];
+
+    // Audio Stems
+    [audioMenu addItemWithTitle:@"Import Audio Stems\u2026" action:@selector(importAudioStems:) keyEquivalent:@""];
+    [audioMenu addItemWithTitle:@"Import Stems from Folder\u2026" action:@selector(importStemsFromFolder:) keyEquivalent:@""];
+    [audioMenu addItemWithTitle:@"Remove All Audio Stems" action:@selector(removeAllAudioStems:) keyEquivalent:@""];
 
     audioMenuItem.submenu = audioMenu;
 }

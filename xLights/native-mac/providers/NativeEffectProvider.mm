@@ -391,6 +391,30 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
             _elements.push_back(std::move(element));
         }
 
+        // Parse song structure regions
+        NSArray* regionNodes = [root nodesForXPath:@"//SongStructure/Region" error:nil];
+        for (NSXMLElement* regionNode in regionNodes) {
+            SongStructureRegion region;
+            region.regionId = _nextRegionId++;
+
+            NSXMLNode* startAttr = [regionNode attributeForName:@"startTimeMS"];
+            region.startTimeMS = startAttr ? [startAttr.stringValue intValue] : 0;
+
+            NSXMLNode* endAttr = [regionNode attributeForName:@"endTimeMS"];
+            region.endTimeMS = endAttr ? [endAttr.stringValue intValue] : 0;
+
+            NSXMLNode* nameAttr = [regionNode attributeForName:@"name"];
+            region.name = nameAttr ? std::string([nameAttr.stringValue UTF8String]) : "";
+
+            NSXMLNode* colorAttr = [regionNode attributeForName:@"color"];
+            if (colorAttr) {
+                unsigned long colorVal = strtoul([colorAttr.stringValue UTF8String], nullptr, 16);
+                region.colorARGB = (uint32_t)colorVal;
+            }
+
+            _songRegions.push_back(region);
+        }
+
         _isLoaded = true;
         _isModified = false;
         _changeCount = 0;
@@ -441,6 +465,15 @@ std::string NativeEffectProvider::exportToSequenceXML(const SequenceMetadata& me
     }
     if (!metadata.author.empty()) {
         xml << "    <author>" << metadata.author << "</author>\n";
+    }
+    if (!metadata.audioStems.empty()) {
+        xml << "    <audioStems>\n";
+        for (const auto& stem : metadata.audioStems) {
+            xml << "      <stem name=\"" << stem.name
+                << "\" relativePath=\"" << stem.relativePath
+                << "\" color=\"" << stem.color << "\"/>\n";
+        }
+        xml << "    </audioStems>\n";
     }
     xml << "  </head>\n";
 
@@ -525,6 +558,20 @@ std::string NativeEffectProvider::exportToSequenceXML(const SequenceMetadata& me
     }
 
     xml << "  </ElementEffects>\n";
+
+    // Write song structure regions
+    if (!_songRegions.empty()) {
+        xml << "  <SongStructure>\n";
+        for (const auto& region : _songRegions) {
+            xml << "    <Region startTimeMS=\"" << region.startTimeMS << "\"";
+            xml << " endTimeMS=\"" << region.endTimeMS << "\"";
+            xml << " name=\"" << region.name << "\"";
+            xml << " color=\"" << std::hex << std::setw(8) << std::setfill('0') << region.colorARGB << std::dec << "\"";
+            xml << "/>\n";
+        }
+        xml << "  </SongStructure>\n";
+    }
+
     xml << "</xsequence>\n";
 
     return xml.str();
@@ -567,6 +614,8 @@ void NativeEffectProvider::clear()
     _undoStack.clear();
     _redoStack.clear();
     _currentUndoGroup.reset();
+    _songRegions.clear();
+    _nextRegionId = 1;
     _nextEffectId = 1;
     _sequenceLengthMS = 0;
     _isLoaded = false;
@@ -1857,6 +1906,136 @@ void NativeEffectProvider::deactivateAllTimingTracks()
             elem->isActive = false;
         }
     }
+}
+
+// --- Song Structure Regions ---
+
+// Default color palette (8 semi-transparent colors, cycled on creation)
+static const uint32_t kSongRegionPalette[] = {
+    0x404488CC, // Blue
+    0x4044AA66, // Green
+    0x40DD8833, // Orange
+    0x409966CC, // Purple
+    0x4033AAAA, // Teal
+    0x40CC4444, // Red
+    0x40667788, // Slate
+    0x40CC9944, // Amber
+};
+static const size_t kSongRegionPaletteCount = sizeof(kSongRegionPalette) / sizeof(kSongRegionPalette[0]);
+
+std::vector<SongStructureRegion> NativeEffectProvider::getSongStructureRegions() const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    return _songRegions;
+}
+
+void NativeEffectProvider::addSongStructureBoundary(int timeMS)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    int duration = _sequenceLengthMS > 0 ? _sequenceLengthMS : 300000;
+    if (timeMS <= 0 || timeMS >= duration) return;
+
+    if (_songRegions.empty()) {
+        // First boundary: create two regions spanning the full sequence
+        SongStructureRegion left;
+        left.regionId = _nextRegionId++;
+        left.startTimeMS = 0;
+        left.endTimeMS = timeMS;
+        left.name = "Region 1";
+        left.colorARGB = kSongRegionPalette[0];
+
+        SongStructureRegion right;
+        right.regionId = _nextRegionId++;
+        right.startTimeMS = timeMS;
+        right.endTimeMS = duration;
+        right.name = "Region 2";
+        right.colorARGB = kSongRegionPalette[1];
+
+        _songRegions.push_back(left);
+        _songRegions.push_back(right);
+    } else {
+        // Find the region containing timeMS and split it
+        for (size_t i = 0; i < _songRegions.size(); i++) {
+            auto& region = _songRegions[i];
+            if (timeMS > region.startTimeMS && timeMS < region.endTimeMS) {
+                SongStructureRegion newRegion;
+                newRegion.regionId = _nextRegionId++;
+                newRegion.startTimeMS = timeMS;
+                newRegion.endTimeMS = region.endTimeMS;
+                newRegion.name = "Region " + std::to_string(_songRegions.size() + 1);
+                newRegion.colorARGB = kSongRegionPalette[_songRegions.size() % kSongRegionPaletteCount];
+
+                region.endTimeMS = timeMS;
+
+                _songRegions.insert(_songRegions.begin() + i + 1, newRegion);
+                break;
+            }
+        }
+    }
+
+    incrementChangeCount();
+}
+
+void NativeEffectProvider::moveSongStructureBoundary(size_t idx, int newTimeMS)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    // idx is the boundary between region[idx] and region[idx+1]
+    if (idx >= _songRegions.size() - 1) return;
+    if (_songRegions.size() < 2) return;
+
+    // Clamp: must stay between left region's start and right region's end
+    int minTime = _songRegions[idx].startTimeMS + 1;
+    int maxTime = _songRegions[idx + 1].endTimeMS - 1;
+    if (newTimeMS < minTime) newTimeMS = minTime;
+    if (newTimeMS > maxTime) newTimeMS = maxTime;
+
+    _songRegions[idx].endTimeMS = newTimeMS;
+    _songRegions[idx + 1].startTimeMS = newTimeMS;
+
+    incrementChangeCount();
+}
+
+void NativeEffectProvider::deleteSongStructureBoundary(size_t idx)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    // idx is the boundary between region[idx] and region[idx+1]
+    if (idx >= _songRegions.size() - 1) return;
+    if (_songRegions.size() < 2) return;
+
+    // Merge: extend left region to cover the right, then remove right
+    _songRegions[idx].endTimeMS = _songRegions[idx + 1].endTimeMS;
+    _songRegions.erase(_songRegions.begin() + idx + 1);
+
+    // If only one region remains, clear it entirely (no boundaries = no structure)
+    if (_songRegions.size() == 1) {
+        _songRegions.clear();
+    }
+
+    incrementChangeCount();
+}
+
+void NativeEffectProvider::updateSongStructureRegion(int64_t regionId, const std::string& name, uint32_t colorARGB)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+
+    for (auto& region : _songRegions) {
+        if (region.regionId == regionId) {
+            region.name = name;
+            region.colorARGB = colorARGB;
+            incrementChangeCount();
+            return;
+        }
+    }
+}
+
+void NativeEffectProvider::clearSongStructure()
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    _songRegions.clear();
+    incrementChangeCount();
 }
 
 void NativeEffectProvider::setModified(bool modified)
