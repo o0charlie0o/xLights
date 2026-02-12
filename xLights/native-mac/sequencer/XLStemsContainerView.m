@@ -110,6 +110,7 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     if (self) {
         self.wantsLayer = YES;
         self.layer.backgroundColor = [[NSColor colorWithWhite:0.12 alpha:1.0] CGColor];
+        self.layer.masksToBounds = YES;
         self.translatesAutoresizingMaskIntoConstraints = NO;
 
         _miniWaveformViews = [NSMutableArray array];
@@ -288,7 +289,7 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 - (void)toggleCollapsed {
     self.collapsed = !_collapsed;
 
-    CGFloat targetHeight = _collapsed ? 0 : _savedExpandedHeight;
+    CGFloat targetHeight = _collapsed ? kStemsHeaderHeight : _savedExpandedHeight;
     if ([_delegate respondsToSelector:@selector(stemsContainer:didChangeHeight:)]) {
         [_delegate stemsContainer:self didChangeHeight:targetHeight];
     }
@@ -302,7 +303,7 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 }
 
 - (CGFloat)currentHeight {
-    if (_collapsed) return 0;
+    if (_collapsed) return kStemsHeaderHeight;
     return _savedExpandedHeight;
 }
 
@@ -326,6 +327,11 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         _titleLabel.stringValue = [NSString stringWithFormat:@"Stems (%lu)", (unsigned long)stems.count];
     } else {
         _titleLabel.stringValue = @"Stems";
+        // No stems — fully hide the panel
+        if ([_delegate respondsToSelector:@selector(stemsContainer:didChangeHeight:)]) {
+            [_delegate stemsContainer:self didChangeHeight:0];
+        }
+        return;
     }
 
     // Create mini waveform views

@@ -923,9 +923,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // 4. Row headings (left) | Effects grid (right)
     // 5. Transport bar (full width)
 
-    // Create the stems height constraint (starts at 0 = collapsed)
-    _stemsHeightConstraint = [_stemsContainerView.heightAnchor constraintEqualToConstant:
-                              _stemsContainerView.collapsed ? 0 : [_stemsContainerView currentHeight]];
+    // Create the stems height constraint (starts at 0 = hidden until stems are loaded)
+    _stemsHeightConstraint = [_stemsContainerView.heightAnchor constraintEqualToConstant:0];
 
     [NSLayoutConstraint activateConstraints:@[
         // Track height slider container: top-left corner
