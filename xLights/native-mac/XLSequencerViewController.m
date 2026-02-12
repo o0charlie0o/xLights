@@ -506,7 +506,6 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Audio stems panel
     XLStemsContainerView *_stemsContainerView;
     XLStemManager *_stemManager;
-    NSView *_stemsLeftSpacer;
     NSLayoutConstraint *_stemsHeightConstraint;
     BOOL _stemsPanelVisible;
 }
@@ -768,10 +767,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [_stemsContainerView setZoomLevel:_effectsGridView.zoomLevel];
     [view addSubview:_stemsContainerView];
 
-    // Left-side spacer that matches stems container height (keeps row headings aligned)
-    _stemsLeftSpacer = [[NSView alloc] initWithFrame:NSZeroRect];
-    _stemsLeftSpacer.translatesAutoresizingMaskIntoConstraints = NO;
-    [view addSubview:_stemsLeftSpacer];
+    // (Left spacer removed — stems panel now spans full width)
 
     // Transport bar at the bottom
     _transportBar = [[XLTransportBarView alloc] initWithFrame:NSZeroRect];
@@ -958,20 +954,14 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [_waveformView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         [_waveformView.heightAnchor constraintEqualToConstant:kWaveformHeight],
 
-        // Stems container: below waveform, right side (aligned with timeline)
+        // Stems container: below waveform, full width
         [_stemsContainerView.topAnchor constraintEqualToAnchor:_waveformView.bottomAnchor],
-        [_stemsContainerView.leadingAnchor constraintEqualToAnchor:_viewSelectorContainer.trailingAnchor],
+        [_stemsContainerView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [_stemsContainerView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         _stemsHeightConstraint,
 
-        // Stems left spacer: matches stems container height, below view selector
-        [_stemsLeftSpacer.topAnchor constraintEqualToAnchor:_viewSelectorContainer.bottomAnchor],
-        [_stemsLeftSpacer.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
-        [_stemsLeftSpacer.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
-        [_stemsLeftSpacer.heightAnchor constraintEqualToAnchor:_stemsContainerView.heightAnchor],
-
-        // Row headings: left side, below stems left spacer, above transport bar
-        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_stemsLeftSpacer.bottomAnchor],
+        // Row headings: left side, below stems container, above transport bar
+        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_stemsContainerView.bottomAnchor],
         [_rowHeadingsView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
         [_rowHeadingsView.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
         [_rowHeadingsView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],

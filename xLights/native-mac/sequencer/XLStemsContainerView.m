@@ -54,16 +54,15 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 }
 
 - (void)mouseDown:(NSEvent *)event {
-    _dragStartPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    _dragStartPoint = event.locationInWindow;
     _dragStartHeight = _container.currentHeight;
     _isDragging = YES;
 }
 
 - (void)mouseDragged:(NSEvent *)event {
     if (!_isDragging) return;
-    NSPoint currentPoint = [self convertPoint:event.locationInWindow fromView:nil];
-    // In flipped coordinates, dragging down increases height
-    CGFloat delta = currentPoint.y - _dragStartPoint.y;
+    // Window coords: Y increases upward. Dragging handle down = lower Y = increase height.
+    CGFloat delta = _dragStartPoint.y - event.locationInWindow.y;
     CGFloat newHeight = _dragStartHeight + delta;
     newHeight = fmax(kStemsMinExpandedHeight, fmin(newHeight, kStemsMaxExpandedHeight));
 
@@ -81,6 +80,15 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 
 @end
 
+#pragma mark - Flipped Document View
+
+@interface XLFlippedDocumentView : NSView
+@end
+
+@implementation XLFlippedDocumentView
+- (BOOL)isFlipped { return YES; }
+@end
+
 #pragma mark - Stems Container View
 
 @implementation XLStemsContainerView {
@@ -96,7 +104,6 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     XLStemsResizeHandle *_resizeHandle;
 
     NSMutableArray<XLMiniWaveformView *> *_miniWaveformViews;
-    NSLayoutConstraint *_docHeightConstraint;
 
     CGFloat _savedExpandedHeight;
     CGFloat _scrollOffsetX;
@@ -214,9 +221,9 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
     _scrollView.backgroundColor = [NSColor colorWithWhite:0.10 alpha:1.0];
     _scrollView.drawsBackground = YES;
 
-    _stackDocumentView = [[NSView alloc] initWithFrame:NSZeroRect];
-    _stackDocumentView.translatesAutoresizingMaskIntoConstraints = NO;
+    _stackDocumentView = [[XLFlippedDocumentView alloc] initWithFrame:NSZeroRect];
     _stackDocumentView.wantsLayer = YES;
+    // Frame-based layout for document view (more reliable in NSScrollView)
     _scrollView.documentView = _stackDocumentView;
 
     [self addSubview:_scrollView];
@@ -270,11 +277,6 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         [_resizeHandle.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [_resizeHandle.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
         [_resizeHandle.heightAnchor constraintEqualToConstant:kStemsResizeHandleHeight],
-
-        // Stack document view: match scroll view width
-        [_stackDocumentView.leadingAnchor constraintEqualToAnchor:_scrollView.contentView.leadingAnchor],
-        [_stackDocumentView.trailingAnchor constraintEqualToAnchor:_scrollView.contentView.trailingAnchor],
-        [_stackDocumentView.topAnchor constraintEqualToAnchor:_scrollView.contentView.topAnchor],
     ]];
 }
 
@@ -336,14 +338,14 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         return;
     }
 
-    // Create mini waveform views
-    CGFloat y = 0;
-    CGFloat width = NSWidth(self.bounds);
+    // Create mini waveform views (frame-based layout for NSScrollView reliability)
+    CGFloat width = NSWidth(_scrollView.bounds);
     if (width < 100) width = 800;
+    CGFloat y = 0;
 
     for (XLStemData *stem in stems) {
         XLMiniWaveformView *mv = [[XLMiniWaveformView alloc] initWithFrame:NSMakeRect(0, y, width, kMiniWaveformHeight)];
-        mv.translatesAutoresizingMaskIntoConstraints = NO;
+        mv.autoresizingMask = NSViewWidthSizable;
         mv.stemData = stem;
         mv.zoomLevel = _zoomLevel;
         mv.scrollOffsetX = _scrollOffsetX;
@@ -352,26 +354,11 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
 
         [_stackDocumentView addSubview:mv];
         [_miniWaveformViews addObject:mv];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [mv.topAnchor constraintEqualToAnchor:_stackDocumentView.topAnchor constant:y],
-            [mv.leadingAnchor constraintEqualToAnchor:_stackDocumentView.leadingAnchor],
-            [mv.trailingAnchor constraintEqualToAnchor:_stackDocumentView.trailingAnchor],
-            [mv.heightAnchor constraintEqualToConstant:kMiniWaveformHeight],
-        ]];
-
         y += kMiniWaveformHeight;
     }
 
-    // Update document view height for scrolling
-    CGFloat docHeight = fmax(y, 1);
-    if (_docHeightConstraint) {
-        _docHeightConstraint.constant = docHeight;
-    } else {
-        _docHeightConstraint = [_stackDocumentView.heightAnchor constraintEqualToConstant:docHeight];
-        _docHeightConstraint.priority = NSLayoutPriorityDefaultHigh;
-        _docHeightConstraint.active = YES;
-    }
+    // Set document view frame for scrollable content size
+    [_stackDocumentView setFrame:NSMakeRect(0, 0, width, y)];
 
     // Auto-expand if stems were just added and panel is collapsed
     if (stems.count > 0 && _collapsed) {
