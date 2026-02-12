@@ -508,6 +508,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     XLStemManager *_stemManager;
     NSView *_stemsLeftSpacer;
     NSLayoutConstraint *_stemsHeightConstraint;
+    BOOL _stemsPanelVisible;
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -755,6 +756,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _stemManager = [[XLStemManager alloc] init];
     _stemManager.showFolderPath = [self.engineBridge getShowFolderPath];
 
+    // Stems panel visibility — defaults to YES if key not set
+    _stemsPanelVisible = ([[NSUserDefaults standardUserDefaults] objectForKey:@"StemsPanel.visible"] == nil)
+                          ? YES
+                          : [[NSUserDefaults standardUserDefaults] boolForKey:@"StemsPanel.visible"];
+
     _stemsContainerView = [[XLStemsContainerView alloc] initWithFrame:NSZeroRect];
     _stemsContainerView.stemManager = _stemManager;
     _stemsContainerView.delegate = self;
@@ -923,8 +929,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // 4. Row headings (left) | Effects grid (right)
     // 5. Transport bar (full width)
 
-    // Create the stems height constraint (starts at 0 = hidden until stems are loaded)
-    _stemsHeightConstraint = [_stemsContainerView.heightAnchor constraintEqualToConstant:0];
+    // Create the stems height constraint — show header when visible, hidden otherwise
+    _stemsHeightConstraint = [_stemsContainerView.heightAnchor constraintEqualToConstant:
+                              _stemsPanelVisible ? kStemsHeaderHeight : 0];
 
     [NSLayoutConstraint activateConstraints:@[
         // Track height slider container: top-left corner
@@ -7498,7 +7505,26 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         menuItem.state = _effectsGridView.snapToTimingMarks ? NSControlStateValueOn : NSControlStateValueOff;
         return YES;
     }
+    if (menuItem.action == @selector(toggleStemsPanel:)) {
+        menuItem.state = _stemsPanelVisible ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
     return YES;
+}
+
+- (void)toggleStemsPanel:(id)sender {
+    _stemsPanelVisible = !_stemsPanelVisible;
+    [[NSUserDefaults standardUserDefaults] setBool:_stemsPanelVisible forKey:@"StemsPanel.visible"];
+
+    if (_stemsPanelVisible) {
+        // Show: collapsed header or expanded, depending on state
+        _stemsHeightConstraint.constant = _stemsContainerView.collapsed
+            ? kStemsHeaderHeight : [_stemsContainerView currentHeight];
+    } else {
+        // Hide completely
+        _stemsHeightConstraint.constant = 0;
+    }
+    [self.view layoutSubtreeIfNeeded];
 }
 
 #pragma mark - Zoom and Navigation Actions
@@ -7591,6 +7617,7 @@ static const CGFloat kZoomFactor = 1.5;
 #pragma mark - XLStemsContainerDelegate
 
 - (void)stemsContainer:(XLStemsContainerView *)container didChangeHeight:(CGFloat)newHeight {
+    if (!_stemsPanelVisible) return;  // Panel hidden via menu — ignore height changes
     _stemsHeightConstraint.constant = newHeight;
     [self.view layoutSubtreeIfNeeded];
 }
@@ -7658,7 +7685,9 @@ static const CGFloat kZoomFactor = 1.5;
         if (returnCode == NSAlertFirstButtonReturn) {
             [self->_stemManager removeAllStems];
             self->_stemsContainerView.collapsed = YES;
-            self->_stemsHeightConstraint.constant = 0;
+            if (self->_stemsPanelVisible) {
+                self->_stemsHeightConstraint.constant = kStemsHeaderHeight;
+            }
             [self.view layoutSubtreeIfNeeded];
         }
     }];

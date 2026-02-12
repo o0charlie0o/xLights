@@ -289,6 +289,7 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [viewMenu addItemWithTitle:@"Show Bottom Panel" action:@selector(toggleBottomPanel:) keyEquivalent:@"b"];
     [viewMenu addItemWithTitle:@"Show Preview" action:@selector(togglePreview:) keyEquivalent:@"p"]
         .keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [viewMenu addItemWithTitle:@"Show Stems Panel" action:@selector(toggleStemsPanel:) keyEquivalent:@""];
 
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"Zoom In" action:@selector(zoomIn:) keyEquivalent:@"+"];

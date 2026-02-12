@@ -111,6 +111,8 @@
 - (void)toggleHousePreview;
 
 #pragma mark - Audio Stems
+/// Toggle stems panel visibility (View menu).
+- (void)toggleStemsPanel:(id)sender;
 /// Import audio stem files via file picker.
 - (void)importAudioStems:(id)sender;
 /// Import stems from a folder (e.g., Demucs output).

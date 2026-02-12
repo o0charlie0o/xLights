@@ -327,9 +327,11 @@ static NSString *const kDefaultsExpandedHeightKey = @"StemsPanel.expandedHeight"
         _titleLabel.stringValue = [NSString stringWithFormat:@"Stems (%lu)", (unsigned long)stems.count];
     } else {
         _titleLabel.stringValue = @"Stems";
-        // No stems — fully hide the panel
+        // No stems — collapse to header only
+        _collapsed = YES;
+        [self updateChevronImage];
         if ([_delegate respondsToSelector:@selector(stemsContainer:didChangeHeight:)]) {
-            [_delegate stemsContainer:self didChangeHeight:0];
+            [_delegate stemsContainer:self didChangeHeight:kStemsHeaderHeight];
         }
         return;
     }
