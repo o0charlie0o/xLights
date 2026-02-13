@@ -11,6 +11,7 @@
 #import "XLEffectPropertiesViewController.h"
 #import "effects/XLEffectPanelView.h"
 #import "XLEngineBridge.h"
+#import "dialogs/XLValueCurveWindow.h"
 
 NSNotificationName const XLEffectSelectionDidChangeNotification = @"XLEffectSelectionDidChangeNotification";
 
@@ -169,8 +170,38 @@ NSNotificationName const XLEffectSelectionDidChangeNotification = @"XLEffectSele
 - (void)effectPanel:(NSString *)effectName
     editValueCurveForParameter:(NSString *)key
 {
-    NSLog(@"XLEffectPropertiesViewController: Request to edit value curve for %@.%@", effectName, key);
-    // TODO: Open value curve editor window
+    if (_selectedEffectId == 0 || !_engineBridge || !key) return;
+
+    // Get current value and parameter definition
+    NSString *currentValue = [_engineBridge getEffectParameter:_selectedEffectId key:key] ?: @"";
+
+    // Find min/max from parameter definitions
+    float minValue = 0.0f;
+    float maxValue = 100.0f;
+    NSArray<NSDictionary *> *params = [_engineBridge getEffectParameters:effectName];
+    for (NSDictionary *param in params) {
+        if ([param[@"key"] isEqualToString:key]) {
+            minValue = [param[@"minValue"] floatValue];
+            maxValue = [param[@"maxValue"] floatValue];
+            break;
+        }
+    }
+
+    XLValueCurveWindow *vcWindow = [[XLValueCurveWindow alloc]
+        initWithCurveData:currentValue.length > 0 ? currentValue : nil
+                 minValue:minValue
+                 maxValue:maxValue];
+    vcWindow.engineBridge = _engineBridge;
+
+    NSInteger effectId = _selectedEffectId;
+    [vcWindow showWithCompletion:^(BOOL modified) {
+        if (!modified) return;
+        NSString *newData = [vcWindow curveDataString];
+        if (newData) {
+            [self->_engineBridge setEffectParameter:effectId key:key value:newData];
+            [self refreshFromEngine];
+        }
+    }];
 }
 
 - (void)effectPanel:(NSString *)effectName

@@ -23,6 +23,8 @@
 
 #include <Box2D/Box2D.h>
 
+#include "../../ValueCurve.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -30,6 +32,7 @@
 #include <fstream>
 #include <functional>
 #include <list>
+#include <unordered_map>
 #include <regex>
 #include <sstream>
 #include <thread>
@@ -57,6 +60,11 @@ NativeRenderCoordinator::~NativeRenderCoordinator() {
 void NativeRenderCoordinator::setListener(RenderCoordinatorListener* listener) {
     std::lock_guard<std::mutex> lock(_listenerMutex);
     _listener = listener;
+}
+
+void NativeRenderCoordinator::setResolvedStartChannels(
+    const std::unordered_map<std::string, uint32_t>& channels) {
+    _resolvedStartChannels = channels;
 }
 
 // =========================================================================
@@ -380,11 +388,23 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
     geom.bufferWi = maxBufX + 1;
     geom.bufferHt = maxBufY + 1;
 
-    // Start channel (convert 1-based XML to 0-based internal)
-    auto it = attrs.find("StartChannel");
-    if (it != attrs.end() && !it->second.empty()) {
-        int sc = std::atoi(it->second.c_str());
-        if (sc > 0) geom.startChannel = static_cast<uint32_t>(sc - 1);
+    // Start channel: use pre-resolved value if available (handles complex formats
+    // like #IP:univ:ch, !Controller:ch, >Model:offset), fall back to atoi for plain numbers.
+    auto scAttrIt = attrs.find("StartChannel");
+    std::string scAttrStr = (scAttrIt != attrs.end()) ? scAttrIt->second : "(none)";
+
+    auto resolvedIt = _resolvedStartChannels.find(modelName);
+    if (resolvedIt != _resolvedStartChannels.end()) {
+        geom.startChannel = resolvedIt->second;
+        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → resolved=%u (from pre-resolved map)\n",
+               modelName.c_str(), scAttrStr.c_str(), geom.startChannel);
+    } else {
+        if (scAttrIt != attrs.end() && !scAttrIt->second.empty()) {
+            int sc = std::atoi(scAttrIt->second.c_str());
+            if (sc > 0) geom.startChannel = static_cast<uint32_t>(sc - 1);
+        }
+        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → atoi=%u (NO pre-resolved entry)\n",
+               modelName.c_str(), scAttrStr.c_str(), geom.startChannel);
     }
 
     geom.nodeCount = static_cast<uint32_t>(nodeCoords.size());
@@ -565,6 +585,99 @@ bool NativeRenderCoordinator::getTimingMarkAtTime(const std::string& trackName, 
     size_t elemIdx = findTimingTrackElement(trackName);
     if (elemIdx == SIZE_MAX) return false;
     return _effectProvider->getEffectAtTime(elemIdx, 0, timeMS, outMark);
+}
+
+// =========================================================================
+// Value Curve helpers for native effect rendering
+// =========================================================================
+
+// Check if a string value is a value curve definition
+static bool isValueCurveString(const std::string& val) {
+    return val.find("Active=TRUE") != std::string::npos &&
+           val.find("Id=ValueCurve") != std::string::npos;
+}
+
+// Cache of parsed ValueCurve objects, keyed by serialized string.
+// Avoids re-parsing the VC string on every frame.
+static std::unordered_map<std::string, ValueCurve> sValueCurveCache;
+
+static ValueCurve& getCachedValueCurve(const std::string& data,
+                                        int minVal, int maxVal, int divisor) {
+    auto cacheIt = sValueCurveCache.find(data);
+    if (cacheIt != sValueCurveCache.end()) {
+        return cacheIt->second;
+    }
+    ValueCurve& vc = sValueCurveCache[data];
+    vc.SetDivisor(divisor);
+    vc.SetLimits(minVal, maxVal);
+    vc.Deserialise(data);
+    printf("[VC] Parsed ValueCurve: type=%s, min=%d, max=%d, divisor=%d\n",
+           vc.GetType().c_str(), minVal, maxVal, divisor);
+    return vc;
+}
+
+// Read an int parameter with value curve support.
+// Checks for value curve data in BOTH the VC key (E_VALUECURVE_*) and the slider key.
+// offset = 0.0..1.0 position within the effect duration.
+static int getSettingInt(const std::map<std::string, std::string>& settings,
+                         const std::string& sliderKey, int defaultVal,
+                         float offset, int startMS, int endMS,
+                         int minVal = 0, int maxVal = 100, int divisor = 1) {
+    // First check for a dedicated E_VALUECURVE_ key
+    std::string vcKey = sliderKey;
+    auto pos = vcKey.find("E_SLIDER_");
+    if (pos != std::string::npos) {
+        vcKey.replace(pos, 9, "E_VALUECURVE_");
+    }
+
+    // Check VC key first, then slider key for VC data
+    for (const auto& key : {vcKey, sliderKey}) {
+        auto it = settings.find(key);
+        if (it != settings.end() && isValueCurveString(it->second)) {
+            ValueCurve& vc = getCachedValueCurve(it->second, minVal, maxVal, divisor);
+            if (vc.IsActive()) {
+                return static_cast<int>(vc.GetOutputValueAt(offset, startMS, endMS));
+            }
+        }
+    }
+
+    // Fall back to plain numeric value
+    auto it = settings.find(sliderKey);
+    if (it != settings.end() && !it->second.empty()) {
+        return std::atoi(it->second.c_str());
+    }
+    return defaultVal;
+}
+
+// Read a double parameter with value curve support.
+static double getSettingDouble(const std::map<std::string, std::string>& settings,
+                               const std::string& sliderKey, double defaultVal,
+                               float offset, int startMS, int endMS,
+                               int minVal = 0, int maxVal = 100, int divisor = 1) {
+    // First check for a dedicated E_VALUECURVE_ key
+    std::string vcKey = sliderKey;
+    auto pos = vcKey.find("E_SLIDER_");
+    if (pos != std::string::npos) {
+        vcKey.replace(pos, 9, "E_VALUECURVE_");
+    }
+
+    // Check VC key first, then slider key for VC data
+    for (const auto& key : {vcKey, sliderKey}) {
+        auto it = settings.find(key);
+        if (it != settings.end() && isValueCurveString(it->second)) {
+            ValueCurve& vc = getCachedValueCurve(it->second, minVal, maxVal, divisor);
+            if (vc.IsActive()) {
+                return static_cast<double>(vc.GetOutputValueAt(offset, startMS, endMS)) / divisor;
+            }
+        }
+    }
+
+    // Fall back to plain numeric value
+    auto it = settings.find(sliderKey);
+    if (it != settings.end() && !it->second.empty()) {
+        return std::atof(it->second.c_str()) / divisor;
+    }
+    return defaultVal;
 }
 
 // =========================================================================
@@ -928,31 +1041,27 @@ bool NativeRenderCoordinator::renderNativeEffect(
     if (type == "Bars") {
         // Native Bars effect — port of legacy BarsEffect::Render
 
-        // Read settings
-        int paletteRepeat = 1;
-        double cycles = 1.0;
-        double center = 0.0;
+        float vcOffset = buf.GetEffectTimeIntervalPosition();
+        int startMS = effectInfo.startTimeMS;
+        int endMS = effectInfo.endTimeMS;
+
+        // Read settings with value curve support
+        int paletteRepeat = getSettingInt(effectInfo.settings, "E_SLIDER_Bars_BarCount", 1,
+                                          vcOffset, startMS, endMS, 1, 50);
+        double cycles = getSettingDouble(effectInfo.settings, "E_SLIDER_Bars_Cycles", 1.0,
+                                          vcOffset, startMS, endMS, 0, 500, 10);
+        double center = getSettingDouble(effectInfo.settings, "E_SLIDER_Bars_Center", 0.0,
+                                          vcOffset, startMS, endMS, -100, 100, 1);
+
         std::string directionStr = "up";
         bool highlight = false;
         bool useFirstColorForHighlight = false;
         bool show3D = false;
         bool gradient = false;
 
-        auto it = effectInfo.settings.find("E_SLIDER_Bars_BarCount");
-        if (it != effectInfo.settings.end() && !it->second.empty())
-            paletteRepeat = std::atoi(it->second.c_str());
-
-        it = effectInfo.settings.find("E_SLIDER_Bars_Cycles");
-        if (it != effectInfo.settings.end() && !it->second.empty())
-            cycles = std::atof(it->second.c_str()) / 10.0;
-
-        it = effectInfo.settings.find("E_CHOICE_Bars_Direction");
+        auto it = effectInfo.settings.find("E_CHOICE_Bars_Direction");
         if (it != effectInfo.settings.end() && !it->second.empty())
             directionStr = it->second;
-
-        it = effectInfo.settings.find("E_SLIDER_Bars_Center");
-        if (it != effectInfo.settings.end() && !it->second.empty())
-            center = std::atof(it->second.c_str());
 
         it = effectInfo.settings.find("E_CHECKBOX_Bars_Highlight");
         if (it != effectInfo.settings.end())

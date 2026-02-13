@@ -36,9 +36,10 @@ final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
         sSwiftEngineBridge = appState.engineBridge
         sSwiftAppState = appState
 
-        // Create window with standard macOS chrome
+        // Create window filling the main screen's visible area
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 100, y: 100, width: 1600, height: 1000)
         let window = NSWindow(
-            contentRect: NSRect(x: 100, y: 100, width: 1600, height: 1000),
+            contentRect: screenFrame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -77,12 +78,17 @@ final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Frame Persistence
 
     private func restoreWindowFrame() {
-        if let frameString = UserDefaults.standard.string(forKey: "XLMainWindowFrame"),
-           let window = self.window {
+        guard let window = self.window else { return }
+        if let frameString = UserDefaults.standard.string(forKey: "XLMainWindowFrame") {
             let frame = NSRectFromString(frameString)
             if frame.size.width > 0 && frame.size.height > 0 {
                 window.setFrame(frame, display: false)
+                return
             }
+        }
+        // No saved frame — fill the screen's visible area
+        if let screenFrame = NSScreen.main?.visibleFrame {
+            window.setFrame(screenFrame, display: false)
         }
     }
 

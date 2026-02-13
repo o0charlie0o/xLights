@@ -406,8 +406,14 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
                                                               ascending:YES
                                                                selector:@selector(localizedCaseInsensitiveCompare:)];
 
-    // First pass: collect all groups and track which models are in groups
+    // First pass: collect all groups and build group name lookup
     NSArray<NSDictionary *> *groups = [_engineBridge getModelGroups];
+    NSMutableSet<NSString *> *groupNameSet = [NSMutableSet set];
+    for (NSDictionary *groupInfo in groups) {
+        [groupNameSet addObject:groupInfo[@"name"]];
+    }
+
+    // Second pass: build tree nodes for each group with all member types
     for (NSDictionary *groupInfo in groups) {
         NSString *groupName = groupInfo[@"name"];
         NSArray<NSString *> *memberNames = groupInfo[@"modelNames"];
@@ -417,20 +423,44 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         for (NSString *memberName in memberNames) {
             [modelsInGroups addObject:memberName];
 
-            NSDictionary *memberInfo = [_engineBridge getModelInfo:memberName];
-            if (!memberInfo) continue;
+            if ([groupNameSet containsObject:memberName]) {
+                // Member is another group — show as a group node child
+                XLModelTreeNode *childGroup = [XLModelTreeNode groupNodeWithName:memberName];
+                [groupNode addChild:childGroup];
+            } else if ([memberName containsString:@"/"]) {
+                // Submodel reference "ModelName/SubmodelName"
+                NSArray<NSString *> *parts = [memberName componentsSeparatedByString:@"/"];
+                NSString *parentModel = parts.firstObject;
+                NSString *subName = (parts.count > 1) ? parts[1] : nil;
+                NSString *parentType = @"Unknown";
+                NSDictionary *parentInfo = [_engineBridge getModelInfo:parentModel];
+                if (parentInfo) parentType = parentInfo[@"type"] ?: @"Unknown";
+                XLModelTreeNode *subNode = [XLModelTreeNode submodelNodeWithName:subName ?: memberName
+                                                                     parentType:parentType];
+                subNode.parentModelName = parentModel;
+                [groupNode addChild:subNode];
+            } else {
+                // Regular model
+                NSDictionary *memberInfo = [_engineBridge getModelInfo:memberName];
+                if (!memberInfo) continue;
 
-            NSString *modelType = memberInfo[@"type"] ?: @"Unknown";
-            XLModelTreeNode *childNode = [XLModelTreeNode nodeWithName:memberName type:modelType];
-            childNode.channelCount = [memberInfo[@"channelCount"] integerValue];
-            [self populateChannelInfoForNode:childNode fromInfo:memberInfo];
-            [self populateShadowInfoForNode:childNode];
-            [self loadSubmodelsForNode:childNode modelName:memberName];
-            [groupNode addChild:childNode];
+                NSString *modelType = memberInfo[@"type"] ?: @"Unknown";
+                XLModelTreeNode *childNode = [XLModelTreeNode nodeWithName:memberName type:modelType];
+                childNode.channelCount = [memberInfo[@"channelCount"] integerValue];
+                [self populateChannelInfoForNode:childNode fromInfo:memberInfo];
+                [self populateShadowInfoForNode:childNode];
+                [self loadSubmodelsForNode:childNode modelName:memberName];
+                [groupNode addChild:childNode];
+            }
         }
 
-        // Sort children within the group alphabetically
-        [groupNode.children sortUsingDescriptors:@[nameSort]];
+        // Sort children: groups first, then non-groups, each alphabetically
+        [groupNode.children sortUsingComparator:^NSComparisonResult(XLModelTreeNode *a, XLModelTreeNode *b) {
+            if (a.isGroup != b.isGroup) {
+                return a.isGroup ? NSOrderedAscending : NSOrderedDescending;
+            }
+            return [a.name localizedCaseInsensitiveCompare:b.name];
+        }];
 
         [groupNodes addObject:groupNode];
     }
@@ -732,9 +762,12 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     XLModelTreeNode *node = [_outlineView itemAtRow:row];
     if (!node) return;
 
-    if (node.isSubmodel && node.parent) {
-        if ([_delegate respondsToSelector:@selector(modelTree:didSelectSubmodel:ofModel:)]) {
-            [_delegate modelTree:self didSelectSubmodel:node.name ofModel:node.parent.name];
+    if (node.isSubmodel) {
+        // parentModelName is set for submodel nodes that are children of groups;
+        // falls back to node.parent.name for normal submodel-under-model case
+        NSString *modelName = node.parentModelName ?: node.parent.name;
+        if (modelName && [_delegate respondsToSelector:@selector(modelTree:didSelectSubmodel:ofModel:)]) {
+            [_delegate modelTree:self didSelectSubmodel:node.name ofModel:modelName];
         }
     } else if (node.isGroup) {
         if ([_delegate respondsToSelector:@selector(modelTree:didSelectGroup:)]) {

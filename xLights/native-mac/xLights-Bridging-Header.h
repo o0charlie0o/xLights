@@ -19,6 +19,7 @@
 #import "XLEffectPropertiesViewController.h"
 #import "XLColorPaletteViewController.h"
 #import "XLEngineBridge.h"
+#import "dialogs/XLValueCurveWindow.h"
 #import "XLPlaybackController.h"
 #import "layout/XLMetalPreviewView.h"
 

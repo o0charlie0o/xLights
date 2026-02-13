@@ -1151,6 +1151,7 @@ ControllerInfo NativeOutputProvider::buildControllerInfo(const NativeControllerC
     info.endChannel = config.startChannel + config.channels - 1;
     info.channels = config.channels;
     info.outputCount = config.outputs.empty() ? 1 : (int)config.outputs.size();
+    info.startUniverse = config.universe;
     info.priority = config.priority;
     info.active = config.active;
     info.autoLayout = config.autoLayout;

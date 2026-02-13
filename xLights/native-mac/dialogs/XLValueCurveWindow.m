@@ -25,21 +25,22 @@ static const XLCurveTypeDef kCurveTypes[] = {
     { "Exponential Up", "Exponential Up", "chart.line.uptrend.xyaxis", 2 },
     { "Exponential Down", "Exponential Down", "chart.line.downtrend.xyaxis", 2 },
     { "Sine", "Sine", "waveform", 4 },
+    { "Decaying Sine", "Decaying Sine", "waveform", 4 },
     { "Abs Sine", "Absolute Sine", "waveform", 4 },
     { "Square", "Square", "square.fill", 3 },
+    { "Random", "Random", "dice", 2 },
     { "Custom", "Custom", "scribble.variable", 0 },
     { "Music", "Music", "music.note", 2 },
+    { "Inverted Music", "Inverted Music", "music.note", 2 },
     { "Music Trigger Fade", "Music Trigger Fade", "music.note.list", 3 },
-    { "Random", "Random", "dice", 2 },
     { "Timing Track Toggle", "Timing Track Toggle", "metronome", 2 },
     { "Timing Track Fade Fixed", "Timing Track Fade Fixed", "metronome.fill", 3 },
     { "Timing Track Fade Proportional", "Timing Track Fade Proportional", "metronome.fill", 3 },
 };
 static const int kCurveTypeCount = sizeof(kCurveTypes) / sizeof(kCurveTypes[0]);
 
-static const CGFloat kWindowWidth = 700.0;
-static const CGFloat kWindowHeight = 700.0;
-static const CGFloat kCurveViewHeight = 300.0;
+static const CGFloat kWindowWidth = 600.0;
+static const CGFloat kWindowHeight = 560.0;
 
 #pragma mark - XLValueCurveView
 
@@ -603,14 +604,9 @@ static const CGFloat kCurveViewHeight = 300.0;
 }
 
 - (void)setupUI {
-    _mainStack = [[NSStackView alloc] init];
-    _mainStack.translatesAutoresizingMaskIntoConstraints = NO;
-    _mainStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    _mainStack.spacing = 12;
-    [self addSubview:_mainStack];
-
-    // Curve type selector
+    // Curve type selector (direct subview — full width guaranteed)
     NSStackView *typeRow = [[NSStackView alloc] init];
+    typeRow.translatesAutoresizingMaskIntoConstraints = NO;
     typeRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     typeRow.spacing = 8;
 
@@ -624,19 +620,21 @@ static const CGFloat kCurveViewHeight = 300.0;
 
     [typeRow addArrangedSubview:typeLabel];
     [typeRow addArrangedSubview:_curveTypePopup];
-    [_mainStack addArrangedSubview:typeRow];
+    [self addSubview:typeRow];
 
-    // Curve view
-    _curveView = [[XLValueCurveView alloc] initWithFrame:NSMakeRect(0, 0, 400, 200)];
+    // Curve view (direct subview — pinned leading+trailing for full width)
+    _curveView = [[XLValueCurveView alloc] initWithFrame:NSZeroRect];
     _curveView.delegate = self;
     _curveView.translatesAutoresizingMaskIntoConstraints = NO;
-    [_mainStack addArrangedSubview:_curveView];
+    [self addSubview:_curveView];
 
-    [NSLayoutConstraint activateConstraints:@[
-        [_curveView.heightAnchor constraintEqualToConstant:200],
-    ]];
+    // Parameter rows in a stack (for auto-collapse on hide)
+    _mainStack = [[NSStackView alloc] init];
+    _mainStack.translatesAutoresizingMaskIntoConstraints = NO;
+    _mainStack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    _mainStack.spacing = 4;
+    [self addSubview:_mainStack];
 
-    // Parameter sliders
     [self addParameterRow:1 label:@"Parameter 1:" slider:&_parameter1Slider
                 labelField:&_param1Label valueField:&_param1ValueLabel];
     [self addParameterRow:2 label:@"Parameter 2:" slider:&_parameter2Slider
@@ -646,11 +644,24 @@ static const CGFloat kCurveViewHeight = 300.0;
     [self addParameterRow:4 label:@"Parameter 4:" slider:&_parameter4Slider
                 labelField:&_param4Label valueField:&_param4ValueLabel];
 
+    // Plain auto layout — everything pinned full width
     [NSLayoutConstraint activateConstraints:@[
-        [_mainStack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
-        [_mainStack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-12],
-        [_mainStack.topAnchor constraintEqualToAnchor:self.topAnchor constant:12],
-        [_mainStack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-12],
+        // Type row at top
+        [typeRow.topAnchor constraintEqualToAnchor:self.topAnchor],
+        [typeRow.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [typeRow.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+
+        // Curve view below type row — full width, flexible height
+        [_curveView.topAnchor constraintEqualToAnchor:typeRow.bottomAnchor constant:4],
+        [_curveView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_curveView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_curveView.heightAnchor constraintGreaterThanOrEqualToConstant:150],
+
+        // Parameter stack below curve view
+        [_mainStack.topAnchor constraintEqualToAnchor:_curveView.bottomAnchor constant:4],
+        [_mainStack.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_mainStack.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_mainStack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
     ]];
 
     [self updateParameterVisibility];
@@ -734,6 +745,61 @@ static const CGFloat kCurveViewHeight = 300.0;
     _param2Label.superview.hidden = (paramCount < 2);
     _param3Label.superview.hidden = (paramCount < 3);
     _param4Label.superview.hidden = (paramCount < 4);
+
+    [self updateParameterLabels];
+}
+
+/// Returns curve-type-specific parameter labels matching the legacy ValueCurveDialog
++ (NSArray<NSString *> *)parameterLabelsForType:(NSString *)type {
+    if ([type isEqualToString:@"Flat"]) {
+        return @[@"Level:", @"N/A:", @"N/A:", @"N/A:"];
+    } else if ([type isEqualToString:@"Ramp"]) {
+        return @[@"Start Level:", @"End Level:", @"N/A:", @"N/A:"];
+    } else if ([type isEqualToString:@"Ramp Up/Down"]) {
+        return @[@"Start Level:", @"Mid Level:", @"End Level:", @"N/A:"];
+    } else if ([type isEqualToString:@"Ramp Up/Down Hold"]) {
+        return @[@"Start/End Level:", @"Mid Level:", @"Mid Level Time:", @"N/A:"];
+    } else if ([type isEqualToString:@"Saw Tooth"]) {
+        return @[@"Start Level:", @"End Level:", @"Cycles:", @"N/A:"];
+    } else if ([type isEqualToString:@"Parabolic Down"]) {
+        return @[@"Slope:", @"Low:", @"N/A:", @"N/A:"];
+    } else if ([type isEqualToString:@"Parabolic Up"]) {
+        return @[@"Slope:", @"High:", @"N/A:", @"N/A:"];
+    } else if ([type isEqualToString:@"Logarithmic Up"] ||
+               [type isEqualToString:@"Logarithmic Down"] ||
+               [type isEqualToString:@"Exponential Up"] ||
+               [type isEqualToString:@"Exponential Down"]) {
+        return @[@"Rate:", @"Vertical Offset:", @"N/A:", @"N/A:"];
+    } else if ([type isEqualToString:@"Sine"] ||
+               [type isEqualToString:@"Decaying Sine"] ||
+               [type isEqualToString:@"Abs Sine"]) {
+        return @[@"Start:", @"Amplitude:", @"Cycles:", @"Vertical Offset:"];
+    } else if ([type isEqualToString:@"Square"]) {
+        return @[@"Start Level:", @"End Level:", @"Cycles:", @"N/A:"];
+    } else if ([type isEqualToString:@"Random"]) {
+        return @[@"Minimum:", @"Maximum:", @"Points:", @"N/A:"];
+    } else if ([type isEqualToString:@"Music"] ||
+               [type isEqualToString:@"Inverted Music"]) {
+        return @[@"Low:", @"High:", @"Gain:", @"N/A:"];
+    } else if ([type isEqualToString:@"Music Trigger Fade"]) {
+        return @[@"Low:", @"High:", @"Trigger:", @"Fade:"];
+    } else if ([type isEqualToString:@"Timing Track Toggle"]) {
+        return @[@"Low:", @"High:", @"N/A:", @"N/A:"];
+    } else if ([type isEqualToString:@"Timing Track Fade Fixed"]) {
+        return @[@"Low:", @"High:", @"Frames:", @"N/A:"];
+    } else if ([type isEqualToString:@"Timing Track Fade Proportional"]) {
+        return @[@"Low:", @"High:", @"Proportion:", @"N/A:"];
+    }
+    return @[@"Parameter 1:", @"Parameter 2:", @"Parameter 3:", @"Parameter 4:"];
+}
+
+- (void)updateParameterLabels {
+    NSString *type = _curveView.curveType;
+    NSArray<NSString *> *labels = [XLValueCurvePanel parameterLabelsForType:type];
+    _param1Label.stringValue = labels[0];
+    _param2Label.stringValue = labels[1];
+    _param3Label.stringValue = labels[2];
+    _param4Label.stringValue = labels[3];
 }
 
 - (void)notifyChange {
@@ -776,6 +842,7 @@ static const CGFloat kCurveViewHeight = 300.0;
                 [type isEqualToString:@"Exponential Up"] ||
                 [type isEqualToString:@"Exponential Down"] ||
                 [type isEqualToString:@"Sine"] ||
+                [type isEqualToString:@"Decaying Sine"] ||
                 [type isEqualToString:@"Abs Sine"] ||
                 [type isEqualToString:@"Music"] ||
                 [type isEqualToString:@"Inverted Music"] ||
@@ -787,8 +854,9 @@ static const CGFloat kCurveViewHeight = 300.0;
         // P3 uses MINVOID/MAXVOID range only for Ramp Up/Down
         return [type isEqualToString:@"Ramp Up/Down"];
     } else if (paramIndex == 4) {
-        // P4 uses MINVOID/MAXVOID range only for Sine and Abs Sine
+        // P4 uses MINVOID/MAXVOID range for Sine, Decaying Sine, and Abs Sine
         return ([type isEqualToString:@"Sine"] ||
+                [type isEqualToString:@"Decaying Sine"] ||
                 [type isEqualToString:@"Abs Sine"]);
     }
     return NO;
@@ -856,6 +924,8 @@ static const CGFloat kCurveViewHeight = 300.0;
     if (!curveData || curveData.length == 0) {
         _curveView.curveType = @"Flat";
         _curveView.parameter1 = 1.0;
+        [self updateParameterVisibility];
+        [_curveView setNeedsDisplay:YES];
         return;
     }
 
@@ -1044,7 +1114,7 @@ static const CGFloat kCurveViewHeight = 300.0;
                                                      backing:NSBackingStoreBuffered
                                                        defer:YES];
     window.title = @"Value Curve Editor";
-    window.minSize = NSMakeSize(500, 600);
+    window.minSize = NSMakeSize(480, 400);
 
     self = [super initWithWindow:window];
     if (self) {
@@ -1061,69 +1131,76 @@ static const CGFloat kCurveViewHeight = 300.0;
 
 - (void)buildUI {
     NSView *contentView = self.window.contentView;
+    CGFloat pad = 12.0;
+    CGFloat vgap = 6.0;
 
-    // Main vertical stack
-    NSStackView *mainStack = [[NSStackView alloc] init];
-    mainStack.translatesAutoresizingMaskIntoConstraints = NO;
-    mainStack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    mainStack.spacing = 16;
-    mainStack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    [contentView addSubview:mainStack];
-
-    // Curve panel
+    // Curve panel (curve type, graph, parameter sliders)
     _curvePanel = [[XLValueCurvePanel alloc] initWithCurveData:nil
                                                       minValue:_minValue
                                                       maxValue:_maxValue];
+    _curvePanel.translatesAutoresizingMaskIntoConstraints = NO;
     _curvePanel.target = self;
     _curvePanel.action = @selector(curveDidChange:);
-    [mainStack addArrangedSubview:_curvePanel];
+    [contentView addSubview:_curvePanel];
 
-    // Wrap values checkbox
-    _wrapValuesCheckbox = [NSButton checkboxWithTitle:@"Wrap values (allow values outside 0-100%)"
+    // Separator after curve panel
+    NSBox *sep1 = [[NSBox alloc] init];
+    sep1.boxType = NSBoxSeparator;
+    sep1.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:sep1];
+
+    // Wrap checkbox + action buttons on same row
+    NSStackView *actionsRow = [[NSStackView alloc] init];
+    actionsRow.translatesAutoresizingMaskIntoConstraints = NO;
+    actionsRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    actionsRow.spacing = 8;
+
+    _wrapValuesCheckbox = [NSButton checkboxWithTitle:@"Wrap values"
                                                target:self action:@selector(wrapValuesChanged:)];
-    [mainStack addArrangedSubview:_wrapValuesCheckbox];
-
-    // Toolbar buttons
-    NSStackView *toolbar = [[NSStackView alloc] init];
-    toolbar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    toolbar.spacing = 8;
+    _wrapValuesCheckbox.controlSize = NSControlSizeSmall;
+    _wrapValuesCheckbox.font = [NSFont systemFontOfSize:11];
 
     _flipButton = [NSButton buttonWithTitle:@"Flip" target:self action:@selector(flipClicked:)];
+    _flipButton.controlSize = NSControlSizeSmall;
     _reverseButton = [NSButton buttonWithTitle:@"Reverse" target:self action:@selector(reverseClicked:)];
-    _loadButton = [NSButton buttonWithTitle:@"Load Preset..." target:self action:@selector(loadClicked:)];
+    _reverseButton.controlSize = NSControlSizeSmall;
+    _loadButton = [NSButton buttonWithTitle:@"Load..." target:self action:@selector(loadClicked:)];
+    _loadButton.controlSize = NSControlSizeSmall;
     _exportButton = [NSButton buttonWithTitle:@"Export..." target:self action:@selector(exportClicked:)];
+    _exportButton.controlSize = NSControlSizeSmall;
 
-    [toolbar addArrangedSubview:_flipButton];
-    [toolbar addArrangedSubview:_reverseButton];
-    [toolbar addArrangedSubview:[[NSView alloc] init]]; // Spacer
-    [toolbar addArrangedSubview:_loadButton];
-    [toolbar addArrangedSubview:_exportButton];
+    [actionsRow addArrangedSubview:_wrapValuesCheckbox];
+    [actionsRow addArrangedSubview:_flipButton];
+    [actionsRow addArrangedSubview:_reverseButton];
+    NSView *spacer1 = [[NSView alloc] init];
+    [spacer1 setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [actionsRow addArrangedSubview:spacer1];
+    [actionsRow addArrangedSubview:_loadButton];
+    [actionsRow addArrangedSubview:_exportButton];
 
-    [mainStack addArrangedSubview:toolbar];
+    [contentView addSubview:actionsRow];
 
-    // Presets section
-    NSTextField *presetsLabel = [NSTextField labelWithString:@"Presets"];
-    presetsLabel.font = [NSFont boldSystemFontOfSize:13];
-    [mainStack addArrangedSubview:presetsLabel];
+    // Separator before presets
+    NSBox *sep2 = [[NSBox alloc] init];
+    sep2.boxType = NSBoxSeparator;
+    sep2.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:sep2];
 
-    _presetsScrollView = [[NSScrollView alloc] init];
-    _presetsScrollView.translatesAutoresizingMaskIntoConstraints = NO;
-    _presetsScrollView.hasHorizontalScroller = YES;
-    _presetsScrollView.hasVerticalScroller = NO;
-    _presetsScrollView.borderType = NSNoBorder;
-
+    // Presets — horizontal stack
     _presetsStack = [[NSStackView alloc] init];
+    _presetsStack.translatesAutoresizingMaskIntoConstraints = NO;
     _presetsStack.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    _presetsStack.spacing = 8;
-    _presetsScrollView.documentView = _presetsStack;
+    _presetsStack.spacing = 6;
+    _presetsStack.distribution = NSStackViewDistributionFillEqually;
 
     [self populatePresets];
-    [mainStack addArrangedSubview:_presetsScrollView];
+    [contentView addSubview:_presetsStack];
 
     // Bottom buttons
     NSStackView *bottomBar = [[NSStackView alloc] init];
+    bottomBar.translatesAutoresizingMaskIntoConstraints = NO;
     bottomBar.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    bottomBar.spacing = 12;
+    bottomBar.spacing = 8;
 
     NSButton *cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancelClicked:)];
     cancelButton.keyEquivalent = @"\033";
@@ -1131,49 +1208,69 @@ static const CGFloat kCurveViewHeight = 300.0;
     NSButton *okButton = [NSButton buttonWithTitle:@"OK" target:self action:@selector(okClicked:)];
     okButton.keyEquivalent = @"\r";
 
-    [bottomBar addArrangedSubview:[[NSView alloc] init]]; // Spacer
+    NSView *spacer2 = [[NSView alloc] init];
+    [spacer2 setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [bottomBar addArrangedSubview:spacer2];
     [bottomBar addArrangedSubview:cancelButton];
     [bottomBar addArrangedSubview:okButton];
 
-    [mainStack addArrangedSubview:bottomBar];
+    [contentView addSubview:bottomBar];
 
+    // All views pinned leading+trailing to contentView with padding — full width guaranteed
     [NSLayoutConstraint activateConstraints:@[
-        [mainStack.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
-        [mainStack.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
-        [mainStack.topAnchor constraintEqualToAnchor:contentView.topAnchor],
-        [mainStack.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
+        // Curve panel: top, full width, expands vertically
+        [_curvePanel.topAnchor constraintEqualToAnchor:contentView.topAnchor constant:pad],
+        [_curvePanel.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:pad],
+        [_curvePanel.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-pad],
 
-        [_presetsScrollView.heightAnchor constraintEqualToConstant:80],
+        // Separator
+        [sep1.topAnchor constraintEqualToAnchor:_curvePanel.bottomAnchor constant:vgap],
+        [sep1.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:pad],
+        [sep1.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-pad],
+
+        // Actions row
+        [actionsRow.topAnchor constraintEqualToAnchor:sep1.bottomAnchor constant:vgap],
+        [actionsRow.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:pad],
+        [actionsRow.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-pad],
+
+        // Separator
+        [sep2.topAnchor constraintEqualToAnchor:actionsRow.bottomAnchor constant:vgap],
+        [sep2.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:pad],
+        [sep2.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-pad],
+
+        // Presets
+        [_presetsStack.topAnchor constraintEqualToAnchor:sep2.bottomAnchor constant:vgap],
+        [_presetsStack.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:pad],
+        [_presetsStack.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-pad],
+
+        // Bottom bar
+        [bottomBar.topAnchor constraintEqualToAnchor:_presetsStack.bottomAnchor constant:vgap],
+        [bottomBar.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor constant:pad],
+        [bottomBar.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor constant:-pad],
+        [bottomBar.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor constant:-pad],
     ]];
 }
 
 - (void)populatePresets {
-    // Add preset buttons for common curves
     NSArray *presets = @[
-        @[@"Flat|100", @"Flat 100%"],
-        @[@"Flat|50", @"Flat 50%"],
+        @[@"Flat|100", @"Flat"],
         @[@"Ramp|0|100", @"Ramp Up"],
-        @[@"Ramp|100|0", @"Ramp Down"],
+        @[@"Ramp|100|0", @"Ramp Dn"],
         @[@"Ramp Up/Down|100|0", @"Peak"],
         @[@"Sine|100|0|10|0", @"Sine"],
         @[@"Square|100|0|10", @"Square"],
-        @[@"Saw Tooth|100|10", @"Saw Tooth"],
-        @[@"Parabolic Down|100|0", @"Parabolic"],
-        @[@"Exponential Up|100|0", @"Exponential"],
+        @[@"Saw Tooth|100|10", @"Saw"],
+        @[@"Random|0|100", @"Random"],
+        @[@"Parabolic Down|100|0", @"Parab."],
+        @[@"Exponential Up|100|0", @"Exp."],
     ];
 
-    for (NSArray *preset in presets) {
-        NSButton *btn = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 70, 60)];
-        btn.title = preset[1];
-        btn.bezelStyle = NSBezelStyleRounded;
-        btn.translatesAutoresizingMaskIntoConstraints = NO;
-        [btn.widthAnchor constraintEqualToConstant:70].active = YES;
-        [btn.heightAnchor constraintEqualToConstant:60].active = YES;
-
-        btn.tag = [presets indexOfObject:preset];
-        [btn setTarget:self];
-        [btn setAction:@selector(presetClicked:)];
-
+    for (NSUInteger i = 0; i < presets.count; i++) {
+        NSArray *preset = presets[i];
+        NSButton *btn = [NSButton buttonWithTitle:preset[1] target:self action:@selector(presetClicked:)];
+        btn.controlSize = NSControlSizeSmall;
+        btn.font = [NSFont systemFontOfSize:10];
+        btn.tag = (NSInteger)i;
         [_presetsStack addArrangedSubview:btn];
     }
 }
@@ -1242,15 +1339,16 @@ static const CGFloat kCurveViewHeight = 300.0;
 }
 
 - (void)presetClicked:(NSButton *)sender {
+    // Must match the order in populatePresets exactly
     NSArray *presets = @[
         @"Flat|100",
-        @"Flat|50",
         @"Ramp|0|100",
         @"Ramp|100|0",
         @"Ramp Up/Down|100|0",
         @"Sine|100|0|10|0",
         @"Square|100|0|10",
         @"Saw Tooth|100|10",
+        @"Random|0|100",
         @"Parabolic Down|100|0",
         @"Exponential Up|100|0",
     ];

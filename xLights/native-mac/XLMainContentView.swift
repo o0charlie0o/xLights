@@ -570,6 +570,14 @@ struct XLMainContentView: View {
     private var toolbarContent: some ToolbarContent {
         // Tab buttons on the left side of the toolbar
         ToolbarItemGroup(placement: .navigation) {
+            Button {
+                appState.sidebarVisible.toggle()
+            } label: {
+                Label("Sidebar", systemImage: "sidebar.left")
+            }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.sidebarVisible))
+            .help("Model Preview Sidebar")
+
             ForEach(XLTab.allCases) { tab in
                 Button {
                     appState.currentTab = tab
@@ -670,14 +678,6 @@ struct XLMainContentView: View {
             }
             .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.songRegionOverlayVisible))
             .help("Show Song Regions in Grid")
-
-            Button {
-                appState.sidebarVisible.toggle()
-            } label: {
-                Label("Sidebar", systemImage: "sidebar.left")
-            }
-            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.sidebarVisible))
-            .help("Model Preview Sidebar")
 
             Button {
                 appState.inspectorVisible.toggle()

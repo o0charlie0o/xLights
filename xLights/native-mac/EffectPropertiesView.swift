@@ -466,10 +466,20 @@ struct EffectPropertiesView: View {
     @ViewBuilder
     private func parameterControl(param: ParameterDefinition) -> some View {
         let currentValue = state.parameters[param.key] ?? param.defaultValue
+        let hasActiveVC = Self.isValueCurveString(currentValue)
 
         switch param.type {
         case .int, .float:
-            sliderControl(param: param, currentValue: currentValue)
+            if hasActiveVC && param.supportsValueCurve {
+                valueCurveDisplay(param: param, curveData: currentValue)
+            } else if param.supportsValueCurve {
+                HStack(spacing: 4) {
+                    sliderControl(param: param, currentValue: currentValue)
+                    vcButton(param: param, curveData: nil)
+                }
+            } else {
+                sliderControl(param: param, currentValue: currentValue)
+            }
 
         case .bool:
             Toggle("", isOn: Binding(
@@ -482,7 +492,6 @@ struct EffectPropertiesView: View {
 
         case .choice:
             if let choices = param.choices, !choices.isEmpty {
-                // Ensure current value is always in the list
                 let allChoices = choices.contains(currentValue) ? choices : [currentValue] + choices
                 Picker("", selection: Binding(
                     get: { currentValue },
@@ -497,7 +506,6 @@ struct EffectPropertiesView: View {
                 .labelsHidden()
                 .frame(maxWidth: 150)
             } else {
-                // No choices available — show as text field
                 TextField("", text: Binding(
                     get: { currentValue },
                     set: { newValue in
@@ -509,10 +517,7 @@ struct EffectPropertiesView: View {
             }
 
         case .valueCurve, .colorCurve:
-            Text(currentValue.count > 40 ? String(currentValue.prefix(40)) + "..." : currentValue)
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .help(currentValue)
+            valueCurveDisplay(param: param, curveData: currentValue)
 
         case .string:
             TextField("", text: Binding(
@@ -528,6 +533,89 @@ struct EffectPropertiesView: View {
             Text(currentValue)
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
+        }
+    }
+
+    /// Display for an active value curve — shows curve type label with Edit/Clear buttons
+    private func valueCurveDisplay(param: ParameterDefinition, curveData: String) -> some View {
+        let curveType = Self.extractCurveType(from: curveData)
+
+        return HStack(spacing: 4) {
+            Text(curveType)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(.accentColor)
+                .lineLimit(1)
+                .help(curveData)
+
+            Spacer().frame(maxWidth: 8)
+
+            Button(action: {
+                openValueCurveEditor(param: param, curveData: curveData)
+            }) {
+                Text("Edit")
+                    .font(.system(size: 9, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+
+            Button(action: {
+                state.setParameter(key: param.key, value: param.defaultValue)
+            }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Remove value curve")
+        }
+    }
+
+    /// Small VC button shown next to slider controls for parameters that support value curves
+    private func vcButton(param: ParameterDefinition, curveData: String?) -> some View {
+        Button(action: {
+            openValueCurveEditor(param: param, curveData: curveData ?? "")
+        }) {
+            Text("VC")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(.secondary)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.mini)
+        .help("Value Curve")
+    }
+
+    /// Check if a parameter value string is an active value curve
+    static func isValueCurveString(_ value: String) -> Bool {
+        return value.contains("Id=ValueCurve") && value.contains("Active=TRUE")
+    }
+
+    /// Extract the curve type name from a value curve data string
+    static func extractCurveType(from curveData: String) -> String {
+        // Format: "Active=TRUE|Id=ValueCurve|Type=Sine|..."
+        for component in curveData.split(separator: "|") {
+            if component.hasPrefix("Type=") {
+                return String(component.dropFirst(5))
+            }
+        }
+        return "Value Curve"
+    }
+
+    /// Open the XLValueCurveWindow editor for the given parameter
+    private func openValueCurveEditor(param: ParameterDefinition, curveData: String) {
+        guard let vcWindow = XLValueCurveWindow(
+            curveData: curveData.isEmpty ? nil : curveData,
+            minValue: Float(param.minValue),
+            maxValue: Float(param.maxValue)
+        ) else { return }
+
+        vcWindow.engineBridge = state.engineBridge
+
+        let paramKey = param.key
+        vcWindow.show { [weak state] modified in
+            guard modified, let state = state else { return }
+            if let newData = vcWindow.curveDataString() {
+                state.setParameter(key: paramKey, value: newData)
+            }
         }
     }
 
@@ -574,6 +662,7 @@ struct EffectPropertiesView: View {
             let maxValue = dict["maxValue"] as? Double ?? 100
             let defaultValue = dict["defaultValue"] as? String ?? "0"
             let choices = dict["choices"] as? [String]
+            let supportsVC = dict["supportsValueCurve"] as? Bool ?? false
 
             return ParameterDefinition(
                 key: key,
@@ -582,7 +671,8 @@ struct EffectPropertiesView: View {
                 minValue: minValue,
                 maxValue: maxValue,
                 defaultValue: defaultValue,
-                choices: choices
+                choices: choices,
+                supportsValueCurve: supportsVC
             )
         }
     }
@@ -600,6 +690,7 @@ struct ParameterDefinition: Identifiable {
     let maxValue: Double
     let defaultValue: String
     let choices: [String]?
+    let supportsValueCurve: Bool
 }
 
 enum ParameterType: String {

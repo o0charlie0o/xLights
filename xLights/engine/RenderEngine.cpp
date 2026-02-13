@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cstring>
 #include <chrono>
+#include <unordered_map>
 
 namespace xlEngine {
 
@@ -157,10 +158,10 @@ void RenderEngine::closeFSEQ()
     _fseqLoaded = false;
     _currentFrameIndex = -1;
     _currentFrameData.clear();
-    _modelChannelMap.clear();
     _controllerStartChannels.clear();
 
     std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+    _modelChannelMap.clear();
     _bufferCache.clear();
 }
 
@@ -174,20 +175,53 @@ bool RenderEngine::isFSEQLoaded() const
 void RenderEngine::buildControllerChannelMap()
 {
     _controllerStartChannels.clear();
-    if (!_outputProvider) return;
+    if (!_outputProvider) {
+        printf("[CHANNEL_MAP] buildControllerChannelMap: NO outputProvider — all controller/IP-based start channels will resolve to 0!\n");
+        return;
+    }
 
     size_t count = _outputProvider->getControllerCount();
-    printf("RenderEngine: Building controller channel map — %zu controllers\n", count);
+    printf("[CHANNEL_MAP] buildControllerChannelMap: %zu controllers from outputProvider\n", count);
     for (size_t i = 0; i < count; i++) {
         auto info = _outputProvider->getController(i);
-        if (info.has_value()) {
-            printf("RenderEngine: Controller[%zu] '%s' — startCh=%d, channels=%d, protocol=%s\n",
-                   i, info->name.c_str(), info->startChannel, info->channels,
-                   info->protocol.c_str());
-            if (!info->name.empty() && info->startChannel > 0) {
-                _controllerStartChannels[info->name] = info->startChannel;
+        if (!info.has_value()) continue;
+
+        printf("[CHANNEL_MAP]   Controller[%zu] name='%s' ip='%s' startCh=%d channels=%d protocol='%s' outputCount=%d startUniverse=%d\n",
+               i, info->name.c_str(), info->ip.c_str(), info->startChannel, info->channels,
+               info->protocol.c_str(), info->outputCount, info->startUniverse);
+
+        // Register by controller name (for !ControllerName:offset format)
+        if (!info->name.empty() && info->startChannel > 0) {
+            _controllerStartChannels[info->name] = info->startChannel;
+        }
+
+        // Register per-universe lookup entries for #IP:universe:channel format.
+        // For E131/ArtNet: register "{protocol}_{ip}_{universe}" for each universe.
+        // For DDP: register "DDP_{ip}".
+        if (!info->ip.empty() && info->startChannel > 0 && info->outputCount > 0) {
+            std::string proto = info->protocol;
+            if (proto == "E1.31") proto = "E131"; // normalize
+
+            if (proto == "DDP") {
+                std::string key = "DDP_" + info->ip;
+                _controllerStartChannels[key] = info->startChannel;
+            } else if (proto == "E131" || proto == "ArtNet") {
+                int channelsPerUniverse = info->channels / info->outputCount;
+                if (channelsPerUniverse <= 0) channelsPerUniverse = 510; // E131 default
+
+                for (int u = 0; u < info->outputCount; u++) {
+                    int universeNum = info->startUniverse + u;
+                    int32_t univStartCh = info->startChannel + (u * channelsPerUniverse);
+                    std::string key = proto + "_" + info->ip + "_" + std::to_string(universeNum);
+                    _controllerStartChannels[key] = univStartCh;
+                }
             }
         }
+    }
+    printf("[CHANNEL_MAP] buildControllerChannelMap: %zu total lookup entries\n",
+           _controllerStartChannels.size());
+    for (const auto& [key, startCh] : _controllerStartChannels) {
+        printf("[CHANNEL_MAP]   lookup '%s' → startCh=%d\n", key.c_str(), startCh);
     }
 }
 
@@ -256,42 +290,64 @@ uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
             result = 0;
         }
     }
-    // Format 2: IP reference (e.g., "#192.168.1.11:1:1" = #IP:universe:channel)
+    // Format 2: Universe/IP reference
+    // 3-part: "#192.168.1.11:1:1" = #IP:universe:channel
+    // 2-part: "#1:1" = #universe:channel (search all controllers)
     else if (sc[0] == '#' && sc.size() > 1) {
-        // Parse #IP:universe:channel
         size_t firstColon = sc.find(':', 1);
         if (firstColon != std::string::npos) {
-            std::string ip = sc.substr(1, firstColon - 1);
+            std::string firstPart = sc.substr(1, firstColon - 1);
             size_t secondColon = sc.find(':', firstColon + 1);
-            int universe = 1, channel = 1;
+
             if (secondColon != std::string::npos) {
+                // 3-part: #IP:universe:channel
+                std::string ip = firstPart;
+                int universe = 1, channel = 1;
                 try { universe = std::stoi(sc.substr(firstColon + 1, secondColon - firstColon - 1)); } catch (...) {}
                 try { channel = std::stoi(sc.substr(secondColon + 1)); } catch (...) {}
+
+                // Look up by IP and universe: "E131_IP_universe" or "DDP_IP"
+                bool found = false;
+                for (const char* proto : {"E131", "ArtNet", "DDP"}) {
+                    std::string key = std::string(proto) + "_" + ip;
+                    if (std::string(proto) != "DDP") {
+                        key += "_" + std::to_string(universe);
+                    }
+                    auto it = _controllerStartChannels.find(key);
+                    if (it != _controllerStartChannels.end()) {
+                        result = static_cast<uint32_t>(it->second - 1) + static_cast<uint32_t>(channel - 1);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    printf("RenderEngine: WARNING — cannot resolve '%s' (no controller at IP %s universe %d)\n",
+                           sc.c_str(), ip.c_str(), universe);
+                }
             } else {
-                try { universe = std::stoi(sc.substr(firstColon + 1)); } catch (...) {}
-            }
+                // 2-part: #universe:channel (search all controllers for matching universe)
+                int universe = 1, channel = 1;
+                try { universe = std::stoi(firstPart); } catch (...) {}
+                try { channel = std::stoi(sc.substr(firstColon + 1)); } catch (...) {}
 
-            // Look up child network entry by IP and universe number.
-            // Child entries are named like "E131_IP_universe" or "DDP_IP".
-            bool found = false;
-            for (const auto& [proto, prefix] : std::initializer_list<std::pair<const char*, const char*>>{
-                    {"E131", "E131_"}, {"ArtNet", "ArtNet_"}, {"DDP", "DDP_"}}) {
-                std::string lookupName = std::string(prefix) + ip;
-                if (std::string(proto) != "DDP") {
-                    lookupName += "_" + std::to_string(universe);
+                bool found = false;
+                for (const char* proto : {"E131", "ArtNet"}) {
+                    std::string suffix = "_" + std::to_string(universe);
+                    for (const auto& [key, startCh] : _controllerStartChannels) {
+                        if (key.size() > suffix.size() &&
+                            key.compare(0, strlen(proto), proto) == 0 &&
+                            key.compare(key.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                            result = static_cast<uint32_t>(startCh - 1) + static_cast<uint32_t>(channel - 1);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found) break;
                 }
-                auto it = _controllerStartChannels.find(lookupName);
-                if (it != _controllerStartChannels.end()) {
-                    // Controller startChannel is 1-based, channel offset is 1-based
-                    result = static_cast<uint32_t>(it->second - 1) + static_cast<uint32_t>(channel - 1);
-                    found = true;
-                    break;
+                if (!found) {
+                    printf("RenderEngine: WARNING — cannot resolve '%s' (no controller with universe %d)\n",
+                           sc.c_str(), universe);
                 }
-            }
-
-            if (!found) {
-                printf("RenderEngine: WARNING — cannot resolve '%s' (no controller at IP %s universe %d)\n",
-                       sc.c_str(), ip.c_str(), universe);
             }
         }
     }
@@ -346,6 +402,7 @@ uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
 
     // Cache the result for future lookups
     _resolvedStartChannels[sc] = result;
+    printf("[CHANNEL_MAP] resolveStartChannel('%s') → %u (0-based)\n", sc.c_str(), result);
     return result;
 }
 
@@ -353,6 +410,8 @@ uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
 
 void RenderEngine::buildModelChannelMap()
 {
+    // Lock to prevent data race with renderFrame() iterating on background thread
+    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
     _modelChannelMap.clear();
     if (!_modelProvider) return;
 
@@ -516,8 +575,14 @@ void RenderEngine::buildModelChannelMap()
         _modelChannelMap[name] = std::move(info);
     }
 
-    printf("RenderEngine: Mapped %zu models out of %zu total (%zu skipped)\n",
+    printf("[CHANNEL_MAP] buildModelChannelMap: mapped %zu models out of %zu total (%zu skipped)\n",
            _modelChannelMap.size(), modelNames.size(), skippedCount);
+    for (const auto& [name, chInfo] : _modelChannelMap) {
+        printf("[CHANNEL_MAP]   model='%s' absStartCh=%u nodes=%u buffer=%dx%d chansPerNode=%u rgbOff=[%d,%d,%d]\n",
+               name.c_str(), chInfo.absStartChannel, chInfo.nodeCount,
+               chInfo.bufferWidth, chInfo.bufferHeight, chInfo.chansPerNode,
+               chInfo.rOffset, chInfo.gOffset, chInfo.bOffset);
+    }
 }
 
 // --- Frame Rendering ---
@@ -539,6 +604,15 @@ void RenderEngine::renderFrame(int timeMS)
         // Skip if we already have this frame cached
         if (frameIndex == _currentFrameIndex) return;
 
+        // Log first FSEQ frame read
+        static bool firstFseqFrame = true;
+        if (firstFseqFrame) {
+            uint32_t maxCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
+            printf("[CHANNEL_MAP] renderFrame(FSEQ): first frame at %dms, frameIndex=%d, numFrames=%d, channels=%u, models=%zu\n",
+                   timeMS, frameIndex, numFrames, maxCh, _modelChannelMap.size());
+            firstFseqFrame = false;
+        }
+
         // Read frame data from FSEQ
         FSEQFile::FrameData* fd = _fseqFile->getFrame(static_cast<uint32_t>(frameIndex));
         if (!fd) return;
@@ -553,6 +627,7 @@ void RenderEngine::renderFrame(int timeMS)
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.clear();
 
+        int modelsWithPixels = 0;
         for (const auto& [modelName, chInfo] : _modelChannelMap) {
             if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
 
@@ -563,6 +638,7 @@ void RenderEngine::renderFrame(int timeMS)
             fb.timeMS = timeMS;
             fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
 
+            int nonBlackPixels = 0;
             // Map each node's channel data to the pixel buffer
             for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
                 uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
@@ -571,6 +647,8 @@ void RenderEngine::renderFrame(int timeMS)
                 uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
                 uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
                 uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
+
+                if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
 
                 int bx = chInfo.nodeBufCoords[i].first;
                 int by = chInfo.nodeBufCoords[i].second;
@@ -583,7 +661,16 @@ void RenderEngine::renderFrame(int timeMS)
                 fb.pixels[idx + 3] = 255;
             }
 
+            if (nonBlackPixels > 0) modelsWithPixels++;
             _bufferCache[modelName] = std::move(fb);
+        }
+
+        // Log stats on first few FSEQ frames
+        static int fseqFrameLogCount = 0;
+        if (fseqFrameLogCount < 5) {
+            printf("[CHANNEL_MAP] renderFrame(FSEQ): frame %d — %d/%zu models have non-black pixels\n",
+                   frameIndex, modelsWithPixels, _modelChannelMap.size());
+            fseqFrameLogCount++;
         }
 
         notifyFrameRendered(timeMS);
@@ -603,6 +690,14 @@ void RenderEngine::renderFrame(int timeMS)
         // Skip if we already have this frame cached
         if (frameIndex == _currentFrameIndex) return;
 
+        // Log first frame read for debugging
+        static bool firstPrerenderedFrame = true;
+        if (firstPrerenderedFrame) {
+            printf("[CHANNEL_MAP] renderFrame(prerendered): first frame at %dms, frameIndex=%d, numFrames=%d, numChannels=%u\n",
+                   timeMS, frameIndex, numFrames, _renderedData->getNumChannels());
+            firstPrerenderedFrame = false;
+        }
+
         // Read frame data from pre-rendered buffer
         const uint8_t* frameData = _renderedData->getFrame(static_cast<uint32_t>(frameIndex));
         if (!frameData) return;
@@ -616,6 +711,7 @@ void RenderEngine::renderFrame(int timeMS)
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.clear();
 
+        int modelsWithPixels = 0;
         for (const auto& [modelName, chInfo] : _modelChannelMap) {
             if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
 
@@ -626,6 +722,7 @@ void RenderEngine::renderFrame(int timeMS)
             fb.timeMS = timeMS;
             fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
 
+            int nonBlackPixels = 0;
             for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
                 uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
                 if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
@@ -633,6 +730,8 @@ void RenderEngine::renderFrame(int timeMS)
                 uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
                 uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
                 uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
+
+                if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
 
                 int bx = chInfo.nodeBufCoords[i].first;
                 int by = chInfo.nodeBufCoords[i].second;
@@ -645,7 +744,16 @@ void RenderEngine::renderFrame(int timeMS)
                 fb.pixels[idx + 3] = 255;
             }
 
+            if (nonBlackPixels > 0) modelsWithPixels++;
             _bufferCache[modelName] = std::move(fb);
+        }
+
+        // Log stats on first few frames
+        static int prerenderedFrameLogCount = 0;
+        if (prerenderedFrameLogCount < 5) {
+            printf("[CHANNEL_MAP] renderFrame(prerendered): frame %d — %d/%zu models have non-black pixels\n",
+                   frameIndex, modelsWithPixels, _modelChannelMap.size());
+            prerenderedFrameLogCount++;
         }
 
         notifyFrameRendered(timeMS);
@@ -808,9 +916,37 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         static_cast<uint32_t>(numFrames),
         static_cast<uint32_t>(frameTimeMS));
 
+    // Resolve start channels BEFORE rendering so the coordinator writes data
+    // at the correct absolute channel offsets. Without this, complex start channel
+    // formats (#IP:univ:ch, !Controller:ch, >Model:offset) resolve to 0 via atoi().
+    if (_controllerStartChannels.empty()) {
+        buildControllerChannelMap();
+    }
+    if (_modelTotalChannels.empty()) {
+        buildModelTotalChannelsMap();
+    }
+
+    // Pre-resolve all model start channels
+    std::unordered_map<std::string, uint32_t> resolvedChannels;
+    {
+        auto modelNames = _modelProvider->getModelNames();
+        for (const auto& name : modelNames) {
+            auto attrs = _modelProvider->getModelAttributes(name);
+            auto displayAs = attrs.find("DisplayAs");
+            if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+            auto scIt = attrs.find("StartChannel");
+            if (scIt != attrs.end() && !scIt->second.empty()) {
+                resolvedChannels[name] = resolveStartChannel(scIt->second);
+            }
+        }
+        printf("RenderEngine::renderAll — pre-resolved %zu model start channels\n",
+               resolvedChannels.size());
+    }
+
     // Create coordinator and set up progress forwarding
     _coordinator = std::make_unique<NativeRenderCoordinator>(
         _effectProvider, _modelProvider, context.get());
+    _coordinator->setResolvedStartChannels(resolvedChannels);
 
     // Bridge coordinator listener to RenderEngineListener
     class ListenerBridge : public RenderCoordinatorListener {
@@ -897,8 +1033,31 @@ void RenderEngine::renderRange(int startMS, int endMS, bool clear,
         }
     }
 
+    // Ensure start channels are resolved for correct channel mapping
+    if (_controllerStartChannels.empty()) {
+        buildControllerChannelMap();
+    }
+    if (_modelTotalChannels.empty()) {
+        buildModelTotalChannelsMap();
+    }
+
+    std::unordered_map<std::string, uint32_t> resolvedChannels;
+    {
+        auto modelNames = _modelProvider->getModelNames();
+        for (const auto& name : modelNames) {
+            auto attrs = _modelProvider->getModelAttributes(name);
+            auto displayAs = attrs.find("DisplayAs");
+            if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+            auto scIt = attrs.find("StartChannel");
+            if (scIt != attrs.end() && !scIt->second.empty()) {
+                resolvedChannels[name] = resolveStartChannel(scIt->second);
+            }
+        }
+    }
+
     _coordinator = std::make_unique<NativeRenderCoordinator>(
         _effectProvider, _modelProvider, context.get());
+    _coordinator->setResolvedStartChannels(resolvedChannels);
 
     bool completed = _coordinator->renderRange(startMS, endMS, *_renderedData);
 

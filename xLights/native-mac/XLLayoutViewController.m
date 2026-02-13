@@ -551,18 +551,32 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
         groupLookup[group[@"name"]] = group[@"modelNames"];
     }
 
-    // Recursively resolve all leaf model names (flatten nested groups)
+    NSLog(@"[SUBMODEL_DEBUG] Group '%@' direct members: %@", groupName, groupLookup[groupName]);
+
+    // Recursively resolve all leaf model names and submodel node indices
     NSMutableOrderedSet<NSString *> *resolved = [NSMutableOrderedSet orderedSet];
+    NSMutableDictionary<NSString *, NSMutableIndexSet *> *submodelMap = [NSMutableDictionary dictionary];
     NSMutableSet<NSString *> *visited = [NSMutableSet set];
-    [self resolveGroupMembers:groupName lookup:groupLookup resolved:resolved visited:visited];
+    [self resolveGroupMembers:groupName lookup:groupLookup
+                     resolved:resolved submodelMap:submodelMap visited:visited];
+
+    NSLog(@"[SUBMODEL_DEBUG] Resolved %lu models: %@", (unsigned long)resolved.count, resolved.array);
+    for (NSString *modelName in submodelMap) {
+        NSMutableIndexSet *idxs = submodelMap[modelName];
+        NSLog(@"[SUBMODEL_DEBUG] Model '%@' submodel indices: count=%lu firstIndex=%lu lastIndex=%lu",
+              modelName, (unsigned long)idxs.count, (unsigned long)idxs.firstIndex, (unsigned long)idxs.lastIndex);
+    }
 
     if (resolved.count == 0) {
-        NSLog(@"XLLayoutViewController: Group '%@' has no members after resolution", groupName);
+        NSLog(@"[SUBMODEL_DEBUG] Group '%@' has no members after resolution", groupName);
         return;
     }
 
     _suppressPreviewDelegate = YES;
     [_previewView selectModels:resolved.array];
+    if (submodelMap.count > 0) {
+        _previewView.selectedSubmodelNodeIndices = submodelMap;
+    }
     _suppressPreviewDelegate = NO;
 
     [self postModelSelectionNotification:@[groupName]];
@@ -570,12 +584,15 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 
 /// Recursively resolves group members to individual model names.
 /// Groups containing other groups are flattened. Submodel references (Model/Sub)
-/// resolve to the parent model name. Circular references are prevented via visited set.
+/// resolve to the parent model name with submodel node indices tracked in submodelMap.
+/// Models referenced both directly and via submodel get full selection (no index restriction).
+/// Circular references are prevented via visited set.
 - (void)resolveGroupMembers:(NSString *)groupName
                      lookup:(NSDictionary<NSString *, NSArray<NSString *> *> *)lookup
                    resolved:(NSMutableOrderedSet<NSString *> *)resolved
+                submodelMap:(NSMutableDictionary<NSString *, NSMutableIndexSet *> *)submodelMap
                     visited:(NSMutableSet<NSString *> *)visited {
-    if ([visited containsObject:groupName]) return; // circular reference guard
+    if ([visited containsObject:groupName]) return;
     [visited addObject:groupName];
 
     NSArray<NSString *> *members = lookup[groupName];
@@ -584,65 +601,91 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     for (NSString *member in members) {
         if (lookup[member]) {
             // Member is another group — recurse
-            [self resolveGroupMembers:member lookup:lookup resolved:resolved visited:visited];
+            [self resolveGroupMembers:member lookup:lookup
+                             resolved:resolved submodelMap:submodelMap visited:visited];
         } else if ([member containsString:@"/"]) {
-            // Submodel reference "ModelName/SubmodelName" — use parent model
-            NSString *parentModel = [member componentsSeparatedByString:@"/"].firstObject;
-            if (parentModel.length > 0) {
-                [resolved addObject:parentModel];
+            // Submodel reference "ModelName/SubmodelName"
+            NSArray<NSString *> *parts = [member componentsSeparatedByString:@"/"];
+            NSString *parentModel = parts.firstObject;
+            NSString *subName = (parts.count > 1) ? parts[1] : nil;
+            if (parentModel.length == 0) continue;
+
+            [resolved addObject:parentModel];
+
+            if (subName.length > 0) {
+                NSIndexSet *indices = [self resolveSubmodelNodeIndices:parentModel submodelName:subName];
+                NSLog(@"[SUBMODEL_DEBUG]   Member '%@' → parent='%@' sub='%@' indices=%lu",
+                      member, parentModel, subName, (unsigned long)indices.count);
+                if (indices.count > 0) {
+                    NSMutableIndexSet *existing = submodelMap[parentModel];
+                    if (existing) {
+                        [existing addIndexes:indices];
+                    } else {
+                        submodelMap[parentModel] = [indices mutableCopy];
+                    }
+                }
             }
         } else {
-            // Direct model name
+            NSLog(@"[SUBMODEL_DEBUG]   Member '%@' → direct model (full selection)", member);
+            // Direct model name — full selection (remove any submodel restriction)
             [resolved addObject:member];
+            [submodelMap removeObjectForKey:member];
         }
     }
+}
+
+/// Resolves submodel strand ranges to a 0-based NSIndexSet of node indices.
+- (NSIndexSet *)resolveSubmodelNodeIndices:(NSString *)modelName submodelName:(NSString *)submodelName {
+    NSDictionary *subDef = [_engineBridge getSubmodelDefinition:modelName submodelName:submodelName];
+    if (!subDef) {
+        NSLog(@"[SUBMODEL_DEBUG]     No definition found for '%@/%@'", modelName, submodelName);
+        return [NSIndexSet indexSet];
+    }
+
+    BOOL isRanges = [subDef[@"isRanges"] boolValue];
+    NSArray<NSString *> *strands = subDef[@"strands"];
+    NSLog(@"[SUBMODEL_DEBUG]     Definition for '%@/%@': isRanges=%d strands=%@", modelName, submodelName, isRanges, strands);
+    if (!isRanges || !strands || strands.count == 0) {
+        NSLog(@"[SUBMODEL_DEBUG]     Skipping: isRanges=%d strandCount=%lu", isRanges, (unsigned long)strands.count);
+        return [NSIndexSet indexSet];
+    }
+
+    NSMutableIndexSet *indexSet = [[NSMutableIndexSet alloc] init];
+    for (NSString *strand in strands) {
+        NSArray<NSString *> *parts = [strand componentsSeparatedByString:@","];
+        for (NSString *part in parts) {
+            NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (trimmed.length == 0) continue;
+
+            NSArray<NSString *> *rangeParts = [trimmed componentsSeparatedByString:@"-"];
+            if (rangeParts.count == 2) {
+                NSInteger start = [rangeParts[0] integerValue];
+                NSInteger end = [rangeParts[1] integerValue];
+                // Ranges can be descending (e.g. "276-271") — normalize
+                if (start > end) { NSInteger tmp = start; start = end; end = tmp; }
+                if (start > 0 && end >= start) {
+                    [indexSet addIndexesInRange:NSMakeRange((NSUInteger)(start - 1), (NSUInteger)(end - start + 1))];
+                }
+            } else if (rangeParts.count == 1) {
+                NSInteger val = [trimmed integerValue];
+                if (val > 0) {
+                    [indexSet addIndex:(NSUInteger)(val - 1)];
+                }
+            }
+        }
+    }
+    return indexSet;
 }
 
 - (void)modelTree:(XLModelTreeViewController *)controller didSelectSubmodel:(NSString *)submodelName ofModel:(NSString *)modelName {
     // Select the parent model in the preview (sets up handles, etc.)
     [self selectModel:modelName];
 
-    // Get the submodel definition to parse strand ranges
-    NSDictionary *subDef = [_engineBridge getSubmodelDefinition:modelName submodelName:submodelName];
-    if (!subDef) {
-        NSLog(@"XLLayoutViewController: No submodel definition found for '%@/%@'", modelName, submodelName);
-        return;
+    // Resolve submodel node indices and apply them
+    NSIndexSet *indices = [self resolveSubmodelNodeIndices:modelName submodelName:submodelName];
+    if (indices.count > 0) {
+        _previewView.selectedSubmodelNodeIndices = @{modelName: indices};
     }
-
-    BOOL isRanges = [subDef[@"isRanges"] boolValue];
-    NSArray<NSString *> *strands = subDef[@"strands"];
-    if (!strands || strands.count == 0) return;
-
-    NSMutableIndexSet *indexSet = [[NSMutableIndexSet alloc] init];
-
-    if (isRanges) {
-        // Strand ranges are 1-based comma-separated like "1-10,15,20-25"
-        for (NSString *strand in strands) {
-            NSArray<NSString *> *parts = [strand componentsSeparatedByString:@","];
-            for (NSString *part in parts) {
-                NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                if (trimmed.length == 0) continue;
-
-                NSArray<NSString *> *rangeParts = [trimmed componentsSeparatedByString:@"-"];
-                if (rangeParts.count == 2) {
-                    NSInteger start = [rangeParts[0] integerValue];
-                    NSInteger end = [rangeParts[1] integerValue];
-                    if (start > 0 && end >= start) {
-                        // Convert 1-based to 0-based
-                        [indexSet addIndexesInRange:NSMakeRange((NSUInteger)(start - 1), (NSUInteger)(end - start + 1))];
-                    }
-                } else if (rangeParts.count == 1) {
-                    NSInteger val = [trimmed integerValue];
-                    if (val > 0) {
-                        // Convert 1-based to 0-based
-                        [indexSet addIndex:(NSUInteger)(val - 1)];
-                    }
-                }
-            }
-        }
-    }
-
-    _previewView.selectedSubmodelNodeIndices = indexSet;
 }
 
 - (void)modelTree:(XLModelTreeViewController *)controller didMoveModel:(NSString *)modelName toGroup:(NSString *)groupName atIndex:(NSInteger)index {

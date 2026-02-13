@@ -38,6 +38,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "NativePixelBuffer.h"
@@ -95,6 +96,11 @@ public:
     NativeRenderCoordinator& operator=(const NativeRenderCoordinator&) = delete;
 
     void setListener(RenderCoordinatorListener* listener);
+
+    // Set pre-resolved start channels for all models (0-based absolute channels).
+    // Must be called before renderAll()/renderRange() for correct channel mapping.
+    // Without this, extractGeometry() falls back to atoi() which only handles plain numbers.
+    void setResolvedStartChannels(const std::unordered_map<std::string, uint32_t>& channels);
 
     // Render all models for the full sequence duration.
     // Returns true if completed, false if aborted.
@@ -178,6 +184,11 @@ private:
     // from the render queue (renderModelFrameStateful) and main thread
     // (resetPersistentState called via invalidateCache).
     mutable std::recursive_mutex _stateMutex;
+
+    // Pre-resolved start channels (0-based) keyed by model name.
+    // Set by RenderEngine before renderAll() for correct channel mapping
+    // with complex start channel formats (#IP:univ:ch, !Controller:ch, >Model:offset).
+    std::unordered_map<std::string, uint32_t> _resolvedStartChannels;
 };
 
 } // namespace xlEngine

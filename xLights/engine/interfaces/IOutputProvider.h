@@ -66,6 +66,7 @@ struct ControllerInfo {
     int32_t endChannel = -1;
     int32_t channels = 0;
     int outputCount = 0;
+    int startUniverse = 1;          // First universe number (E131/ArtNet)
     int priority = 100;
 
     // State

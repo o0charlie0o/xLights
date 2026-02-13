@@ -46,6 +46,10 @@
 /// Whether this node is a submodel
 @property (nonatomic, assign) BOOL isSubmodel;
 
+/// For submodel nodes that are children of groups, stores the actual parent model name.
+/// When nil, falls back to node.parent.name (normal submodel-under-model case).
+@property (nonatomic, copy) NSString *parentModelName;
+
 /// Whether this node is a shadow model
 @property (nonatomic, assign) BOOL isShadowModel;
 
