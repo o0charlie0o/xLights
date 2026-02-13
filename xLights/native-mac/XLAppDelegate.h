@@ -36,6 +36,12 @@ extern NSNotificationName const XLShowFolderDidChangeNotification;
 /// Open an existing sequence.
 - (IBAction)openSequence:(id)sender;
 
+/// Close the current sequence and return to empty state.
+- (IBAction)closeSequence:(id)sender;
+
+/// Add a path to the recent sequences list and update the menu.
+- (void)addRecentSequence:(NSString *)path;
+
 /// Prompt user to select a show folder (saves permanently).
 - (IBAction)selectShowFolder:(id)sender;
 

@@ -4801,6 +4801,7 @@ static XLEngineBridge *_sharedBridge = nil;
     std::string stdType = [newType UTF8String];
     BOOL result = _effectEngine->convertEffectType((int)effectId, stdType) ? YES : NO;
     if (result) {
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"XLEffectDidChangeNotification" object:self];
         [self scheduleAutoSave];
     }
     return result;

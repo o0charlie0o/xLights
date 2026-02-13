@@ -285,7 +285,6 @@ static double frequencyToSlider(double freq) {
 }
 
 - (void)sheetDidLoad {
-    // Apply default preset (Kick)
     [_presetPopup selectItemAtIndex:XLOnsetPresetKick];
     [self applyPreset:XLOnsetPresetKick];
 }

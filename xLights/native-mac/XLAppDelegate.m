@@ -146,6 +146,15 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
     // Activate the app to bring it to the foreground
     [NSApp activateIgnoringOtherApps:YES];
 
+    // Observe recent sequences changes to rebuild the menu
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(recentSequencesMenuNeedsUpdate:)
+                                                 name:@"XLRecentSequencesDidChange"
+                                               object:nil];
+
+    // Build the Open Recent submenu from NSUserDefaults
+    [self populateRecentSequencesMenu];
+
     NSLog(@"XLAppDelegate: SwiftUI window launched");
 
     // Initialize permanent folder from saved defaults
@@ -235,6 +244,10 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
         BOOL isOn = [[XLSwiftUIWindowHelper shared] isSongRegionOverlayVisible];
         menuItem.state = isOn ? NSControlStateValueOn : NSControlStateValueOff;
         return YES;
+    }
+    if (menuItem.action == @selector(closeSequence:)) {
+        XLEngineBridge *engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+        return engineBridge && [engineBridge isSequenceLoaded];
     }
     return YES;
 }
@@ -1235,6 +1248,22 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
     }];
 }
 
+- (IBAction)closeSequence:(id)sender {
+    NSLog(@"XLAppDelegate: closeSequence called");
+
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (!engineBridge || ![engineBridge isSequenceLoaded]) {
+        NSLog(@"XLAppDelegate: No sequence to close");
+        return;
+    }
+
+    [engineBridge closeSequence];
+    [swiftHelper notifySequenceDataChanged];
+    NSLog(@"XLAppDelegate: Sequence closed, returned to empty state");
+}
+
 - (IBAction)openSequence:(id)sender {
     NSLog(@"XLAppDelegate: openSequence called");
 
@@ -1304,7 +1333,102 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
     }
 
     [defaults setObject:recents forKey:@"RecentSequences"];
+
+    // Keep system recent documents in sync (for Dock right-click → Recent Items)
+    NSURL *fileURL = [NSURL fileURLWithPath:path];
+    if (fileURL) {
+        [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:fileURL];
+    }
+
     [[NSNotificationCenter defaultCenter] postNotificationName:@"XLRecentSequencesDidChange" object:nil];
+}
+
+#pragma mark - Open Recent Menu
+
+- (NSMenu *)findRecentSequencesMenu {
+    NSMenu *mainMenu = [NSApp mainMenu];
+    // File menu is at index 1 (after the app menu)
+    NSMenu *fileMenu = [[mainMenu itemAtIndex:1] submenu];
+    if (!fileMenu) return nil;
+    for (NSMenuItem *item in fileMenu.itemArray) {
+        if (item.tag == 9001 && item.submenu) {
+            return item.submenu;
+        }
+    }
+    return nil;
+}
+
+- (void)populateRecentSequencesMenu {
+    NSMenu *recentMenu = [self findRecentSequencesMenu];
+    if (!recentMenu) return;
+
+    [recentMenu removeAllItems];
+
+    NSArray *recents = [[NSUserDefaults standardUserDefaults] arrayForKey:@"RecentSequences"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    if (recents.count > 0) {
+        for (NSString *path in recents) {
+            if (![fm fileExistsAtPath:path]) continue;
+
+            NSString *filename = [path lastPathComponent];
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:filename
+                                                         action:@selector(openRecentSequenceFromMenu:)
+                                                  keyEquivalent:@""];
+            item.representedObject = path;
+            item.toolTip = path;
+            item.target = self;
+            [recentMenu addItem:item];
+        }
+    }
+
+    if (recentMenu.numberOfItems > 0) {
+        [recentMenu addItem:[NSMenuItem separatorItem]];
+    }
+
+    NSMenuItem *clearItem = [[NSMenuItem alloc] initWithTitle:@"Clear Menu"
+                                                      action:@selector(clearRecentSequencesMenu:)
+                                               keyEquivalent:@""];
+    clearItem.target = self;
+    [recentMenu addItem:clearItem];
+}
+
+- (IBAction)openRecentSequenceFromMenu:(id)sender {
+    NSMenuItem *menuItem = (NSMenuItem *)sender;
+    NSString *path = menuItem.representedObject;
+    if (!path) return;
+
+    XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
+    XLEngineBridge *engineBridge = swiftHelper.engineBridge;
+
+    if (!engineBridge) {
+        NSLog(@"XLAppDelegate: Engine bridge not available for opening recent sequence");
+        return;
+    }
+
+    NSLog(@"XLAppDelegate: Opening recent sequence from menu: %@", path);
+    BOOL success = [engineBridge loadSequence:path];
+    if (success) {
+        [self addRecentSequence:path];
+        [swiftHelper notifySequenceDataChanged];
+    } else {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Failed to Open Sequence";
+        alert.informativeText = [NSString stringWithFormat:@"Could not load the sequence file:\n%@", path];
+        alert.alertStyle = NSAlertStyleWarning;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+    }
+}
+
+- (IBAction)clearRecentSequencesMenu:(id)sender {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:@"RecentSequences"];
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"XLRecentSequencesDidChange" object:nil];
+}
+
+- (void)recentSequencesMenuNeedsUpdate:(NSNotification *)notification {
+    [self populateRecentSequencesMenu];
 }
 
 @end

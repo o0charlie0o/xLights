@@ -416,11 +416,9 @@ struct EffectPropertiesView: View {
 
     private func effectPanelView(effectType: String) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
+            // Header with effect type picker
             HStack {
-                Text(effectType)
-                    .font(.headline)
-                    .foregroundColor(.primary)
+                effectTypePicker(currentType: effectType)
                 Spacer()
                 if let effectId = state.selectedEffectId {
                     Text("ID: \(effectId)")
@@ -429,7 +427,7 @@ struct EffectPropertiesView: View {
                 }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
             .background(Color(nsColor: NSColor(white: 0.2, alpha: 1.0)))
 
             Divider()
@@ -450,6 +448,41 @@ struct EffectPropertiesView: View {
                 .padding(12)
             }
         }
+    }
+
+    private func effectTypePicker(currentType: String) -> some View {
+        let effectTypes: [String] = {
+            guard let bridge = state.engineBridge,
+                  let types = bridge.getEffectTypes() as? [String] else {
+                return [currentType]
+            }
+            return types.sorted()
+        }()
+
+        return Picker(selection: Binding(
+            get: { currentType },
+            set: { newType in
+                guard newType != currentType,
+                      let bridge = state.engineBridge,
+                      let effectId = state.selectedEffectId else { return }
+                if bridge.convertEffectType(effectId, newType: newType) {
+                    // Re-select to reload parameters for the new type
+                    state.selectEffect(id: effectId)
+                    // Notify the grid to redraw with the new effect type
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("XLEffectTypeDidChangeNotification"),
+                        object: nil,
+                        userInfo: ["effectId": effectId, "newType": newType]
+                    )
+                }
+            }
+        ), label: EmptyView()) {
+            ForEach(effectTypes, id: \.self) { type in
+                Text(type).tag(type)
+            }
+        }
+        .pickerStyle(.menu)
+        .frame(maxWidth: 180)
     }
 
     private func parameterRow(param: ParameterDefinition) -> some View {

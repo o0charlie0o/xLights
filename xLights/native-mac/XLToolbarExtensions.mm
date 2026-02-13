@@ -189,13 +189,14 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [fileMenu addItemWithTitle:@"Open Sequence…" action:@selector(openSequence:) keyEquivalent:@"o"];
 
     NSMenuItem *recentItem = [fileMenu addItemWithTitle:@"Open Recent" action:nil keyEquivalent:@""];
+    recentItem.tag = 9001; // Tag for finding the submenu dynamically
     NSMenu *recentMenu = [[NSMenu alloc] initWithTitle:@"Open Recent"];
-    [recentMenu performSelector:@selector(_setMenuName:) withObject:@"NSRecentDocumentsMenu"];
-    [recentMenu addItemWithTitle:@"Clear Menu" action:@selector(clearRecentDocuments:) keyEquivalent:@""];
     recentItem.submenu = recentMenu;
 
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
+    [fileMenu addItemWithTitle:@"Close Sequence" action:@selector(closeSequence:) keyEquivalent:@"w"];
+    NSMenuItem *closeWindowItem = [fileMenu addItemWithTitle:@"Close Window" action:@selector(performClose:) keyEquivalent:@"W"];
+    closeWindowItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [fileMenu addItemWithTitle:@"Save" action:@selector(saveDocument:) keyEquivalent:@"s"];
     [fileMenu addItemWithTitle:@"Save As…" action:@selector(saveDocumentAs:) keyEquivalent:@"S"];
     [fileMenu addItemWithTitle:@"Revert to Saved…" action:@selector(revertDocumentToSaved:) keyEquivalent:@""];

@@ -514,6 +514,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     XLStemManager *_stemManager;
     NSLayoutConstraint *_stemsHeightConstraint;
     BOOL _stemsPanelVisible;
+
+    // Clipping container for row headings + effects grid (prevents Metal layer overlap)
+    NSView *_gridClipContainer;
 }
 
 @property (nonatomic, strong) XLTimelineRulerView *timelineRuler;
@@ -726,7 +729,17 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _rowHeadingsView.dataSource = self;
     _rowHeadingsView.delegate = self;
     _rowHeadingsView.rowHeight = savedRowHeight;
-    [view addSubview:_rowHeadingsView];
+    // Clipping container for row headings + effects grid.
+    // The effects grid is a layer-hosting Metal view whose layer can composite
+    // above sibling views in Core Animation. Wrapping it in a clipping container
+    // ensures it never paints over the transport bar below.
+    _gridClipContainer = [[NSView alloc] initWithFrame:NSZeroRect];
+    _gridClipContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    _gridClipContainer.wantsLayer = YES;
+    _gridClipContainer.layer.masksToBounds = YES;
+    [view addSubview:_gridClipContainer];
+
+    [_gridClipContainer addSubview:_rowHeadingsView];
 
     // Effects grid (Metal-backed timeline)
     _effectsGridView = [[XLEffectsGridView alloc] initWithFrame:NSZeroRect];
@@ -741,7 +754,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     } else {
         _effectsGridView.snapToTimingMarks = YES;
     }
-    [view addSubview:_effectsGridView];
+    [_gridClipContainer addSubview:_effectsGridView];
 
     // Undo controller for effect operations
     _undoController = [[XLUndoController alloc] initWithGridView:_effectsGridView];
@@ -981,17 +994,23 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [_stemsContainerView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
         _stemsHeightConstraint,
 
-        // Row headings: left side, below stems container, above transport bar
-        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_stemsContainerView.bottomAnchor],
-        [_rowHeadingsView.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
-        [_rowHeadingsView.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
-        [_rowHeadingsView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
+        // Grid clip container: holds row headings + effects grid, clips Metal overflow
+        [_gridClipContainer.topAnchor constraintEqualToAnchor:_stemsContainerView.bottomAnchor],
+        [_gridClipContainer.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
+        [_gridClipContainer.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
+        [_gridClipContainer.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
 
-        // Effects grid: main area, right of row headings, below stems container, above transport bar
-        [_effectsGridView.topAnchor constraintEqualToAnchor:_stemsContainerView.bottomAnchor],
+        // Row headings: left side inside clip container
+        [_rowHeadingsView.topAnchor constraintEqualToAnchor:_gridClipContainer.topAnchor],
+        [_rowHeadingsView.leadingAnchor constraintEqualToAnchor:_gridClipContainer.leadingAnchor],
+        [_rowHeadingsView.widthAnchor constraintEqualToConstant:kRowHeaderWidth],
+        [_rowHeadingsView.bottomAnchor constraintEqualToAnchor:_gridClipContainer.bottomAnchor],
+
+        // Effects grid: main area inside clip container, right of row headings
+        [_effectsGridView.topAnchor constraintEqualToAnchor:_gridClipContainer.topAnchor],
         [_effectsGridView.leadingAnchor constraintEqualToAnchor:_rowHeadingsView.trailingAnchor],
-        [_effectsGridView.trailingAnchor constraintEqualToAnchor:view.trailingAnchor],
-        [_effectsGridView.bottomAnchor constraintEqualToAnchor:_transportBar.topAnchor],
+        [_effectsGridView.trailingAnchor constraintEqualToAnchor:_gridClipContainer.trailingAnchor],
+        [_effectsGridView.bottomAnchor constraintEqualToAnchor:_gridClipContainer.bottomAnchor],
 
         // Transport bar: full width at the very bottom
         [_transportBar.leadingAnchor constraintEqualToAnchor:view.leadingAnchor],
@@ -1081,6 +1100,19 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // This is needed because SwiftUI recreates this VC on tab switches,
     // and the empty state starts hidden by default in loadView.
     [self reloadSequenceData];
+}
+
+- (void)viewDidLayout {
+    [super viewDidLayout];
+    // Re-apply masksToBounds after layout — layer-backed views may replace
+    // their backing layer, so ensure the clip container always clips.
+    _gridClipContainer.layer.masksToBounds = YES;
+
+    // Ensure the transport bar composites above the Metal layer-hosting grid.
+    // In CA, sibling layer order doesn't always match AppKit subview order
+    // for layer-hosting views, so use explicit zPosition.
+    _transportBar.layer.zPosition = 10;
+    _emptyStateView.layer.zPosition = 20;
 }
 
 #pragma mark - Audio Loading

@@ -618,6 +618,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
     _metalLayer.drawableSize = CGSizeMake(newSize.width * _metalLayer.contentsScale,
                                            newSize.height * _metalLayer.contentsScale);
+    _metalLayer.masksToBounds = YES;
     _iconOverlayLayer.frame = CGRectMake(0, 0, newSize.width, newSize.height);
     _labelOverlayLayer.frame = CGRectMake(0, 0, newSize.width, newSize.height);
 
