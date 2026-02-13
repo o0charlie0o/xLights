@@ -63,7 +63,12 @@
 
 /// Reload sequence data from the engine bridge.
 /// Call this when a sequence is loaded or unloaded, or when elements/effects change.
+/// Does NOT restore zoom level -- use loadZoomLevelForCurrentSequence for that.
 - (void)reloadSequenceData;
+
+/// Load the saved zoom level for the current sequence.
+/// Call this only when initially opening/creating a sequence, not on every refresh.
+- (void)loadZoomLevelForCurrentSequence;
 
 /// Refresh the view selector dropdown with current views.
 /// Called automatically by reloadSequenceData.

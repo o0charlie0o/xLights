@@ -186,6 +186,13 @@ public:
     // Get the blended color for a specific pixel coordinate.
     xlColor getBlendedPixel(int x, int y) const;
 
+    // Get a pointer to the raw blended pixel data (RGBA, bufferWi * bufferHt * 4 bytes).
+    // Valid after calcOutput(). Returns nullptr if no output has been calculated.
+    const uint8_t* getBlendedPixelData() const;
+
+    // Get the size in bytes of the blended pixel data.
+    size_t getBlendedPixelDataSize() const;
+
     // =========================================================================
     // Reset / clear
     // =========================================================================

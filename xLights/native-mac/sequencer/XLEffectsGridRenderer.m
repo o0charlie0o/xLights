@@ -667,8 +667,18 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
         dispatch_semaphore_signal(semaphore);
     }];
 
-    [commandBuffer presentDrawable:drawable];
-    [commandBuffer commit];
+    // When presentsWithTransaction is YES, present synchronously after
+    // the command buffer is scheduled (not just committed). This ensures
+    // the drawable is composited in the same CATransaction as the scroll
+    // offset update, preventing grid line flashing during scroll.
+    if (layer.presentsWithTransaction) {
+        [commandBuffer commit];
+        [commandBuffer waitUntilScheduled];
+        [drawable present];
+    } else {
+        [commandBuffer presentDrawable:drawable];
+        [commandBuffer commit];
+    }
 }
 
 #pragma mark - Coordinate Helpers
@@ -938,10 +948,7 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
     NSUInteger maxVertices = kMaxTimingVertices;
     NSUInteger vertexCount = 0;
 
-    // Collect which rows are timing tracks (for horizontal center lines)
-    // and collect all tick positions
-    BOOL rowSeen[512];
-    memset(rowSeen, 0, sizeof(rowSeen));
+    // Draw timing ticks and center line segments within each mark's range
 
     for (NSUInteger ei = 0; ei < effectCount; ei++) {
         XLEffectRenderInfo info = effects[ei];
@@ -959,15 +966,6 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
 
         CGFloat yMid = yTop + rowHeight * 0.5;
 
-        // Draw horizontal center line once per row
-        if (info.row >= 0 && info.row < 512 && !rowSeen[info.row]) {
-            rowSeen[info.row] = YES;
-            if (vertexCount + 2 <= maxVertices) {
-                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(0, yMid), lineColor };
-                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(viewSize.width, yMid), lineColor };
-            }
-        }
-
         // Vertical tick at start time
         CGFloat xStart = info.startTimeMS * zoomLevel - scrollOffset.x;
         if (xStart >= -1 && xStart <= viewSize.width + 1) {
@@ -983,6 +981,16 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
             if (vertexCount + 2 <= maxVertices) {
                 vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(xEnd, yTop + 2), tickColor };
                 vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(xEnd, yBot - 2), tickColor };
+            }
+        }
+
+        // Draw horizontal center line segment within this timing mark's range
+        {
+            CGFloat lineX0 = fmax(0, xStart);
+            CGFloat lineX1 = fmin(viewSize.width, xEnd);
+            if (lineX1 > lineX0 && vertexCount + 2 <= maxVertices) {
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(lineX0, yMid), lineColor };
+                vertices[vertexCount++] = (SimpleVertex){ simd_make_float2(lineX1, yMid), lineColor };
             }
         }
     }
@@ -1216,10 +1224,10 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
         CGFloat y1 = yBase + kEffectBlockInset;
         CGFloat y2 = yBase + rowHeight - kEffectBlockInset;
 
-        // Inset timing mark blocks so tick lines are visible between them
+        // Inset timing mark blocks so tick lines are clearly visible between them
         if (info.isTimingMark) {
-            x1 += 1.0;
-            x2 -= 1.0;
+            x1 += 2.0;
+            x2 -= 2.0;
         }
 
         // Skip if too narrow to draw

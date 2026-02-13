@@ -93,11 +93,21 @@ class XLCommandPaletteState: ObservableObject {
         loadCommands()
         isVisible = true
         XLSetCommandPaletteVisible(true)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("XLCommandPaletteVisibilityChanged"),
+            object: nil,
+            userInfo: ["visible": true]
+        )
     }
 
     func hide() {
         isVisible = false
         XLSetCommandPaletteVisible(false)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("XLCommandPaletteVisibilityChanged"),
+            object: nil,
+            userInfo: ["visible": false]
+        )
     }
 
     func toggle() {

@@ -398,8 +398,13 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         return;
     }
 
-    NSMutableArray<XLModelTreeNode *> *nodes = [[NSMutableArray alloc] init];
+    NSMutableArray<XLModelTreeNode *> *groupNodes = [[NSMutableArray alloc] init];
+    NSMutableArray<XLModelTreeNode *> *ungroupedNodes = [[NSMutableArray alloc] init];
     NSMutableSet<NSString *> *modelsInGroups = [[NSMutableSet alloc] init];
+
+    NSSortDescriptor *nameSort = [NSSortDescriptor sortDescriptorWithKey:@"name"
+                                                              ascending:YES
+                                                               selector:@selector(localizedCaseInsensitiveCompare:)];
 
     // First pass: collect all groups and track which models are in groups
     NSArray<NSDictionary *> *groups = [_engineBridge getModelGroups];
@@ -424,8 +429,14 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
             [groupNode addChild:childNode];
         }
 
-        [nodes addObject:groupNode];
+        // Sort children within the group alphabetically
+        [groupNode.children sortUsingDescriptors:@[nameSort]];
+
+        [groupNodes addObject:groupNode];
     }
+
+    // Sort groups alphabetically
+    [groupNodes sortUsingDescriptors:@[nameSort]];
 
     // Second pass: add models that are not in any group (excluding groups themselves)
     NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
@@ -443,8 +454,16 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         [self populateShadowInfoForNode:node];
         [self loadSubmodelsForNode:node modelName:modelName];
 
-        [nodes addObject:node];
+        [ungroupedNodes addObject:node];
     }
+
+    // Sort ungrouped models alphabetically
+    [ungroupedNodes sortUsingDescriptors:@[nameSort]];
+
+    // Combine: groups first (sorted), then ungrouped models (sorted)
+    NSMutableArray<XLModelTreeNode *> *nodes = [[NSMutableArray alloc] initWithCapacity:groupNodes.count + ungroupedNodes.count];
+    [nodes addObjectsFromArray:groupNodes];
+    [nodes addObjectsFromArray:ungroupedNodes];
 
     _allNodes = [nodes copy];
 }

@@ -36,7 +36,7 @@ static const CGFloat kRegionBandTop = 0.0;
 // with static variables in CALayerDelegate callbacks
 static const CGFloat kBgR = 0.118, kBgG = 0.118, kBgB = 0.118;
 static const CGFloat kTickGray = 0.55;
-static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
+static const CGFloat kPlayheadR = 0.2, kPlayheadG = 0.5, kPlayheadB = 1.0;
 
 @interface XLTimelineRulerView ()
 

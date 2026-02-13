@@ -349,7 +349,7 @@ playhead:
     if (_playbackPositionMS >= 0) {
         CGFloat playheadX = [self pointXForTimeMS:_playbackPositionMS];
         if (playheadX >= 0 && playheadX <= width) {
-            CGContextSetRGBStrokeColor(ctx, 1.0, 0.2, 0.2, 0.9);
+            CGContextSetRGBStrokeColor(ctx, 0.2, 0.5, 1.0, 0.9);
             CGContextSetLineWidth(ctx, 1.0);
             CGContextMoveToPoint(ctx, playheadX, 0);
             CGContextAddLineToPoint(ctx, playheadX, height);

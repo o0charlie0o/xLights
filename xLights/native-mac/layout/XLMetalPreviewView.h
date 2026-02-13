@@ -245,6 +245,15 @@
 /// Reload model data from the engine bridge
 - (void)reloadModels;
 
+/// Schedule a throttled reload of model data.
+/// Multiple calls within a short window are coalesced into a single reload.
+/// Use this instead of reloadModels for frequent operations like property edits
+/// and selection changes to avoid ~120ms per-call overhead with 200+ models.
+- (void)scheduleReloadModels;
+
+/// Cancel any pending scheduled reload.
+- (void)cancelPendingReload;
+
 /// Select a model by name
 - (void)selectModel:(NSString *)modelName;
 

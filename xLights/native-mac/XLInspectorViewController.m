@@ -53,7 +53,7 @@ static NSArray<NSString *> *sLastLayoutSelection = nil;
     _stackView.orientation = NSUserInterfaceLayoutOrientationVertical;
     _stackView.alignment = NSLayoutAttributeLeading;
     _stackView.spacing = 0;
-    _stackView.distribution = NSStackViewDistributionFill;
+    _stackView.distribution = NSStackViewDistributionGravityAreas;
 
     _scrollView.documentView = _stackView;
 
@@ -62,7 +62,6 @@ static NSArray<NSString *> *sLastLayoutSelection = nil;
         [_stackView.topAnchor constraintEqualToAnchor:clipView.topAnchor],
         [_stackView.leadingAnchor constraintEqualToAnchor:clipView.leadingAnchor],
         [_stackView.trailingAnchor constraintEqualToAnchor:clipView.trailingAnchor],
-        [_stackView.bottomAnchor constraintEqualToAnchor:clipView.bottomAnchor],
     ]];
 
     [self addPlaceholderContent];

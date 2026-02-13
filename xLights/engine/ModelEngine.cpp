@@ -515,7 +515,7 @@ std::vector<NodeCoord> generateNodesFromAttributes(
         if (starPoints < 3) starPoints = 5;
         float starRatio = attrFloat(attrs, "starRatio", 2.618034f);
         if (starRatio < 1.01f) starRatio = 2.618034f;
-        float innerPercent = attrFloat(attrs, "starInnerPercent", -1.0f);
+        float innerPercent = attrFloat(attrs, "starCenterPercent", -1.0f);
 
         // Determine starting angle from StarStartLocation
         std::string startLoc = attrStr(attrs, "StarStartLocation", "Top Ctr-CCW");

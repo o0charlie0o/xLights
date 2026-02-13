@@ -57,6 +57,8 @@ struct XLLayoutTabView: NSViewControllerRepresentable {
 // MARK: - Sequencer Tab View Wrapper
 
 /// Wraps XLSequencerViewController (AppKit) for use in SwiftUI.
+/// Caches the VC in XLSwiftUIWindowHelper so it survives tab switches
+/// (SwiftUI recreates NSViewControllerRepresentable views on tab changes).
 struct XLSequencerTabView: NSViewControllerRepresentable {
     let engineBridge: XLEngineBridge
 
@@ -65,11 +67,18 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
     }
 
     func makeNSViewController(context: Context) -> XLSequencerViewController {
+        // Reuse cached VC if available (survives SwiftUI tab switch lifecycle)
+        if let cached = XLSwiftUIWindowHelper.shared.cachedSequencerViewController {
+            context.coordinator.viewController = cached
+            return cached
+        }
         let viewController = XLSequencerViewController()
         viewController.engineBridge = engineBridge
         context.coordinator.viewController = viewController
         context.coordinator.startObserving()
-        // Store weak reference for direct access (e.g., house preview toggle)
+        // Store strong reference for reuse across tab switches
+        XLSwiftUIWindowHelper.shared.cachedSequencerViewController = viewController
+        // Also set the weak reference used by other code
         XLSwiftUIWindowHelper.shared.sequencerViewController = viewController
         return viewController
     }
@@ -83,6 +92,7 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
         private var observer: NSObjectProtocol?
 
         func startObserving() {
+            guard observer == nil else { return }
             observer = NotificationCenter.default.addObserver(
                 forName: XLSequenceDataDidChangeNotification,
                 object: nil,
@@ -90,6 +100,8 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
             ) { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.viewController?.reloadSequenceData()
+                    // Restore saved zoom only on sequence open/create (not on every reload)
+                    self?.viewController?.loadZoomLevelForCurrentSequence()
                 }
             }
         }

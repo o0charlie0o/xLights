@@ -11,6 +11,7 @@
 #import "XLEngineBridge.h"
 #import "effects/XLEffectPanelDefinitions.h"
 #import "layout/XLORS5Parser.h"
+#import "XLNativePhonemeDictionary.h"
 
 // Include C++ engine headers
 // During transition period, these will delegate to the existing xLightsFrame
@@ -636,12 +637,16 @@ static XLEngineBridge *_sharedBridge = nil;
                   (unsigned long)groupCount, (unsigned long)modelCount);
         }
 
-        NSLog(@"XLEngineBridge: createSequence completed - name: %@, duration: %ldms, frameMS: %ldms, media: %@",
-              name, (long)durationMS, (long)frameMS, mediaFile ?: @"(none)");
+        // Use actual duration from sequence provider (may have been updated from audio file)
+        int actualDuration = (int)(_nativeSequenceProvider->getSequenceDuration() * 1000.0);
+        if (actualDuration <= 0) actualDuration = (int)durationMS;
+
+        NSLog(@"XLEngineBridge: createSequence completed - name: %@, duration: %ldms (requested: %ldms), frameMS: %ldms, media: %@",
+              name, (long)actualDuration, (long)durationMS, (long)frameMS, mediaFile ?: @"(none)");
 
         // Update render provider with sequence timing so renderAll knows frame count
         if (_nativeRenderProvider) {
-            _nativeRenderProvider->setSequenceInfo((int)frameMS, (int)durationMS);
+            _nativeRenderProvider->setSequenceInfo((int)frameMS, actualDuration);
         }
 
         // Auto-save: write the .xsq file immediately to the show folder
@@ -2327,6 +2332,62 @@ static XLEngineBridge *_sharedBridge = nil;
     };
 }
 
+- (NSArray<NSDictionary *> *)getAllModelData {
+    return [self getAllModelDataForNames:nil];
+}
+
+- (NSArray<NSDictionary *> *)getAllModelDataForNames:(NSArray<NSString *> *)modelNames {
+    [self ensureEngineInitialized];
+    if (!_modelEngine) return @[];
+
+    NSArray<NSString *> *names = modelNames;
+    if (!names) {
+        names = [self getModelNamesExcludingGroups];
+    }
+
+    NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:names.count];
+    for (NSString *modelName in names) {
+        std::string stdName = [modelName UTF8String];
+        if (!_modelEngine->hasModel(stdName)) continue;
+
+        xlEngine::ModelInfo info = _modelEngine->getModel(stdName);
+        NSDictionary *infoDict = [self dictFromModelInfo:info];
+        if (!infoDict) continue;
+
+        std::vector<xlEngine::NodeCoord> nodes = _modelEngine->getModelNodes(stdName);
+        NSMutableArray *nodesArray = [NSMutableArray arrayWithCapacity:nodes.size()];
+        for (const auto &node : nodes) {
+            [nodesArray addObject:@{
+                @"x": @(node.x),
+                @"y": @(node.y),
+                @"z": @(node.z),
+                @"bufX": @(node.bufX),
+                @"bufY": @(node.bufY),
+                @"channel": @(node.actChannel),
+                @"channelCount": @(node.channelCount),
+                @"stringNum": @(node.stringNum),
+            }];
+        }
+
+        xlEngine::ModelEngine::BoundingBox box = _modelEngine->getModelBounds(stdName);
+        NSDictionary *boundsDict = @{
+            @"minX": @(box.minX), @"maxX": @(box.maxX),
+            @"minY": @(box.minY), @"maxY": @(box.maxY),
+            @"minZ": @(box.minZ), @"maxZ": @(box.maxZ),
+        };
+
+        if (nodesArray.count > 0) {
+            [result addObject:@{
+                @"name": modelName,
+                @"info": infoDict,
+                @"nodes": nodesArray,
+                @"bounds": boundsDict,
+            }];
+        }
+    }
+    return result;
+}
+
 #pragma mark - Model Import Operations
 
 /// Map an .xmodel XML root element name to a user-facing model type string.
@@ -3886,6 +3947,19 @@ static XLEngineBridge *_sharedBridge = nil;
     for (size_t i = 0; i < viewNames.size(); i++) {
         if (viewNames[i] == stdViewName) {
             _currentViewIndex = (NSInteger)i;
+
+            // Add missing models to the effect provider (matches legacy AddMissingModelsToSequence).
+            // Non-Master views may reference models that are not yet in the sequence.
+            if (_nativeEffectProvider && i > 0) {
+                auto viewInfo = _nativeModelProvider->getViewAtIndex(i);
+                for (const auto& modelName : viewInfo.models) {
+                    size_t existingIdx = _nativeEffectProvider->getElementIndex(modelName);
+                    if (existingIdx == SIZE_MAX) {
+                        _nativeEffectProvider->addElement(modelName, xlEngine::SequenceElementType::Model);
+                    }
+                }
+            }
+
             NSLog(@"XLEngineBridge: Set current view to '%s' (index %zu)", stdViewName.c_str(), i);
             return YES;
         }
@@ -5569,8 +5643,8 @@ static XLEngineBridge *_sharedBridge = nil;
     if (!word || word.length == 0) return @[];
 
 #ifdef XLIGHTS_NATIVE
-    // Native build: return empty (dictionary not available yet)
-    return @[];
+    XLNativePhonemeDictionary *dict = [XLNativePhonemeDictionary sharedInstance];
+    return [dict phonemesForWord:word];
 #else
     xLightsFrame* frame = xLightsApp::GetFrame();
     if (!frame) return @[];

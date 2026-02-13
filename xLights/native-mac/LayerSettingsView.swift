@@ -211,7 +211,8 @@ struct BufferSettingsSection: View {
         renderStyle = RenderStyle(settingsValue: styleStr) ?? .defaultStyle
 
         bufferStagger = Int(params["B_SPINCTRL_BufferStagger"] ?? "0") ?? 0
-        camera = params["B_CHOICE_PerPreviewCamera"] ?? "2D"
+        let cameraVal = params["B_CHOICE_PerPreviewCamera"] ?? "2D"
+        camera = (cameraVal == "2D" || cameraVal == "3D") ? cameraVal : "2D"
 
         let transformStr = params["B_CHOICE_BufferTransform"] ?? "None"
         transformation = BufferTransformation(settingsValue: transformStr) ?? .none

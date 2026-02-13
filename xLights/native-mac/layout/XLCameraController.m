@@ -178,7 +178,7 @@ static const float kDefaultMaxElevation = M_PI_2 - 0.01f;
     simd_float3 right = simd_normalize(simd_cross(forward, _up));
     simd_float3 camUp = simd_normalize(simd_cross(right, forward));
 
-    _target = _target - right * (dx * panScale) + camUp * (dy * panScale);
+    _target = _target + right * (dx * panScale) - camUp * (dy * panScale);
 }
 
 - (void)zoomByDelta:(float)delta sensitivity:(float)sensitivity {
@@ -224,14 +224,18 @@ static const float kDefaultMaxElevation = M_PI_2 - 0.01f;
                      aspect:(float)aspect {
     simd_float3 center = (bbMin + bbMax) * 0.5f;
     simd_float3 extents = bbMax - bbMin;
-    float maxExtent = fmaxf(extents.x, fmaxf(extents.y, extents.z));
 
     float dist;
     if (_perspective) {
-        dist = (maxExtent * 0.5f) / tanf(_fieldOfView * 0.5f);
-        dist *= 0.85f; // tight framing
+        float halfFovY = _fieldOfView * 0.5f;
+        float distY = (extents.y * 0.5f) / tanf(halfFovY);
+        float distX = (extents.x * 0.5f) / (tanf(halfFovY) * fmaxf(aspect, 0.01f));
+        float distZ = (extents.z * 0.5f) / tanf(halfFovY);
+        dist = fmaxf(distX, fmaxf(distY, distZ));
+        dist *= 1.05f;
     } else {
-        dist = maxExtent * 1.5f;
+        float extentForAspect = fmaxf(extents.x / fmaxf(aspect, 0.01f), extents.y);
+        dist = fmaxf(extentForAspect, extents.z) * 1.5f;
     }
 
     [self animateToAzimuth:_azimuth

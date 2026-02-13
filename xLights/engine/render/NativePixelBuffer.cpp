@@ -606,6 +606,15 @@ xlColor NativePixelBuffer::getBlendedPixel(int x, int y) const {
     return _outputPixels[y * _bufferWi + x];
 }
 
+const uint8_t* NativePixelBuffer::getBlendedPixelData() const {
+    if (_outputPixels.empty()) return nullptr;
+    return reinterpret_cast<const uint8_t*>(_outputPixels.data());
+}
+
+size_t NativePixelBuffer::getBlendedPixelDataSize() const {
+    return _outputPixels.size() * sizeof(xlColor);
+}
+
 // =========================================================================
 // Clear
 // =========================================================================

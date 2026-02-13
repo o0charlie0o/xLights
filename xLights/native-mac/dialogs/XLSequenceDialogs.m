@@ -11,6 +11,7 @@
 #import "XLSequenceDialogs.h"
 #import "../XLEngineBridge.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <AVFoundation/AVFoundation.h>
 
 static const CGFloat kLabelWidth = 120.0;
 
@@ -173,7 +174,16 @@ static const CGFloat kLabelWidth = 120.0;
             self.audioFilePath = panel.URL.path;
             self.clearAudioButton.hidden = NO;
 
-            // TODO: Get duration from audio file
+            // Detect audio file duration and update the duration field
+            AVURLAsset *asset = [AVURLAsset URLAssetWithURL:panel.URL options:nil];
+            CMTime duration = asset.duration;
+            if (CMTIME_IS_VALID(duration) && !CMTIME_IS_INDEFINITE(duration)) {
+                NSInteger durationSec = (NSInteger)ceil(CMTimeGetSeconds(duration));
+                if (durationSec > 0) {
+                    self.durationField.integerValue = durationSec;
+                    self.durationStepper.integerValue = durationSec;
+                }
+            }
         }
     }];
 }

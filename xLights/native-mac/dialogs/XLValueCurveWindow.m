@@ -38,7 +38,7 @@ static const XLCurveTypeDef kCurveTypes[] = {
 static const int kCurveTypeCount = sizeof(kCurveTypes) / sizeof(kCurveTypes[0]);
 
 static const CGFloat kWindowWidth = 700.0;
-static const CGFloat kWindowHeight = 550.0;
+static const CGFloat kWindowHeight = 700.0;
 static const CGFloat kCurveViewHeight = 300.0;
 
 #pragma mark - XLValueCurveView
@@ -1044,7 +1044,7 @@ static const CGFloat kCurveViewHeight = 300.0;
                                                      backing:NSBackingStoreBuffered
                                                        defer:YES];
     window.title = @"Value Curve Editor";
-    window.minSize = NSMakeSize(500, 400);
+    window.minSize = NSMakeSize(500, 600);
 
     self = [super initWithWindow:window];
     if (self) {
@@ -1152,8 +1152,8 @@ static const CGFloat kCurveViewHeight = 300.0;
     NSArray *presets = @[
         @[@"Flat|100", @"Flat 100%"],
         @[@"Flat|50", @"Flat 50%"],
-        @[@"Ramp|100|0", @"Ramp Up"],
-        @[@"Ramp|0|100", @"Ramp Down"],
+        @[@"Ramp|0|100", @"Ramp Up"],
+        @[@"Ramp|100|0", @"Ramp Down"],
         @[@"Ramp Up/Down|100|0", @"Peak"],
         @[@"Sine|100|0|10|0", @"Sine"],
         @[@"Square|100|0|10", @"Square"],
@@ -1245,8 +1245,8 @@ static const CGFloat kCurveViewHeight = 300.0;
     NSArray *presets = @[
         @"Flat|100",
         @"Flat|50",
-        @"Ramp|100|0",
         @"Ramp|0|100",
+        @"Ramp|100|0",
         @"Ramp Up/Down|100|0",
         @"Sine|100|0|10|0",
         @"Square|100|0|10",

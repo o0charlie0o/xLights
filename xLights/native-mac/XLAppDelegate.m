@@ -1220,6 +1220,7 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
                     if ([wc isKindOfClass:[XLMainWindowController class]]) {
                         XLMainWindowController *mainController = (XLMainWindowController *)wc;
                         [mainController.sequencerViewController reloadSequenceData];
+                        [mainController.sequencerViewController loadZoomLevelForCurrentSequence];
                         [mainController switchToTab:2];
                     }
                 }

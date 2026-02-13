@@ -20,7 +20,7 @@ static const CGFloat kPlayheadWidth = 1.0;
 // issues in CALayerDelegate callbacks
 static const CGFloat kWaveR = 0.51, kWaveG = 0.70, kWaveB = 0.81;  // 130/255, 178/255, 207/255
 static const CGFloat kBgR = 0.08, kBgG = 0.08, kBgB = 0.08;
-static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
+static const CGFloat kPlayheadR = 0.2, kPlayheadG = 0.5, kPlayheadB = 1.0;
 static const CGFloat kCursorR = 1.0, kCursorG = 1.0, kCursorB = 1.0;  // White cursor line
 static const CGFloat kCursorAlpha = 0.6;
 static const CGFloat kCenterLineGray = 0.25;

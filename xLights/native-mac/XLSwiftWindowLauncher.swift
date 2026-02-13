@@ -167,6 +167,11 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
     /// (avoids responder chain issues when focus is outside the sequencer)
     @objc public weak var sequencerViewController: XLSequencerViewController?
 
+    /// Strong cached reference to the sequencer VC so it survives SwiftUI tab switches.
+    /// NSViewControllerRepresentable recreates the VC when the tab changes;
+    /// caching prevents losing the empty state and other UI state.
+    @objc public var cachedSequencerViewController: XLSequencerViewController?
+
     private override init() {
         super.init()
     }

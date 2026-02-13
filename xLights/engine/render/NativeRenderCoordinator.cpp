@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <list>
 #include <thread>
@@ -180,20 +181,14 @@ RenderedFrame NativeRenderCoordinator::renderModelFrame(
 
     renderModelAtTime(job, timeMS);
 
-    // Extract RGBA pixel data from the blended output
+    // Bulk copy RGBA pixel data from the blended output buffer
     result.width = w;
     result.height = h;
-    result.pixels.resize(static_cast<size_t>(w) * h * 4);
-
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            xlColor c = job.pixelBuffer->getBlendedPixel(x, y);
-            size_t i = (static_cast<size_t>(y) * w + x) * 4;
-            result.pixels[i]     = c.red;
-            result.pixels[i + 1] = c.green;
-            result.pixels[i + 2] = c.blue;
-            result.pixels[i + 3] = c.alpha;
-        }
+    const uint8_t* pixelData = job.pixelBuffer->getBlendedPixelData();
+    size_t dataSize = job.pixelBuffer->getBlendedPixelDataSize();
+    if (pixelData && dataSize > 0) {
+        result.pixels.resize(dataSize);
+        std::memcpy(result.pixels.data(), pixelData, dataSize);
     }
 
     return result;
@@ -271,17 +266,15 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
 
     renderModelAtTime(job, timeMS);
 
-    // Extract RGBA pixel data from the blended output
-    result.pixels.resize(static_cast<size_t>(w) * h * 4);
-    for (int y = 0; y < h; ++y) {
-        for (int x = 0; x < w; ++x) {
-            xlColor c = job.pixelBuffer->getBlendedPixel(x, y);
-            size_t i = (static_cast<size_t>(y) * w + x) * 4;
-            result.pixels[i]     = c.red;
-            result.pixels[i + 1] = c.green;
-            result.pixels[i + 2] = c.blue;
-            result.pixels[i + 3] = c.alpha;
-        }
+    // Bulk copy RGBA pixel data from the blended output buffer.
+    // xlColor is {red, green, blue, alpha} = 4 bytes in RGBA order,
+    // matching the result pixel format exactly. memcpy is significantly
+    // faster than per-pixel getBlendedPixel() calls.
+    const uint8_t* pixelData = job.pixelBuffer->getBlendedPixelData();
+    size_t dataSize = job.pixelBuffer->getBlendedPixelDataSize();
+    if (pixelData && dataSize > 0) {
+        result.pixels.resize(dataSize);
+        std::memcpy(result.pixels.data(), pixelData, dataSize);
     }
 
     return result;

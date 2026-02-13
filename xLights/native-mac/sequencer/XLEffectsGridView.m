@@ -404,6 +404,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     _metalLayer.contentsScale = self.window.backingScaleFactor ?: 2.0;
     _metalLayer.framebufferOnly = YES;
+    // Synchronize drawable presentation with CATransaction to prevent
+    // stale frames from appearing during scroll. Without this, the GPU
+    // can present a frame rendered with an old scroll offset while the
+    // view has already scrolled, causing grid lines to flash/jitter.
+    _metalLayer.presentsWithTransaction = YES;
     self.layer = _metalLayer;
     self.wantsLayer = YES;
 
@@ -680,6 +685,10 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     free(_renderEffects);
     _renderEffects = NULL;
     _renderEffectCount = 0;
+
+    // Clear overlay layers to prevent stale visuals during view switches
+    _iconOverlayLayer.contents = nil;
+    _labelOverlayLayer.contents = nil;
 
     if (!_dataSource) {
         _totalRows = 0;
@@ -1235,30 +1244,54 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 /// Rebuild _timingMarkValues from current _renderEffects.
 /// Called during timing mark drags to keep grid lines in sync.
 - (void)rebuildTimingMarkValuesFromRenderEffects {
+    // Collect timing mark start times from ALL layers of the active timing track
+    // so that the most granular sub-layer marks appear as grid lines.
     NSUInteger count = 0;
     for (NSUInteger i = 0; i < _renderEffectCount; i++) {
         if (_renderEffects[i].isTimingMark &&
-            _renderEffects[i].timingColorIndex == _activeTimingColorIndex &&
-            _renderEffects[i].layer == 0) {
+            _renderEffects[i].timingColorIndex == _activeTimingColorIndex) {
             count++;
         }
     }
     if (count == 0) return;
 
-    free(_timingMarkValues);
-    _timingMarkValues = (CGFloat *)malloc(count * sizeof(CGFloat));
-    if (!_timingMarkValues) {
+    CGFloat *raw = (CGFloat *)malloc(count * sizeof(CGFloat));
+    if (!raw) {
+        free(_timingMarkValues);
+        _timingMarkValues = NULL;
         _timingMarkCount = 0;
         return;
     }
-    _timingMarkCount = 0;
+    NSUInteger rawCount = 0;
     for (NSUInteger i = 0; i < _renderEffectCount; i++) {
         if (_renderEffects[i].isTimingMark &&
-            _renderEffects[i].timingColorIndex == _activeTimingColorIndex &&
-            _renderEffects[i].layer == 0) {
-            _timingMarkValues[_timingMarkCount++] = _renderEffects[i].startTimeMS;
+            _renderEffects[i].timingColorIndex == _activeTimingColorIndex) {
+            raw[rawCount++] = _renderEffects[i].startTimeMS;
         }
     }
+
+    // Sort the values so we can deduplicate
+    for (NSUInteger i = 1; i < rawCount; i++) {
+        CGFloat key = raw[i];
+        NSUInteger j = i;
+        while (j > 0 && raw[j - 1] > key) {
+            raw[j] = raw[j - 1];
+            j--;
+        }
+        raw[j] = key;
+    }
+
+    // Deduplicate (marks from different layers may share start times)
+    NSUInteger unique = 0;
+    for (NSUInteger i = 0; i < rawCount; i++) {
+        if (unique == 0 || fabs(raw[i] - raw[unique - 1]) > 0.5) {
+            raw[unique++] = raw[i];
+        }
+    }
+
+    free(_timingMarkValues);
+    _timingMarkValues = raw;
+    _timingMarkCount = unique;
 }
 
 #pragma mark - Selection Management
@@ -2349,33 +2382,33 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                 }
             }
 
-            // Cascade push RIGHT: walk from dragged mark rightward
+            // Cascade resize RIGHT: compress neighboring marks by moving their start edge
+            // while keeping their end fixed (marks shrink but stay in place)
             CGFloat pushEdge = draggedEnd;
             for (NSUInteger n = 0; n < _timingNudgeCount; n++) {
                 XLTimingNudgeEntry *e = &_timingNudgeChain[n];
                 NSUInteger idx = e->renderIndex;
                 if (idx >= _renderEffectCount) continue;
-                // Only push marks whose original start is to the right of (or overlapping) the dragged mark
                 if (e->originalStartMS < pushEdge && e->originalEndMS > draggedStart) {
-                    CGFloat dur = e->originalEndMS - e->originalStartMS;
                     _renderEffects[idx].startTimeMS = pushEdge;
-                    _renderEffects[idx].endTimeMS = pushEdge + dur;
-                    pushEdge = pushEdge + dur;
+                    // Keep the original end — resize, don't push
+                    _renderEffects[idx].endTimeMS = e->originalEndMS;
+                    pushEdge = e->originalEndMS;
                 }
             }
 
-            // Cascade push LEFT: walk from dragged mark leftward
+            // Cascade resize LEFT: compress neighboring marks by moving their end edge
+            // while keeping their start fixed (marks shrink but stay in place)
             CGFloat leftPushEdge = draggedStart;
             for (NSInteger n = (NSInteger)_timingNudgeCount - 1; n >= 0; n--) {
                 XLTimingNudgeEntry *e = &_timingNudgeChain[n];
                 NSUInteger idx = e->renderIndex;
                 if (idx >= _renderEffectCount) continue;
-                // Only push marks whose original end is to the left of (or overlapping) the dragged mark
                 if (e->originalEndMS > leftPushEdge && e->originalStartMS < draggedEnd) {
-                    CGFloat dur = e->originalEndMS - e->originalStartMS;
                     _renderEffects[idx].endTimeMS = leftPushEdge;
-                    _renderEffects[idx].startTimeMS = leftPushEdge - dur;
-                    leftPushEdge = leftPushEdge - dur;
+                    // Keep the original start — resize, don't push
+                    _renderEffects[idx].startTimeMS = e->originalStartMS;
+                    leftPushEdge = e->originalStartMS;
                 }
             }
 
