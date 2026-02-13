@@ -94,20 +94,29 @@ void RenderEngine::setEffectProvider(IEffectProvider* provider)
     _effectProvider = provider;
 }
 
+void RenderEngine::setAudioProvider(IAudioProvider* provider)
+{
+    _audioProvider = provider;
+}
+
 // Lightweight IRenderContext adapter for the coordinator
 namespace {
 class RenderEngineContext : public IRenderContext {
 public:
-    RenderEngineContext(int frameTimeMS, double sequenceDuration)
-        : _frameTimeMS(frameTimeMS), _duration(sequenceDuration) {}
+    RenderEngineContext(int frameTimeMS, double sequenceDuration,
+                        IAudioProvider* audioProvider = nullptr)
+        : _frameTimeMS(frameTimeMS), _duration(sequenceDuration),
+          _audioProvider(audioProvider) {}
 
     void* getAudioManager() override { return nullptr; }
+    IAudioProvider* getAudioProvider() override { return _audioProvider; }
     double getSequenceDuration() override { return _duration; }
     int getFrameTimeMS() override { return _frameTimeMS; }
 
 private:
     int _frameTimeMS;
     double _duration;
+    IAudioProvider* _audioProvider;
 };
 } // anonymous namespace
 
@@ -665,7 +674,7 @@ void RenderEngine::renderFrame(int timeMS)
         // Must be under _bufferCacheMutex because invalidateAllCaches() can
         // reset _liveCoordinator from another thread while holding this lock.
         if (!_liveCoordinator) {
-            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec);
+            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
             _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
                 _effectProvider, _modelProvider, _liveContext.get());
             _lastLiveRenderTimeMS = -1;
@@ -738,7 +747,7 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
         // Must be under _bufferCacheMutex because invalidateAllCaches() can
         // reset _liveCoordinator from another thread while holding this lock.
         if (!_liveCoordinator) {
-            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec);
+            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
             _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
                 _effectProvider, _modelProvider, _liveContext.get());
             _lastLiveRenderTimeMS = -1;
@@ -791,7 +800,7 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
            numFrames, frameTimeMS, totalChannels, duration);
 
     // Create render context
-    auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration);
+    auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
 
     // Allocate output buffer
     _renderedData = std::make_unique<NativeSequenceData>(
@@ -869,7 +878,7 @@ void RenderEngine::renderRange(int startMS, int endMS, bool clear,
     }
 
     double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
-    auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration);
+    auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
 
     // Reuse or create sequence data buffer
     if (!_renderedData || _renderedData->getNumChannels() != static_cast<uint32_t>(totalChannels)

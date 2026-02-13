@@ -24,11 +24,15 @@
 // - Thread-safe: implementations must handle concurrent access
 // - Pointer returned by getAudioManager() is opaque to avoid pulling in
 //   AudioManager.h; callers that need AudioManager cast the void* themselves.
+// - getAudioProvider() returns the native audio pipeline interface for
+//   wx-free audio data access during effect rendering.
 
 #include <string>
 #include <cstdint>
 
 namespace xlEngine {
+
+class IAudioProvider;
 
 struct IRenderContext {
     virtual ~IRenderContext() = default;
@@ -37,7 +41,14 @@ struct IRenderContext {
     // Returns nullptr if no audio is loaded.
     // The return type is void* to avoid pulling AudioManager.h into this header;
     // callers cast to AudioManager* as needed.
+    // DEPRECATED: Prefer getAudioProvider() for native builds.
     virtual void* getAudioManager() = 0;
+
+    // Returns the native audio provider for audio-reactive effects.
+    // Returns nullptr if no audio is loaded or audio provider is not set.
+    // This is the preferred audio access method for the native macOS build,
+    // replacing the opaque void* getAudioManager() pattern.
+    virtual IAudioProvider* getAudioProvider() { return nullptr; }
 
     // Returns the total sequence duration in seconds.
     virtual double getSequenceDuration() = 0;

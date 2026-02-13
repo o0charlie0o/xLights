@@ -50,6 +50,7 @@ class NativeSequenceData;
 
 namespace xlEngine {
 
+class IAudioProvider;
 class IEffectProvider;
 class NativeRenderCoordinator;
 struct IRenderContext;
@@ -324,6 +325,11 @@ public:
     // Set the effect provider for accessing sequence effect data during rendering.
     void setEffectProvider(IEffectProvider* provider);
 
+    // Set the audio provider for audio-reactive effect rendering.
+    // The provider supplies FFT spectrum, waveform, and level data.
+    // Must be set before rendering effects that use audio data.
+    void setAudioProvider(IAudioProvider* provider);
+
     // Load an FSEQ file for playback rendering.
     // Returns true if the file was loaded and channel mappings were resolved.
     bool loadFSEQ(const std::string& fseqPath);
@@ -358,6 +364,7 @@ private:
     IModelProvider* _modelProvider = nullptr;
     IOutputProvider* _outputProvider = nullptr;
     IEffectProvider* _effectProvider = nullptr;
+    IAudioProvider* _audioProvider = nullptr;
 
     // Render coordinator for batch rendering (renderAll/renderRange)
     std::unique_ptr<NativeRenderCoordinator> _coordinator;

@@ -42,6 +42,7 @@
 namespace xlEngine {
 
 struct IRenderContext;
+class IAudioProvider;
 
 // Forward declaration — effects that use the render cache store state here
 class EffectRenderCache {
@@ -273,7 +274,13 @@ public:
 
     // Returns AudioManager* via the IRenderContext (cast from void*).
     // Returns nullptr if no context or no audio loaded.
+    // DEPRECATED: Prefer GetAudioProvider() for native builds.
     void* GetMedia() const;
+
+    // Returns the native audio provider for audio-reactive effects.
+    // Returns nullptr if no audio is loaded or provider is not set.
+    // This is the preferred audio access method for native macOS effects.
+    IAudioProvider* GetAudioProvider() const;
 
     // =========================================================================
     // Public state (read by effects)

@@ -11,6 +11,7 @@
 #include "NativeRenderCoordinator.h"
 #include "NativeSequenceData.h"
 #include "NativeRenderBuffer.h"
+#include "NativeDrawingContext.h"
 #include "IRenderContext.h"
 #include "../interfaces/IEffectProvider.h"
 #include "../interfaces/IModelProvider.h"
@@ -22,6 +23,7 @@
 #include <cstring>
 #include <functional>
 #include <list>
+#include <sstream>
 #include <thread>
 
 namespace xlEngine {
@@ -10864,6 +10866,611 @@ bool NativeRenderCoordinator::renderNativeEffect(
         // Actual rendering requires GPU pipeline integration with either:
         //   1. Metal compute shader transpilation from GLSL source, or
         //   2. MoltenVK/SPIRV-Cross pipeline for .fs shader execution
+        return true;
+    }
+
+    if (type == "Text") {
+        // Native Text effect — port of legacy TextEffect::Render (OS Font path)
+        //
+        // Renders text using NativeTextDrawingContext (CoreText/CoreGraphics).
+        // Supports: text content, font selection, movement directions, speed,
+        // centering, start/end position offsets, vertical text, rotation,
+        // multi-color per-character/per-word, and newline support.
+        //
+        // Not yet implemented: countdown modes, lyric tracks, file-based text,
+        // xLights custom bitmap fonts (CHOICE_Text_Font != "Use OS Fonts"),
+        // wavey direction, word-flip direction.
+
+        // --- Read settings ---
+        std::string text;
+        auto it = effectInfo.settings.find("E_TEXTCTRL_Text");
+        if (it != effectInfo.settings.end()) text = it->second;
+
+        // Skip xLights bitmap fonts — only handle OS fonts
+        std::string xlFont = "Use OS Fonts";
+        it = effectInfo.settings.find("E_CHOICE_Text_Font");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            xlFont = it->second;
+        if (xlFont != "Use OS Fonts") {
+            // xLights bitmap fonts not supported in native build
+            return true;
+        }
+
+        // Replace literal \n with actual newlines
+        {
+            std::string::size_type pos = 0;
+            while ((pos = text.find("\\n", pos)) != std::string::npos) {
+                text.replace(pos, 2, "\n");
+                pos += 1;
+            }
+        }
+
+        if (text.empty()) return true;
+
+        // Font string parsing: wxWidgets NativeFontInfoUserDesc format
+        // macOS format: "FaceName [Bold] [Italic] Size" e.g. "Arial Bold 12"
+        std::string fontString;
+        it = effectInfo.settings.find("E_FONTPICKER_Text_Font");
+        if (it != effectInfo.settings.end()) fontString = it->second;
+
+        std::string fontName = "Helvetica";
+        float fontSize = 12.0f;
+        bool fontBold = false;
+        bool fontItalic = false;
+
+        if (!fontString.empty()) {
+            // Parse the wx font description string
+            // Format examples: "Arial 12", "Arial Bold 12", "Arial Bold Italic 12",
+            //                  "Courier New 20", ".AppleSystemUIFont 14"
+            // Strategy: last token is size, check for Bold/Italic keywords,
+            // remaining tokens form the face name.
+            std::vector<std::string> tokens;
+            std::istringstream iss(fontString);
+            std::string token;
+            while (iss >> token) tokens.push_back(token);
+
+            if (!tokens.empty()) {
+                // Try to parse the last token as size
+                float parsedSize = 0;
+                try { parsedSize = std::stof(tokens.back()); } catch (...) {}
+
+                if (parsedSize > 0) {
+                    fontSize = parsedSize;
+                    tokens.pop_back();
+                }
+
+                // Check for Bold/Italic modifiers (case-insensitive)
+                auto isModifier = [](const std::string& s) -> int {
+                    std::string lower = s;
+                    for (auto& c : lower) c = std::tolower(c);
+                    if (lower == "bold") return 1;
+                    if (lower == "italic" || lower == "oblique" || lower == "slant") return 2;
+                    return 0;
+                };
+
+                // Remove modifier tokens from end
+                while (!tokens.empty()) {
+                    int mod = isModifier(tokens.back());
+                    if (mod == 1) { fontBold = true; tokens.pop_back(); }
+                    else if (mod == 2) { fontItalic = true; tokens.pop_back(); }
+                    else break;
+                }
+
+                // Remaining tokens form the face name
+                if (!tokens.empty()) {
+                    fontName.clear();
+                    for (size_t i = 0; i < tokens.size(); i++) {
+                        if (i > 0) fontName += " ";
+                        fontName += tokens[i];
+                    }
+                }
+            }
+        }
+
+        // Direction
+        enum { DIR_LEFT, DIR_RIGHT, DIR_UP, DIR_DOWN, DIR_NONE,
+               DIR_UPLEFT, DIR_DOWNLEFT, DIR_UPRIGHT, DIR_DOWNRIGHT,
+               DIR_WAVEY, DIR_VECTOR, DIR_WORDFLIP, DIR_LEFTRIGHT, DIR_UPDOWN };
+        int dir = DIR_NONE;
+        it = effectInfo.settings.find("E_CHOICE_Text_Dir");
+        if (it != effectInfo.settings.end()) {
+            const std::string& d = it->second;
+            if (d == "left") dir = DIR_LEFT;
+            else if (d == "right") dir = DIR_RIGHT;
+            else if (d == "up") dir = DIR_UP;
+            else if (d == "down") dir = DIR_DOWN;
+            else if (d == "up-left") dir = DIR_UPLEFT;
+            else if (d == "down-left") dir = DIR_DOWNLEFT;
+            else if (d == "up-right") dir = DIR_UPRIGHT;
+            else if (d == "down-right") dir = DIR_DOWNRIGHT;
+            else if (d == "wavey") dir = DIR_WAVEY;
+            else if (d == "vector") dir = DIR_VECTOR;
+            else if (d == "word-flip") dir = DIR_WORDFLIP;
+            else if (d == "left-right") dir = DIR_LEFTRIGHT;
+            else if (d == "up-down") dir = DIR_UPDOWN;
+        }
+
+        int tspeed = 10;
+        it = effectInfo.settings.find("E_TEXTCTRL_Text_Speed");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            tspeed = std::atoi(it->second.c_str());
+
+        bool center = false;
+        it = effectInfo.settings.find("E_CHECKBOX_TextToCenter");
+        if (it != effectInfo.settings.end()) center = (it->second == "1");
+
+        bool norepeat = false;
+        it = effectInfo.settings.find("E_CHECKBOX_TextNoRepeat");
+        if (it != effectInfo.settings.end()) norepeat = (it->second == "1");
+
+        bool pixelOffsets = false;
+        it = effectInfo.settings.find("E_CHECKBOX_Text_PixelOffsets");
+        if (it != effectInfo.settings.end()) pixelOffsets = (it->second == "1");
+
+        bool perWord = false;
+        it = effectInfo.settings.find("E_CHECKBOX_Text_Color_PerWord");
+        if (it != effectInfo.settings.end()) perWord = (it->second == "1");
+
+        int startx = 0, starty = 0, endx = 0, endy = 0;
+        it = effectInfo.settings.find("E_SLIDER_Text_XStart");
+        if (it != effectInfo.settings.end() && !it->second.empty()) startx = std::atoi(it->second.c_str());
+        it = effectInfo.settings.find("E_SLIDER_Text_YStart");
+        if (it != effectInfo.settings.end() && !it->second.empty()) starty = std::atoi(it->second.c_str());
+        it = effectInfo.settings.find("E_SLIDER_Text_XEnd");
+        if (it != effectInfo.settings.end() && !it->second.empty()) endx = std::atoi(it->second.c_str());
+        it = effectInfo.settings.find("E_SLIDER_Text_YEnd");
+        if (it != effectInfo.settings.end() && !it->second.empty()) endy = std::atoi(it->second.c_str());
+
+        // Text effect type (normal, vert up, vert down, rotate)
+        int textEffect = 0;
+        it = effectInfo.settings.find("E_CHOICE_Text_Effect");
+        if (it != effectInfo.settings.end()) {
+            const std::string& e = it->second;
+            if (e == "vert text up") textEffect = 1;
+            else if (e == "vert text down") textEffect = 2;
+            else if (e == "rotate up 45") textEffect = 3;
+            else if (e == "rotate up 90") textEffect = 4;
+            else if (e == "rotate down 45") textEffect = 5;
+            else if (e == "rotate down 90") textEffect = 6;
+        }
+
+        // Apply vertical text transformation
+        std::string msg = text;
+        if (textEffect == 1) {
+            // vertical text up: reverse characters, each on its own line
+            std::string result;
+            for (int i = (int)msg.size() - 1; i >= 0; i--) {
+                result += msg[i];
+                result += '\n';
+            }
+            msg = result;
+        } else if (textEffect == 2) {
+            // vertical text down: each character on its own line
+            std::string result;
+            for (size_t i = 0; i < msg.size(); i++) {
+                result += msg[i];
+                result += '\n';
+            }
+            msg = result;
+        }
+
+        // Word-flip: select one word based on position in effect
+        if (dir == DIR_WORDFLIP && !msg.empty()) {
+            std::vector<std::string> words;
+            std::string word;
+            for (char c : msg) {
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                    if (!word.empty()) { words.push_back(word); word.clear(); }
+                } else {
+                    word += c;
+                }
+            }
+            if (!word.empty()) words.push_back(word);
+            if (words.size() > 1 && tspeed > 0) {
+                float msPerWord = ((float)(buf.curEffEndPer - buf.curEffStartPer + 1) * buf.frameTimeInMs) / (words.size() * tspeed);
+                int wordIdx = 0;
+                if (msPerWord > 0)
+                    wordIdx = (int)(((float)(buf.curPeriod - buf.curEffStartPer) * buf.frameTimeInMs) / msPerWord);
+                wordIdx = wordIdx % (int)words.size();
+                msg = words[wordIdx];
+            } else if (!words.empty()) {
+                msg = words[0];
+            }
+        }
+
+        if (msg.empty()) return true;
+
+        // Get palette colors
+        size_t numColors = buf.palette.ExplicitSize();
+        if (numColors == 0) numColors = 1;
+        xlColor primaryColor;
+        buf.palette.GetColor(0, primaryColor);
+
+        // Acquire a NativeTextDrawingContext from the pool
+        NativeTextDrawingContext* dc = NativeTextDrawingContext::GetContext();
+        if (!dc) return true;
+
+        int w = buf.BufferWi;
+        int h = buf.BufferHt;
+
+        // Size the drawing context to match the buffer
+        dc->ResetSize(w, h);
+        dc->Clear();
+        dc->SetFont(fontName, fontSize, fontBold, fontItalic, primaryColor);
+
+        // Measure text (multi-line aware)
+        // Split msg into lines and measure each
+        std::vector<std::string> lines;
+        {
+            std::istringstream stream(msg);
+            std::string line;
+            while (std::getline(stream, line)) {
+                lines.push_back(line);
+            }
+            if (lines.empty()) lines.push_back(msg);
+        }
+
+        int maxLineWidth = 0;
+        int totalTextHeight = 0;
+        int lineHeight = 0;
+        std::vector<int> lineWidths;
+        for (const auto& line : lines) {
+            if (line.empty()) {
+                // Empty line: use height of "W" as reference
+                auto ext = dc->GetTextExtent("W");
+                lineHeight = ext.second;
+                totalTextHeight += lineHeight;
+                lineWidths.push_back(0);
+            } else {
+                auto ext = dc->GetTextExtent(line);
+                lineWidths.push_back(ext.first);
+                lineHeight = ext.second;
+                totalTextHeight += lineHeight;
+                if (ext.first > maxLineWidth) maxLineWidth = ext.first;
+            }
+        }
+        if (lineHeight == 0) {
+            auto ext = dc->GetTextExtent("W");
+            lineHeight = ext.second;
+            if (lineHeight == 0) lineHeight = (int)fontSize;
+        }
+
+        // Rotation angle for rotated text effects
+        double textRotation = 0.0;
+        int xoffset = 0, yoffset = 0;
+        auto textWidth = maxLineWidth;
+        auto textHeight = totalTextHeight;
+        switch (textEffect) {
+            case 3: // rotate up 45
+                textRotation = 45.0;
+                yoffset = (int)(0.707 * textHeight);
+                { int i = (int)(0.707 * (textWidth + textHeight));
+                  textWidth = i; textHeight = i; }
+                break;
+            case 4: // rotate up 90
+                textRotation = 90.0;
+                std::swap(textWidth, textHeight);
+                break;
+            case 5: // rotate down 45
+                textRotation = -45.0;
+                xoffset = (int)(0.707 * textHeight);
+                { int sz = (int)(0.707 * (textWidth + textHeight));
+                  textWidth = sz; textHeight = sz; yoffset = sz; }
+                break;
+            case 6: // rotate down 90
+                textRotation = -90.0;
+                xoffset = textHeight;
+                yoffset = textWidth;
+                std::swap(textWidth, textHeight);
+                break;
+            default: break;
+        }
+
+        int txtwidth = textWidth;
+        int totwidth = w + txtwidth;
+        int totheight = h + textHeight;
+
+        int OffsetLeft = startx * w / 100;
+        int OffsetTop = -starty * h / 100;
+        if (pixelOffsets) {
+            OffsetLeft = startx;
+            OffsetTop = -starty;
+        }
+
+        int xlimit = totwidth * 8 + 1;
+        int ylimit = totheight * 8 + 1;
+
+        int state = (buf.curPeriod - buf.curEffStartPer) * tspeed * buf.frameTimeInMs / 50;
+
+        // Compute drawing rectangle position based on direction
+        // The rect defines where the center of the text should be drawn.
+        // We use the same coordinate system as legacy: rect is in buffer coords
+        // with (0,0) at top-left of the buffer.
+        int rectX = 0, rectY = 0;
+
+        // Helper macros matching legacy behavior
+        auto zigzag = [](int value, int range) -> int {
+            if (range <= 0) return 0;
+            return ((value / range) & 1) ? (value % range) : (range - value % range - 1);
+        };
+
+        bool isGoingLeft = (dir == DIR_LEFT || dir == DIR_UPLEFT || dir == DIR_DOWNLEFT);
+        bool isGoingRight = (dir == DIR_RIGHT || dir == DIR_UPRIGHT || dir == DIR_DOWNRIGHT);
+
+        int extra_left = 0, extra_right = 0;
+        if (isGoingLeft) {
+            // Measure trimmed text to get extra whitespace width
+            std::string trimmed = msg;
+            size_t start = trimmed.find_first_not_of(" \t");
+            if (start != std::string::npos && start > 0) {
+                std::string trimmedStr = trimmed.substr(start);
+                auto ext = dc->GetTextExtent(trimmedStr);
+                extra_left = maxLineWidth - ext.first;
+            }
+        }
+        if (isGoingRight) {
+            std::string trimmed = msg;
+            size_t end = trimmed.find_last_not_of(" \t");
+            if (end != std::string::npos && end < trimmed.size() - 1) {
+                std::string trimmedStr = trimmed.substr(0, end + 1);
+                auto ext = dc->GetTextExtent(trimmedStr);
+                extra_right = maxLineWidth - ext.first;
+            }
+        }
+
+        if (textRotation == 0.0) {
+            // Non-rotated text: compute rect offset for movement directions
+            rectX = 0;
+            rectY = 0;
+
+            switch (dir) {
+                case DIR_VECTOR: {
+                    double position = buf.GetEffectTimeIntervalPosition(1.0f);
+                    double ex = endx * w / 100;
+                    double ey = -endy * h / 100;
+                    if (pixelOffsets) { ex = endx; ey = -endy; }
+                    ex = OffsetLeft + (ex - OffsetLeft) * position;
+                    ey = OffsetTop + (ey - OffsetTop) * position;
+                    rectX = (int)ex;
+                    rectY = (int)ey;
+                } break;
+                case DIR_LEFT: {
+                    int state8 = state / 8;
+                    if (state8 < 0) state8 += 32768;
+                    if (norepeat && !center && state > xlimit) {
+                        rectX = -xlimit;
+                    } else {
+                        rectX = center ? std::max(xlimit / 16 - state8, -extra_left / 2)
+                                       : xlimit / 16 - state % xlimit / 8;
+                    }
+                    rectY = OffsetTop;
+                } break;
+                case DIR_RIGHT: {
+                    if (norepeat && !center && state > xlimit) {
+                        rectX = xlimit;
+                    } else {
+                        rectX = center ? std::min(state / 8 - xlimit / 16, extra_right / 2)
+                                       : state % xlimit / 8 - xlimit / 16;
+                    }
+                    rectY = OffsetTop;
+                } break;
+                case DIR_UP: {
+                    if (norepeat && !center && state > ylimit) {
+                        rectY = -ylimit;
+                    } else {
+                        rectY = center ? std::max(ylimit / 16 - state / 8, 0)
+                                       : ylimit / 16 - state % ylimit / 8;
+                    }
+                    rectX = OffsetLeft;
+                } break;
+                case DIR_DOWN: {
+                    if (norepeat && !center && state > ylimit) {
+                        rectY = ylimit;
+                    } else {
+                        rectY = center ? std::min(state / 8 - ylimit / 16, 0)
+                                       : state % ylimit / 8 - ylimit / 16;
+                    }
+                    rectX = OffsetLeft;
+                } break;
+                case DIR_UPLEFT: {
+                    if (norepeat && !center && (state > ylimit || state > xlimit)) {
+                        rectX = -xlimit; rectY = -ylimit;
+                    } else {
+                        rectX = center ? std::max(xlimit / 16 - state / 8 + startx, 0)
+                                       : xlimit / 16 - state % xlimit / 8 + startx;
+                        rectY = center ? std::max(ylimit / 16 - state / 8 - starty, 0)
+                                       : ylimit / 16 - state % ylimit / 8 - starty;
+                    }
+                } break;
+                case DIR_DOWNLEFT: {
+                    if (norepeat && !center && (state > ylimit || state > xlimit)) {
+                        rectX = -xlimit; rectY = ylimit;
+                    } else {
+                        rectX = center ? std::max(xlimit / 16 - state / 8 + startx, 0)
+                                       : xlimit / 16 - state % xlimit / 8 + startx;
+                        rectY = center ? std::min(state / 8 - ylimit / 16 + starty, 0)
+                                       : state % ylimit / 8 - ylimit / 16 + starty;
+                    }
+                } break;
+                case DIR_UPRIGHT: {
+                    if (norepeat && !center && (state > ylimit || state > xlimit)) {
+                        rectX = xlimit; rectY = -ylimit;
+                    } else {
+                        rectX = center ? std::min(state / 8 - xlimit / 16 - startx, 0)
+                                       : state % xlimit / 8 - xlimit / 16 - startx;
+                        rectY = center ? std::max(ylimit / 16 - state / 8 - starty, 0)
+                                       : ylimit / 16 - state % ylimit / 8 - starty;
+                    }
+                } break;
+                case DIR_DOWNRIGHT: {
+                    if (norepeat && !center && (state > ylimit || state > xlimit)) {
+                        rectX = xlimit; rectY = ylimit;
+                    } else {
+                        rectX = center ? std::min(state / 8 - xlimit / 16 - startx, 0)
+                                       : state % xlimit / 8 - xlimit / 16 - startx;
+                        rectY = center ? std::min(state / 8 - ylimit / 16 + starty, 0)
+                                       : state % ylimit / 8 - ylimit / 16 + starty;
+                    }
+                } break;
+                case DIR_WAVEY: {
+                    if (center)
+                        rectX = std::min(state / 8 - xlimit / 16, extra_right / 2);
+                    else
+                        rectX = xlimit / 16 - state % xlimit / 8;
+                    rectY = zigzag(state / 4, totheight) / 2 - totheight / 4;
+                } break;
+                case DIR_LEFTRIGHT: {
+                    int cycle = xlimit;
+                    int halfCycle = xlimit / 2;
+                    if (halfCycle == 0) halfCycle = 1;
+                    int normalizedState = state % cycle;
+                    int offsetX;
+                    if (normalizedState <= halfCycle)
+                        offsetX = xlimit / 8 - (normalizedState * (xlimit / 4)) / halfCycle;
+                    else
+                        offsetX = -xlimit / 8 + ((normalizedState - halfCycle) * (xlimit / 4)) / halfCycle;
+                    if (norepeat && state > xlimit) {
+                        rectX = -xlimit;
+                    } else {
+                        rectX = offsetX;
+                    }
+                    rectY = OffsetTop;
+                } break;
+                case DIR_UPDOWN: {
+                    int cycle = ylimit;
+                    int halfCycle = ylimit / 2;
+                    if (halfCycle == 0) halfCycle = 1;
+                    int normalizedState = state % cycle;
+                    int offsetY;
+                    if (normalizedState <= halfCycle)
+                        offsetY = ylimit / 16 - (normalizedState * (ylimit / 8)) / halfCycle;
+                    else
+                        offsetY = -(ylimit / 16) + ((normalizedState - halfCycle) * (ylimit / 8)) / halfCycle;
+                    if (norepeat && state > ylimit) {
+                        rectY = -ylimit;
+                    } else {
+                        rectY = offsetY;
+                    }
+                    rectX = OffsetLeft;
+                } break;
+                case DIR_WORDFLIP:
+                case DIR_NONE:
+                default:
+                    rectX = OffsetLeft;
+                    rectY = OffsetTop;
+                    break;
+            }
+
+            // Draw text centered in the rect, with per-line horizontal centering
+            // The rect offset shifts the drawing origin
+            int baseY = (h - totalTextHeight) / 2 + rectY;
+            int curColorPos = 0;
+
+            for (size_t li = 0; li < lines.size(); li++) {
+                const std::string& curLine = lines[li];
+                if (curLine.empty()) {
+                    baseY += lineHeight;
+                    continue;
+                }
+
+                // Center this line horizontally within the buffer + rect offset
+                int lineW = lineWidths[li];
+                int drawX = (w - lineW) / 2 + rectX;
+                int drawY = baseY;
+
+                if (numColors <= 1) {
+                    // Single color: draw whole line
+                    dc->SetFont(fontName, fontSize, fontBold, fontItalic, primaryColor);
+                    dc->DrawText(curLine, drawX, drawY);
+                } else {
+                    // Multi-color: draw character by character
+                    auto extents = dc->GetTextExtents(curLine);
+                    for (size_t ci = 0; ci < curLine.size(); ci++) {
+                        char ch = curLine[ci];
+                        if (ch == ' ') {
+                            if (perWord && ci + 1 < curLine.size() && curLine[ci + 1] != ' ')
+                                curColorPos++;
+                            continue;
+                        }
+                        xlColor charColor;
+                        buf.palette.GetColor(curColorPos % numColors, charColor);
+                        dc->SetFont(fontName, fontSize, fontBold, fontItalic, charColor);
+
+                        double charX = drawX;
+                        if (ci > 0 && ci - 1 < extents.size()) {
+                            charX = drawX + extents[ci - 1];
+                        }
+                        std::string charStr(1, ch);
+                        dc->DrawText(charStr, (int)charX, drawY);
+
+                        if (!perWord) curColorPos++;
+                        else if (perWord && ch == ' ' && ci + 1 < curLine.size() && curLine[ci + 1] != ' ')
+                            curColorPos++;
+                    }
+                }
+
+                baseY += lineHeight;
+            }
+        } else {
+            // Rotated text: draw with rotation at computed position
+            switch (dir) {
+                case DIR_LEFT:
+                    rectX = w - state % xlimit / 8 + xoffset;
+                    rectY = OffsetTop;
+                    break;
+                case DIR_RIGHT:
+                    rectX = state % xlimit / 8 - txtwidth + xoffset;
+                    rectY = OffsetTop;
+                    break;
+                case DIR_UP:
+                    rectX = OffsetLeft;
+                    rectY = totheight - state % ylimit / 8 - yoffset;
+                    break;
+                case DIR_DOWN:
+                    rectX = OffsetLeft;
+                    rectY = state % ylimit / 8 - yoffset;
+                    break;
+                case DIR_VECTOR: {
+                    double position = buf.GetEffectTimeIntervalPosition(1.0f);
+                    double ex = endx * w / 100;
+                    double ey = -endy * h / 100;
+                    if (pixelOffsets) { ex = endx; ey = -endy; }
+                    ex = OffsetLeft + (ex - OffsetLeft) * position;
+                    ey = OffsetTop + (ey - OffsetTop) * position;
+                    rectX = w / 2 + (int)ex - txtwidth / 2 + xoffset;
+                    rectY = h / 2 + (int)ey + yoffset;
+                } break;
+                default:
+                    rectX = OffsetLeft;
+                    rectY = OffsetTop;
+                    break;
+            }
+
+            dc->SetFont(fontName, fontSize, fontBold, fontItalic, primaryColor);
+            dc->DrawText(msg, rectX, rectY, textRotation);
+        }
+
+        // Extract rendered pixels from the drawing context into the NativeRenderBuffer.
+        // NativeTextDrawingContext uses top-left origin (y=0 is top),
+        // NativeRenderBuffer uses bottom-left origin (y=0 is bottom).
+        auto* pixelData = dc->FlushAndGetPixels();
+        if (pixelData && (int)pixelData->size() == w * h) {
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    const xlColor& c = (*pixelData)[(h - 1 - y) * w + x];
+                    if (c.red != 0 || c.green != 0 || c.blue != 0 || c.alpha != 0) {
+                        // Use alpha from the rendered text
+                        xlColor pixel = c;
+                        if (pixel.alpha == 0 && (pixel.red != 0 || pixel.green != 0 || pixel.blue != 0)) {
+                            pixel.alpha = 255;
+                        }
+                        buf.SetPixel(x, y, pixel);
+                    }
+                }
+            }
+        }
+
+        NativeTextDrawingContext::ReleaseContext(dc);
         return true;
     }
 

@@ -778,4 +778,10 @@ void* NativeRenderBuffer::GetMedia() const
     return _context->getAudioManager();
 }
 
+IAudioProvider* NativeRenderBuffer::GetAudioProvider() const
+{
+    if (_context == nullptr) return nullptr;
+    return _context->getAudioProvider();
+}
+
 } // namespace xlEngine
