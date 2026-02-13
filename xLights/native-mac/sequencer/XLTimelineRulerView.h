@@ -193,4 +193,10 @@ typedef struct {
 /// Returns the number of active timing tags.
 - (NSInteger)activeTimingTagCount;
 
+#pragma mark - Preview Timing Marks (Onset Detection)
+
+/// Preview timing marks (onset detection preview). Array of NSNumber (milliseconds).
+/// Drawn as translucent orange lines. Set to nil to clear.
+@property (nonatomic, copy, nullable) NSArray<NSNumber *> *previewTimingMarks;
+
 @end

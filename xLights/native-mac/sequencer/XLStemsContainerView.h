@@ -49,6 +49,15 @@ static const CGFloat kStemsMaxExpandedHeight = 400.0;
 /// Called when the cursor (hover) position changes over the stems area (-1 when exiting).
 - (void)stemsContainer:(XLStemsContainerView *)container didMoveCursorToTimeMS:(CGFloat)timeMS;
 
+/// Called when the user requests onset detection for a specific stem.
+- (void)stemsContainer:(XLStemsContainerView *)container didRequestOnsetDetectionForStemAtIndex:(NSUInteger)stemIndex;
+
+/// Called when the user requests to edit a stem's properties.
+- (void)stemsContainer:(XLStemsContainerView *)container didRequestEditStemAtIndex:(NSUInteger)stemIndex;
+
+/// Called when the user requests to remove a stem.
+- (void)stemsContainer:(XLStemsContainerView *)container didRequestRemoveStemAtIndex:(NSUInteger)stemIndex;
+
 @end
 
 /// Container view sitting between the waveform and effects grid.
@@ -83,6 +92,9 @@ static const CGFloat kStemsMaxExpandedHeight = 400.0;
 
 /// Rebuild mini waveform subviews from stem manager data.
 - (void)reloadStems;
+
+/// Set onset preview markers on the mini waveform at the given stem index.
+- (void)setOnsetPreviewTimesMS:(NSArray<NSNumber *> *)timesMS forStemAtIndex:(NSUInteger)stemIndex;
 
 /// Current total height (0 if collapsed, header + content + handle if expanded).
 - (CGFloat)currentHeight;

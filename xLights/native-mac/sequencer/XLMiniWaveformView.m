@@ -98,6 +98,11 @@
     [self setNeedsDisplay:YES];
 }
 
+- (void)setOnsetPreviewTimesMS:(NSArray<NSNumber *> *)onsetPreviewTimesMS {
+    _onsetPreviewTimesMS = [onsetPreviewTimesMS copy];
+    [self setNeedsDisplay:YES];
+}
+
 #pragma mark - Coordinate Conversion
 
 - (CGFloat)pointXForTimeMS:(CGFloat)timeMS {
@@ -314,6 +319,20 @@
     }
 
 playhead:
+    // Draw onset preview markers (orange lines)
+    if (_onsetPreviewTimesMS.count > 0) {
+        CGContextSetRGBStrokeColor(ctx, 1.0, 0.6, 0.0, 0.7);
+        CGContextSetLineWidth(ctx, 1.0);
+        for (NSNumber *timeNum in _onsetPreviewTimesMS) {
+            CGFloat timeMS = timeNum.doubleValue;
+            CGFloat x = [self pointXForTimeMS:timeMS];
+            if (x < -1 || x > width + 1) continue;
+            CGContextMoveToPoint(ctx, x, 0);
+            CGContextAddLineToPoint(ctx, x, height);
+        }
+        CGContextStrokePath(ctx);
+    }
+
     // Draw cursor line (white, semi-transparent — same as main waveform)
     if (_cursorPositionMS >= 0 && _cursorPositionMS <= _sequenceLengthMS) {
         CGFloat cursorX = [self pointXForTimeMS:_cursorPositionMS];

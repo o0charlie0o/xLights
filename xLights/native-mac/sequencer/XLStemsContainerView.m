@@ -149,6 +149,7 @@ static const CGFloat kStemRowHeightDefault = 30.0;
 @protocol XLStemRowHeaderDelegate <NSObject>
 - (void)stemRowDidReorder:(NSUInteger)fromIndex toIndex:(NSUInteger)toIndex;
 - (void)stemRowDidRequestEdit:(NSUInteger)index;
+- (void)stemRowDidRequestContextMenu:(NSUInteger)index atPoint:(NSPoint)point inView:(NSView *)view;
 @end
 
 #pragma mark - Stem Row Header View (draws one stem name)
@@ -237,6 +238,12 @@ static const CGFloat kDragThreshold = 4.0;
     if (targetIdx != _stemIndex) {
         [_delegate stemRowDidReorder:_stemIndex toIndex:targetIdx];
     }
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    [_delegate stemRowDidRequestContextMenu:_stemIndex
+                                    atPoint:[self convertPoint:event.locationInWindow fromView:nil]
+                                     inView:self];
 }
 
 - (void)drawRect:(NSRect)dirtyRect {
@@ -693,6 +700,12 @@ static const CGFloat kDragThreshold = 4.0;
     }
 }
 
+- (void)setOnsetPreviewTimesMS:(NSArray<NSNumber *> *)timesMS forStemAtIndex:(NSUInteger)stemIndex {
+    if (stemIndex < _miniWaveformViews.count) {
+        _miniWaveformViews[stemIndex].onsetPreviewTimesMS = timesMS;
+    }
+}
+
 #pragma mark - Scroll/Zoom Forwarding
 
 - (void)setScrollOffsetX:(CGFloat)offsetX {
@@ -881,6 +894,63 @@ static const CGFloat kDragThreshold = 4.0;
         NSString *newName = nameField.stringValue;
         if (newName.length == 0) newName = stem.name;
         [_stemManager updateStemAtIndex:index name:newName color:colorWell.color];
+    }
+}
+
+- (void)stemRowDidRequestContextMenu:(NSUInteger)index atPoint:(NSPoint)point inView:(NSView *)view {
+    NSArray<XLStemData *> *stems = _stemManager.stems;
+    if (index >= stems.count) return;
+    XLStemData *stem = stems[index];
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Stem"];
+
+    NSMenuItem *onsetItem = [[NSMenuItem alloc] initWithTitle:@"Create Timing Track from Audio..."
+                                                      action:@selector(contextMenuOnsetDetection:)
+                                               keyEquivalent:@""];
+    onsetItem.target = self;
+    onsetItem.tag = index;
+    onsetItem.enabled = (stem.audioData != nil && !stem.isLoading);
+    [menu addItem:onsetItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit Stem..."
+                                                     action:@selector(contextMenuEditStem:)
+                                              keyEquivalent:@""];
+    editItem.target = self;
+    editItem.tag = index;
+    [menu addItem:editItem];
+
+    NSMenuItem *removeItem = [[NSMenuItem alloc] initWithTitle:@"Remove Stem"
+                                                       action:@selector(contextMenuRemoveStem:)
+                                                keyEquivalent:@""];
+    removeItem.target = self;
+    removeItem.tag = index;
+    [menu addItem:removeItem];
+
+    [NSMenu popUpContextMenu:menu withEvent:[NSApp currentEvent] forView:view];
+}
+
+- (void)contextMenuOnsetDetection:(NSMenuItem *)sender {
+    NSUInteger idx = (NSUInteger)sender.tag;
+    if ([_delegate respondsToSelector:@selector(stemsContainer:didRequestOnsetDetectionForStemAtIndex:)]) {
+        [_delegate stemsContainer:self didRequestOnsetDetectionForStemAtIndex:idx];
+    }
+}
+
+- (void)contextMenuEditStem:(NSMenuItem *)sender {
+    NSUInteger idx = (NSUInteger)sender.tag;
+    if ([_delegate respondsToSelector:@selector(stemsContainer:didRequestEditStemAtIndex:)]) {
+        [_delegate stemsContainer:self didRequestEditStemAtIndex:idx];
+    } else {
+        [self stemRowDidRequestEdit:idx];
+    }
+}
+
+- (void)contextMenuRemoveStem:(NSMenuItem *)sender {
+    NSUInteger idx = (NSUInteger)sender.tag;
+    if ([_delegate respondsToSelector:@selector(stemsContainer:didRequestRemoveStemAtIndex:)]) {
+        [_delegate stemsContainer:self didRequestRemoveStemAtIndex:idx];
     }
 }
 

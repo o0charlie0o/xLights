@@ -36,6 +36,7 @@
 #import "XLEffectPropertiesViewController.h"
 #import "dialogs/XLNewTimingDialog.h"
 #import "dialogs/XLTimingImportDialog.h"
+#import "dialogs/XLOnsetDetectionDialog.h"
 #import "XLSongRegionEditPopover.h"
 
 // Import Swift generated header for XLSwiftUIWindowHelper
@@ -448,7 +449,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                                           XLRowHeadingsDelegate,
                                           XLScrollCoordinatorDelegate,
                                           XLPlaybackControllerDelegate,
-                                          XLStemsContainerDelegate> {
+                                          XLStemsContainerDelegate,
+                                          XLOnsetDetectionDialogDelegate> {
     // C array of row data - immune to heap corruption
     XLRowEntry *_rowData;
     NSUInteger _rowCount;
@@ -1370,6 +1372,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Update symbol names for context menu
     [self updateAvailableSymbolNames];
+
+    // Sync song region overlay visibility from SwiftUI state
+    _effectsGridView.showSongRegionOverlay = [[XLSwiftUIWindowHelper shared] isSongRegionOverlayVisible];
 }
 
 - (void)updateAvailableSymbolNames {
@@ -2172,6 +2177,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [self reloadSongRegionsForRuler];
 }
 
+- (void)setSongRegionOverlayVisible:(BOOL)visible {
+    _effectsGridView.showSongRegionOverlay = visible;
+    [_effectsGridView setNeedsDisplay];
+}
+
 /// Lightweight refresh after timing mark add/split/delete.
 /// Only reloads timing data in grid + ruler without resetting zoom, audio, or playhead.
 - (void)refreshTimingData {
@@ -2205,17 +2215,20 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)reloadSongRegionsForRuler {
     if (!_engineBridge || ![_engineBridge isSequenceLoaded]) {
         [_timelineRuler setSongRegions:NULL count:0];
+        [_effectsGridView setSongRegions:NULL count:0];
         return;
     }
 
     NSArray<NSDictionary *> *regions = [_engineBridge getSongStructureRegions];
     if (!regions || regions.count == 0) {
         [_timelineRuler setSongRegions:NULL count:0];
+        [_effectsGridView setSongRegions:NULL count:0];
         return;
     }
 
     NSInteger count = (NSInteger)regions.count;
     XLSongRegion *cRegions = (XLSongRegion *)calloc(count, sizeof(XLSongRegion));
+    XLSongRegionRenderInfo *gridRegions = (XLSongRegionRenderInfo *)calloc(count, sizeof(XLSongRegionRenderInfo));
 
     for (NSInteger i = 0; i < count; i++) {
         NSDictionary *d = regions[i];
@@ -2237,10 +2250,20 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         if (name) {
             strlcpy(cRegions[i].name, [name UTF8String], sizeof(cRegions[i].name));
         }
+
+        // Also populate grid renderer struct (just needs time + color)
+        gridRegions[i].startTimeMS = cRegions[i].startTimeMS;
+        gridRegions[i].endTimeMS = cRegions[i].endTimeMS;
+        gridRegions[i].colorR = (float)r;
+        gridRegions[i].colorG = (float)g;
+        gridRegions[i].colorB = (float)b;
+        gridRegions[i].colorA = (float)a;
     }
 
     [_timelineRuler setSongRegions:cRegions count:count];
+    [_effectsGridView setSongRegions:gridRegions count:(NSUInteger)count];
     free(cRegions);
+    free(gridRegions);
 }
 
 #pragma mark - XLEffectsGridDataSource
@@ -8202,6 +8225,108 @@ static const CGFloat kZoomFactor = 1.5;
     [_effectsGridView setPlaybackPositionMS:timeMS animated:NO];
     _timelineRuler.playbackPosition = timeMS / 1000.0;
     _transportBar.currentPositionMS = timeMS;
+}
+
+- (void)stemsContainer:(XLStemsContainerView *)container didRequestOnsetDetectionForStemAtIndex:(NSUInteger)stemIndex {
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) return;
+    if (stemIndex >= _stemManager.stems.count) return;
+
+    XLStemData *stem = _stemManager.stems[stemIndex];
+    if (!stem.audioData) return;
+
+    // Gather existing timing track names for duplicate validation
+    NSArray<NSDictionary *> *timingTracks = [self.engineBridge getTimingTracks];
+    NSMutableArray<NSString *> *existingNames = [NSMutableArray arrayWithCapacity:timingTracks.count];
+    for (NSDictionary *track in timingTracks) {
+        NSString *name = track[@"name"];
+        if (name) [existingNames addObject:name];
+    }
+
+    XLOnsetDetectionDialog *dialog = [[XLOnsetDetectionDialog alloc] init];
+    dialog.stemData = stem;
+    dialog.stemIndex = stemIndex;
+    dialog.existingTrackNames = existingNames;
+    dialog.onsetDelegate = self;
+
+    [dialog presentAsSheetForWindow:self.view.window completion:^(NSModalResponse response) {
+        if (response == NSModalResponseOK) {
+            NSString *trackName = dialog.trackName;
+            NSArray<NSNumber *> *onsets = dialog.detectedOnsets;
+
+            // Create empty timing track
+            BOOL success = [self.engineBridge createTimingTrack:trackName];
+            if (!success) {
+                NSLog(@"XLSequencerViewController: Failed to create timing track '%@'", trackName);
+                return;
+            }
+
+            // Batch-create timing marks
+            for (NSUInteger i = 0; i < onsets.count; i++) {
+                NSInteger startMS = onsets[i].integerValue;
+                NSInteger endMS;
+                if (i + 1 < onsets.count) {
+                    endMS = onsets[i + 1].integerValue;
+                } else {
+                    // Last mark extends one frame past start
+                    NSInteger frameDuration = (self->_frameRate > 0) ? (1000 / self->_frameRate) : 50;
+                    endMS = startMS + frameDuration;
+                }
+                [self.engineBridge createTimingMark:trackName layer:0
+                                        startTimeMS:startMS endTimeMS:endMS label:@""];
+            }
+
+            // Activate and refresh
+            [self.engineBridge setActiveTimingTrack:trackName];
+            [self populateTimingTrackSelector];
+            [self reloadTimingMarksForRuler];
+            [self reloadSequenceData];
+
+            NSLog(@"XLSequencerViewController: Created timing track '%@' with %lu onset marks",
+                  trackName, (unsigned long)onsets.count);
+        }
+
+        // Clear preview markers regardless
+        [self->_stemsContainerView setOnsetPreviewTimesMS:nil forStemAtIndex:stemIndex];
+        self->_timelineRuler.previewTimingMarks = nil;
+    }];
+}
+
+- (void)stemsContainer:(XLStemsContainerView *)container didRequestEditStemAtIndex:(NSUInteger)stemIndex {
+    // TODO: Implement stem editing dialog
+    NSLog(@"XLSequencerViewController: Edit stem at index %lu (not yet implemented)", (unsigned long)stemIndex);
+}
+
+- (void)stemsContainer:(XLStemsContainerView *)container didRequestRemoveStemAtIndex:(NSUInteger)stemIndex {
+    if (stemIndex >= _stemManager.stems.count) return;
+    XLStemData *stem = _stemManager.stems[stemIndex];
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Remove \"%@\"?", stem.name];
+    alert.informativeText = @"This will remove the stem from the sequence. The audio file will not be deleted.";
+    [alert addButtonWithTitle:@"Remove"];
+    [alert addButtonWithTitle:@"Cancel"];
+    alert.alertStyle = NSAlertStyleWarning;
+
+    [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            [self->_stemManager removeStemAtIndex:stemIndex];
+            [self->_stemsContainerView reloadStems];
+        }
+    }];
+}
+
+#pragma mark - XLOnsetDetectionDialogDelegate
+
+- (void)onsetDetectionDialog:(XLOnsetDetectionDialog *)dialog
+       didUpdatePreviewOnsets:(NSArray<NSNumber *> *)onsetTimesMS
+                forStemIndex:(NSUInteger)stemIndex {
+    [_stemsContainerView setOnsetPreviewTimesMS:onsetTimesMS forStemAtIndex:stemIndex];
+    _timelineRuler.previewTimingMarks = onsetTimesMS;
+}
+
+- (void)onsetDetectionDialogDidDismiss:(XLOnsetDetectionDialog *)dialog {
+    [_stemsContainerView setOnsetPreviewTimesMS:nil forStemAtIndex:dialog.stemIndex];
+    _timelineRuler.previewTimingMarks = nil;
 }
 
 #pragma mark - Audio Stems Import

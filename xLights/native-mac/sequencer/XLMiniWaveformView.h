@@ -39,4 +39,8 @@ static const CGFloat kMiniWaveformHeight = 30.0;
 /// Current cursor (mouse hover) position in milliseconds (-1 = hidden).
 @property (nonatomic, assign) CGFloat cursorPositionMS;
 
+/// Array of onset preview times in milliseconds (nil = no preview).
+/// Orange vertical lines drawn at these positions.
+@property (nonatomic, copy, nullable) NSArray<NSNumber *> *onsetPreviewTimesMS;
+
 @end

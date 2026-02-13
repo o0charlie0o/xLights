@@ -518,6 +518,20 @@ static const NSInteger kTimingTagCount = 10;
         CGContextSetGrayFillColor(ctx, 0.3, 0.4);
         CGContextFillRect(ctx, CGRectMake(seqEndX, 0, width - seqEndX, height));
     }
+
+    // Draw preview timing marks (translucent orange lines)
+    if (_previewTimingMarks.count > 0) {
+        CGContextSetRGBStrokeColor(ctx, 1.0, 0.6, 0.0, 0.4);
+        CGContextSetLineWidth(ctx, 1.0);
+        for (NSNumber *timeNum in _previewTimingMarks) {
+            CGFloat timeMS = timeNum.doubleValue;
+            CGFloat x = (timeMS * _zoomLevel) - _scrollOffset;
+            if (x < -1 || x > width + 1) continue;
+            CGContextMoveToPoint(ctx, x, 0);
+            CGContextAddLineToPoint(ctx, x, height);
+        }
+        CGContextStrokePath(ctx);
+    }
 }
 
 #pragma mark - Tick Interval Calculation
@@ -690,6 +704,11 @@ static const NSInteger kTimingTagCount = 10;
 
 - (void)reloadSongRegions {
     [_songRegionsLayer setNeedsDisplay];
+}
+
+- (void)setPreviewTimingMarks:(NSArray<NSNumber *> *)previewTimingMarks {
+    _previewTimingMarks = [previewTimingMarks copy];
+    [self.layer setNeedsDisplay];
 }
 
 #pragma mark - Scrolling
