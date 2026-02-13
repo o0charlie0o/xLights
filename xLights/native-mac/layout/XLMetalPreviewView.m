@@ -843,6 +843,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         // Successfully got a drawable — clear the content dirty flag
         _contentDirty = NO;
 
+        // Rebuild model vertices if selection/highlight changed
+        if (_modelVerticesDirty) {
+            _modelVerticesDirty = NO;
+            [self buildModelVertices];
+        }
+
         CGSize drawableSize = _mlayer.drawableSize;
         if (_renderLogCount < 5) {
             NSLog(@"[HousePreview] renderFrame: drawable OK, size=%.0fx%.0f, modelVertexCount=%lu, gridVertexCount=%lu",
@@ -1098,6 +1104,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)highlightModel:(NSString *)modelName {
     _highlightedModelName = modelName;
+    _modelVerticesDirty = YES;
     _contentDirty = YES;
 }
 
@@ -1168,6 +1175,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (modelName) {
         [_selectedModelNamesSet addObject:modelName];
     }
+
+    _modelVerticesDirty = YES;
 
     if (!modelName) {
         [self clearModelSelection];
@@ -3455,6 +3464,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _isManipulatingHandle = NO;
     _isManipulatingPolylinePoint = NO;
     _activeHandleType = XLHandleTypeNone;
+    _modelVerticesDirty = YES;
     _contentDirty = YES;
 }
 
