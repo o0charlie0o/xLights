@@ -401,36 +401,37 @@
         positionMS = _durationMS;
     }
 
-    // Snap to frame boundary
+    // Snap to frame boundary for rendering only (UI shows precise position)
+    NSInteger renderPositionMS = positionMS;
     if (_frameTimeMS > 0) {
-        positionMS = (positionMS / _frameTimeMS) * _frameTimeMS;
+        renderPositionMS = (positionMS / _frameTimeMS) * _frameTimeMS;
     }
 
-    _positionMS = positionMS;
+    _positionMS = renderPositionMS;
 
-    // Seek audio
+    // Seek audio to precise position (audio is continuous, no need to snap)
     if (_useNativeAudio && _audioPlayer.isLoaded) {
         [_audioPlayer seekToPosition:(CGFloat)positionMS];
     }
 
-    // Update engine position (for rendering, not audio)
-    [_engineBridge seek:positionMS];
+    // Update engine position at frame boundary (for rendering)
+    [_engineBridge seek:renderPositionMS];
 
-    // If playing, update start reference
+    // If playing, update start reference with precise position
     if (_isPlaying && !_isPaused) {
         _playbackStartTime = CFAbsoluteTimeGetCurrent();
         _playbackStartPositionMS = positionMS;
     }
 
-    // Render the frame at the new position
-    [self renderFrameAtTime:positionMS];
+    // Render the frame at the snapped position
+    [self renderFrameAtTime:renderPositionMS];
 
     // Update preview position
     if (_previewView) {
         _previewView.playbackPositionMS = positionMS;
     }
 
-    // Notify delegate
+    // Notify delegate with precise position for smooth UI
     if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
         [_delegate playbackController:self didUpdatePositionMS:positionMS];
     }

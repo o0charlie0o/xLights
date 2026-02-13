@@ -159,6 +159,12 @@
 /// @param viewWidth The width of the view in points.
 - (void)zoomToFitSequenceLength:(CGFloat)sequenceLengthMS viewWidth:(CGFloat)viewWidth;
 
+/// Zoom to fit a specific time range in the view with 10% padding.
+/// @param startMS The start of the time range in milliseconds.
+/// @param endMS The end of the time range in milliseconds.
+/// @param viewWidth The width of the view in points.
+- (void)zoomToTimeRangeFromMS:(CGFloat)startMS toMS:(CGFloat)endMS viewWidth:(CGFloat)viewWidth;
+
 /// Zoom centered on the current playhead position.
 /// @param zoomLevel The new zoom level.
 /// @param playheadMS The current playhead position in milliseconds.

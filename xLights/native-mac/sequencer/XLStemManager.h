@@ -45,6 +45,12 @@ static const NSUInteger kStemBucketCount = 32768;
 /// Remove a stem at the given index.
 - (void)removeStemAtIndex:(NSUInteger)index;
 
+/// Move a stem from one index to another.
+- (void)moveStemAtIndex:(NSUInteger)from toIndex:(NSUInteger)to;
+
+/// Update a stem's display name and/or waveform color.
+- (void)updateStemAtIndex:(NSUInteger)index name:(NSString *)name color:(NSColor *)color;
+
 /// Remove all stems.
 - (void)removeAllStems;
 

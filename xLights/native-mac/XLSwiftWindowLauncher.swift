@@ -225,6 +225,20 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Set the house preview visibility state (called from ObjC).
+    @objc public func setHousePreviewVisible(_ visible: Bool) {
+        DispatchQueue.main.async {
+            sSwiftAppState?.housePreviewVisible = visible
+        }
+    }
+
+    /// Set the snap-to-timing enabled state (called from ObjC).
+    @objc public func setSnapEnabled(_ enabled: Bool) {
+        DispatchQueue.main.async {
+            sSwiftAppState?.snapEnabled = enabled
+        }
+    }
+
     // MARK: - Top Panel Toggles
 
     /// Toggle the Effects palette panel visibility.

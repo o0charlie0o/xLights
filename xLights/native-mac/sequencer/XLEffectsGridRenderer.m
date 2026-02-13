@@ -1268,6 +1268,44 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
         }
     }
 
+    // Draw cyan triangle indicators in the top-right corner of linked symbol effects.
+    {
+        static const NSUInteger kMaxSymbolVertices = 2048;
+        SimpleVertex symbolVertices[kMaxSymbolVertices];
+        NSUInteger symbolVertexCount = 0;
+
+        simd_float4 cyanColor = simd_make_float4(0.0, 0.85, 0.85, 0.9);
+
+        for (NSUInteger ei = 0; ei < effectCount; ei++) {
+            XLEffectRenderInfo info = effects[ei];
+            if (!info.isLinkedToSymbol || info.isTimingMark) continue;
+
+            if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+            CGFloat symYBase = rowYPosition(info.row, fp);
+            if (symYBase + rowHeight < -1 || symYBase > viewSize.height + 1) continue;
+
+            CGFloat sx2 = info.endTimeMS * zoomLevel - scrollOffset.x;
+            CGFloat sy1 = symYBase + kEffectBlockInset;
+
+            CGFloat triSize = MIN(8.0, rowHeight * 0.4);
+
+            if (symbolVertexCount + 3 > kMaxSymbolVertices) break;
+            symbolVertices[symbolVertexCount++] = (SimpleVertex){ simd_make_float2(sx2 - triSize, sy1), cyanColor };
+            symbolVertices[symbolVertexCount++] = (SimpleVertex){ simd_make_float2(sx2, sy1), cyanColor };
+            symbolVertices[symbolVertexCount++] = (SimpleVertex){ simd_make_float2(sx2, sy1 + triSize), cyanColor };
+        }
+
+        if (symbolVertexCount > 0) {
+            id<MTLBuffer> symbolBuffer = [_device newBufferWithBytes:symbolVertices
+                                                              length:symbolVertexCount * sizeof(SimpleVertex)
+                                                             options:MTLResourceStorageModeShared];
+            [encoder setRenderPipelineState:_linePipeline];
+            [encoder setVertexBuffer:symbolBuffer offset:0 atIndex:0];
+            [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:symbolVertexCount];
+        }
+    }
+
     // Draw selection outlines on top using pre-allocated triple-buffered buffer
     if (outlineVertexCount > 0) {
         [encoder setRenderPipelineState:_outlinePipeline];

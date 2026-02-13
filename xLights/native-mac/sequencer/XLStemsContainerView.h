@@ -20,7 +20,7 @@
 static const CGFloat kStemsHeaderHeight = 22.0;
 
 /// Resize handle height.
-static const CGFloat kStemsResizeHandleHeight = 6.0;
+static const CGFloat kStemsResizeHandleHeight = 2.0;
 
 /// Default expanded height.
 static const CGFloat kStemsDefaultExpandedHeight = 120.0;
@@ -42,6 +42,12 @@ static const CGFloat kStemsMaxExpandedHeight = 400.0;
 
 /// Called when the Import from Folder button is clicked.
 - (void)stemsContainerDidRequestImportFromFolder:(XLStemsContainerView *)container;
+
+/// Called when a stem waveform is clicked to seek.
+- (void)stemsContainer:(XLStemsContainerView *)container didSeekToTimeMS:(CGFloat)timeMS;
+
+/// Called when the cursor (hover) position changes over the stems area (-1 when exiting).
+- (void)stemsContainer:(XLStemsContainerView *)container didMoveCursorToTimeMS:(CGFloat)timeMS;
 
 @end
 
@@ -73,11 +79,15 @@ static const CGFloat kStemsMaxExpandedHeight = 400.0;
 - (void)setZoomLevel:(CGFloat)zoomLevel;
 - (void)setSequenceLengthMS:(CGFloat)lengthMS;
 - (void)setPlaybackPositionMS:(CGFloat)positionMS;
+- (void)setCursorPositionMS:(CGFloat)positionMS;
 
 /// Rebuild mini waveform subviews from stem manager data.
 - (void)reloadStems;
 
 /// Current total height (0 if collapsed, header + content + handle if expanded).
 - (CGFloat)currentHeight;
+
+/// Update the saved expanded height (called by resize handle during drag).
+- (void)setExpandedHeight:(CGFloat)height;
 
 @end

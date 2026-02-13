@@ -57,4 +57,11 @@
 /// @return YES if renamed successfully.
 - (BOOL)renamePreset:(NSString *)oldName toName:(NSString *)newName;
 
+/// Returns the name of the currently selected preset in the outline view, or nil if none selected.
+- (NSString *)selectedPresetName;
+
+/// Returns the full preset data dictionary for the currently selected preset, or nil.
+/// Keys include: effectType, settings, palette, name, dateCreated.
+- (NSDictionary *)selectedPresetData;
+
 @end

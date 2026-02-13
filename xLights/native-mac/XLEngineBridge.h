@@ -803,6 +803,35 @@
 /// Returns array of phoneme strings (e.g. @[@"AI", @"etc", @"rest"]) or empty array if unknown
 - (NSArray<NSString *> *)getPhonemesForWord:(NSString *)word;
 
+#pragma mark - Track Folders
+
+/// Get all track folders.
+/// Returns array of dictionaries with: name, collapsed (BOOL)
+- (NSArray<NSDictionary *> *)getTrackFolders;
+
+/// Create a new track folder.
+/// @return YES if created successfully
+- (BOOL)createTrackFolder:(NSString *)name;
+
+/// Delete a track folder. Elements become ungrouped.
+/// @return YES if deleted successfully
+- (BOOL)deleteTrackFolder:(NSString *)name;
+
+/// Rename a track folder.
+/// @return YES if renamed successfully
+- (BOOL)renameTrackFolder:(NSString *)oldName toName:(NSString *)newName;
+
+/// Assign an element to a folder (nil or empty = remove from folder).
+/// @return YES if successful
+- (BOOL)setElement:(NSString *)elementName folder:(NSString * _Nullable)folderName;
+
+/// Get the folder name for an element (nil if not in a folder).
+- (NSString * _Nullable)getElementFolder:(NSString *)elementName;
+
+/// Set a track folder's collapsed state.
+/// @return YES if successful
+- (BOOL)setTrackFolderCollapsed:(NSString *)name collapsed:(BOOL)collapsed;
+
 #pragma mark - Song Structure Regions
 
 /// Get all song structure regions.

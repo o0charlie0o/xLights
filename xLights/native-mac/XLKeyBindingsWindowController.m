@@ -206,6 +206,7 @@ static XLKeyBindingsWindowController *sharedInstance = nil;
     [entries addObject:[XLKeyBindingEntry entryWithAction:@"Zoom In" shortcut:@"\u2318+" category:@"View"]];
     [entries addObject:[XLKeyBindingEntry entryWithAction:@"Zoom Out" shortcut:@"\u2318-" category:@"View"]];
     [entries addObject:[XLKeyBindingEntry entryWithAction:@"Zoom to Fit" shortcut:@"\u23180" category:@"View"]];
+    [entries addObject:[XLKeyBindingEntry entryWithAction:@"Zoom to Selection" shortcut:@"Y" category:@"View"]];
     [entries addObject:[XLKeyBindingEntry entryWithAction:@"Full Screen" shortcut:@"\u2303\u2318F" category:@"View"]];
 
     // -- Sequence / Transport --

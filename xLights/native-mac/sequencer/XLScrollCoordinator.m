@@ -160,7 +160,7 @@ static const CGFloat kDefaultZoom = 0.1;
     if (_isUpdatingViews) return;
 
     CGFloat clamped = [self clampHorizontalOffset:offsetX];
-    if (fabs(clamped - _horizontalScrollOffset) < 0.01) return;
+    if (clamped == _horizontalScrollOffset) return;
 
     _horizontalScrollOffset = clamped;
     [self syncHorizontalScrollToAllViewsExcept:view];
@@ -174,7 +174,7 @@ static const CGFloat kDefaultZoom = 0.1;
     if (_isUpdatingViews) return;
 
     CGFloat clamped = [self clampVerticalOffset:offsetY];
-    if (fabs(clamped - _verticalScrollOffset) < 0.01) return;
+    if (clamped == _verticalScrollOffset) return;
 
     _verticalScrollOffset = clamped;
     [self syncVerticalScrollToAllViewsExcept:view];
@@ -191,7 +191,7 @@ static const CGFloat kDefaultZoom = 0.1;
     if (_isUpdatingViews) return;
 
     CGFloat clamped = [self clampZoomLevel:zoomLevel];
-    if (fabs(clamped - _zoomLevel) < 0.00001) return;
+    if (clamped == _zoomLevel) return;
 
     CGFloat oldZoom = _zoomLevel;
     _zoomLevel = clamped;
@@ -399,6 +399,33 @@ static const CGFloat kDefaultZoom = 0.1;
 
     // Reset horizontal scroll to show from the beginning with margin
     _horizontalScrollOffset = -viewWidth * marginFraction;
+    _horizontalScrollOffset = [self clampHorizontalOffset:_horizontalScrollOffset];
+
+    [self syncZoomToAllViews];
+    [self syncHorizontalScrollToAllViews];
+
+    if ([_delegate respondsToSelector:@selector(scrollCoordinator:didChangeZoomLevel:)]) {
+        [_delegate scrollCoordinator:self didChangeZoomLevel:_zoomLevel];
+    }
+    if ([_delegate respondsToSelector:@selector(scrollCoordinator:didChangeHorizontalScrollOffset:)]) {
+        [_delegate scrollCoordinator:self didChangeHorizontalScrollOffset:_horizontalScrollOffset];
+    }
+}
+
+- (void)zoomToTimeRangeFromMS:(CGFloat)startMS toMS:(CGFloat)endMS viewWidth:(CGFloat)viewWidth {
+    if (startMS >= endMS || viewWidth <= 0) return;
+
+    // Add 10% padding on each side
+    CGFloat range = endMS - startMS;
+    CGFloat padding = range * 0.1;
+    CGFloat paddedStart = MAX(0, startMS - padding);
+    CGFloat paddedEnd = endMS + padding;
+
+    CGFloat newZoom = viewWidth / (paddedEnd - paddedStart);
+    newZoom = [self clampZoomLevel:newZoom];
+
+    _zoomLevel = newZoom;
+    _horizontalScrollOffset = paddedStart * newZoom;
     _horizontalScrollOffset = [self clampHorizontalOffset:_horizontalScrollOffset];
 
     [self syncZoomToAllViews];

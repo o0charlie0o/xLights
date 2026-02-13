@@ -31,6 +31,7 @@
         _scrollOffsetX = 0;
         _sequenceLengthMS = 60000;
         _playbackPositionMS = -1;
+        _cursorPositionMS = -1;
     }
     return self;
 }
@@ -76,6 +77,12 @@
 
 - (void)setPlaybackPositionMS:(CGFloat)playbackPositionMS {
     _playbackPositionMS = playbackPositionMS;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setCursorPositionMS:(CGFloat)cursorPositionMS {
+    if (fabs(cursorPositionMS - _cursorPositionMS) < 0.01) return;
+    _cursorPositionMS = cursorPositionMS;
     [self setNeedsDisplay:YES];
 }
 
@@ -307,6 +314,18 @@
     }
 
 playhead:
+    // Draw cursor line (white, semi-transparent — same as main waveform)
+    if (_cursorPositionMS >= 0 && _cursorPositionMS <= _sequenceLengthMS) {
+        CGFloat cursorX = [self pointXForTimeMS:_cursorPositionMS];
+        if (cursorX >= 0 && cursorX <= width) {
+            CGContextSetRGBStrokeColor(ctx, 1.0, 1.0, 1.0, 0.6);
+            CGContextSetLineWidth(ctx, 1.0);
+            CGContextMoveToPoint(ctx, cursorX, 0);
+            CGContextAddLineToPoint(ctx, cursorX, height);
+            CGContextStrokePath(ctx);
+        }
+    }
+
     // Draw playhead
     if (_playbackPositionMS >= 0) {
         CGFloat playheadX = [self pointXForTimeMS:_playbackPositionMS];

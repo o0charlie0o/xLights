@@ -19,6 +19,9 @@
 ///   - Menu bar key equivalents (Cmd+S, Cmd+N, etc.)
 ///   - XLKeyboardHandler bindings loaded from key_bindings.xml
 ///   - Built-in sequencer/effects grid shortcuts
+/// Posted when user saves changes in the key bindings editor.
+extern NSNotificationName const XLKeyBindingsDidChangeNotification;
+
 @interface XLKeyBindingsWindowController : NSWindowController <NSTableViewDelegate, NSTableViewDataSource, NSSearchFieldDelegate>
 
 /// Shared singleton instance.
@@ -29,5 +32,8 @@
 
 /// Reload bindings (e.g., after show folder changes).
 - (void)reloadBindings;
+
+/// Set the show folder path so bindings load/save from key_bindings.xml.
+- (void)setShowFolderPath:(NSString *)showFolderPath;
 
 @end

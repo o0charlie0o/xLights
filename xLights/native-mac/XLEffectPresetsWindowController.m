@@ -81,6 +81,7 @@ static NSString * const kPresetKeyDateCreated = @"dateCreated";
     window.title = @"Effect Presets";
     window.minSize = NSMakeSize(300, 350);
     window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    window.level = NSFloatingWindowLevel;
 
     self = [super initWithWindow:window];
     if (self) {
@@ -501,6 +502,18 @@ static NSString * const kPresetKeyDateCreated = @"dateCreated";
 
 - (void)setCurrentEffectId:(NSInteger)effectId {
     _currentEffectId = effectId;
+}
+
+- (NSString *)selectedPresetName {
+    XLPresetNode *selected = [self selectedPresetNode];
+    if (!selected || selected.isGroup) return nil;
+    return selected.name;
+}
+
+- (NSDictionary *)selectedPresetData {
+    XLPresetNode *selected = [self selectedPresetNode];
+    if (!selected || selected.isGroup) return nil;
+    return selected.presetData;
 }
 
 #pragma mark - NSOutlineViewDataSource

@@ -66,6 +66,7 @@ typedef struct {
     char label[XL_LABEL_MAX]; // Timing mark label text (phrases, words, phonemes)
     CGFloat fadeInMS;             // Fade in duration in milliseconds (0 = no fade)
     CGFloat fadeOutMS;            // Fade out duration in milliseconds (0 = no fade)
+    BOOL isLinkedToSymbol;        // YES if linked to a symbol (cyan triangle indicator)
 } XLEffectRenderInfo;
 
 /// Manages Metal rendering for the effects grid.

@@ -2759,8 +2759,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didMoveCursorToTimeMS:(CGFloat)timeMS
 {
-    // Forward cursor position to waveform view for synchronized cursor line
+    // Forward cursor position to waveform and stems for synchronized cursor line
     _waveformView.cursorPositionMS = timeMS;
+    [_stemsContainerView setCursorPositionMS:timeMS];
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -6229,6 +6230,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _transportBar.currentPositionMS = timeMS;
 }
 
+- (void)waveformView:(XLWaveformView *)view didMoveCursorToTimeMS:(CGFloat)timeMS {
+    [_stemsContainerView setCursorPositionMS:timeMS];
+}
+
 - (void)waveformView:(XLWaveformView *)view didChangeScrollOffset:(CGFloat)scrollOffsetX {
     // Use scroll coordinator for synchronized horizontal scroll
     [_scrollCoordinator viewDidScrollHorizontally:scrollOffsetX fromView:view];
@@ -6470,6 +6475,22 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 }
 
 - (void)handleZoomToSelection:(NSNotification *)notification {
+    [self zoomToSelectionOrWaveformRegion];
+}
+
+- (void)zoomToSelectionOrWaveformRegion {
+    // Priority 1: Waveform loop region selection
+    if (_waveformView.hasLoopRegion) {
+        CGFloat viewWidth = _effectsGridView.bounds.size.width;
+        if (viewWidth > 0) {
+            [_scrollCoordinator zoomToTimeRangeFromMS:_waveformView.loopRegionStartMS
+                                                toMS:_waveformView.loopRegionEndMS
+                                           viewWidth:viewWidth];
+            return;
+        }
+    }
+
+    // Priority 2: Selected effects
     [_effectsGridView zoomToSelection];
 }
 
@@ -7356,10 +7377,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // MARK: - Zoom to Selection (xlmac-360v)
 
-    // ZOOM_SEL: Zoom timeline to fit the selected effects
+    // ZOOM_SEL: Zoom timeline to fit selected effects or waveform region
     if ([actionType isEqualToString:@"ZOOM_SEL"]) {
-        [_effectsGridView zoomToSelection];
-        NSLog(@"XLSequencerViewController: ZOOM_SEL - zoomed to selection");
+        [self zoomToSelectionOrWaveformRegion];
+        NSLog(@"XLSequencerViewController: ZOOM_SEL - zoomed to selection/region");
         return YES;
     }
 
@@ -8165,6 +8186,22 @@ static const CGFloat kZoomFactor = 1.5;
 
 - (void)stemsContainerDidRequestImportFromFolder:(XLStemsContainerView *)container {
     [self importStemsFromFolder:nil];
+}
+
+- (void)stemsContainer:(XLStemsContainerView *)container didMoveCursorToTimeMS:(CGFloat)timeMS {
+    _waveformView.cursorPositionMS = timeMS;
+}
+
+- (void)stemsContainer:(XLStemsContainerView *)container didSeekToTimeMS:(CGFloat)timeMS {
+    if (_playbackController) {
+        [_playbackController seekToPositionMS:(NSInteger)timeMS];
+    } else {
+        [self.engineBridge seek:(NSInteger)timeMS];
+    }
+
+    [_effectsGridView setPlaybackPositionMS:timeMS animated:NO];
+    _timelineRuler.playbackPosition = timeMS / 1000.0;
+    _transportBar.currentPositionMS = timeMS;
 }
 
 #pragma mark - Audio Stems Import

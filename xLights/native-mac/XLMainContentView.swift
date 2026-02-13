@@ -39,6 +39,10 @@ final class XLAppState {
     var isRendering: Bool = false
     var renderProgress: Double = 0.0
 
+    // State synced from ObjC sequencer VC
+    var housePreviewVisible: Bool = false
+    var snapEnabled: Bool = true
+
     // Shared engine bridge - created once, passed to all view controllers
     let engineBridge: XLEngineBridge
 

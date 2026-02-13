@@ -447,7 +447,7 @@ static std::vector<KeyBinding> createDefaultBindings() {
     // Zoom
     bindings.emplace_back("+", false, "ZOOM_IN");
     bindings.emplace_back("-", false, "ZOOM_OUT");
-    bindings.emplace_back("", false, "ZOOM_SEL");
+    bindings.emplace_back("Y", false, "ZOOM_SEL");
 
     // Random
     bindings.emplace_back("R", false, "RANDOM", false, false, true);

@@ -36,4 +36,7 @@ static const CGFloat kMiniWaveformHeight = 30.0;
 /// Current playback position in milliseconds (for playhead line).
 @property (nonatomic, assign) CGFloat playbackPositionMS;
 
+/// Current cursor (mouse hover) position in milliseconds (-1 = hidden).
+@property (nonatomic, assign) CGFloat cursorPositionMS;
+
 @end

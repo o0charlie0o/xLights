@@ -49,6 +49,12 @@ struct NativeEffectLayer;
 struct NativeElement;
 struct UndoAction;
 
+/// Track folder for visual grouping of sequencer rows (UI-only, no effect on rendering).
+struct TrackFolder {
+    std::string name;
+    bool collapsed = false;
+};
+
 /// Song structure region for annotating sections of the sequence (Intro, Verse, Chorus, etc.)
 struct SongStructureRegion {
     int64_t regionId = 0;
@@ -335,6 +341,42 @@ public:
     /// Remove all song structure regions.
     void clearSongStructure();
 
+    // --- Track Folder Operations ---
+
+    /// Get all track folders.
+    std::vector<TrackFolder> getTrackFolders() const;
+
+    /// Create a new track folder.
+    /// @param name Folder name (must be unique)
+    /// @return true if created successfully
+    bool createTrackFolder(const std::string& name);
+
+    /// Delete a track folder. Elements in the folder become ungrouped.
+    /// @param name Folder name to delete
+    /// @return true if deleted successfully
+    bool deleteTrackFolder(const std::string& name);
+
+    /// Rename a track folder.
+    /// @param oldName Current folder name
+    /// @param newName New folder name
+    /// @return true if renamed successfully
+    bool renameTrackFolder(const std::string& oldName, const std::string& newName);
+
+    /// Assign an element to a folder (empty string = ungroup).
+    /// @param elementName Name of the element
+    /// @param folderName Name of the folder (empty to remove from folder)
+    /// @return true if successful
+    bool setElementFolder(const std::string& elementName, const std::string& folderName);
+
+    /// Get the folder name for an element (empty if not in a folder).
+    std::string getElementFolder(const std::string& elementName) const;
+
+    /// Set a track folder's collapsed state.
+    /// @param name Folder name
+    /// @param collapsed Whether the folder should be collapsed
+    /// @return true if successful
+    bool setTrackFolderCollapsed(const std::string& name, bool collapsed);
+
     /// Mark the sequence as modified.
     void setModified(bool modified);
 
@@ -385,6 +427,9 @@ private:
     std::deque<std::unique_ptr<UndoGroup>> _redoStack;
     std::unique_ptr<UndoGroup> _currentUndoGroup;
     static constexpr size_t kMaxUndoLevels = 100;
+
+    // Track folders (UI-only grouping)
+    std::vector<TrackFolder> _trackFolders;
 
     // Song structure regions
     std::vector<SongStructureRegion> _songRegions;

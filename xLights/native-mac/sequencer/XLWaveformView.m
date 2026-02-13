@@ -912,11 +912,19 @@ static CVReturn waveformDisplayLinkCallback(CVDisplayLinkRef displayLink,
 
     // Update cursor position (will trigger redraw via setter)
     self.cursorPositionMS = timeMS;
+
+    if ([_delegate respondsToSelector:@selector(waveformView:didMoveCursorToTimeMS:)]) {
+        [_delegate waveformView:self didMoveCursorToTimeMS:timeMS];
+    }
 }
 
 - (void)mouseExited:(NSEvent *)event {
     // Clear cursor position when mouse leaves
     self.cursorPositionMS = -1;
+
+    if ([_delegate respondsToSelector:@selector(waveformView:didMoveCursorToTimeMS:)]) {
+        [_delegate waveformView:self didMoveCursorToTimeMS:-1];
+    }
 }
 
 - (void)scrollWheel:(NSEvent *)event {

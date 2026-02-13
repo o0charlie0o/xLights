@@ -18,6 +18,7 @@ static const CGFloat kIconSize = 14.0;
 static const CGFloat kIconPadding = 3.0;
 static const CGFloat kIndentWidth = 16.0;
 static const CGFloat kDragInsertionLineHeight = 2.0;
+static const CGFloat kDragDistanceThreshold = 4.0;
 
 #pragma mark - Row Cell Layer
 
@@ -29,6 +30,8 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 @property (nonatomic, assign) XLElementType elementType;
 @property (nonatomic, assign) NSInteger indentLevel;
 @property (nonatomic, assign) NSInteger timingColorIndex;
+@property (nonatomic, assign) BOOL isFolder;
+@property (nonatomic, assign) BOOL folderCollapsed;
 @property (nonatomic, copy) NSString *name;
 @end
 
@@ -46,9 +49,19 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 }
 
 @property (nonatomic, assign) NSInteger cachedRowCount;
+@property (nonatomic, readwrite, strong) NSMutableIndexSet *selectedRows;
 @property (nonatomic, strong) CALayer *insertionIndicatorLayer;
+@property (nonatomic, strong) CALayer *folderDropHighlightLayer;
 @property (nonatomic, assign) NSInteger dragSourceRow;
 @property (nonatomic, assign) NSInteger dragTargetRow;
+@property (nonatomic, assign) NSInteger dragOntoFolderRow;
+@property (nonatomic, assign) BOOL dragSourceIsFolder;
+@property (nonatomic, assign) BOOL dragSourceIsTiming;
+@property (nonatomic, assign) BOOL deferredDeselect;
+@property (nonatomic, assign) NSInteger deferredDeselectRow;
+@property (nonatomic, assign) BOOL didDrag;
+@property (nonatomic, assign) BOOL dragInitiated;
+@property (nonatomic, assign) NSPoint mouseDownPoint;
 @property (nonatomic, strong) NSTrackingArea *trackingArea;
 
 @end
@@ -64,9 +77,13 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         _rowHeight = 22.0;
         _verticalScrollOffset = 0.0;
         _selectedRow = -1;
+        _selectedRows = [NSMutableIndexSet indexSet];
         _cachedRowCount = 0;
         _dragSourceRow = -1;
         _dragTargetRow = -1;
+        _dragOntoFolderRow = -1;
+        _dragSourceIsFolder = NO;
+        _dragSourceIsTiming = NO;
 
         // Initialize C array for row cell layers
         _rowCellLayersCapacity = 64;
@@ -77,6 +94,14 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         _insertionIndicatorLayer.backgroundColor = CGColorCreateGenericRGB(0.3, 0.6, 1.0, 1.0);
         _insertionIndicatorLayer.hidden = YES;
         [self.layer addSublayer:_insertionIndicatorLayer];
+
+        _folderDropHighlightLayer = [CALayer layer];
+        _folderDropHighlightLayer.backgroundColor = CGColorCreateGenericRGB(0.85, 0.72, 0.40, 0.15);
+        _folderDropHighlightLayer.borderColor = CGColorCreateGenericRGB(0.85, 0.72, 0.40, 0.6);
+        _folderDropHighlightLayer.borderWidth = 1.5;
+        _folderDropHighlightLayer.cornerRadius = 3.0;
+        _folderDropHighlightLayer.hidden = YES;
+        [self.layer addSublayer:_folderDropHighlightLayer];
 
         [self registerForDraggedTypes:@[NSPasteboardTypeString]];
     }
@@ -130,6 +155,11 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 - (void)setSelectedRow:(NSInteger)selectedRow {
     NSInteger oldSelected = _selectedRow;
     _selectedRow = selectedRow;
+    // Keep selectedRows in sync for single-select callers
+    [_selectedRows removeAllIndexes];
+    if (selectedRow >= 0) {
+        [_selectedRows addIndex:(NSUInteger)selectedRow];
+    }
     if (oldSelected != selectedRow) {
         [self updateRowAppearance];
     }
@@ -176,6 +206,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     }
 
     [self.layer addSublayer:_insertionIndicatorLayer];
+    [self.layer addSublayer:_folderDropHighlightLayer];
 }
 
 - (XLRowCellLayer *)createCellForRow:(NSInteger)row {
@@ -194,6 +225,12 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
             if ([_dataSource respondsToSelector:@selector(rowHeadings:timingColorIndexForRow:)]) {
                 cell.timingColorIndex = [_dataSource rowHeadings:self timingColorIndexForRow:row];
             }
+            if ([_dataSource respondsToSelector:@selector(rowHeadings:isFolderAtRow:)]) {
+                cell.isFolder = [_dataSource rowHeadings:self isFolderAtRow:row];
+            }
+            if ([_dataSource respondsToSelector:@selector(rowHeadings:isFolderCollapsedAtRow:)]) {
+                cell.folderCollapsed = [_dataSource rowHeadings:self isFolderCollapsedAtRow:row];
+            }
         } @catch (NSException *exception) {
             NSLog(@"XLRowHeadingsView: Exception getting data for row %ld: %@ - %@",
                   (long)row, exception.name, exception.reason);
@@ -211,7 +248,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         cell.indentLevel = 0;
     }
 
-    cell.isSelected = (row == _selectedRow);
+    cell.isSelected = (row >= 0 && [_selectedRows containsIndex:(NSUInteger)row]);
     [cell setNeedsDisplay];
 
     return cell;
@@ -277,7 +314,7 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     for (NSUInteger i = 0; i < _rowCellLayersCount; i++) {
         XLRowCellLayer *cell = _rowCellLayersData[i];
         if (!cell) continue;
-        BOOL shouldBeSelected = (cell.row == _selectedRow);
+        BOOL shouldBeSelected = (cell.row >= 0 && [_selectedRows containsIndex:(NSUInteger)cell.row]);
         if (cell.isSelected != shouldBeSelected) {
             cell.isSelected = shouldBeSelected;
             [cell setNeedsDisplay];
@@ -336,6 +373,13 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         XLTimingTrackColor(cell.timingColorIndex, &cr, &cg, &cb);
         CGFloat alpha = cell.isSelected ? 0.7 : 0.45;
         CGContextSetRGBFillColor(ctx, cr, cg, cb, alpha);
+    } else if (cell.isFolder) {
+        // Folder header: distinct warm gray background
+        if (cell.isSelected) {
+            CGContextSetRGBFillColor(ctx, 0.28, 0.26, 0.22, 1.0);
+        } else {
+            CGContextSetRGBFillColor(ctx, 0.20, 0.19, 0.17, 1.0);
+        }
     } else if (cell.isSelected) {
         CGContextSetRGBFillColor(ctx, 0.22, 0.36, 0.55, 1.0);
     } else if (isEvenRow) {
@@ -364,23 +408,40 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     }
     xCursor += kDisclosureSize + kIconPadding;
 
-    // Element type icon (SF Symbol)
-    [self drawIconForElementType:cell.elementType
-                       inContext:ctx
-                              at:CGPointMake(xCursor, (h - kIconSize) / 2.0)
-                            size:kIconSize];
+    // Element type icon (SF Symbol) — folder rows use folder icon
+    if (cell.isFolder) {
+        NSString *folderSymbol = cell.folderCollapsed ? @"folder" : @"folder.fill";
+        [self drawSFSymbolInContext:ctx
+                               name:folderSymbol
+                                 at:CGPointMake(xCursor, (h - kIconSize) / 2.0)
+                               size:kIconSize
+                              color:CGColorCreateGenericRGB(0.85, 0.72, 0.40, 1.0)];
+    } else {
+        [self drawIconForElementType:cell.elementType
+                           inContext:ctx
+                                  at:CGPointMake(xCursor, (h - kIconSize) / 2.0)
+                                size:kIconSize];
+    }
     xCursor += kIconSize + kIconPadding;
 
     // Name label (truncated with ellipsis) - extends to right edge with padding
     CGFloat maxTextWidth = w - kIconPadding - xCursor;
     if (maxTextWidth > 0 && cell.name.length > 0) {
+        CGColorRef textColor;
+        if (cell.isFolder) {
+            textColor = cell.isSelected
+                ? CGColorCreateGenericRGB(1.0, 1.0, 1.0, 1.0)
+                : CGColorCreateGenericRGB(0.90, 0.82, 0.55, 1.0);
+        } else {
+            textColor = cell.isSelected
+                ? CGColorCreateGenericRGB(1.0, 1.0, 1.0, 1.0)
+                : CGColorCreateGenericRGB(0.85, 0.85, 0.85, 1.0);
+        }
         [self drawTextInContext:ctx
                            text:cell.name
                            rect:CGRectMake(xCursor, 0, maxTextWidth, h)
-                      textColor:cell.isSelected
-                                    ? CGColorCreateGenericRGB(1.0, 1.0, 1.0, 1.0)
-                                    : CGColorCreateGenericRGB(0.85, 0.85, 0.85, 1.0)
-                       fontSize:11.0];
+                      textColor:textColor
+                       fontSize:cell.isFolder ? 11.5 : 11.0];
     }
 }
 
@@ -461,6 +522,40 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     [NSGraphicsContext restoreGraphicsState];
 }
 
+- (void)drawSFSymbolInContext:(CGContextRef)ctx
+                         name:(NSString *)symbolName
+                           at:(CGPoint)origin
+                         size:(CGFloat)size
+                        color:(CGColorRef)tintColor {
+    NSImage *symbol = [NSImage imageWithSystemSymbolName:symbolName
+                                accessibilityDescription:nil];
+    if (!symbol) return;
+
+    NSGraphicsContext *gc = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:gc];
+
+    NSColor *nsColor = [NSColor colorWithCGColor:tintColor];
+    NSImageSymbolConfiguration *sizeConfig =
+        [NSImageSymbolConfiguration configurationWithPointSize:size * 0.7
+                                                       weight:NSFontWeightMedium
+                                                        scale:NSImageSymbolScaleSmall];
+    NSImageSymbolConfiguration *colorConfig =
+        [NSImageSymbolConfiguration configurationWithHierarchicalColor:nsColor];
+    NSImageSymbolConfiguration *combined = [sizeConfig configurationByApplyingConfiguration:colorConfig];
+    NSImage *configured = [symbol imageWithSymbolConfiguration:combined];
+
+    NSRect iconRect = NSMakeRect(origin.x, origin.y, size, size);
+    [configured drawInRect:iconRect
+              fromRect:NSZeroRect
+             operation:NSCompositingOperationSourceOver
+              fraction:0.9
+        respectFlipped:YES
+                 hints:nil];
+
+    [NSGraphicsContext restoreGraphicsState];
+}
+
 - (void)drawTextInContext:(CGContextRef)ctx
                      text:(NSString *)text
                      rect:(CGRect)rect
@@ -523,6 +618,15 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
     NSInteger row = [self rowAtPoint:point];
 
+    // Always reset drag state before any early returns to prevent stale state
+    _dragInitiated = NO;
+    _didDrag = NO;
+    _deferredDeselect = NO;
+    _mouseDownPoint = point;
+
+    NSLog(@"[RowDrag] mouseDown row=%ld pt=(%.1f,%.1f) clicks=%ld",
+          (long)row, point.x, point.y, (long)event.clickCount);
+
     if (row < 0) return;
 
     // Double-click: toggle expand/collapse
@@ -543,15 +647,60 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
         return;
     }
 
-    // Single click: select row
-    self.selectedRow = row;
+    // Multi-select: Cmd-click toggles individual row, Shift-click selects range
+    NSUInteger modifiers = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+
+    if (modifiers & NSEventModifierFlagCommand) {
+        // Cmd-click: toggle this row in/out of selection
+        if ([_selectedRows containsIndex:(NSUInteger)row]) {
+            [_selectedRows removeIndex:(NSUInteger)row];
+        } else {
+            [_selectedRows addIndex:(NSUInteger)row];
+        }
+        _selectedRow = row;
+        [self updateRowAppearance];
+    } else if (modifiers & NSEventModifierFlagShift) {
+        // Shift-click: select range from anchor (selectedRow) to clicked row
+        NSInteger anchor = _selectedRow;
+        if (anchor < 0) anchor = row;
+        NSInteger lo = MIN(anchor, row);
+        NSInteger hi = MAX(anchor, row);
+        [_selectedRows removeAllIndexes];
+        [_selectedRows addIndexesInRange:NSMakeRange((NSUInteger)lo, (NSUInteger)(hi - lo + 1))];
+        // Keep _selectedRow as the anchor, don't change it
+        [self updateRowAppearance];
+    } else if (_selectedRows.count > 1 && [_selectedRows containsIndex:(NSUInteger)row]) {
+        // Plain click on an already-selected row in a multi-selection:
+        // Defer the single-select to mouseUp so a drag can use the full selection
+        _deferredDeselect = YES;
+        _deferredDeselectRow = row;
+        _selectedRow = row;
+    } else {
+        // Plain click: single select
+        _selectedRow = row;
+        [_selectedRows removeAllIndexes];
+        [_selectedRows addIndex:(NSUInteger)row];
+        [self updateRowAppearance];
+    }
+
     if ([_delegate respondsToSelector:@selector(rowHeadings:didSelectRow:)]) {
         [_delegate rowHeadings:self didSelectRow:row];
     }
 }
 
 - (void)mouseUp:(NSEvent *)event {
-    // Reserved for drag completion if needed
+    NSLog(@"[RowDrag] mouseUp didDrag=%d dragInitiated=%d deferredDeselect=%d",
+          _didDrag, _dragInitiated, _deferredDeselect);
+    // If we deferred a deselect (plain click on multi-selected row) and no drag happened,
+    // now reduce to single selection
+    if (_deferredDeselect && !_didDrag) {
+        _selectedRow = _deferredDeselectRow;
+        [_selectedRows removeAllIndexes];
+        [_selectedRows addIndex:(NSUInteger)_deferredDeselectRow];
+        [self updateRowAppearance];
+    }
+    _deferredDeselect = NO;
+    _didDrag = NO;
 }
 
 - (void)rightMouseDown:(NSEvent *)event {
@@ -560,7 +709,10 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 
     if (row < 0) return;
 
-    self.selectedRow = row;
+    // If right-clicking within an existing multi-selection, keep it
+    if (![_selectedRows containsIndex:(NSUInteger)row]) {
+        self.selectedRow = row;
+    }
 
     NSMenu *menu = nil;
     if ([_delegate respondsToSelector:@selector(rowHeadings:contextMenuForRow:)]) {
@@ -576,6 +728,17 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 
 - (NSMenu *)defaultContextMenuForRow:(NSInteger)row {
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Row Actions"];
+
+    // Check if this is a folder row
+    BOOL isFolder = NO;
+    if ([_dataSource respondsToSelector:@selector(rowHeadings:isFolderAtRow:)]) {
+        isFolder = [_dataSource rowHeadings:self isFolderAtRow:row];
+    }
+
+    if (isFolder) {
+        [self buildFolderContextMenu:menu forRow:row];
+        return menu;
+    }
 
     // Determine element type for this row
     XLElementType elementType = XLElementTypeModel;
@@ -683,6 +846,38 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     collapseLayers.tag = row;
     [menu addItem:collapseLayers];
 
+    // Collapse/Expand All Folders
+    NSMenuItem *collapseFolders = [[NSMenuItem alloc] initWithTitle:@"Collapse All Folders"
+                                                            action:@selector(contextCollapseAllFolders:)
+                                                     keyEquivalent:@""];
+    collapseFolders.target = self;
+    collapseFolders.tag = row;
+    [menu addItem:collapseFolders];
+
+    NSMenuItem *expandFolders = [[NSMenuItem alloc] initWithTitle:@"Expand All Folders"
+                                                          action:@selector(contextExpandAllFolders:)
+                                                   keyEquivalent:@""];
+    expandFolders.target = self;
+    expandFolders.tag = row;
+    [menu addItem:expandFolders];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    // --- Track Folder ---
+    NSMenuItem *createFolder = [[NSMenuItem alloc] initWithTitle:@"Create Track Folder"
+                                                         action:@selector(contextCreateFolder:)
+                                                  keyEquivalent:@""];
+    createFolder.target = self;
+    createFolder.tag = row;
+    [menu addItem:createFolder];
+
+    NSMenuItem *removeFromFolder = [[NSMenuItem alloc] initWithTitle:@"Remove from Folder"
+                                                             action:@selector(contextRemoveFromFolder:)
+                                                      keyEquivalent:@""];
+    removeFromFolder.target = self;
+    removeFromFolder.tag = row;
+    [menu addItem:removeFromFolder];
+
     [menu addItem:[NSMenuItem separatorItem]];
 
     // --- Render Enable/Disable ---
@@ -772,6 +967,53 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     copyInclSubs.target = self;
     copyInclSubs.tag = row;
     [menu addItem:copyInclSubs];
+}
+
+- (void)buildFolderContextMenu:(NSMenu *)menu forRow:(NSInteger)row {
+    BOOL isCollapsed = NO;
+    if ([_dataSource respondsToSelector:@selector(rowHeadings:isFolderCollapsedAtRow:)]) {
+        isCollapsed = [_dataSource rowHeadings:self isFolderCollapsedAtRow:row];
+    }
+
+    NSString *expandCollapseTitle = isCollapsed ? @"Expand Folder" : @"Collapse Folder";
+    NSMenuItem *expandCollapse = [[NSMenuItem alloc] initWithTitle:expandCollapseTitle
+                                                           action:@selector(contextToggleFolderExpand:)
+                                                    keyEquivalent:@""];
+    expandCollapse.target = self;
+    expandCollapse.tag = row;
+    [menu addItem:expandCollapse];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *renameFolder = [[NSMenuItem alloc] initWithTitle:@"Rename Folder"
+                                                         action:@selector(contextRenameFolder:)
+                                                  keyEquivalent:@""];
+    renameFolder.target = self;
+    renameFolder.tag = row;
+    [menu addItem:renameFolder];
+
+    NSMenuItem *deleteFolder = [[NSMenuItem alloc] initWithTitle:@"Delete Folder"
+                                                         action:@selector(contextDeleteFolder:)
+                                                  keyEquivalent:@""];
+    deleteFolder.target = self;
+    deleteFolder.tag = row;
+    [menu addItem:deleteFolder];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *collapseFolders = [[NSMenuItem alloc] initWithTitle:@"Collapse All Folders"
+                                                            action:@selector(contextCollapseAllFolders:)
+                                                     keyEquivalent:@""];
+    collapseFolders.target = self;
+    collapseFolders.tag = row;
+    [menu addItem:collapseFolders];
+
+    NSMenuItem *expandFolders = [[NSMenuItem alloc] initWithTitle:@"Expand All Folders"
+                                                          action:@selector(contextExpandAllFolders:)
+                                                   keyEquivalent:@""];
+    expandFolders.target = self;
+    expandFolders.tag = row;
+    [menu addItem:expandFolders];
 }
 
 - (void)buildTimingContextMenu:(NSMenu *)menu forRow:(NSInteger)row {
@@ -1107,15 +1349,92 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     }
 }
 
+// --- Track Folder Context Menu Actions ---
+
+- (void)contextToggleFolderExpand:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:didToggleExpandAtRow:)]) {
+        [_delegate rowHeadings:self didToggleExpandAtRow:row];
+    }
+}
+
+- (void)contextRenameFolder:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:renameFolderAtRow:)]) {
+        [_delegate rowHeadings:self renameFolderAtRow:row];
+    }
+}
+
+- (void)contextDeleteFolder:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:deleteFolderAtRow:)]) {
+        [_delegate rowHeadings:self deleteFolderAtRow:row];
+    }
+}
+
+- (void)contextCollapseAllFolders:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsCollapseAllFolders:)]) {
+        [_delegate rowHeadingsCollapseAllFolders:self];
+    }
+}
+
+- (void)contextExpandAllFolders:(NSMenuItem *)sender {
+    if ([_delegate respondsToSelector:@selector(rowHeadingsExpandAllFolders:)]) {
+        [_delegate rowHeadingsExpandAllFolders:self];
+    }
+}
+
+- (void)contextCreateFolder:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:createFolderFromRow:)]) {
+        [_delegate rowHeadings:self createFolderFromRow:row];
+    }
+}
+
+- (void)contextRemoveFromFolder:(NSMenuItem *)sender {
+    NSInteger row = sender.tag;
+    if ([_delegate respondsToSelector:@selector(rowHeadings:removeFromFolderAtRow:)]) {
+        [_delegate rowHeadings:self removeFromFolderAtRow:row];
+    }
+}
+
 #pragma mark - Drag and Drop (Source)
 
 - (void)mouseDragged:(NSEvent *)event {
     NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
-    NSInteger row = [self rowAtPoint:point];
+
+    // Require minimum drag distance before initiating drag session
+    if (!_dragInitiated) {
+        CGFloat dx = point.x - _mouseDownPoint.x;
+        CGFloat dy = point.y - _mouseDownPoint.y;
+        CGFloat dist = sqrt(dx * dx + dy * dy);
+        NSLog(@"[RowDrag] mouseDragged below threshold dist=%.1f (need %.1f) pt=(%.1f,%.1f)",
+              dist, kDragDistanceThreshold, point.x, point.y);
+        if (dist < kDragDistanceThreshold) return;
+        NSLog(@"[RowDrag] mouseDragged THRESHOLD MET — initiating drag");
+        _dragInitiated = YES;
+    }
+
+    NSInteger row = [self rowAtPoint:_mouseDownPoint];
+    NSLog(@"[RowDrag] mouseDragged beginDraggingSession row=%ld", (long)row);
 
     if (row < 0 || row >= _cachedRowCount) return;
 
+    _didDrag = YES;
+    _deferredDeselect = NO;
     _dragSourceRow = row;
+    _dragOntoFolderRow = -1;
+
+    // Record source row properties for drop validation
+    _dragSourceIsFolder = NO;
+    _dragSourceIsTiming = NO;
+    if (_dataSource) {
+        if ([_dataSource respondsToSelector:@selector(rowHeadings:isFolderAtRow:)]) {
+            _dragSourceIsFolder = [_dataSource rowHeadings:self isFolderAtRow:row];
+        }
+        XLElementType type = [_dataSource rowHeadings:self elementTypeForRow:row];
+        _dragSourceIsTiming = (type == XLElementTypeTiming);
+    }
 
     NSString *dragString = [NSString stringWithFormat:@"row:%ld", (long)row];
     NSPasteboardItem *pbItem = [[NSPasteboardItem alloc] init];
@@ -1123,14 +1442,27 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
 
     NSDraggingItem *dragItem = [[NSDraggingItem alloc] initWithPasteboardWriter:pbItem];
 
-    CGFloat y = row * _rowHeight - _verticalScrollOffset;
+    // Calculate visual row rect accounting for pinned timing area
+    CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+    CGFloat y;
+    if (row < _pinnedTimingRowCount) {
+        y = row * _rowHeight;
+    } else {
+        y = pinnedHeight + (row - _pinnedTimingRowCount) * _rowHeight - _verticalScrollOffset;
+    }
+    // Determine drag count from multi-selection
+    NSUInteger dragCount = 1;
+    if (_selectedRows.count > 1 && [_selectedRows containsIndex:(NSUInteger)row]) {
+        dragCount = _selectedRows.count;
+    }
+
     NSRect rowRect = NSMakeRect(0, y, NSWidth(self.bounds), _rowHeight);
-    [dragItem setDraggingFrame:rowRect contents:[self imageForRow:row]];
+    [dragItem setDraggingFrame:rowRect contents:[self imageForRow:row dragCount:dragCount]];
 
     [self beginDraggingSessionWithItems:@[dragItem] event:event source:self];
 }
 
-- (NSImage *)imageForRow:(NSInteger)row {
+- (NSImage *)imageForRow:(NSInteger)row dragCount:(NSUInteger)count {
     CGFloat w = NSWidth(self.bounds);
     NSImage *image = [[NSImage alloc] initWithSize:NSMakeSize(w, _rowHeight)];
     [image lockFocus];
@@ -1146,6 +1478,31 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     [[NSColor colorWithWhite:0.2 alpha:0.8] setFill];
     NSRectFill(NSMakeRect(0, 0, w, _rowHeight));
     [name drawAtPoint:NSMakePoint(20, (_rowHeight - 14) / 2.0) withAttributes:attrs];
+
+    // Draw count badge for multi-item drag
+    if (count > 1) {
+        NSString *badgeText = [NSString stringWithFormat:@"%lu", (unsigned long)count];
+        NSDictionary *badgeAttrs = @{
+            NSFontAttributeName: [NSFont boldSystemFontOfSize:10.0],
+            NSForegroundColorAttributeName: [NSColor whiteColor],
+        };
+        NSSize textSize = [badgeText sizeWithAttributes:badgeAttrs];
+        CGFloat badgeW = MAX(textSize.width + 8, _rowHeight - 4);
+        CGFloat badgeH = _rowHeight - 4;
+        CGFloat badgeX = w - badgeW - 6;
+        CGFloat badgeY = 2;
+        NSRect badgeRect = NSMakeRect(badgeX, badgeY, badgeW, badgeH);
+
+        [[NSColor colorWithRed:0.35 green:0.55 blue:0.85 alpha:1.0] setFill];
+        NSBezierPath *pill = [NSBezierPath bezierPathWithRoundedRect:badgeRect
+                                                             xRadius:badgeH / 2.0
+                                                             yRadius:badgeH / 2.0];
+        [pill fill];
+
+        CGFloat tx = badgeX + (badgeW - textSize.width) / 2.0;
+        CGFloat ty = badgeY + (badgeH - textSize.height) / 2.0;
+        [badgeText drawAtPoint:NSMakePoint(tx, ty) withAttributes:badgeAttrs];
+    }
 
     [image unlockFocus];
     return image;
@@ -1167,18 +1524,81 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     NSInteger targetRow = [self rowAtPoint:point];
 
     if (targetRow < 0) targetRow = 0;
-    if (targetRow >= _cachedRowCount) targetRow = _cachedRowCount;
+    if (targetRow >= _cachedRowCount) targetRow = _cachedRowCount - 1;
 
-    _dragTargetRow = targetRow;
+    // Don't allow dropping onto self
+    if (targetRow == _dragSourceRow) {
+        _dragTargetRow = -1;
+        _dragOntoFolderRow = -1;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        _insertionIndicatorLayer.hidden = YES;
+        _folderDropHighlightLayer.hidden = YES;
+        [CATransaction commit];
+        return NSDragOperationNone;
+    }
+
+    // Check if target is a folder row
+    BOOL targetIsFolder = NO;
+    if (targetRow >= 0 && targetRow < _cachedRowCount && _dataSource) {
+        if ([_dataSource respondsToSelector:@selector(rowHeadings:isFolderAtRow:)]) {
+            targetIsFolder = [_dataSource rowHeadings:self isFolderAtRow:targetRow];
+        }
+    }
+
+    // Timing tracks and folders can't be dropped into folders
+    BOOL canDropIntoFolder = targetIsFolder && !_dragSourceIsTiming && !_dragSourceIsFolder;
+
+    // Calculate position within the target row
+    CGFloat pinnedHeight = _pinnedTimingRowCount * _rowHeight;
+    CGFloat rowY;
+    if (targetRow < _pinnedTimingRowCount) {
+        rowY = targetRow * _rowHeight;
+    } else {
+        rowY = pinnedHeight + (targetRow - _pinnedTimingRowCount) * _rowHeight - _verticalScrollOffset;
+    }
+    CGFloat relativeY = point.y - rowY;
+    CGFloat fraction = relativeY / _rowHeight;
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    CGFloat y = targetRow * _rowHeight - _verticalScrollOffset;
-    _insertionIndicatorLayer.frame = CGRectMake(0, y - kDragInsertionLineHeight / 2.0,
-                                                 NSWidth(self.bounds), kDragInsertionLineHeight);
-    _insertionIndicatorLayer.hidden = NO;
-    [CATransaction commit];
 
+    if (canDropIntoFolder && fraction > 0.25 && fraction < 0.75) {
+        // Drop INTO the folder — highlight the folder row
+        _dragOntoFolderRow = targetRow;
+        _dragTargetRow = -1;
+        _insertionIndicatorLayer.hidden = YES;
+
+        _folderDropHighlightLayer.frame = CGRectMake(2, rowY + 1,
+                                                      NSWidth(self.bounds) - 4, _rowHeight - 2);
+        _folderDropHighlightLayer.hidden = NO;
+    } else {
+        // Standard insertion line between rows
+        _dragOntoFolderRow = -1;
+        _folderDropHighlightLayer.hidden = YES;
+
+        NSInteger insertRow;
+        if (fraction < 0.5) {
+            insertRow = targetRow;
+        } else {
+            insertRow = targetRow + 1;
+        }
+        if (insertRow > _cachedRowCount) insertRow = _cachedRowCount;
+
+        _dragTargetRow = insertRow;
+
+        CGFloat lineY;
+        if (insertRow < _pinnedTimingRowCount) {
+            lineY = insertRow * _rowHeight;
+        } else {
+            lineY = pinnedHeight + (insertRow - _pinnedTimingRowCount) * _rowHeight - _verticalScrollOffset;
+        }
+        _insertionIndicatorLayer.frame = CGRectMake(0, lineY - kDragInsertionLineHeight / 2.0,
+                                                     NSWidth(self.bounds), kDragInsertionLineHeight);
+        _insertionIndicatorLayer.hidden = NO;
+    }
+
+    [CATransaction commit];
     return NSDragOperationMove;
 }
 
@@ -1186,24 +1606,48 @@ static const CGFloat kDragInsertionLineHeight = 2.0;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _insertionIndicatorLayer.hidden = YES;
+    _folderDropHighlightLayer.hidden = YES;
     [CATransaction commit];
     _dragTargetRow = -1;
+    _dragOntoFolderRow = -1;
 }
 
 - (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _insertionIndicatorLayer.hidden = YES;
+    _folderDropHighlightLayer.hidden = YES;
     [CATransaction commit];
 
-    if (_dragSourceRow >= 0 && _dragTargetRow >= 0 && _dragSourceRow != _dragTargetRow) {
-        if ([_delegate respondsToSelector:@selector(rowHeadings:didReorderRow:toRow:)]) {
-            [_delegate rowHeadings:self didReorderRow:_dragSourceRow toRow:_dragTargetRow];
+    if (_dragSourceRow >= 0) {
+        if (_dragOntoFolderRow >= 0 && _dragOntoFolderRow < _cachedRowCount) {
+            // Drop into folder — delegate reads selectedRows for multi-move
+            NSString *folderName = nil;
+            if (_dataSource) {
+                folderName = [_dataSource rowHeadings:self nameForRow:_dragOntoFolderRow];
+            }
+            if (folderName && [_delegate respondsToSelector:@selector(rowHeadings:moveRowToFolder:folderName:)]) {
+                [_delegate rowHeadings:self moveRowToFolder:_dragSourceRow folderName:folderName];
+            }
+        } else if (_dragTargetRow >= 0 && _dragSourceRow != _dragTargetRow) {
+            // Standard reorder
+            if ([_delegate respondsToSelector:@selector(rowHeadings:didReorderRow:toRow:)]) {
+                [_delegate rowHeadings:self didReorderRow:_dragSourceRow toRow:_dragTargetRow];
+            }
         }
     }
 
+    // Clear selection AFTER delegate call (it needs selectedRows for multi-move),
+    // then refresh visuals since reloadData already rebuilt cells with old selection
+    _selectedRow = -1;
+    [_selectedRows removeAllIndexes];
+    [self updateRowAppearance];
+
     _dragSourceRow = -1;
     _dragTargetRow = -1;
+    _dragOntoFolderRow = -1;
+    _dragSourceIsFolder = NO;
+    _dragSourceIsTiming = NO;
     return YES;
 }
 

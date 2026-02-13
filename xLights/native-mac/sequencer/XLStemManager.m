@@ -183,6 +183,22 @@ static NSString *XLStemNameFromFilename(NSString *filename) {
     [self postChangeNotification];
 }
 
+- (void)moveStemAtIndex:(NSUInteger)from toIndex:(NSUInteger)to {
+    if (from >= _stems.count || to >= _stems.count || from == to) return;
+    XLStemData *stem = _stems[from];
+    [_stems removeObjectAtIndex:from];
+    [_stems insertObject:stem atIndex:to];
+    [self postChangeNotification];
+}
+
+- (void)updateStemAtIndex:(NSUInteger)index name:(NSString *)name color:(NSColor *)color {
+    if (index >= _stems.count) return;
+    XLStemData *stem = _stems[index];
+    if (name) stem.name = name;
+    if (color) stem.waveformColor = color;
+    [self postChangeNotification];
+}
+
 #pragma mark - Serialization
 
 - (NSArray<NSDictionary<NSString *, NSString *> *> *)serializeToDicts {

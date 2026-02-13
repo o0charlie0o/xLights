@@ -301,7 +301,7 @@ extension XLCommandPaletteState {
             XLCommand(title: "Zoom to Fit", subtitle: "Fit entire sequence in view", icon: "arrow.left.and.right.righttriangle.left.righttriangle.right", category: "View", shortcut: "⌘0") {
                 print("Zoom to Fit")
             },
-            XLCommand(title: "Zoom to Selection", subtitle: "Zoom to fit selected effects", icon: "selection.pin.in.out", category: "View", shortcut: nil) {
+            XLCommand(title: "Zoom to Selection", subtitle: "Zoom to fit selected effects or waveform region", icon: "selection.pin.in.out", category: "View", shortcut: "Y") {
                 NotificationCenter.default.post(name: NSNotification.Name("XLZoomToSelection"), object: nil)
             },
             XLCommand(title: "Toggle Inspector", subtitle: "Show or hide the inspector panel", icon: "sidebar.right", category: "View", shortcut: nil) {

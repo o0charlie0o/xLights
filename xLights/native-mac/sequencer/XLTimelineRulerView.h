@@ -15,6 +15,15 @@
 
 @class XLTimelineRulerView;
 
+/// Plain-C struct for passing song region data to the ruler view.
+typedef struct {
+    NSInteger regionId;
+    NSInteger startTimeMS;
+    NSInteger endTimeMS;
+    CGFloat colorR, colorG, colorB, colorA;
+    char name[128];
+} XLSongRegion;
+
 /// Delegate protocol for timeline ruler events.
 @protocol XLTimelineRulerDelegate <NSObject>
 
@@ -61,6 +70,26 @@
 
 /// Returns YES if the sequencer currently has a time selection (for enabling "Zoom to Selection").
 - (BOOL)timelineRulerHasTimeSelection:(XLTimelineRulerView *)ruler;
+
+// --- Song Structure Region Delegate Methods ---
+
+/// Called when the user Option+clicks or uses context menu to add a boundary.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestAddSongRegionBoundaryAtTimeMS:(NSInteger)timeMS;
+
+/// Called when a boundary is dragged to a new position.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didMoveSongRegionBoundaryAtIndex:(NSInteger)idx toTimeMS:(NSInteger)timeMS;
+
+/// Called when a boundary is deleted (via context menu or key).
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didRequestDeleteSongRegionBoundaryAtIndex:(NSInteger)idx;
+
+/// Called when a region's name or color is edited.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didEditSongRegionId:(NSInteger)regionId name:(NSString *)name color:(NSColor *)color;
+
+/// Called when the user selects a region.
+- (void)timelineRuler:(XLTimelineRulerView *)ruler didSelectSongRegionId:(NSInteger)regionId;
+
+/// Called when the user requests clearing all song structure regions.
+- (void)timelineRulerDidRequestClearSongStructure:(XLTimelineRulerView *)ruler;
 
 @end
 
@@ -133,6 +162,21 @@
 
 /// Reload timing marks from the data source and redraw.
 - (void)reloadTimingMarks;
+
+#pragma mark - Song Structure Regions
+
+/// Song regions to display (C array, caller-managed). Set via setSongRegions:count:.
+@property (nonatomic, readonly) XLSongRegion *songRegions;
+@property (nonatomic, readonly) NSInteger songRegionCount;
+
+/// The regionId of the currently selected song region, or -1 if none.
+@property (nonatomic, assign) NSInteger selectedSongRegionId;
+
+/// Set song regions data. Copies the array.
+- (void)setSongRegions:(const XLSongRegion *)regions count:(NSInteger)count;
+
+/// Reload song regions rendering.
+- (void)reloadSongRegions;
 
 #pragma mark - Timing Tags (Bookmarks)
 

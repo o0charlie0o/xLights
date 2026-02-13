@@ -32,6 +32,9 @@ typedef NS_ENUM(NSInteger, XLWaveformType) {
 /// Called when the user clicks on the waveform to seek to a time position.
 - (void)waveformView:(XLWaveformView *)view didSeekToTimeMS:(CGFloat)timeMS;
 
+/// Called when the cursor (hover) position changes (-1 when exiting).
+- (void)waveformView:(XLWaveformView *)view didMoveCursorToTimeMS:(CGFloat)timeMS;
+
 /// Called when the scroll offset changes (e.g. from scroll wheel input).
 - (void)waveformView:(XLWaveformView *)view didChangeScrollOffset:(CGFloat)scrollOffsetX;
 

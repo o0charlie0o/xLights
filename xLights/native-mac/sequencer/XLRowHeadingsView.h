@@ -32,6 +32,8 @@ typedef NS_ENUM(NSInteger, XLElementType) {
 - (NSInteger)rowHeadings:(XLRowHeadingsView *)view indentLevelForRow:(NSInteger)row;
 @optional
 - (NSInteger)rowHeadings:(XLRowHeadingsView *)view timingColorIndexForRow:(NSInteger)row;
+- (BOOL)rowHeadings:(XLRowHeadingsView *)view isFolderAtRow:(NSInteger)row;
+- (BOOL)rowHeadings:(XLRowHeadingsView *)view isFolderCollapsedAtRow:(NSInteger)row;
 @end
 
 @protocol XLRowHeadingsDelegate <NSObject>
@@ -52,6 +54,15 @@ typedef NS_ENUM(NSInteger, XLElementType) {
 - (void)rowHeadings:(XLRowHeadingsView *)view editLayerNameAtRow:(NSInteger)row;
 - (void)rowHeadingsCollapseAllModels:(XLRowHeadingsView *)view;
 - (void)rowHeadingsCollapseAllLayers:(XLRowHeadingsView *)view;
+- (void)rowHeadingsCollapseAllFolders:(XLRowHeadingsView *)view;
+- (void)rowHeadingsExpandAllFolders:(XLRowHeadingsView *)view;
+
+// Track folder operations
+- (void)rowHeadings:(XLRowHeadingsView *)view createFolderFromRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view moveRowToFolder:(NSInteger)row folderName:(NSString *)folderName;
+- (void)rowHeadings:(XLRowHeadingsView *)view removeFromFolderAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view renameFolderAtRow:(NSInteger)row;
+- (void)rowHeadings:(XLRowHeadingsView *)view deleteFolderAtRow:(NSInteger)row;
 
 // Model operations
 - (void)rowHeadings:(XLRowHeadingsView *)view toggleStrandsAtRow:(NSInteger)row;
@@ -89,6 +100,8 @@ typedef NS_ENUM(NSInteger, XLElementType) {
 @property (nonatomic, assign) CGFloat rowHeight;
 @property (nonatomic, assign) CGFloat verticalScrollOffset;
 @property (nonatomic, assign) NSInteger selectedRow;
+/// All currently selected row indices. Supports shift-click (range) and cmd-click (toggle).
+@property (nonatomic, readonly, strong) NSMutableIndexSet *selectedRows;
 /// Number of timing track rows pinned at the top (frozen rows). Set by the sequencer VC.
 @property (nonatomic, assign) NSInteger pinnedTimingRowCount;
 - (void)reloadData;

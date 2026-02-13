@@ -519,7 +519,12 @@ void XLSetCommandPaletteVisible(bool visible) {
 }
 
 - (IBAction)showKeyBindings:(id)sender {
-    [[XLKeyBindingsWindowController sharedController] showWindow:sender];
+    NSString *showFolder = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+    XLKeyBindingsWindowController *kbController = [XLKeyBindingsWindowController sharedController];
+    if (showFolder.length > 0) {
+        [kbController setShowFolderPath:showFolder];
+    }
+    [kbController showWindow:sender];
 }
 
 - (IBAction)exportHousePreviewVideo:(id)sender {

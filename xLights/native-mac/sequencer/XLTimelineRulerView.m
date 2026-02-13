@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLTimelineRulerView.h"
+#import "../XLSongRegionEditPopover.h"
 
 static const CGFloat kRulerHeight = 28.0;
 static const CGFloat kPlayheadTriangleSize = 8.0;
@@ -25,6 +26,12 @@ static const CGFloat kTimingMarkHitTestWidth = 8.0;
 static const CGFloat kTimingMarkR = 0.3, kTimingMarkG = 0.7, kTimingMarkB = 1.0;
 static const CGFloat kTimingMarkSelectedR = 1.0, kTimingMarkSelectedG = 0.5, kTimingMarkSelectedB = 0.0;
 
+// Song region constants
+static const CGFloat kBoundaryHitTestWidth = 5.0;
+static const CGFloat kBoundaryHandleWidth = 2.0;
+static const CGFloat kRegionNameFontSize = 8.0;
+static const CGFloat kRegionBandTop = 0.0;
+
 // Color constants as raw RGBA values to avoid NSColor object lifetime issues
 // with static variables in CALayerDelegate callbacks
 static const CGFloat kBgR = 0.118, kBgG = 0.118, kBgB = 0.118;
@@ -36,6 +43,7 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 @property (nonatomic, assign) BOOL dragging;
 @property (nonatomic, strong) CALayer *playheadLayer;
 @property (nonatomic, strong) CALayer *timingMarksLayer;
+@property (nonatomic, strong) CALayer *songRegionsLayer;
 @property (nonatomic, strong) NSTimer *playheadTimer;
 @property (nonatomic, assign) CFTimeInterval lastDisplayLinkTimestamp;
 
@@ -48,6 +56,10 @@ static const CGFloat kPlayheadR = 1.0, kPlayheadG = 0.2, kPlayheadB = 0.2;
 @property (nonatomic, assign) NSInteger draggingTimingMarkId;
 @property (nonatomic, assign) CGFloat dragStartTimeMS;
 
+// Song region boundary dragging state
+@property (nonatomic, assign) BOOL draggingBoundary;
+@property (nonatomic, assign) NSInteger draggingBoundaryIndex;
+
 // Right-click context position (ms)
 @property (nonatomic, assign) NSInteger rightClickPositionMS;
 
@@ -58,7 +70,12 @@ static const NSInteger kTimingTagCount = 10;
 
 @implementation XLTimelineRulerView {
     NSInteger _timingTags[10];  // -1 = unset
+    XLSongRegion *_songRegionStorage;
+    NSInteger _songRegionStorageCount;
 }
+
+@synthesize songRegions = _songRegionStorage;
+@synthesize songRegionCount = _songRegionStorageCount;
 
 #pragma mark - Initialization
 
@@ -98,6 +115,13 @@ static const NSInteger kTimingTagCount = 10;
     _draggingTimingMark = NO;
     _draggingTimingMarkId = -1;
 
+    // Song regions
+    _songRegionStorage = NULL;
+    _songRegionStorageCount = 0;
+    _selectedSongRegionId = -1;
+    _draggingBoundary = NO;
+    _draggingBoundaryIndex = -1;
+
     // Timing tags (bookmarks)
     for (NSInteger i = 0; i < kTimingTagCount; i++) {
         _timingTags[i] = -1;
@@ -106,10 +130,15 @@ static const NSInteger kTimingTagCount = 10;
 
     [self setupPlayheadLayer];
     [self setupTimingMarksLayer];
+    [self setupSongRegionsLayer];
 }
 
 - (void)dealloc {
     [self stopDisplayLink];
+    if (_songRegionStorage) {
+        free(_songRegionStorage);
+        _songRegionStorage = NULL;
+    }
 }
 
 #pragma mark - Layer Backing
@@ -135,8 +164,10 @@ static const NSInteger kTimingTagCount = 10;
     self.layer.contentsScale = scale;
     _playheadLayer.contentsScale = scale;
     _timingMarksLayer.contentsScale = scale;
+    _songRegionsLayer.contentsScale = scale;
     [self.layer setNeedsDisplay];
     [_timingMarksLayer setNeedsDisplay];
+    [_songRegionsLayer setNeedsDisplay];
 }
 
 #pragma mark - Playhead Layer
@@ -150,10 +181,18 @@ static const NSInteger kTimingTagCount = 10;
 
 - (void)setupTimingMarksLayer {
     _timingMarksLayer = [CALayer layer];
-    _timingMarksLayer.zPosition = 50;  // Below playhead, above ticks
+    _timingMarksLayer.zPosition = 60;  // Above song regions, below playhead
     _timingMarksLayer.delegate = self;
     _timingMarksLayer.needsDisplayOnBoundsChange = YES;
     [self.layer addSublayer:_timingMarksLayer];
+}
+
+- (void)setupSongRegionsLayer {
+    _songRegionsLayer = [CALayer layer];
+    _songRegionsLayer.zPosition = 50;  // Below timing marks and playhead
+    _songRegionsLayer.delegate = self;
+    _songRegionsLayer.needsDisplayOnBoundsChange = YES;
+    [self.layer addSublayer:_songRegionsLayer];
 }
 
 - (void)updateTimingMarksLayer {
@@ -163,6 +202,16 @@ static const NSInteger kTimingTagCount = 10;
     CGFloat scale = self.window.backingScaleFactor ?: 1.0;
     _timingMarksLayer.contentsScale = scale;
     [_timingMarksLayer setNeedsDisplay];
+    [CATransaction commit];
+}
+
+- (void)updateSongRegionsLayer {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _songRegionsLayer.frame = self.bounds;
+    CGFloat scale = self.window.backingScaleFactor ?: 1.0;
+    _songRegionsLayer.contentsScale = scale;
+    [_songRegionsLayer setNeedsDisplay];
     [CATransaction commit];
 }
 
@@ -280,6 +329,83 @@ static const NSInteger kTimingTagCount = 10;
     }
 }
 
+#pragma mark - Song Region Drawing
+
+- (void)drawSongRegionsInContext:(CGContextRef)ctx bounds:(CGRect)bounds {
+    if (_songRegionStorageCount == 0 || !_songRegionStorage) return;
+
+    CGFloat width = CGRectGetWidth(bounds);
+    CGFloat height = CGRectGetHeight(bounds);
+
+    NSDictionary *nameAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:kRegionNameFontSize weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: [NSColor colorWithWhite:1.0 alpha:0.85],
+    };
+
+    for (NSInteger i = 0; i < _songRegionStorageCount; i++) {
+        XLSongRegion *region = &_songRegionStorage[i];
+
+        CGFloat x0 = [self pointForTime:region->startTimeMS / 1000.0];
+        CGFloat x1 = [self pointForTime:region->endTimeMS / 1000.0];
+
+        // Clip to visible area
+        if (x1 < 0 || x0 > width) continue;
+        if (x0 < 0) x0 = 0;
+        if (x1 > width) x1 = width;
+
+        CGFloat regionWidth = x1 - x0;
+        if (regionWidth < 1) continue;
+
+        // Fill semi-transparent band
+        BOOL isSelected = (region->regionId == _selectedSongRegionId);
+        CGFloat alpha = isSelected ? region->colorA * 1.8 : region->colorA;
+        if (alpha > 1.0) alpha = 1.0;
+        CGContextSetRGBFillColor(ctx, region->colorR, region->colorG, region->colorB, alpha);
+        CGContextFillRect(ctx, CGRectMake(x0, kRegionBandTop, regionWidth, height));
+
+        // Selected border
+        if (isSelected) {
+            CGContextSetRGBStrokeColor(ctx, region->colorR, region->colorG, region->colorB, 0.8);
+            CGContextSetLineWidth(ctx, 1.0);
+            CGContextStrokeRect(ctx, CGRectMake(x0 + 0.5, kRegionBandTop + 0.5, regionWidth - 1.0, height - 1.0));
+        }
+
+        // Draw region name (centered, truncated with ellipsis if too wide)
+        if (region->name[0] != '\0' && regionWidth > 20) {
+            NSString *name = [NSString stringWithUTF8String:region->name];
+            NSSize nameSize = [name sizeWithAttributes:nameAttrs];
+
+            // Truncate if needed
+            if (nameSize.width > regionWidth - 8) {
+                while (name.length > 1) {
+                    name = [[name substringToIndex:name.length - 1] stringByAppendingString:@"\u2026"];
+                    nameSize = [name sizeWithAttributes:nameAttrs];
+                    if (nameSize.width <= regionWidth - 8) break;
+                    name = [name substringToIndex:name.length - 2]; // Remove char + ellipsis
+                }
+            }
+
+            CGFloat nameX = x0 + (regionWidth - nameSize.width) / 2.0;
+            CGFloat nameY = (height - nameSize.height) / 2.0;
+
+            NSGraphicsContext *nsCtx = [NSGraphicsContext graphicsContextWithCGContext:ctx flipped:YES];
+            [NSGraphicsContext saveGraphicsState];
+            [NSGraphicsContext setCurrentContext:nsCtx];
+            [name drawAtPoint:NSMakePoint(nameX, nameY) withAttributes:nameAttrs];
+            [NSGraphicsContext restoreGraphicsState];
+        }
+
+        // Draw boundary handle at the right edge (internal boundaries only)
+        if (i < _songRegionStorageCount - 1) {
+            CGFloat bx = [self pointForTime:region->endTimeMS / 1000.0];
+            if (bx >= 0 && bx <= width) {
+                CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0, 0.4);
+                CGContextFillRect(ctx, CGRectMake(bx - kBoundaryHandleWidth / 2.0, 2, kBoundaryHandleWidth, height - 4));
+            }
+        }
+    }
+}
+
 #pragma mark - CALayerDelegate
 
 - (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)ctx {
@@ -290,6 +416,11 @@ static const NSInteger kTimingTagCount = 10;
 
     if (layer == _timingMarksLayer) {
         [self drawTimingMarksInContext:ctx bounds:layer.bounds];
+        return;
+    }
+
+    if (layer == _songRegionsLayer) {
+        [self drawSongRegionsInContext:ctx bounds:layer.bounds];
         return;
     }
 
@@ -392,14 +523,8 @@ static const NSInteger kTimingTagCount = 10;
 #pragma mark - Tick Interval Calculation
 
 - (NSTimeInterval)majorTickIntervalForZoom {
-    // Target: labels roughly kMinPixelsBetweenLabels apart
-    // zoomLevel = pixels per millisecond
-    // We want: interval_ms * zoomLevel >= kMinPixelsBetweenLabels
-    // interval_ms >= kMinPixelsBetweenLabels / zoomLevel
-
     CGFloat targetIntervalMS = kMinPixelsBetweenLabels / _zoomLevel;
 
-    // Snap to nice intervals (in ms)
     static const double niceIntervals[] = {
         10, 20, 25, 50, 100, 200, 250, 500,
         1000, 2000, 2500, 5000, 10000, 15000, 30000,
@@ -409,7 +534,7 @@ static const NSInteger kTimingTagCount = 10;
 
     for (int i = 0; i < niceCount; i++) {
         if (niceIntervals[i] >= targetIntervalMS) {
-            return niceIntervals[i] / 1000.0; // Convert to seconds
+            return niceIntervals[i] / 1000.0;
         }
     }
     return niceIntervals[niceCount - 1] / 1000.0;
@@ -428,28 +553,24 @@ static const NSInteger kTimingTagCount = 10;
     NSTimeInterval majorInterval = [self majorTickIntervalForZoom];
 
     if (majorInterval < 0.1) {
-        // Sub-second: show with milliseconds
         if (minutes > 0) {
             return [NSString stringWithFormat:@"%d:%02d.%03d", minutes, seconds, ms];
         }
         return [NSString stringWithFormat:@"%d.%03d", seconds, ms];
     }
     else if (majorInterval < 1.0) {
-        // Sub-second: show with fractional seconds
         if (minutes > 0) {
             return [NSString stringWithFormat:@"%d:%02d.%d", minutes, seconds, ms / 100];
         }
         return [NSString stringWithFormat:@"%d.%d", seconds, ms / 100];
     }
     else if (majorInterval < 60.0) {
-        // Seconds range
         if (minutes > 0) {
             return [NSString stringWithFormat:@"%d:%02d", minutes, seconds];
         }
         return [NSString stringWithFormat:@"%ds", seconds];
     }
     else {
-        // Minutes range
         return [NSString stringWithFormat:@"%dm", minutes];
     }
 }
@@ -457,8 +578,6 @@ static const NSInteger kTimingTagCount = 10;
 #pragma mark - Coordinate Conversion
 
 - (NSTimeInterval)timeForPoint:(CGFloat)x {
-    // x = (time_ms * zoomLevel) - scrollOffset
-    // time_ms = (x + scrollOffset) / zoomLevel
     CGFloat timeMS = (x + _scrollOffset) / _zoomLevel;
     return timeMS / 1000.0;
 }
@@ -488,17 +607,17 @@ static const NSInteger kTimingTagCount = 10;
     _playbackPosition = playbackPosition;
     _lastSyncedPosition = playbackPosition;
     _lastSyncTime = CFAbsoluteTimeGetCurrent();
-    // Update visual position - playback controller sends updates at 60fps
     [self updatePlayheadPosition];
 }
 
 - (void)setZoomLevel:(CGFloat)zoomLevel {
     CGFloat clamped = fmin(fmax(zoomLevel, kMinZoomLevel), kMaxZoomLevel);
-    if (fabs(clamped - _zoomLevel) < 0.0001) return;
+    if (fabs(clamped - _zoomLevel) < 0.00001) return;
     _zoomLevel = clamped;
     [self.layer setNeedsDisplay];
     [self updatePlayheadPosition];
     [_timingMarksLayer setNeedsDisplay];
+    [_songRegionsLayer setNeedsDisplay];
 }
 
 - (void)setScrollOffset:(CGFloat)scrollOffset {
@@ -507,6 +626,7 @@ static const NSInteger kTimingTagCount = 10;
     [self.layer setNeedsDisplay];
     [self updatePlayheadPosition];
     [_timingMarksLayer setNeedsDisplay];
+    [_songRegionsLayer setNeedsDisplay];
 }
 
 - (void)setSequenceDuration:(NSTimeInterval)sequenceDuration {
@@ -518,13 +638,11 @@ static const NSInteger kTimingTagCount = 10;
     BOOL wasPlaying = _playing;
     _playing = playing;
     if (playing && !wasPlaying) {
-        // Initialize interpolation state when playback starts
         _lastSyncedPosition = _playbackPosition;
         _lastSyncTime = CFAbsoluteTimeGetCurrent();
         [self startDisplayLink];
     } else if (!playing && wasPlaying) {
         [self stopDisplayLink];
-        // Reset interpolation state
         _lastSyncTime = 0;
     }
 }
@@ -545,6 +663,35 @@ static const NSInteger kTimingTagCount = 10;
     [_timingMarksLayer setNeedsDisplay];
 }
 
+- (void)setSelectedSongRegionId:(NSInteger)selectedSongRegionId {
+    if (_selectedSongRegionId != selectedSongRegionId) {
+        _selectedSongRegionId = selectedSongRegionId;
+        [_songRegionsLayer setNeedsDisplay];
+    }
+}
+
+#pragma mark - Song Regions Data
+
+- (void)setSongRegions:(const XLSongRegion *)regions count:(NSInteger)count {
+    if (_songRegionStorage) {
+        free(_songRegionStorage);
+        _songRegionStorage = NULL;
+    }
+    _songRegionStorageCount = 0;
+
+    if (regions && count > 0) {
+        _songRegionStorage = (XLSongRegion *)malloc(sizeof(XLSongRegion) * count);
+        memcpy(_songRegionStorage, regions, sizeof(XLSongRegion) * count);
+        _songRegionStorageCount = count;
+    }
+
+    [_songRegionsLayer setNeedsDisplay];
+}
+
+- (void)reloadSongRegions {
+    [_songRegionsLayer setNeedsDisplay];
+}
+
 #pragma mark - Scrolling
 
 - (void)scrollToTime:(NSTimeInterval)time {
@@ -557,6 +704,35 @@ static const NSInteger kTimingTagCount = 10;
     } else if (x > _scrollOffset + viewWidth - margin) {
         self.scrollOffset = x - viewWidth + margin;
     }
+}
+
+#pragma mark - Song Region Hit Testing
+
+- (NSInteger)boundaryIndexAtPoint:(NSPoint)point {
+    if (_songRegionStorageCount < 2 || !_songRegionStorage) return -1;
+
+    // Check internal boundaries (between adjacent regions)
+    for (NSInteger i = 0; i < _songRegionStorageCount - 1; i++) {
+        CGFloat bx = [self pointForTime:_songRegionStorage[i].endTimeMS / 1000.0];
+        if (fabs(point.x - bx) <= kBoundaryHitTestWidth) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+- (NSInteger)songRegionIdAtPoint:(NSPoint)point {
+    if (_songRegionStorageCount == 0 || !_songRegionStorage) return -1;
+
+    NSTimeInterval time = [self timeForPoint:point.x];
+    NSInteger timeMS = (NSInteger)(time * 1000.0);
+
+    for (NSInteger i = 0; i < _songRegionStorageCount; i++) {
+        if (timeMS >= _songRegionStorage[i].startTimeMS && timeMS < _songRegionStorage[i].endTimeMS) {
+            return _songRegionStorage[i].regionId;
+        }
+    }
+    return -1;
 }
 
 #pragma mark - Timing Mark Hit Testing
@@ -573,9 +749,7 @@ static const NSInteger kTimingTagCount = 10;
         NSTimeInterval time = startTimeMSNum.doubleValue / 1000.0;
         CGFloat markX = [self pointForTime:time];
 
-        // Check if click is within hit test area (horizontal)
         if (fabs(point.x - markX) <= kTimingMarkHitTestWidth) {
-            // Check if in the lower portion of the view (near the triangle)
             if (point.y >= height - kTimingMarkTriangleSize * 3) {
                 return markIdNum.integerValue;
             }
@@ -597,21 +771,55 @@ static const NSInteger kTimingTagCount = 10;
 - (void)mouseDown:(NSEvent *)event {
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
     NSTimeInterval time = [self timeForPoint:loc.x];
-    time = [self snapTimeToFrame:time];
     time = fmax(0, fmin(time, _sequenceDuration));
 
-    // Check for Option+click to create timing mark
-    if ((event.modifierFlags & NSEventModifierFlagOption) && _timingMarksEditable) {
-        if ([_delegate respondsToSelector:@selector(timelineRuler:didRequestTimingMarkAtSeconds:)]) {
-            [_delegate timelineRuler:self didRequestTimingMarkAtSeconds:time];
+    // Check for Option+click to add song region boundary (or create timing mark if no regions)
+    if (event.modifierFlags & NSEventModifierFlagOption) {
+        // Snap to frame boundary for timing marks and boundaries
+        NSTimeInterval snappedTime = [self snapTimeToFrame:time];
+        snappedTime = fmax(0, fmin(snappedTime, _sequenceDuration));
+        NSInteger timeMS = (NSInteger)(snappedTime * 1000.0);
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didRequestAddSongRegionBoundaryAtTimeMS:)]) {
+            [_delegate timelineRuler:self didRequestAddSongRegionBoundaryAtTimeMS:timeMS];
+            return;
+        }
+        // Fallback to timing mark creation
+        if (_timingMarksEditable && [_delegate respondsToSelector:@selector(timelineRuler:didRequestTimingMarkAtSeconds:)]) {
+            [_delegate timelineRuler:self didRequestTimingMarkAtSeconds:snappedTime];
         }
         return;
+    }
+
+    // Check if clicking on a song region boundary
+    NSInteger boundaryIdx = [self boundaryIndexAtPoint:loc];
+    if (boundaryIdx >= 0) {
+        _draggingBoundary = YES;
+        _draggingBoundaryIndex = boundaryIdx;
+        return;
+    }
+
+    // Check double-click on a song region → edit popover
+    if (event.clickCount == 2) {
+        NSInteger regionId = [self songRegionIdAtPoint:loc];
+        if (regionId >= 0) {
+            [self showEditPopoverForRegionId:regionId atPoint:loc];
+            return;
+        }
+    }
+
+    // Check single click on a song region → select
+    NSInteger regionId = [self songRegionIdAtPoint:loc];
+    if (regionId >= 0 && _songRegionStorageCount > 0) {
+        self.selectedSongRegionId = regionId;
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didSelectSongRegionId:)]) {
+            [_delegate timelineRuler:self didSelectSongRegionId:regionId];
+        }
+        // Don't return — also start scrubbing
     }
 
     // Check if clicking on a timing mark
     NSInteger hitMarkId = [self timingMarkIdAtPoint:loc];
     if (hitMarkId >= 0 && _timingMarksEditable) {
-        // Start dragging the timing mark
         _draggingTimingMark = YES;
         _draggingTimingMarkId = hitMarkId;
         _selectedTimingMarkId = hitMarkId;
@@ -636,19 +844,39 @@ static const NSInteger kTimingTagCount = 10;
 - (void)mouseDragged:(NSEvent *)event {
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
     NSTimeInterval time = [self timeForPoint:loc.x];
-    time = [self snapTimeToFrame:time];
     time = fmax(0, fmin(time, _sequenceDuration));
 
-    // Handle timing mark dragging
+    // Handle song region boundary dragging (snap to frame)
+    if (_draggingBoundary && _draggingBoundaryIndex >= 0) {
+        NSTimeInterval snappedTime = [self snapTimeToFrame:time];
+        snappedTime = fmax(0, fmin(snappedTime, _sequenceDuration));
+        NSInteger timeMS = (NSInteger)(snappedTime * 1000.0);
+        if (_songRegionStorage && _draggingBoundaryIndex < _songRegionStorageCount - 1) {
+            NSInteger idx = _draggingBoundaryIndex;
+            // Clamp to adjacent region bounds
+            NSInteger minT = _songRegionStorage[idx].startTimeMS + 1;
+            NSInteger maxT = _songRegionStorage[idx + 1].endTimeMS - 1;
+            if (timeMS < minT) timeMS = minT;
+            if (timeMS > maxT) timeMS = maxT;
+
+            _songRegionStorage[idx].endTimeMS = timeMS;
+            _songRegionStorage[idx + 1].startTimeMS = timeMS;
+            [_songRegionsLayer setNeedsDisplay];
+        }
+        return;
+    }
+
+    // Handle timing mark dragging (snap to frame)
     if (_draggingTimingMark && _draggingTimingMarkId >= 0) {
-        // Update the timing mark position in the local array for visual feedback
+        NSTimeInterval snappedTime = [self snapTimeToFrame:time];
+        snappedTime = fmax(0, fmin(snappedTime, _sequenceDuration));
         NSMutableArray *updatedMarks = [_timingMarks mutableCopy];
         for (NSUInteger i = 0; i < updatedMarks.count; i++) {
             NSDictionary *mark = updatedMarks[i];
             NSNumber *markIdNum = mark[@"id"];
             if (markIdNum && markIdNum.integerValue == _draggingTimingMarkId) {
                 NSMutableDictionary *mutableMark = [mark mutableCopy];
-                mutableMark[@"startTimeMS"] = @((NSInteger)(time * 1000.0));
+                mutableMark[@"startTimeMS"] = @((NSInteger)(snappedTime * 1000.0));
                 updatedMarks[i] = mutableMark;
                 break;
             }
@@ -672,20 +900,42 @@ static const NSInteger kTimingTagCount = 10;
 - (void)mouseUp:(NSEvent *)event {
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
     NSTimeInterval time = [self timeForPoint:loc.x];
-    time = [self snapTimeToFrame:time];
     time = fmax(0, fmin(time, _sequenceDuration));
 
-    // Finalize timing mark drag
+    // Finalize song region boundary drag (snap to frame)
+    if (_draggingBoundary && _draggingBoundaryIndex >= 0) {
+        NSTimeInterval snappedTime = [self snapTimeToFrame:time];
+        snappedTime = fmax(0, fmin(snappedTime, _sequenceDuration));
+        NSInteger timeMS = (NSInteger)(snappedTime * 1000.0);
+        if ([_delegate respondsToSelector:@selector(timelineRuler:didMoveSongRegionBoundaryAtIndex:toTimeMS:)]) {
+            // Clamp the same way as during drag
+            if (_songRegionStorage && _draggingBoundaryIndex < _songRegionStorageCount - 1) {
+                NSInteger idx = _draggingBoundaryIndex;
+                NSInteger minT = _songRegionStorage[idx].startTimeMS;
+                NSInteger maxT = _songRegionStorage[idx + 1].endTimeMS;
+                if (timeMS < minT + 1) timeMS = minT + 1;
+                if (timeMS > maxT - 1) timeMS = maxT - 1;
+            }
+            [_delegate timelineRuler:self didMoveSongRegionBoundaryAtIndex:_draggingBoundaryIndex toTimeMS:timeMS];
+        }
+        _draggingBoundary = NO;
+        _draggingBoundaryIndex = -1;
+        return;
+    }
+
+    // Finalize timing mark drag (snap to frame)
     if (_draggingTimingMark && _draggingTimingMarkId >= 0) {
+        NSTimeInterval snappedTime = [self snapTimeToFrame:time];
+        snappedTime = fmax(0, fmin(snappedTime, _sequenceDuration));
         if ([_delegate respondsToSelector:@selector(timelineRuler:didMoveTimingMarkId:toSeconds:)]) {
-            [_delegate timelineRuler:self didMoveTimingMarkId:_draggingTimingMarkId toSeconds:time];
+            [_delegate timelineRuler:self didMoveTimingMarkId:_draggingTimingMarkId toSeconds:snappedTime];
         }
         _draggingTimingMark = NO;
         _draggingTimingMarkId = -1;
         return;
     }
 
-    // Finalize normal playhead scrubbing
+    // Finalize normal playhead scrubbing (no snap — sub-frame precision)
     if (!_dragging) return;
 
     _dragging = NO;
@@ -696,6 +946,82 @@ static const NSInteger kTimingTagCount = 10;
         [_delegate timelineRuler:self didEndScrubbing:time];
     }
 }
+
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    [self updateCursorForPoint:loc modifierFlags:event.modifierFlags];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    [[NSCursor arrowCursor] set];
+}
+
+- (void)flagsChanged:(NSEvent *)event {
+    NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
+    if (NSPointInRect(loc, self.bounds)) {
+        [self updateCursorForPoint:loc modifierFlags:event.modifierFlags];
+    }
+}
+
+- (void)updateCursorForPoint:(NSPoint)loc modifierFlags:(NSEventModifierFlags)flags {
+    NSInteger boundaryIdx = [self boundaryIndexAtPoint:loc];
+    if (boundaryIdx >= 0) {
+        [[NSCursor resizeLeftRightCursor] set];
+    } else if (flags & NSEventModifierFlagOption) {
+        [[NSCursor crosshairCursor] set];
+    } else {
+        [[NSCursor arrowCursor] set];
+    }
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea *area in self.trackingAreas) {
+        [self removeTrackingArea:area];
+    }
+    NSTrackingArea *trackingArea = [[NSTrackingArea alloc]
+        initWithRect:self.bounds
+             options:(NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveInActiveApp)
+               owner:self
+            userInfo:nil];
+    [self addTrackingArea:trackingArea];
+}
+
+#pragma mark - Edit Popover
+
+- (void)showEditPopoverForRegionId:(NSInteger)regionId atPoint:(NSPoint)loc {
+    XLSongRegion *region = NULL;
+    for (NSInteger i = 0; i < _songRegionStorageCount; i++) {
+        if (_songRegionStorage[i].regionId == regionId) {
+            region = &_songRegionStorage[i];
+            break;
+        }
+    }
+    if (!region) return;
+
+    NSString *name = [NSString stringWithUTF8String:region->name];
+    NSColor *color = [NSColor colorWithRed:region->colorR green:region->colorG blue:region->colorB alpha:region->colorA];
+
+    // Anchor rect: small area around the click point
+    NSRect anchorRect = NSMakeRect(loc.x - 10, loc.y - 5, 20, 10);
+
+    __weak XLTimelineRulerView *weakSelf = self;
+    NSInteger capturedRegionId = regionId;
+
+    [XLSongRegionEditPopover showRelativeToRect:anchorRect
+                                         ofView:self
+                                       withName:name
+                                          color:color
+                                     completion:^(NSString *newName, NSColor *newColor) {
+        XLTimelineRulerView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if ([strongSelf.delegate respondsToSelector:@selector(timelineRuler:didEditSongRegionId:name:color:)]) {
+            [strongSelf.delegate timelineRuler:strongSelf didEditSongRegionId:capturedRegionId name:newName color:newColor];
+        }
+    }];
+}
+
+#pragma mark - Context Menu
 
 - (void)rightMouseDown:(NSEvent *)event {
     NSPoint loc = [self convertPoint:event.locationInWindow fromView:nil];
@@ -727,6 +1053,44 @@ static const NSInteger kTimingTagCount = 10;
 
     [menu addItem:[NSMenuItem separatorItem]];
 
+    // --- Song Structure items ---
+    NSInteger boundaryIdx = [self boundaryIndexAtPoint:loc];
+
+    NSMenuItem *addBoundaryItem = [[NSMenuItem alloc] initWithTitle:@"Add Boundary Here"
+                                                             action:@selector(contextAddBoundary:)
+                                                      keyEquivalent:@""];
+    addBoundaryItem.target = self;
+    [menu addItem:addBoundaryItem];
+
+    if (boundaryIdx >= 0) {
+        NSMenuItem *deleteBoundaryItem = [[NSMenuItem alloc] initWithTitle:@"Delete Boundary"
+                                                                   action:@selector(contextDeleteBoundary:)
+                                                            keyEquivalent:@""];
+        deleteBoundaryItem.target = self;
+        deleteBoundaryItem.tag = boundaryIdx;
+        [menu addItem:deleteBoundaryItem];
+    }
+
+    NSInteger regionId = [self songRegionIdAtPoint:loc];
+    if (regionId >= 0) {
+        NSMenuItem *editRegionItem = [[NSMenuItem alloc] initWithTitle:@"Edit Region..."
+                                                               action:@selector(contextEditRegion:)
+                                                        keyEquivalent:@""];
+        editRegionItem.target = self;
+        editRegionItem.tag = regionId;
+        [menu addItem:editRegionItem];
+    }
+
+    if (_songRegionStorageCount > 0) {
+        NSMenuItem *clearItem = [[NSMenuItem alloc] initWithTitle:@"Clear Song Structure"
+                                                          action:@selector(contextClearSongStructure:)
+                                                   keyEquivalent:@""];
+        clearItem.target = self;
+        [menu addItem:clearItem];
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+
     // --- Timing mark delete (if right-clicked on one) ---
     NSInteger hitMarkId = [self timingMarkIdAtPoint:loc];
     if (hitMarkId >= 0 && _timingMarksEditable) {
@@ -752,7 +1116,7 @@ static const NSInteger kTimingTagCount = 10;
         [menu addItem:tagItem];
     }
 
-    // --- Delete Tag submenu (only if any tags are active) ---
+    // --- Delete Tag submenu ---
     NSInteger tagCount = [self activeTimingTagCount];
     if (tagCount > 0) {
         [menu addItem:[NSMenuItem separatorItem]];
@@ -787,6 +1151,37 @@ static const NSInteger kTimingTagCount = 10;
 }
 
 #pragma mark - Context Menu Actions
+
+- (void)contextAddBoundary:(id)sender {
+    if ([_delegate respondsToSelector:@selector(timelineRuler:didRequestAddSongRegionBoundaryAtTimeMS:)]) {
+        [_delegate timelineRuler:self didRequestAddSongRegionBoundaryAtTimeMS:_rightClickPositionMS];
+    }
+}
+
+- (void)contextDeleteBoundary:(id)sender {
+    NSInteger idx = [(NSMenuItem *)sender tag];
+    if ([_delegate respondsToSelector:@selector(timelineRuler:didRequestDeleteSongRegionBoundaryAtIndex:)]) {
+        [_delegate timelineRuler:self didRequestDeleteSongRegionBoundaryAtIndex:idx];
+    }
+}
+
+- (void)contextEditRegion:(id)sender {
+    NSInteger regionId = [(NSMenuItem *)sender tag];
+    // Find the region center for popover anchor
+    for (NSInteger i = 0; i < _songRegionStorageCount; i++) {
+        if (_songRegionStorage[i].regionId == regionId) {
+            CGFloat cx = [self pointForTime:(_songRegionStorage[i].startTimeMS + _songRegionStorage[i].endTimeMS) / 2000.0];
+            [self showEditPopoverForRegionId:regionId atPoint:NSMakePoint(cx, NSHeight(self.bounds) / 2.0)];
+            return;
+        }
+    }
+}
+
+- (void)contextClearSongStructure:(id)sender {
+    if ([_delegate respondsToSelector:@selector(timelineRulerDidRequestClearSongStructure:)]) {
+        [_delegate timelineRulerDidRequestClearSongStructure:self];
+    }
+}
 
 - (void)deleteSelectedTimingMark:(id)sender {
     if (_selectedTimingMarkId >= 0 && _timingMarksEditable) {
@@ -848,24 +1243,26 @@ static const NSInteger kTimingTagCount = 10;
 }
 
 - (void)keyDown:(NSEvent *)event {
-    // Handle Delete/Backspace to delete selected timing mark
-    if (_selectedTimingMarkId >= 0 && _timingMarksEditable) {
-        unichar keyChar = 0;
-        if (event.characters.length > 0) {
-            keyChar = [event.characters characterAtIndex:0];
-        }
+    unichar keyChar = 0;
+    if (event.characters.length > 0) {
+        keyChar = [event.characters characterAtIndex:0];
+    }
 
-        if (keyChar == NSDeleteCharacter || keyChar == NSBackspaceCharacter ||
-            event.keyCode == 51 || event.keyCode == 117) {  // 51 = Backspace, 117 = Delete
+    // Delete/Backspace: delete selected timing mark or selected boundary
+    if (keyChar == NSDeleteCharacter || keyChar == NSBackspaceCharacter ||
+        event.keyCode == 51 || event.keyCode == 117) {
+        if (_selectedTimingMarkId >= 0 && _timingMarksEditable) {
             [self deleteSelectedTimingMark:nil];
             return;
         }
     }
 
     // Escape to deselect
-    if (event.keyCode == 53) {  // Escape
+    if (event.keyCode == 53) {
         _selectedTimingMarkId = -1;
+        _selectedSongRegionId = -1;
         [_timingMarksLayer setNeedsDisplay];
+        [_songRegionsLayer setNeedsDisplay];
         return;
     }
 
@@ -886,7 +1283,6 @@ static const NSInteger kTimingTagCount = 10;
         CGFloat newZoom = _zoomLevel * factor;
         self.zoomLevel = newZoom;
 
-        // Adjust scroll offset to keep time under cursor stable
         CGFloat newX = timeAtCursor * 1000.0 * _zoomLevel;
         self.scrollOffset = newX - loc.x;
         if (_scrollOffset < 0) self.scrollOffset = 0;
@@ -903,7 +1299,7 @@ static const NSInteger kTimingTagCount = 10;
         return;
     }
 
-    // Horizontal scrolling (shift+scroll or natural horizontal scroll)
+    // Horizontal scrolling
     CGFloat dx = event.scrollingDeltaX;
     if (event.modifierFlags & NSEventModifierFlagShift) {
         dx = event.scrollingDeltaY;
@@ -919,7 +1315,6 @@ static const NSInteger kTimingTagCount = 10;
         return;
     }
 
-    // Magnify gesture (pinch) also arrives as scrollWheel on some configurations
     [super scrollWheel:event];
 }
 
@@ -961,14 +1356,11 @@ static const NSInteger kTimingTagCount = 10;
 - (void)startDisplayLink {
     if (_playheadTimer) return;
 
-    // Use NSTimer instead of CADisplayLink - more reliable for this use case
-    // 60fps update rate for smooth playhead animation
     _playheadTimer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
                                                       target:self
                                                     selector:@selector(playheadTimerFired:)
                                                     userInfo:nil
                                                      repeats:YES];
-    // Add to common run loop modes so it fires during tracking
     [[NSRunLoop mainRunLoop] addTimer:_playheadTimer forMode:NSRunLoopCommonModes];
     _lastDisplayLinkTimestamp = 0;
 }
@@ -984,20 +1376,16 @@ static const NSInteger kTimingTagCount = 10;
 - (void)playheadTimerFired:(NSTimer *)timer {
     if (!_playing) return;
 
-    // Interpolate the playhead position based on elapsed time since last sync
-    // This provides smooth 60fps animation even when position updates are less frequent
     if (_lastSyncTime > 0 && _playbackRate > 0) {
         CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
         CFAbsoluteTime elapsed = now - _lastSyncTime;
         NSTimeInterval interpolatedPosition = _lastSyncedPosition + (elapsed * _playbackRate);
 
-        // Clamp to valid range
         if (interpolatedPosition < 0) interpolatedPosition = 0;
         if (_sequenceDuration > 0 && interpolatedPosition > _sequenceDuration) {
             interpolatedPosition = _sequenceDuration;
         }
 
-        // Update the visual position directly without triggering sync update
         _playbackPosition = interpolatedPosition;
     }
 
@@ -1013,8 +1401,10 @@ static const NSInteger kTimingTagCount = 10;
         self.layer.contentsScale = scale;
         _playheadLayer.contentsScale = scale;
         _timingMarksLayer.contentsScale = scale;
+        _songRegionsLayer.contentsScale = scale;
         [self.layer setNeedsDisplay];
         [self updateTimingMarksLayer];
+        [self updateSongRegionsLayer];
     } else {
         [self stopDisplayLink];
     }
@@ -1025,6 +1415,7 @@ static const NSInteger kTimingTagCount = 10;
     [self.layer setNeedsDisplay];
     [self updatePlayheadPosition];
     [self updateTimingMarksLayer];
+    [self updateSongRegionsLayer];
 }
 
 #pragma mark - Flipped Coordinates
