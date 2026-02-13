@@ -1425,43 +1425,47 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             NSInteger bufX = [node[@"bufX"] integerValue];
             NSInteger bufY = [node[@"bufY"] integerValue];
 
-            // Per-node gray: white for submodel nodes, baseGray for others
-            float nodeGray = baseGray;
-            if (hasSubmodelSelection && [_selectedSubmodelNodeIndices containsIndex:nodeIndex]) {
-                nodeGray = 1.0f;
+            // Determine if this node should render pure white
+            BOOL nodeIsWhite = NO;
+            if (hasSubmodelSelection) {
+                // Submodel selected: only submodel node indices get white
+                nodeIsWhite = [_selectedSubmodelNodeIndices containsIndex:nodeIndex];
+            } else if (isSelected || isMultiSelected) {
+                // Full model or multi-selection: all nodes white
+                nodeIsWhite = YES;
             }
 
-            // Try to get color from rendered pixel data
-            BOOL gotPixelColor = NO;
-            if (pixels && pixelWidth > 0 && pixelHeight > 0) {
-                // Calculate pixel index in RGBA buffer
-                if (bufX >= 0 && bufX < (NSInteger)pixelWidth &&
-                    bufY >= 0 && bufY < (NSInteger)pixelHeight) {
-                    NSUInteger pixelIdx = ((NSUInteger)bufY * pixelWidth + (NSUInteger)bufX) * 4;
-                    if (pixelIdx + 3 < pixelData.length) {
-                        float r = pixels[pixelIdx + 0] / 255.0f;
-                        float g = pixels[pixelIdx + 1] / 255.0f;
-                        float b = pixels[pixelIdx + 2] / 255.0f;
-                        // Use pixel color directly — alpha 0 means "off" (black)
-                        vertex.color = (simd_float4){r, g, b, 1.0f};
-                        gotPixelColor = YES;
+            if (nodeIsWhite) {
+                // Selected pixels render pure white — matches legacy behavior
+                vertex.color = (simd_float4){1.0f, 1.0f, 1.0f, 1.0f};
+            } else {
+                // Try to get color from rendered pixel data
+                BOOL gotPixelColor = NO;
+                if (pixels && pixelWidth > 0 && pixelHeight > 0) {
+                    if (bufX >= 0 && bufX < (NSInteger)pixelWidth &&
+                        bufY >= 0 && bufY < (NSInteger)pixelHeight) {
+                        NSUInteger pixelIdx = ((NSUInteger)bufY * pixelWidth + (NSUInteger)bufX) * 4;
+                        if (pixelIdx + 3 < pixelData.length) {
+                            float r = pixels[pixelIdx + 0] / 255.0f;
+                            float g = pixels[pixelIdx + 1] / 255.0f;
+                            float b = pixels[pixelIdx + 2] / 255.0f;
+                            vertex.color = (simd_float4){r, g, b, 1.0f};
+                            gotPixelColor = YES;
+                        }
                     }
                 }
-            }
 
-            // Fall back: black when showing effect colors (model has no effects),
-            // layout color otherwise (editing/non-playback mode)
-            if (!gotPixelColor) {
-                if (useEffectColors) {
-                    // No pixel data = model is off during playback
-                    vertex.color = (simd_float4){0.0f, 0.0f, 0.0f, 1.0f};
-                } else {
-                    vertex.color = (simd_float4){
-                        nodeGray * (0.3f + 0.7f * defaultR),
-                        nodeGray * (0.3f + 0.7f * defaultG),
-                        nodeGray * (0.3f + 0.7f * defaultB),
-                        1.0f
-                    };
+                if (!gotPixelColor) {
+                    if (useEffectColors) {
+                        vertex.color = (simd_float4){0.0f, 0.0f, 0.0f, 1.0f};
+                    } else {
+                        vertex.color = (simd_float4){
+                            baseGray * (0.3f + 0.7f * defaultR),
+                            baseGray * (0.3f + 0.7f * defaultG),
+                            baseGray * (0.3f + 0.7f * defaultB),
+                            1.0f
+                        };
+                    }
                 }
             }
 
@@ -2364,10 +2368,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     NSUInteger vertexCount = vertexData.length / sizeof(MSVertex);
     if (vertexCount > 0) {
-        // Use the grid pipeline which has the same float3 position + float4 color vertex layout
+        // Use newBufferWithBytes for large payloads (setVertexBytes has 4096-byte limit)
+        id<MTLBuffer> vtxBuffer = [_device newBufferWithBytes:vertexData.bytes
+                                                       length:vertexData.length
+                                                      options:MTLResourceStorageModeShared];
         [encoder pushDebugGroup:@"MultiSelectionBounds"];
         [encoder setRenderPipelineState:_gridPipelineState];
-        [encoder setVertexBytes:vertexData.bytes length:vertexData.length atIndex:0];
+        [encoder setVertexBuffer:vtxBuffer offset:0 atIndex:0];
         [encoder setVertexBytes:&viewProjection length:sizeof(simd_float4x4) atIndex:1];
         [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexCount];
         [encoder popDebugGroup];
