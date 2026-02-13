@@ -54,6 +54,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 @property (nonatomic, strong, readwrite) XLLayoutUndoController *undoController;
 @property (nonatomic, assign) XLToolMode manipulationToolMode;
 @property (nonatomic, assign) BOOL initialDividersSet;
+@property (nonatomic, assign) BOOL suppressPreviewDelegate;
 
 /// Nudge undo coalescing: accumulate rapid nudges into a single undo operation
 @property (nonatomic, assign) BOOL nudgeUndoGroupOpen;
@@ -485,6 +486,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 #pragma mark - XLMetalPreviewDelegate
 
 - (void)previewView:(XLMetalPreviewView *)view didSelectModel:(NSString *)modelName {
+    if (_suppressPreviewDelegate) return;
     if (modelName) {
         [_modelTreeController selectModelWithName:modelName];
     } else {
@@ -494,6 +496,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 }
 
 - (void)previewView:(XLMetalPreviewView *)view didSelectModels:(NSArray<NSString *> *)modelNames {
+    if (_suppressPreviewDelegate) return;
     if (modelNames.count > 0) {
         [_modelTreeController selectModelsWithNames:modelNames];
         [self postModelSelectionNotification:modelNames];
@@ -529,19 +532,73 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 #pragma mark - XLModelTreeDelegate
 
 - (void)modelTree:(XLModelTreeViewController *)controller didSelectModel:(NSString *)modelName {
-    NSLog(@"XLLayoutViewController: Model selected from tree: %@", modelName);
     // Check if the tree has multi-selection active
     NSArray<NSString *> *treeSelection = [controller selectedModelNames];
     if (treeSelection.count > 1) {
+        _suppressPreviewDelegate = YES;
         [_previewView selectModels:treeSelection];
+        _suppressPreviewDelegate = NO;
     } else {
         [self selectModel:modelName];
     }
 }
 
-- (void)modelTree:(XLModelTreeViewController *)controller didSelectSubmodel:(NSString *)submodelName ofModel:(NSString *)modelName {
-    NSLog(@"XLLayoutViewController: Submodel '%@' selected on model '%@'", submodelName, modelName);
+- (void)modelTree:(XLModelTreeViewController *)controller didSelectGroup:(NSString *)groupName {
+    // Build lookup: group name → direct member names
+    NSArray<NSDictionary *> *allGroups = [_engineBridge getModelGroups];
+    NSMutableDictionary<NSString *, NSArray<NSString *> *> *groupLookup = [NSMutableDictionary dictionary];
+    for (NSDictionary *group in allGroups) {
+        groupLookup[group[@"name"]] = group[@"modelNames"];
+    }
 
+    // Recursively resolve all leaf model names (flatten nested groups)
+    NSMutableOrderedSet<NSString *> *resolved = [NSMutableOrderedSet orderedSet];
+    NSMutableSet<NSString *> *visited = [NSMutableSet set];
+    [self resolveGroupMembers:groupName lookup:groupLookup resolved:resolved visited:visited];
+
+    if (resolved.count == 0) {
+        NSLog(@"XLLayoutViewController: Group '%@' has no members after resolution", groupName);
+        return;
+    }
+
+    _suppressPreviewDelegate = YES;
+    [_previewView selectModels:resolved.array];
+    _suppressPreviewDelegate = NO;
+
+    [self postModelSelectionNotification:@[groupName]];
+}
+
+/// Recursively resolves group members to individual model names.
+/// Groups containing other groups are flattened. Submodel references (Model/Sub)
+/// resolve to the parent model name. Circular references are prevented via visited set.
+- (void)resolveGroupMembers:(NSString *)groupName
+                     lookup:(NSDictionary<NSString *, NSArray<NSString *> *> *)lookup
+                   resolved:(NSMutableOrderedSet<NSString *> *)resolved
+                    visited:(NSMutableSet<NSString *> *)visited {
+    if ([visited containsObject:groupName]) return; // circular reference guard
+    [visited addObject:groupName];
+
+    NSArray<NSString *> *members = lookup[groupName];
+    if (!members) return;
+
+    for (NSString *member in members) {
+        if (lookup[member]) {
+            // Member is another group — recurse
+            [self resolveGroupMembers:member lookup:lookup resolved:resolved visited:visited];
+        } else if ([member containsString:@"/"]) {
+            // Submodel reference "ModelName/SubmodelName" — use parent model
+            NSString *parentModel = [member componentsSeparatedByString:@"/"].firstObject;
+            if (parentModel.length > 0) {
+                [resolved addObject:parentModel];
+            }
+        } else {
+            // Direct model name
+            [resolved addObject:member];
+        }
+    }
+}
+
+- (void)modelTree:(XLModelTreeViewController *)controller didSelectSubmodel:(NSString *)submodelName ofModel:(NSString *)modelName {
     // Select the parent model in the preview (sets up handles, etc.)
     [self selectModel:modelName];
 
@@ -950,61 +1007,13 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
         return;
     }
 
-    _previewView.selectedModelName = modelName;
+    // Suppress preview→tree delegate callback to prevent re-entrant selection
+    _suppressPreviewDelegate = YES;
+    [_previewView selectModel:modelName];
+    _suppressPreviewDelegate = NO;
 
-    // Get model info from engine bridge and set up handles
-    NSDictionary *modelInfo = [_engineBridge getModelInfo:modelName];
-    if (modelInfo) {
-        // Extract position
-        simd_float3 position = simd_make_float3(
-            [modelInfo[@"WorldPosX"] floatValue],
-            [modelInfo[@"WorldPosY"] floatValue],
-            [modelInfo[@"WorldPosZ"] floatValue]
-        );
-
-        // Extract scale
-        simd_float3 scale = simd_make_float3(
-            [modelInfo[@"ScaleX"] floatValue] ?: 1.0f,
-            [modelInfo[@"ScaleY"] floatValue] ?: 1.0f,
-            [modelInfo[@"ScaleZ"] floatValue] ?: 1.0f
-        );
-
-        // Extract rotation
-        simd_float3 rotation = simd_make_float3(
-            [modelInfo[@"RotateX"] floatValue],
-            [modelInfo[@"RotateY"] floatValue],
-            [modelInfo[@"RotateZ"] floatValue]
-        );
-
-        // Extract render dimensions (computed from buffer dims in dictFromModelInfo)
-        float renderWidth = [modelInfo[@"RenderWidth"] floatValue];
-        float renderHeight = [modelInfo[@"RenderHeight"] floatValue];
-        float renderDepth = [modelInfo[@"RenderDepth"] floatValue];
-        if (renderWidth < 0.001f) renderWidth = 1.0f;
-        if (renderHeight < 0.001f) renderHeight = 1.0f;
-        if (renderDepth < 0.001f) renderDepth = 2.0f;
-
-        BOOL isLocked = [modelInfo[@"Locked"] boolValue];
-        BOOL supportsZScaling = [modelInfo[@"SupportsZScaling"] boolValue];
-
-        // Bounding box in local space centered at origin, matching legacy BoxedScreenLocation
-        simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
-        simd_float3 bbMax = simd_make_float3(renderWidth/2, renderHeight/2, renderDepth/2);
-
-        [_previewView setModelTransformWithPosition:position
-                                              scale:scale
-                                           rotation:rotation
-                                     boundingBoxMin:bbMin
-                                     boundingBoxMax:bbMax
-                                        renderWidth:renderWidth
-                                       renderHeight:renderHeight
-                                        renderDepth:renderDepth
-                                           isLocked:isLocked
-                                   supportsZScaling:supportsZScaling];
-
-        // Notify global inspector to show model properties
-        [self postModelSelectionNotification:@[modelName]];
-    }
+    // Notify global inspector to show model properties
+    [self postModelSelectionNotification:@[modelName]];
 
     [_modelTreeController selectModelWithName:modelName];
 }

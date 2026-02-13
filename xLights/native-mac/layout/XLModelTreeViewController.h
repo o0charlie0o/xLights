@@ -26,6 +26,9 @@
 /// Selection changed in the model tree
 - (void)modelTree:(XLModelTreeViewController *)controller didSelectModel:(NSString *)modelName;
 
+/// A model group was selected in the model tree
+- (void)modelTree:(XLModelTreeViewController *)controller didSelectGroup:(NSString *)groupName;
+
 /// A submodel was selected in the model tree
 - (void)modelTree:(XLModelTreeViewController *)controller didSelectSubmodel:(NSString *)submodelName ofModel:(NSString *)modelName;
 

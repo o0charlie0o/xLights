@@ -631,12 +631,22 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
     _modelAttributes.clear();
     _submodelAttributes.clear();
 
-    // Parse group names first (from modelGroups section)
+    // Parse group names and attributes (from modelGroups section)
     NSArray<NSXMLElement*>* groupElements = [xmlDoc.rootElement nodesForXPath:@"//modelGroups/modelGroup" error:nil];
     for (NSXMLElement* elem in groupElements) {
         NSXMLNode* nameAttr = [elem attributeForName:@"name"];
         if (nameAttr && nameAttr.stringValue) {
-            _groupNames.push_back([nameAttr.stringValue UTF8String]);
+            std::string gName = [nameAttr.stringValue UTF8String];
+            _groupNames.push_back(gName);
+
+            // Store all XML attributes (includes "models" list of member names)
+            std::map<std::string, std::string> gAttrs;
+            for (NSXMLNode* attr in [elem attributes]) {
+                if (attr.name && attr.stringValue) {
+                    gAttrs[[attr.name UTF8String]] = [attr.stringValue UTF8String];
+                }
+            }
+            _groupAttributes[gName] = std::move(gAttrs);
         }
     }
 

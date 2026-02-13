@@ -736,6 +736,10 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         if ([_delegate respondsToSelector:@selector(modelTree:didSelectSubmodel:ofModel:)]) {
             [_delegate modelTree:self didSelectSubmodel:node.name ofModel:node.parent.name];
         }
+    } else if (node.isGroup) {
+        if ([_delegate respondsToSelector:@selector(modelTree:didSelectGroup:)]) {
+            [_delegate modelTree:self didSelectGroup:node.name];
+        }
     } else {
         NSString *name = node.name;
         if (name && [_delegate respondsToSelector:@selector(modelTree:didSelectModel:)]) {
