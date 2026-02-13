@@ -148,6 +148,8 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     // Inline label editor for timing marks
     NSTextField *_labelEditor;
     void (^_labelEditCompletion)(NSString * _Nullable);
+    NSInteger _labelEditRow;           // Row being edited (for Tab navigation)
+    NSInteger _labelEditEffectIndex;   // Render index of the effect being edited
 
     // Song region overlay data (plain C, immune to heap corruption)
     XLSongRegionRenderInfo *_songRegions;
@@ -1501,16 +1503,66 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                              endMS:(CGFloat)endMS
                     excludingIndex:(NSInteger)excludeIdx
 {
+    return [self findNonBlockedRowFrom:startRow inDirection:direction
+                            forStartMS:startMS endMS:endMS
+                        excludingIndex:excludeIdx excludeSelected:NO];
+}
+
+/// Walk rows in direction to find one where [startMS, endMS] doesn't overlap any effect.
+/// @param excludeSelected If YES, skip all currently selected effects (for multi-drag).
+/// @return First clear row, or startRow if already clear or all rows blocked.
+- (NSInteger)findNonBlockedRowFrom:(NSInteger)startRow
+                       inDirection:(int)direction
+                        forStartMS:(CGFloat)startMS
+                             endMS:(CGFloat)endMS
+                    excludingIndex:(NSInteger)excludeIdx
+                   excludeSelected:(BOOL)excludeSelected
+{
     NSInteger row = startRow;
     while (row >= 0 && row < _totalRows) {
         NSInteger overlap = [self findOverlappingEffectOnRow:row
                                                     startMS:startMS
                                                       endMS:endMS
-                                             excludingIndex:excludeIdx];
+                                             excludingIndex:excludeIdx
+                                            excludeSelected:excludeSelected];
         if (overlap < 0) return row;
         row += direction;
     }
     return startRow;
+}
+
+/// Check whether any two effects within the multi-drag selection would overlap each other
+/// at the given deltas. Returns YES if intra-selection overlap is detected.
+- (BOOL)checkIntraSelectionOverlapWithTimeDelta:(CGFloat)timeDelta
+                                       rowDelta:(NSInteger)rowDelta
+{
+    NSUInteger totalCount = 1 + _multiDragCount;
+    struct { CGFloat start; CGFloat end; NSInteger row; } *candidates = calloc(totalCount, sizeof(*candidates));
+    if (!candidates) return NO;
+
+    candidates[0].start = _dragOriginalStartMS + timeDelta;
+    candidates[0].end = _dragOriginalEndMS + timeDelta;
+    candidates[0].row = _mouseDownRow + rowDelta;
+
+    for (NSUInteger m = 0; m < _multiDragCount; m++) {
+        candidates[m + 1].start = _multiDragEntries[m].originalStartMS + timeDelta;
+        candidates[m + 1].end = _multiDragEntries[m].originalEndMS + timeDelta;
+        candidates[m + 1].row = _multiDragEntries[m].originalRow + rowDelta;
+    }
+
+    BOOL hasOverlap = NO;
+    for (NSUInteger a = 0; a < totalCount && !hasOverlap; a++) {
+        for (NSUInteger b = a + 1; b < totalCount; b++) {
+            if (candidates[a].row != candidates[b].row) continue;
+            if (candidates[a].start < candidates[b].end && candidates[a].end > candidates[b].start) {
+                hasOverlap = YES;
+                break;
+            }
+        }
+    }
+
+    free(candidates);
+    return hasOverlap;
 }
 
 #pragma mark - Mouse Events
@@ -2040,7 +2092,8 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                                            inDirection:direction
                                             forStartMS:newStart
                                                  endMS:newEnd
-                                        excludingIndex:_mouseDownEffectIndex];
+                                        excludingIndex:_mouseDownEffectIndex
+                                       excludeSelected:isMultiDrag];
                 if (isMultiDrag) {
                     NSLog(@"[MULTIDRAG] cross-row skip: wanted row=%ld blocked by idx=%ld, skipped to row=%ld (dir=%d)",
                           (long)origTarget, (long)overlapIdx, (long)targetRow, direction);
@@ -2048,87 +2101,148 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             }
         }
 
-        // Multi-drag: validate ALL selected effects for collisions and constrain
+        // Multi-drag: validate ALL selected effects for collisions and constrain.
+        // Uses iterative convergence: constraining for one effect may create new
+        // collisions for previously-validated effects. Also checks for intra-selection
+        // overlap (two selected effects ending up on the same row after row delta).
         if (isMultiDrag && isRegularEffect) {
             CGFloat candidateDelta = newStart - _dragOriginalStartMS;
             NSInteger rowDelta = targetRow - _mouseDownRow;
-            BOOL constrained = NO;
 
             NSLog(@"[MULTIDRAG] validation start: candidateDelta=%.1f rowDelta=%ld targetRow=%ld",
                   candidateDelta, (long)rowDelta, (long)targetRow);
 
-            for (NSUInteger m = 0; m < _multiDragCount; m++) {
-                CGFloat cStart = _multiDragEntries[m].originalStartMS + candidateDelta;
-                CGFloat cEnd = _multiDragEntries[m].originalEndMS + candidateDelta;
-                NSInteger cRow = _multiDragEntries[m].originalRow + rowDelta;
-                cRow = MAX(0, MIN(cRow, _totalRows - 1));
+            // Iterative constraint loop: run up to 4 passes to converge.
+            // Each pass checks all selected effects (primary + secondaries) against
+            // non-selected effects. If any effect overlaps, we tighten candidateDelta.
+            // Subsequent passes re-validate with the tighter delta.
+            static const int kMaxConstraintPasses = 4;
+            for (int pass = 0; pass < kMaxConstraintPasses; pass++) {
+                BOOL constrainedThisPass = NO;
 
-                NSInteger overlap = [self findOverlappingEffectOnRow:cRow
-                                                            startMS:cStart
-                                                              endMS:cEnd
-                                                     excludingIndex:(NSInteger)_multiDragEntries[m].renderIndex
-                                                    excludeSelected:YES];
-                NSLog(@"[MULTIDRAG]   entry[%lu] renderIdx=%lu: candidateRow=%ld start=%.1f end=%.1f overlapIdx=%ld",
-                      (unsigned long)m, (unsigned long)_multiDragEntries[m].renderIndex,
-                      (long)cRow, cStart, cEnd, (long)overlap);
-                if (overlap >= 0) {
-                    XLEffectRenderInfo blocker = _renderEffects[overlap];
-                    CGFloat effDuration = _multiDragEntries[m].originalEndMS - _multiDragEntries[m].originalStartMS;
-                    NSLog(@"[MULTIDRAG]     blocker: renderIdx=%ld row=%ld start=%.1f end=%.1f (effDur=%.1f)",
-                          (long)overlap, (long)blocker.row, blocker.startTimeMS, blocker.endTimeMS, effDuration);
-                    if (candidateDelta > 0) {
-                        // Moving right: pull delta back so this effect's end <= blocker's start
-                        CGFloat maxDelta = blocker.startTimeMS - _multiDragEntries[m].originalEndMS;
-                        NSLog(@"[MULTIDRAG]     moving right: maxDelta=%.1f (blocker.start %.1f - origEnd %.1f)",
-                              maxDelta, blocker.startTimeMS, _multiDragEntries[m].originalEndMS);
-                        if (maxDelta < candidateDelta) {
-                            candidateDelta = MAX(0, maxDelta);
-                            constrained = YES;
-                            NSLog(@"[MULTIDRAG]     CONSTRAINED delta to %.1f", candidateDelta);
-                        }
-                    } else if (candidateDelta < 0) {
-                        // Moving left: push delta forward so this effect's start >= blocker's end
-                        CGFloat minDelta = blocker.endTimeMS - _multiDragEntries[m].originalStartMS;
-                        NSLog(@"[MULTIDRAG]     moving left: minDelta=%.1f (blocker.end %.1f - origStart %.1f)",
-                              minDelta, blocker.endTimeMS, _multiDragEntries[m].originalStartMS);
-                        if (minDelta > candidateDelta) {
-                            candidateDelta = MIN(0, minDelta);
-                            constrained = YES;
-                            NSLog(@"[MULTIDRAG]     CONSTRAINED delta to %.1f", candidateDelta);
+                // Check primary effect against non-selected effects
+                {
+                    CGFloat pStart = _dragOriginalStartMS + candidateDelta;
+                    CGFloat pEnd = _dragOriginalEndMS + candidateDelta;
+                    NSInteger pRow = _mouseDownRow + rowDelta;
+                    pRow = MAX(0, MIN(pRow, _totalRows - 1));
+
+                    NSInteger overlap = [self findOverlappingEffectOnRow:pRow
+                                                                startMS:pStart
+                                                                  endMS:pEnd
+                                                         excludingIndex:_mouseDownEffectIndex
+                                                        excludeSelected:YES];
+                    if (overlap >= 0) {
+                        XLEffectRenderInfo blocker = _renderEffects[overlap];
+                        NSLog(@"[MULTIDRAG] pass %d: primary overlaps renderIdx=%ld [%.1f-%.1f] on row=%ld",
+                              pass, (long)overlap, blocker.startTimeMS, blocker.endTimeMS, (long)pRow);
+                        if (candidateDelta > 0) {
+                            CGFloat maxDelta = blocker.startTimeMS - _dragOriginalEndMS;
+                            if (maxDelta < candidateDelta) {
+                                candidateDelta = MAX(0, maxDelta);
+                                constrainedThisPass = YES;
+                            }
+                        } else if (candidateDelta < 0) {
+                            CGFloat minDelta = blocker.endTimeMS - _dragOriginalStartMS;
+                            if (minDelta > candidateDelta) {
+                                candidateDelta = MIN(0, minDelta);
+                                constrainedThisPass = YES;
+                            }
                         }
                     }
                 }
+
+                // Check each secondary effect against non-selected effects
+                for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                    CGFloat cStart = _multiDragEntries[m].originalStartMS + candidateDelta;
+                    CGFloat cEnd = _multiDragEntries[m].originalEndMS + candidateDelta;
+                    NSInteger cRow = _multiDragEntries[m].originalRow + rowDelta;
+                    cRow = MAX(0, MIN(cRow, _totalRows - 1));
+
+                    NSInteger overlap = [self findOverlappingEffectOnRow:cRow
+                                                                startMS:cStart
+                                                                  endMS:cEnd
+                                                         excludingIndex:(NSInteger)_multiDragEntries[m].renderIndex
+                                                        excludeSelected:YES];
+                    if (overlap >= 0) {
+                        XLEffectRenderInfo blocker = _renderEffects[overlap];
+                        NSLog(@"[MULTIDRAG] pass %d: entry[%lu] renderIdx=%lu overlaps renderIdx=%ld [%.1f-%.1f] on row=%ld",
+                              pass, (unsigned long)m, (unsigned long)_multiDragEntries[m].renderIndex,
+                              (long)overlap, blocker.startTimeMS, blocker.endTimeMS, (long)cRow);
+                        if (candidateDelta > 0) {
+                            CGFloat maxDelta = blocker.startTimeMS - _multiDragEntries[m].originalEndMS;
+                            if (maxDelta < candidateDelta) {
+                                candidateDelta = MAX(0, maxDelta);
+                                constrainedThisPass = YES;
+                                NSLog(@"[MULTIDRAG] pass %d: CONSTRAINED delta to %.1f (entry %lu moving right)",
+                                      pass, candidateDelta, (unsigned long)m);
+                            }
+                        } else if (candidateDelta < 0) {
+                            CGFloat minDelta = blocker.endTimeMS - _multiDragEntries[m].originalStartMS;
+                            if (minDelta > candidateDelta) {
+                                candidateDelta = MIN(0, minDelta);
+                                constrainedThisPass = YES;
+                                NSLog(@"[MULTIDRAG] pass %d: CONSTRAINED delta to %.1f (entry %lu moving left)",
+                                      pass, candidateDelta, (unsigned long)m);
+                            }
+                        }
+                    }
+                }
+
+                if (!constrainedThisPass) {
+                    NSLog(@"[MULTIDRAG] pass %d: converged (no new constraints)", pass);
+                    break;
+                }
             }
 
-            if (constrained) {
-                newStart = _dragOriginalStartMS + candidateDelta;
-                newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
-                NSLog(@"[MULTIDRAG] after constraint: newStart=%.1f candidateDelta=%.1f", newStart, candidateDelta);
-                // Also re-check the primary effect at the constrained position
-                CGFloat pEnd = newStart + duration;
-                NSInteger pOverlap = [self findOverlappingEffectOnRow:targetRow
-                                                             startMS:newStart
-                                                               endMS:pEnd
-                                                      excludingIndex:_mouseDownEffectIndex
-                                                     excludeSelected:YES];
-                NSLog(@"[MULTIDRAG] primary re-check: row=%ld start=%.1f end=%.1f overlapIdx=%ld",
-                      (long)targetRow, newStart, pEnd, (long)pOverlap);
-                if (pOverlap >= 0) {
-                    XLEffectRenderInfo blocker = _renderEffects[pOverlap];
-                    if (candidateDelta > 0) {
-                        CGFloat maxDelta = blocker.startTimeMS - _dragOriginalEndMS;
-                        candidateDelta = MAX(0, MIN(candidateDelta, maxDelta));
-                    } else {
-                        CGFloat minDelta = blocker.endTimeMS - _dragOriginalStartMS;
-                        candidateDelta = MIN(0, MAX(candidateDelta, minDelta));
-                    }
-                    newStart = _dragOriginalStartMS + candidateDelta;
-                    newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
-                    NSLog(@"[MULTIDRAG] primary also constrained: newStart=%.1f candidateDelta=%.1f", newStart, candidateDelta);
+            // Check for intra-selection overlap: selected effects colliding with each other.
+            // This can happen when effects from different rows end up on the same row,
+            // or when time-delta pushes same-row selected effects into each other.
+            if ([self checkIntraSelectionOverlapWithTimeDelta:candidateDelta rowDelta:rowDelta]) {
+                NSLog(@"[MULTIDRAG] intra-selection overlap detected, reverting to zero delta");
+                candidateDelta = 0;
+
+                // If row change also causes intra-selection overlap, revert row delta too
+                if (rowDelta != 0 &&
+                    [self checkIntraSelectionOverlapWithTimeDelta:0 rowDelta:rowDelta]) {
+                    NSLog(@"[MULTIDRAG] intra-selection overlap persists with rowDelta=%ld, reverting row delta too",
+                          (long)rowDelta);
+                    targetRow = _mouseDownRow;
+                    rowDelta = 0;
                 }
-            } else {
-                NSLog(@"[MULTIDRAG] no constraints from secondary effects");
             }
+
+            // Validate that cross-row moves don't put secondary effects on blocked rows
+            if (rowDelta != 0) {
+                BOOL crossRowBlocked = NO;
+                for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                    CGFloat cStart = _multiDragEntries[m].originalStartMS + candidateDelta;
+                    CGFloat cEnd = _multiDragEntries[m].originalEndMS + candidateDelta;
+                    NSInteger cRow = _multiDragEntries[m].originalRow + rowDelta;
+                    cRow = MAX(0, MIN(cRow, _totalRows - 1));
+
+                    NSInteger overlap = [self findOverlappingEffectOnRow:cRow
+                                                                startMS:cStart
+                                                                  endMS:cEnd
+                                                         excludingIndex:(NSInteger)_multiDragEntries[m].renderIndex
+                                                        excludeSelected:YES];
+                    if (overlap >= 0) {
+                        NSLog(@"[MULTIDRAG] cross-row blocked: entry[%lu] would overlap on row=%ld, reverting to original rows",
+                              (unsigned long)m, (long)cRow);
+                        crossRowBlocked = YES;
+                        break;
+                    }
+                }
+                if (crossRowBlocked) {
+                    targetRow = _mouseDownRow;
+                    rowDelta = 0;
+                }
+            }
+
+            newStart = _dragOriginalStartMS + candidateDelta;
+            newStart = MAX(0, MIN(newStart, _sequenceLengthMS - duration));
+            NSLog(@"[MULTIDRAG] after full validation: newStart=%.1f candidateDelta=%.1f rowDelta=%ld",
+                  newStart, candidateDelta, (long)rowDelta);
         }
 
         _dragCurrentRow = targetRow;
@@ -2168,40 +2282,49 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             }
         }
 
-        // Post-write overlap verification: check every selected effect against non-selected
+        // Post-write overlap verification: check every selected effect against ALL others
+        // (both non-selected and other selected effects for intra-selection detection)
         if (_multiDragCount > 0) {
-            // Check primary
-            if ((NSUInteger)_mouseDownEffectIndex < _renderEffectCount) {
-                XLEffectRenderInfo pi = _renderEffects[_mouseDownEffectIndex];
-                for (NSUInteger i = 0; i < _renderEffectCount; i++) {
-                    if ((NSInteger)i == _mouseDownEffectIndex) continue;
-                    if (i < _selectedEffectsCapacity && _selectedEffects[i]) continue;
-                    XLEffectRenderInfo other = _renderEffects[i];
-                    if (other.row != pi.row || other.isTimingMark) continue;
-                    if (pi.startTimeMS < other.endTimeMS && pi.endTimeMS > other.startTimeMS) {
-                        NSLog(@"[MULTIDRAG] *** OVERLAP DETECTED *** primary renderIdx=%ld [%.1f-%.1f] row=%ld overlaps renderIdx=%lu [%.1f-%.1f]",
-                              (long)_mouseDownEffectIndex, pi.startTimeMS, pi.endTimeMS, (long)pi.row,
-                              (unsigned long)i, other.startTimeMS, other.endTimeMS);
+            NSUInteger selCount = 1 + _multiDragCount;
+            NSUInteger *selIndices = calloc(selCount, sizeof(NSUInteger));
+            if (selIndices) {
+                selIndices[0] = (NSUInteger)_mouseDownEffectIndex;
+                for (NSUInteger m = 0; m < _multiDragCount; m++) {
+                    selIndices[m + 1] = _multiDragEntries[m].renderIndex;
+                }
+
+                for (NSUInteger s = 0; s < selCount; s++) {
+                    NSUInteger sidx = selIndices[s];
+                    if (sidx >= _renderEffectCount) continue;
+                    XLEffectRenderInfo si = _renderEffects[sidx];
+
+                    // Check against non-selected effects
+                    for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+                        if (i == sidx) continue;
+                        if (i < _selectedEffectsCapacity && _selectedEffects[i]) continue;
+                        XLEffectRenderInfo other = _renderEffects[i];
+                        if (other.row != si.row || other.isTimingMark) continue;
+                        if (si.startTimeMS < other.endTimeMS && si.endTimeMS > other.startTimeMS) {
+                            NSLog(@"[MULTIDRAG] *** EXT OVERLAP *** sel[%lu] renderIdx=%lu [%.1f-%.1f] row=%ld vs renderIdx=%lu [%.1f-%.1f]",
+                                  (unsigned long)s, (unsigned long)sidx, si.startTimeMS, si.endTimeMS, (long)si.row,
+                                  (unsigned long)i, other.startTimeMS, other.endTimeMS);
+                        }
+                    }
+
+                    // Check against other selected effects (intra-selection)
+                    for (NSUInteger t = s + 1; t < selCount; t++) {
+                        NSUInteger tidx = selIndices[t];
+                        if (tidx >= _renderEffectCount) continue;
+                        XLEffectRenderInfo ti = _renderEffects[tidx];
+                        if (ti.row != si.row) continue;
+                        if (si.startTimeMS < ti.endTimeMS && si.endTimeMS > ti.startTimeMS) {
+                            NSLog(@"[MULTIDRAG] *** INTRA OVERLAP *** sel[%lu] renderIdx=%lu [%.1f-%.1f] vs sel[%lu] renderIdx=%lu [%.1f-%.1f] row=%ld",
+                                  (unsigned long)s, (unsigned long)sidx, si.startTimeMS, si.endTimeMS,
+                                  (unsigned long)t, (unsigned long)tidx, ti.startTimeMS, ti.endTimeMS, (long)si.row);
+                        }
                     }
                 }
-            }
-            // Check each secondary
-            for (NSUInteger m = 0; m < _multiDragCount; m++) {
-                NSUInteger idx = _multiDragEntries[m].renderIndex;
-                if (idx >= _renderEffectCount) continue;
-                XLEffectRenderInfo si = _renderEffects[idx];
-                for (NSUInteger i = 0; i < _renderEffectCount; i++) {
-                    if (i == idx) continue;
-                    if ((NSInteger)i == _mouseDownEffectIndex) continue; // skip primary (both selected)
-                    if (i < _selectedEffectsCapacity && _selectedEffects[i]) continue;
-                    XLEffectRenderInfo other = _renderEffects[i];
-                    if (other.row != si.row || other.isTimingMark) continue;
-                    if (si.startTimeMS < other.endTimeMS && si.endTimeMS > other.startTimeMS) {
-                        NSLog(@"[MULTIDRAG] *** OVERLAP DETECTED *** entry[%lu] renderIdx=%lu [%.1f-%.1f] row=%ld overlaps renderIdx=%lu [%.1f-%.1f]",
-                              (unsigned long)m, (unsigned long)idx, si.startTimeMS, si.endTimeMS, (long)si.row,
-                              (unsigned long)i, other.startTimeMS, other.endTimeMS);
-                    }
-                }
+                free(selIndices);
             }
         }
 
@@ -4388,13 +4511,22 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 #pragma mark - Inline Label Editing
 
 - (void)beginEditingLabelAtRow:(NSInteger)row
+                   effectIndex:(NSInteger)effectIndex
                        startMS:(CGFloat)startMS
                          endMS:(CGFloat)endMS
                   currentLabel:(NSString *)currentLabel
              completionHandler:(void (^)(NSString * _Nullable newLabel))completion
 {
-    // Cancel any existing edit
-    [self cancelLabelEditing];
+    // Dismiss any existing editor without triggering navigation
+    if (_labelEditor) {
+        [_labelEditor removeFromSuperview];
+        _labelEditor = nil;
+        _labelEditCompletion = nil;
+    }
+
+    // Store editing context for Tab/Shift+Tab navigation
+    _labelEditRow = row;
+    _labelEditEffectIndex = effectIndex;
 
     // Calculate the editor rect in view coordinates (accounting for pinned timing rows)
     CGFloat x1 = startMS * _zoomLevel - _scrollOffset.x;
@@ -4462,6 +4594,36 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     }
 }
 
+- (void)commitLabelAndAdvance:(BOOL)forward {
+    if (!_labelEditor) return;
+
+    NSString *newLabel = [_labelEditor.stringValue copy];
+    NSInteger row = _labelEditRow;
+    NSInteger effectIndex = _labelEditEffectIndex;
+
+    // Tear down the editor without triggering navigation recursion
+    [_labelEditor removeFromSuperview];
+    _labelEditor = nil;
+    void (^completion)(NSString * _Nullable) = _labelEditCompletion;
+    _labelEditCompletion = nil;
+
+    // Commit the current label first
+    if (completion) {
+        completion(newLabel);
+    }
+
+    // Then request navigation to next/previous mark via delegate
+    if (forward) {
+        if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestEditNextLabelAfterIndex:inRow:)]) {
+            [_delegate effectsGrid:self didRequestEditNextLabelAfterIndex:effectIndex inRow:row];
+        }
+    } else {
+        if ([_delegate respondsToSelector:@selector(effectsGrid:didRequestEditPreviousLabelBeforeIndex:inRow:)]) {
+            [_delegate effectsGrid:self didRequestEditPreviousLabelBeforeIndex:effectIndex inRow:row];
+        }
+    }
+}
+
 - (void)cancelLabelEditing {
     if (!_labelEditor) return;
 
@@ -4481,12 +4643,20 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 - (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
     if (control == _labelEditor) {
         if (commandSelector == @selector(insertNewline:)) {
-            // Enter key: commit
+            // Enter key: commit and close
             [self commitLabelEditing];
             return YES;
         } else if (commandSelector == @selector(cancelOperation:)) {
             // Escape key: cancel
             [self cancelLabelEditing];
+            return YES;
+        } else if (commandSelector == @selector(insertTab:)) {
+            // Tab key: commit current label and advance to next timing mark
+            [self commitLabelAndAdvance:YES];
+            return YES;
+        } else if (commandSelector == @selector(insertBacktab:)) {
+            // Shift+Tab key: commit current label and go to previous timing mark
+            [self commitLabelAndAdvance:NO];
             return YES;
         }
     }

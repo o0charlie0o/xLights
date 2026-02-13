@@ -1093,6 +1093,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         bbMax = (simd_float3){500.0f, 500.0f, 500.0f};
     }
 
+    // Apply frame padding (expands bounding box for breathing room)
+    if (_framePadding > 0.0f) {
+        simd_float3 extents = bbMax - bbMin;
+        simd_float3 pad = extents * _framePadding;
+        bbMin -= pad;
+        bbMax += pad;
+    }
+
     NSLog(@"[HousePreview] frameAllModels: bb=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f) drawableSize=%.0fx%.0f",
           bbMin.x, bbMin.y, bbMin.z, bbMax.x, bbMax.y, bbMax.z,
           _mlayer.drawableSize.width, _mlayer.drawableSize.height);
@@ -1128,7 +1136,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
           (unsigned long)modelNames.count);
 
     NSUInteger skippedCount = 0;
+    NSSet<NSString *> *filter = _visibleModelFilter;
+    BOOL hasFilter = (filter != nil && filter.count > 0);
+
     for (NSString *modelName in modelNames) {
+        // If a visible model filter is active, skip models not in the set
+        if (hasFilter && ![filter containsObject:modelName]) {
+            skippedCount++;
+            continue;
+        }
+
         NSDictionary *info = [_engineBridge getModelInfo:modelName];
         if (!info) {
             skippedCount++;
@@ -1136,12 +1153,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
 
         // Filter by LayoutGroup: only show models in "Default" or "All Previews"
-        NSString *layoutGroup = info[@"LayoutGroup"];
-        if (layoutGroup && layoutGroup.length > 0 &&
-            ![layoutGroup isEqualToString:@"Default"] &&
-            ![layoutGroup isEqualToString:@"All Previews"]) {
-            skippedCount++;
-            continue;
+        // (skip this filter when using visibleModelFilter — sidebar shows specific models)
+        if (!hasFilter) {
+            NSString *layoutGroup = info[@"LayoutGroup"];
+            if (layoutGroup && layoutGroup.length > 0 &&
+                ![layoutGroup isEqualToString:@"Default"] &&
+                ![layoutGroup isEqualToString:@"All Previews"]) {
+                skippedCount++;
+                continue;
+            }
         }
 
         NSArray<NSDictionary *> *nodes = [_engineBridge getModelNodes:modelName];

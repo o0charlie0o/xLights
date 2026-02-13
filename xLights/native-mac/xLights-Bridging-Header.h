@@ -19,6 +19,8 @@
 #import "XLEffectPropertiesViewController.h"
 #import "XLColorPaletteViewController.h"
 #import "XLEngineBridge.h"
+#import "XLPlaybackController.h"
+#import "layout/XLMetalPreviewView.h"
 
 // Input handling
 #import "input/XLKeyboardHandler.h"

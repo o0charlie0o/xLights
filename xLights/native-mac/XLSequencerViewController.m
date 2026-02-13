@@ -37,6 +37,7 @@
 #import "dialogs/XLNewTimingDialog.h"
 #import "dialogs/XLTimingImportDialog.h"
 #import "dialogs/XLOnsetDetectionDialog.h"
+#import "audio/XLOnsetDetector.h"
 #import "XLSongRegionEditPopover.h"
 
 // Import Swift generated header for XLSwiftUIWindowHelper
@@ -2498,6 +2499,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     // Show inline text editor on the grid view
     [gridView beginEditingLabelAtRow:row
+                         effectIndex:effectIndex
                              startMS:startMS
                                endMS:endMS
                         currentLabel:currentLabel
@@ -2506,6 +2508,118 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             BOOL success = [self->_engineBridge setTimingMarkLabel:effectId label:newLabel];
             if (success) {
                 NSLog(@"Updated timing mark %ld label to '%@'", (long)effectId, newLabel);
+                [self reloadSequenceData];
+                [gridView reloadData];
+            }
+        }
+    }];
+}
+
+#pragma mark - Timing Label Navigation (Tab/Shift+Tab)
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditNextLabelAfterIndex:(NSInteger)effectIndex
+                                inRow:(NSInteger)row
+{
+    [self navigateLabelEditingInGrid:gridView fromIndex:effectIndex inRow:row forward:YES];
+}
+
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditPreviousLabelBeforeIndex:(NSInteger)effectIndex
+                                     inRow:(NSInteger)row
+{
+    [self navigateLabelEditingInGrid:gridView fromIndex:effectIndex inRow:row forward:NO];
+}
+
+/// Find the next or previous timing mark in the same row and open the label editor on it.
+- (void)navigateLabelEditingInGrid:(XLEffectsGridView *)gridView
+                         fromIndex:(NSInteger)currentIndex
+                             inRow:(NSInteger)row
+                           forward:(BOOL)forward
+{
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    XLRowEntry *rowEntry = &_rowData[row];
+    if (rowEntry->type != XLElementTypeTiming) return;
+
+    // Get current effect's start time via grid view
+    CGFloat currentStartMS = [gridView startMSForRenderIndex:(NSUInteger)currentIndex];
+    if (currentStartMS < 0) return;
+
+    // Get effects in this row and find the adjacent timing mark by start time
+    NSInteger effectCountInRow = [self effectsGrid:gridView numberOfEffectsInRow:row];
+
+    // Collect timing marks in this row sorted by start time
+    NSInteger bestLocalIndex = -1;
+    CGFloat bestTime = forward ? CGFLOAT_MAX : -1.0;
+
+    for (NSInteger i = 0; i < effectCountInRow; i++) {
+        XLEffectRenderInfo info = [self effectsGrid:gridView effectInfoForRow:row atIndex:i];
+        if (!info.isTimingMark) continue;
+
+        if (forward) {
+            if (info.startTimeMS > currentStartMS + 0.5 && info.startTimeMS < bestTime) {
+                bestTime = info.startTimeMS;
+                bestLocalIndex = i;
+            }
+        } else {
+            if (info.startTimeMS < currentStartMS - 0.5 && info.startTimeMS > bestTime) {
+                bestTime = info.startTimeMS;
+                bestLocalIndex = i;
+            }
+        }
+    }
+
+    if (bestLocalIndex < 0) {
+        [gridView.window makeFirstResponder:gridView];
+        return;
+    }
+
+    // Reload data so any committed label change is reflected
+    [self reloadSequenceData];
+    [gridView reloadData];
+
+    // Re-fetch effect count after reload (indices may have changed)
+    effectCountInRow = [self effectsGrid:gridView numberOfEffectsInRow:row];
+
+    // Re-find the target by matching bestTime
+    NSInteger targetLocalIndex = -1;
+    for (NSInteger i = 0; i < effectCountInRow; i++) {
+        XLEffectRenderInfo info = [self effectsGrid:gridView effectInfoForRow:row atIndex:i];
+        if (info.isTimingMark && fabs(info.startTimeMS - bestTime) < 0.5) {
+            targetLocalIndex = i;
+            break;
+        }
+    }
+
+    if (targetLocalIndex < 0) return;
+
+    // Compute the flat render index by summing effects from all prior rows
+    NSInteger renderOffset = 0;
+    for (NSInteger r = 0; r < row; r++) {
+        renderOffset += [self effectsGrid:gridView numberOfEffectsInRow:r];
+    }
+    NSInteger targetRenderIndex = renderOffset + targetLocalIndex;
+
+    NSInteger targetEffectId = [gridView effectIdAtRenderIndex:(NSUInteger)targetRenderIndex];
+    if (targetEffectId < 0) return;
+
+    NSDictionary *effectInfo = [_engineBridge getEffect:targetEffectId];
+    NSString *targetLabel = effectInfo[@"effectType"] ?: @"";
+    XLEffectRenderInfo targetInfo = [self effectsGrid:gridView effectInfoForRow:row atIndex:targetLocalIndex];
+
+    // Scroll to make the target visible if needed
+    [gridView scrollToTimeMS:targetInfo.startTimeMS];
+
+    [gridView beginEditingLabelAtRow:row
+                         effectIndex:targetRenderIndex
+                             startMS:targetInfo.startTimeMS
+                               endMS:targetInfo.endTimeMS
+                        currentLabel:targetLabel
+                   completionHandler:^(NSString *newLabel) {
+        if (newLabel && ![newLabel isEqualToString:targetLabel]) {
+            BOOL success = [self->_engineBridge setTimingMarkLabel:targetEffectId label:newLabel];
+            if (success) {
+                NSLog(@"Updated timing mark %ld label to '%@'", (long)targetEffectId, newLabel);
                 [self reloadSequenceData];
                 [gridView reloadData];
             }
@@ -5981,15 +6095,39 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view importNotesAtRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData || !_engineBridge) return;
     NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
-    NSLog(@"XLSequencerViewController: Import notes for track '%@' (placeholder)", trackName);
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.allowedContentTypes = @[
+        [UTType typeWithFilenameExtension:@"mid"],
+        [UTType typeWithFilenameExtension:@"midi"],
+        [UTType typeWithFilenameExtension:@"txt"],
+    ];
+    panel.message = @"Select a MIDI or Audacity timing file to import notes from.";
+
+    [panel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+        if (result != NSModalResponseOK || !panel.URL) return;
+
+        NSString *filePath = panel.URL.path;
+        NSString *ext = panel.URL.pathExtension.lowercaseString;
+
+        if ([ext isEqualToString:@"mid"] || [ext isEqualToString:@"midi"]) {
+            [self importTimingFromMIDIFile:filePath trackName:trackName replace:YES];
+        } else {
+            [self importTimingFromAudacityFile:filePath trackName:trackName replace:YES];
+        }
+    }];
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view importLyricsAtRow:(NSInteger)row {
-    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData) return;
+    if (row < 0 || row >= (NSInteger)_rowCount || !_rowData || !_engineBridge) return;
     NSString *trackName = [NSString stringWithUTF8String:_rowData[row].name];
-    NSLog(@"XLSequencerViewController: Import lyrics for track '%@' (placeholder)", trackName);
+
+    [self showLyricsImportDialogForTrack:trackName];
 }
 
 - (void)rowHeadings:(XLRowHeadingsView *)view breakdownPhrasesAtRow:(NSInteger)row {
@@ -6374,6 +6512,848 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)generateTiming:(id)sender {
     // Generate timing from audio is similar to import, just pre-select audio analysis
     [self importTiming:sender];
+}
+
+#pragma mark - Timing Import Implementations
+
+- (void)importTimingFromAudioWithTrackName:(NSString *)trackName
+                               sensitivity:(double)sensitivity
+                                   replace:(BOOL)replace {
+    NSString *mediaFile = [self.engineBridge getMediaFilePath];
+    if (!mediaFile || mediaFile.length == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Audio File";
+        alert.informativeText = @"The current sequence has no audio file loaded. Audio analysis requires an audio file.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    XLAudioSampleData *audioData = [XLAudioLoader loadAudioFile:mediaFile];
+    if (!audioData || audioData.sampleCount == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Audio Load Error";
+        alert.informativeText = @"Failed to load audio data for beat detection.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    // Mix to mono if stereo
+    const float *monoSamples = audioData.samples;
+    NSUInteger monoCount = audioData.sampleCount;
+    float *mixedMono = NULL;
+
+    if (audioData.channelCount > 1) {
+        mixedMono = (float *)malloc(monoCount * sizeof(float));
+        if (!mixedMono) return;
+        for (NSUInteger i = 0; i < monoCount; i++) {
+            float sum = 0;
+            for (NSUInteger ch = 0; ch < audioData.channelCount; ch++) {
+                sum += audioData.samples[i * audioData.channelCount + ch];
+            }
+            mixedMono[i] = sum / audioData.channelCount;
+        }
+        monoSamples = mixedMono;
+    }
+
+    double threshold = 1.0 - sensitivity;
+    double minIntervalMS = 50.0;
+
+    XLOnsetResult *result = [XLOnsetDetector detectOnsetsInSamples:monoSamples
+                                                       sampleCount:monoCount
+                                                        sampleRate:audioData.sampleRate
+                                                            method:XLOnsetMethodDefault
+                                                         threshold:threshold
+                                                     minIntervalMS:minIntervalMS];
+
+    if (mixedMono) free(mixedMono);
+
+    if (!result) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Detection Error";
+        alert.informativeText = @"Beat detection failed. Try adjusting the sensitivity.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    NSArray<NSNumber *> *onsets = [result recomputeOnsetsWithThreshold:threshold
+                                                         minIntervalMS:minIntervalMS];
+
+    if (onsets.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Beats Detected";
+        alert.informativeText = @"No beats were detected at the current sensitivity. Try increasing the sensitivity.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    BOOL success = [self.engineBridge createTimingTrack:trackName];
+    if (!success) {
+        NSLog(@"XLSequencerViewController: Failed to create timing track '%@' for audio import", trackName);
+        return;
+    }
+
+    NSInteger frameDuration = (_frameRate > 0) ? (1000 / _frameRate) : 50;
+    for (NSUInteger i = 0; i < onsets.count; i++) {
+        NSInteger startMS = onsets[i].integerValue;
+        NSInteger endMS;
+        if (i + 1 < onsets.count) {
+            endMS = onsets[i + 1].integerValue;
+        } else {
+            endMS = startMS + frameDuration;
+        }
+        [self.engineBridge createTimingMark:trackName layer:0
+                                startTimeMS:startMS endTimeMS:endMS label:@""];
+    }
+
+    [self.engineBridge setActiveTimingTrack:trackName];
+    [self populateTimingTrackSelector];
+    [self reloadTimingMarksForRuler];
+    [self reloadSequenceData];
+
+    NSLog(@"XLSequencerViewController: Created timing track '%@' with %lu beats from audio analysis",
+          trackName, (unsigned long)onsets.count);
+}
+
+- (void)importTimingFromMIDIFile:(NSString *)filePath
+                       trackName:(NSString *)trackName
+                         replace:(BOOL)replace {
+    if (!filePath || !trackName) return;
+
+    NSData *fileData = [NSData dataWithContentsOfFile:filePath];
+    if (!fileData || fileData.length < 14) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Invalid MIDI File";
+        alert.informativeText = @"The selected file does not appear to be a valid MIDI file.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    const uint8_t *bytes = (const uint8_t *)fileData.bytes;
+    NSUInteger length = fileData.length;
+
+    // Verify MIDI header "MThd"
+    if (bytes[0] != 'M' || bytes[1] != 'T' || bytes[2] != 'h' || bytes[3] != 'd') {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Invalid MIDI File";
+        alert.informativeText = @"The file does not have a valid MIDI header.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    // Parse header
+    uint16_t numTracks = (bytes[10] << 8) | bytes[11];
+    uint16_t division = (bytes[12] << 8) | bytes[13];
+
+    if (division == 0) division = 480;
+
+    // Collect all note-on events with their absolute tick times
+    NSMutableArray<NSDictionary *> *noteEvents = [NSMutableArray array];
+
+    // Parse tempo map to convert ticks to milliseconds
+    NSMutableArray<NSDictionary *> *tempoEvents = [NSMutableArray array];
+    // Default tempo: 120 BPM = 500000 microseconds per quarter note
+    [tempoEvents addObject:@{@"tick": @0, @"uspqn": @500000}];
+
+    NSUInteger offset = 14;
+
+    for (uint16_t t = 0; t < numTracks && offset < length; t++) {
+        if (offset + 8 > length) break;
+        // Verify "MTrk" chunk header
+        if (bytes[offset] != 'M' || bytes[offset+1] != 'T' ||
+            bytes[offset+2] != 'r' || bytes[offset+3] != 'k') {
+            break;
+        }
+
+        uint32_t trackLen = ((uint32_t)bytes[offset+4] << 24) |
+                            ((uint32_t)bytes[offset+5] << 16) |
+                            ((uint32_t)bytes[offset+6] << 8)  |
+                            (uint32_t)bytes[offset+7];
+
+        NSUInteger trackStart = offset + 8;
+        NSUInteger trackEnd = trackStart + trackLen;
+        if (trackEnd > length) trackEnd = length;
+
+        NSUInteger pos = trackStart;
+        uint32_t absoluteTick = 0;
+        uint8_t runningStatus = 0;
+
+        while (pos < trackEnd) {
+            // Read variable-length delta time
+            uint32_t delta = 0;
+            while (pos < trackEnd) {
+                uint8_t b = bytes[pos++];
+                delta = (delta << 7) | (b & 0x7F);
+                if (!(b & 0x80)) break;
+            }
+            absoluteTick += delta;
+
+            if (pos >= trackEnd) break;
+
+            uint8_t status = bytes[pos];
+            if (status & 0x80) {
+                runningStatus = status;
+                pos++;
+            } else {
+                status = runningStatus;
+            }
+
+            uint8_t type = status & 0xF0;
+
+            if (type == 0x90 && pos + 1 < trackEnd) {
+                // Note On
+                uint8_t note = bytes[pos++];
+                uint8_t velocity = bytes[pos++];
+                if (velocity > 0) {
+                    [noteEvents addObject:@{
+                        @"tick": @(absoluteTick),
+                        @"note": @(note),
+                        @"track": @(t),
+                    }];
+                }
+            } else if (type == 0x80 && pos + 1 < trackEnd) {
+                // Note Off
+                pos += 2;
+            } else if (type == 0xA0 && pos + 1 < trackEnd) {
+                // Aftertouch
+                pos += 2;
+            } else if (type == 0xB0 && pos + 1 < trackEnd) {
+                // Control Change
+                pos += 2;
+            } else if (type == 0xC0) {
+                // Program Change
+                pos += 1;
+            } else if (type == 0xD0) {
+                // Channel Pressure
+                pos += 1;
+            } else if (type == 0xE0 && pos + 1 < trackEnd) {
+                // Pitch Bend
+                pos += 2;
+            } else if (status == 0xFF && pos < trackEnd) {
+                // Meta event
+                uint8_t metaType = bytes[pos++];
+                uint32_t metaLen = 0;
+                while (pos < trackEnd) {
+                    uint8_t b = bytes[pos++];
+                    metaLen = (metaLen << 7) | (b & 0x7F);
+                    if (!(b & 0x80)) break;
+                }
+                if (metaType == 0x51 && metaLen == 3 && pos + 3 <= trackEnd) {
+                    // Tempo change
+                    uint32_t uspqn = ((uint32_t)bytes[pos] << 16) |
+                                     ((uint32_t)bytes[pos+1] << 8) |
+                                     (uint32_t)bytes[pos+2];
+                    [tempoEvents addObject:@{@"tick": @(absoluteTick), @"uspqn": @(uspqn)}];
+                }
+                pos += metaLen;
+            } else if (status == 0xF0 || status == 0xF7) {
+                // SysEx
+                uint32_t sysexLen = 0;
+                while (pos < trackEnd) {
+                    uint8_t b = bytes[pos++];
+                    sysexLen = (sysexLen << 7) | (b & 0x7F);
+                    if (!(b & 0x80)) break;
+                }
+                pos += sysexLen;
+            } else {
+                // Unknown/unsupported, skip
+                pos++;
+            }
+        }
+
+        offset = trackEnd;
+    }
+
+    if (noteEvents.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Notes Found";
+        alert.informativeText = @"No note events were found in the MIDI file.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    // Sort tempo events and note events by tick
+    [tempoEvents sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"tick"] compare:b[@"tick"]];
+    }];
+    [noteEvents sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"tick"] compare:b[@"tick"]];
+    }];
+
+    // Convert tick -> milliseconds using the tempo map
+    BOOL success = [self.engineBridge createTimingTrack:trackName];
+    if (!success) {
+        NSLog(@"XLSequencerViewController: Failed to create timing track for MIDI import");
+        return;
+    }
+
+    NSInteger frameDuration = (_frameRate > 0) ? (1000 / _frameRate) : 50;
+    NSUInteger tempoIdx = 0;
+    double currentTick = 0;
+    double currentTimeMS = 0;
+    double currentUSPQN = 500000.0;
+
+    for (NSUInteger i = 0; i < noteEvents.count; i++) {
+        uint32_t noteTick = [noteEvents[i][@"tick"] unsignedIntValue];
+
+        // Advance through tempo events up to this tick
+        while (tempoIdx + 1 < tempoEvents.count &&
+               [tempoEvents[tempoIdx + 1][@"tick"] unsignedIntValue] <= noteTick) {
+            uint32_t tempoTick = [tempoEvents[tempoIdx + 1][@"tick"] unsignedIntValue];
+            double tickDelta = tempoTick - currentTick;
+            currentTimeMS += (tickDelta / division) * (currentUSPQN / 1000.0);
+            currentTick = tempoTick;
+            currentUSPQN = [tempoEvents[tempoIdx + 1][@"uspqn"] doubleValue];
+            tempoIdx++;
+        }
+
+        double tickDelta = noteTick - currentTick;
+        double noteTimeMS = currentTimeMS + (tickDelta / division) * (currentUSPQN / 1000.0);
+
+        NSInteger startMS = (NSInteger)noteTimeMS;
+
+        // Note label: map MIDI note to name
+        uint8_t midiNote = [noteEvents[i][@"note"] unsignedCharValue];
+        NSString *label = [self midiNoteToString:midiNote];
+
+        // End time: next note start or one frame later
+        NSInteger endMS;
+        if (i + 1 < noteEvents.count) {
+            uint32_t nextTick = [noteEvents[i + 1][@"tick"] unsignedIntValue];
+            double nextDelta = nextTick - currentTick;
+            double nextTimeMS = currentTimeMS + (nextDelta / division) * (currentUSPQN / 1000.0);
+            endMS = (NSInteger)nextTimeMS;
+            if (endMS <= startMS) endMS = startMS + frameDuration;
+        } else {
+            endMS = startMS + frameDuration;
+        }
+
+        [self.engineBridge createTimingMark:trackName layer:0
+                                startTimeMS:startMS endTimeMS:endMS label:label];
+    }
+
+    [self.engineBridge setActiveTimingTrack:trackName];
+    [self populateTimingTrackSelector];
+    [self reloadTimingMarksForRuler];
+    [self reloadSequenceData];
+
+    NSLog(@"XLSequencerViewController: Imported %lu MIDI notes as timing track '%@'",
+          (unsigned long)noteEvents.count, trackName);
+}
+
+- (NSString *)midiNoteToString:(uint8_t)midi {
+    static NSArray<NSString *> *noteNames = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        noteNames = @[@"C", @"C#", @"D", @"D#", @"E", @"F",
+                      @"F#", @"G", @"G#", @"A", @"A#", @"B"];
+    });
+    int octave = (midi / 12) - 1;
+    if (octave < 0) octave = 0;
+    int note = midi % 12;
+    return [NSString stringWithFormat:@"%@%d", noteNames[note], octave];
+}
+
+- (void)importTimingFromLyricsFile:(NSString *)filePath
+                         trackName:(NSString *)trackName
+                           replace:(BOOL)replace {
+    if (!filePath || !trackName) return;
+
+    NSError *error = nil;
+    NSString *content = [NSString stringWithContentsOfFile:filePath
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:&error];
+    if (!content || error) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"File Read Error";
+        alert.informativeText = [NSString stringWithFormat:@"Failed to read lyrics file: %@",
+                                 error.localizedDescription];
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    NSString *ext = filePath.pathExtension.lowercaseString;
+
+    if ([ext isEqualToString:@"lrc"]) {
+        [self importLRCContent:content trackName:trackName replace:replace];
+    } else {
+        [self importPlainTextLyrics:content trackName:trackName replace:replace];
+    }
+}
+
+- (void)importLRCContent:(NSString *)content
+               trackName:(NSString *)trackName
+                 replace:(BOOL)replace {
+    NSArray<NSString *> *lines = [content componentsSeparatedByCharactersInSet:
+                                  [NSCharacterSet newlineCharacterSet]];
+
+    NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
+
+    // Parse LRC format: [mm:ss.xx]lyrics or [mm:ss]lyrics
+    NSRegularExpression *regex = [NSRegularExpression
+        regularExpressionWithPattern:@"\\[(\\d+):(\\d+)(?:[.:](\\d+))?\\](.*)$"
+                             options:0 error:nil];
+
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) continue;
+
+        NSTextCheckingResult *match = [regex firstMatchInString:trimmed
+                                                        options:0
+                                                          range:NSMakeRange(0, trimmed.length)];
+        if (match) {
+            NSString *minStr = [trimmed substringWithRange:[match rangeAtIndex:1]];
+            NSString *secStr = [trimmed substringWithRange:[match rangeAtIndex:2]];
+            NSRange csRange = [match rangeAtIndex:3];
+            double centiseconds = 0;
+            if (csRange.location != NSNotFound) {
+                NSString *csStr = [trimmed substringWithRange:csRange];
+                centiseconds = csStr.doubleValue;
+                if (csStr.length <= 2) centiseconds *= 10;
+            }
+            double timeMS = minStr.doubleValue * 60000 + secStr.doubleValue * 1000 + centiseconds;
+            NSString *lyricText = [trimmed substringWithRange:[match rangeAtIndex:4]];
+            lyricText = [lyricText stringByTrimmingCharactersInSet:
+                         [NSCharacterSet whitespaceCharacterSet]];
+
+            if (lyricText.length > 0) {
+                [entries addObject:@{
+                    @"timeMS": @(timeMS),
+                    @"text": lyricText,
+                }];
+            }
+        }
+    }
+
+    if (entries.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Lyrics Found";
+        alert.informativeText = @"No timestamped lyrics were found in the LRC file. Ensure the file uses [mm:ss.xx] format.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    [entries sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"timeMS"] compare:b[@"timeMS"]];
+    }];
+
+    BOOL success = [self.engineBridge createTimingTrack:trackName];
+    if (!success) return;
+
+    for (NSUInteger i = 0; i < entries.count; i++) {
+        NSInteger startMS = [entries[i][@"timeMS"] integerValue];
+        NSInteger endMS;
+        if (i + 1 < entries.count) {
+            endMS = [entries[i + 1][@"timeMS"] integerValue];
+        } else {
+            endMS = (NSInteger)_sequenceDurationMS;
+            if (endMS <= startMS) endMS = startMS + 5000;
+        }
+
+        NSString *sanitized = [self sanitizeLyricText:entries[i][@"text"]];
+        [self.engineBridge createTimingMark:trackName layer:0
+                                startTimeMS:startMS endTimeMS:endMS label:sanitized];
+    }
+
+    [self.engineBridge setActiveTimingTrack:trackName];
+    [self populateTimingTrackSelector];
+    [self reloadTimingMarksForRuler];
+    [self reloadSequenceData];
+
+    NSLog(@"XLSequencerViewController: Imported %lu lyrics entries as timing track '%@'",
+          (unsigned long)entries.count, trackName);
+}
+
+- (void)importPlainTextLyrics:(NSString *)content
+                    trackName:(NSString *)trackName
+                      replace:(BOOL)replace {
+    NSArray<NSString *> *allLines = [content componentsSeparatedByCharactersInSet:
+                                     [NSCharacterSet newlineCharacterSet]];
+    NSMutableArray<NSString *> *phrases = [NSMutableArray array];
+
+    for (NSString *line in allLines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length > 0) {
+            [phrases addObject:[self sanitizeLyricText:trimmed]];
+        }
+    }
+
+    if (phrases.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Lyrics Found";
+        alert.informativeText = @"The file contains no text lines.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    BOOL success = [self.engineBridge createTimingTrack:trackName];
+    if (!success) return;
+
+    // Evenly distribute phrases across the sequence duration
+    NSInteger duration = (NSInteger)_sequenceDurationMS;
+    if (duration <= 0) duration = 60000;
+    NSInteger intervalMS = duration / (NSInteger)phrases.count;
+    if (intervalMS <= 0) intervalMS = 1000;
+
+    NSInteger startMS = 0;
+    for (NSUInteger i = 0; i < phrases.count; i++) {
+        NSInteger endMS = startMS + intervalMS;
+        if (i == phrases.count - 1) {
+            endMS = duration;
+        }
+        [self.engineBridge createTimingMark:trackName layer:0
+                                startTimeMS:startMS endTimeMS:endMS label:phrases[i]];
+        startMS = endMS;
+    }
+
+    [self.engineBridge setActiveTimingTrack:trackName];
+    [self populateTimingTrackSelector];
+    [self reloadTimingMarksForRuler];
+    [self reloadSequenceData];
+
+    NSLog(@"XLSequencerViewController: Imported %lu text phrases as timing track '%@'",
+          (unsigned long)phrases.count, trackName);
+}
+
+- (NSString *)sanitizeLyricText:(NSString *)text {
+    NSMutableString *result = [text mutableCopy];
+    [result replaceOccurrencesOfString:@"\u2019" withString:@"'" options:0
+                                 range:NSMakeRange(0, result.length)];
+    [result replaceOccurrencesOfString:@"\u0218" withString:@"'" options:0
+                                 range:NSMakeRange(0, result.length)];
+    [result replaceOccurrencesOfString:@"\u201c" withString:@"\"" options:0
+                                 range:NSMakeRange(0, result.length)];
+    [result replaceOccurrencesOfString:@"\u201d" withString:@"\"" options:0
+                                 range:NSMakeRange(0, result.length)];
+    [result replaceOccurrencesOfString:@"\"" withString:@"" options:0
+                                 range:NSMakeRange(0, result.length)];
+    [result replaceOccurrencesOfString:@"<" withString:@"" options:0
+                                 range:NSMakeRange(0, result.length)];
+    [result replaceOccurrencesOfString:@">" withString:@"" options:0
+                                 range:NSMakeRange(0, result.length)];
+    return [result copy];
+}
+
+- (void)showLyricsImportDialogForTrack:(NSString *)trackName {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Import Lyrics";
+    alert.informativeText = @"Enter lyrics below (one phrase per line). Phrases will be evenly distributed across the sequence duration.";
+    [alert addButtonWithTitle:@"Import"];
+    [alert addButtonWithTitle:@"Import from File..."];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 400, 200)];
+    scrollView.hasVerticalScroller = YES;
+    scrollView.borderType = NSBezelBorder;
+
+    NSTextView *textView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 380, 200)];
+    textView.minSize = NSMakeSize(380, 200);
+    textView.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+    textView.verticallyResizable = YES;
+    textView.horizontallyResizable = NO;
+    textView.font = [NSFont systemFontOfSize:13];
+    textView.textContainer.widthTracksTextView = YES;
+    textView.autoresizingMask = NSViewWidthSizable;
+    scrollView.documentView = textView;
+
+    alert.accessoryView = scrollView;
+    [alert.window makeFirstResponder:textView];
+
+    [alert beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse returnCode) {
+        if (returnCode == NSAlertFirstButtonReturn) {
+            NSString *text = textView.string;
+            if (text.length > 0) {
+                [self importPlainTextLyrics:text trackName:trackName replace:YES];
+            }
+        } else if (returnCode == NSAlertSecondButtonReturn) {
+            NSOpenPanel *panel = [NSOpenPanel openPanel];
+            panel.canChooseFiles = YES;
+            panel.canChooseDirectories = NO;
+            panel.allowsMultipleSelection = NO;
+            panel.allowedContentTypes = @[
+                [UTType typeWithFilenameExtension:@"lrc"],
+                [UTType typeWithFilenameExtension:@"txt"],
+            ];
+
+            [panel beginSheetModalForWindow:self.view.window completionHandler:^(NSModalResponse result) {
+                if (result == NSModalResponseOK && panel.URL) {
+                    [self importTimingFromLyricsFile:panel.URL.path
+                                          trackName:trackName
+                                            replace:YES];
+                }
+            }];
+        }
+    }];
+}
+
+- (void)importTimingFromPapagayoFile:(NSString *)filePath
+                           trackName:(NSString *)trackName
+                             replace:(BOOL)replace {
+    if (!filePath || !trackName) return;
+
+    NSError *error = nil;
+    NSString *content = [NSString stringWithContentsOfFile:filePath
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:&error];
+    if (!content || error) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"File Read Error";
+        alert.informativeText = [NSString stringWithFormat:@"Failed to read Papagayo file: %@",
+                                 error.localizedDescription];
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    NSArray<NSString *> *lines = [content componentsSeparatedByCharactersInSet:
+                                  [NSCharacterSet newlineCharacterSet]];
+    if (lines.count < 5) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Invalid Papagayo File";
+        alert.informativeText = @"The file does not appear to be a valid Papagayo lipsync file.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+
+    NSUInteger lineIdx = 0;
+
+    // Line 0: header ("lipsync version 1")
+    NSString *header = [lines[lineIdx] stringByTrimmingCharactersInSet:
+                        [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (![header.lowercaseString isEqualToString:@"lipsync version 1"]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Invalid Papagayo File";
+        alert.informativeText = @"Expected 'lipsync version 1' header.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert beginSheetModalForWindow:self.view.window completionHandler:nil];
+        return;
+    }
+    lineIdx++;
+
+    // Line 1: audio filename (ignored)
+    lineIdx++;
+
+    // Line 2: samples per second
+    NSString *spsStr = [self papagayoTrimTabs:lines[lineIdx] depth:0];
+    NSInteger sampsPerSec = spsStr.integerValue;
+    if (sampsPerSec < 1) sampsPerSec = 24;
+    NSInteger ms = 1000 / sampsPerSec;
+    lineIdx++;
+
+    // Line 3: number of samples (ignored)
+    lineIdx++;
+
+    // Line 4: number of voices
+    NSString *numVoicesStr = [self papagayoTrimTabs:lines[lineIdx] depth:0];
+    NSInteger numVoices = numVoicesStr.integerValue;
+    if (numVoices < 1) numVoices = 1;
+    lineIdx++;
+
+    for (NSInteger v = 0; v < numVoices && lineIdx < lines.count; v++) {
+        NSString *voiceTrackName;
+        if (numVoices == 1) {
+            voiceTrackName = trackName;
+        } else {
+            voiceTrackName = [NSString stringWithFormat:@"%@ Voice %ld", trackName, (long)(v + 1)];
+        }
+
+        // Voice name line
+        lineIdx++;
+        if (lineIdx >= lines.count) break;
+
+        // All phrases text (ignored)
+        lineIdx++;
+        if (lineIdx >= lines.count) break;
+
+        // Number of phrases
+        NSString *numPhrasesStr = [self papagayoTrimTabs:lines[lineIdx] depth:1];
+        NSInteger numPhrases = numPhrasesStr.integerValue;
+        lineIdx++;
+
+        BOOL success = [self.engineBridge createTimingTrack:voiceTrackName];
+        if (!success) {
+            NSLog(@"XLSequencerViewController: Failed to create Papagayo timing track '%@'", voiceTrackName);
+            continue;
+        }
+
+        // Add extra layers for words (layer 1) and phonemes (layer 2)
+        [self.engineBridge addLayer:voiceTrackName];
+        [self.engineBridge addLayer:voiceTrackName];
+
+        for (NSInteger p = 0; p < numPhrases && lineIdx < lines.count; p++) {
+            // Phrase label
+            NSString *phraseLabel = [self papagayoTrimTabs:lines[lineIdx] depth:2];
+            lineIdx++;
+            if (lineIdx >= lines.count) break;
+
+            // Phrase start frame
+            NSString *phraseStartStr = [self papagayoTrimTabs:lines[lineIdx] depth:2];
+            NSInteger phraseStartMS = phraseStartStr.integerValue * ms;
+            lineIdx++;
+            if (lineIdx >= lines.count) break;
+
+            // Phrase end frame
+            NSString *phraseEndStr = [self papagayoTrimTabs:lines[lineIdx] depth:2];
+            NSInteger phraseEndMS = phraseEndStr.integerValue * ms;
+            lineIdx++;
+            if (lineIdx >= lines.count) break;
+
+            // Create phrase timing mark (layer 0)
+            [self.engineBridge createTimingMark:voiceTrackName layer:0
+                                    startTimeMS:phraseStartMS endTimeMS:phraseEndMS
+                                          label:phraseLabel];
+
+            // Number of words
+            NSString *numWordsStr = [self papagayoTrimTabs:lines[lineIdx] depth:2];
+            NSInteger numWords = numWordsStr.integerValue;
+            lineIdx++;
+
+            for (NSInteger w = 0; w < numWords && lineIdx < lines.count; w++) {
+                // Word line: "word startframe endframe numphonemes"
+                NSString *wordLine = [self papagayoTrimTabs:lines[lineIdx] depth:3];
+                lineIdx++;
+
+                NSArray<NSString *> *wordParts = [wordLine componentsSeparatedByString:@" "];
+                if (wordParts.count < 4) continue;
+
+                NSString *wordLabel = wordParts[0];
+                NSInteger wordStartMS = wordParts[1].integerValue * ms;
+                NSInteger wordEndMS = wordParts[2].integerValue * ms;
+                NSInteger numPhonemes = wordParts[3].integerValue;
+
+                // Create word timing mark (layer 1)
+                [self.engineBridge createTimingMark:voiceTrackName layer:1
+                                        startTimeMS:wordStartMS endTimeMS:wordEndMS
+                                              label:wordLabel];
+
+                for (NSInteger ph = 0; ph < numPhonemes && lineIdx < lines.count; ph++) {
+                    NSString *phonemeLine = [self papagayoTrimTabs:lines[lineIdx] depth:4];
+                    lineIdx++;
+
+                    NSArray<NSString *> *phonemeParts = [phonemeLine componentsSeparatedByString:@" "];
+                    if (phonemeParts.count < 2) continue;
+
+                    NSInteger phonemeFrame = phonemeParts[0].integerValue;
+                    NSString *phonemeLabel = phonemeParts[1];
+                    NSInteger phonemeStartMS = phonemeFrame * ms;
+
+                    NSInteger phonemeEndMS;
+                    if (ph + 1 < numPhonemes && lineIdx < lines.count) {
+                        NSString *nextLine = [self papagayoTrimTabs:lines[lineIdx] depth:4];
+                        NSArray<NSString *> *nextParts = [nextLine componentsSeparatedByString:@" "];
+                        if (nextParts.count >= 1) {
+                            phonemeEndMS = nextParts[0].integerValue * ms;
+                        } else {
+                            phonemeEndMS = wordEndMS;
+                        }
+                    } else {
+                        phonemeEndMS = wordEndMS;
+                    }
+
+                    if (phonemeEndMS <= phonemeStartMS) {
+                        phonemeEndMS = phonemeStartMS + ms;
+                    }
+
+                    // Create phoneme timing mark (layer 2)
+                    [self.engineBridge createTimingMark:voiceTrackName layer:2
+                                            startTimeMS:phonemeStartMS endTimeMS:phonemeEndMS
+                                                  label:phonemeLabel];
+                }
+            }
+        }
+
+        [self.engineBridge setActiveTimingTrack:voiceTrackName];
+    }
+
+    [self populateTimingTrackSelector];
+    [self reloadTimingMarksForRuler];
+    [self reloadSequenceData];
+
+    NSLog(@"XLSequencerViewController: Imported Papagayo file with %ld voice(s) as '%@'",
+          (long)numVoices, trackName);
+}
+
+- (NSString *)papagayoTrimTabs:(NSString *)line depth:(NSInteger)depth {
+    NSString *result = line;
+    for (NSInteger i = 0; i < depth; i++) {
+        if ([result hasPrefix:@"\t"]) {
+            result = [result substringFromIndex:1];
+        }
+    }
+    return [result stringByTrimmingCharactersInSet:
+            [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (void)importTimingFromAudacityFile:(NSString *)filePath
+                           trackName:(NSString *)trackName
+                             replace:(BOOL)replace {
+    if (!filePath || !trackName) return;
+
+    NSError *error = nil;
+    NSString *content = [NSString stringWithContentsOfFile:filePath
+                                                 encoding:NSUTF8StringEncoding
+                                                    error:&error];
+    if (!content || error) return;
+
+    NSArray<NSString *> *lines = [content componentsSeparatedByCharactersInSet:
+                                  [NSCharacterSet newlineCharacterSet]];
+
+    NSMutableArray<NSDictionary *> *marks = [NSMutableArray array];
+
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) continue;
+
+        // Audacity timing format: start_seconds\tend_seconds\tlabel
+        NSArray<NSString *> *parts = [trimmed componentsSeparatedByString:@"\t"];
+        if (parts.count >= 2) {
+            double startSec = parts[0].doubleValue;
+            double endSec = parts[1].doubleValue;
+            NSString *label = (parts.count >= 3) ? parts[2] : @"";
+            NSInteger startMS = (NSInteger)(startSec * 1000);
+            NSInteger endMS = (NSInteger)(endSec * 1000);
+            if (endMS <= startMS) endMS = startMS + 50;
+
+            [marks addObject:@{
+                @"startMS": @(startMS),
+                @"endMS": @(endMS),
+                @"label": label,
+            }];
+        }
+    }
+
+    if (marks.count == 0) return;
+
+    BOOL success = [self.engineBridge createTimingTrack:trackName];
+    if (!success) return;
+
+    for (NSDictionary *mark in marks) {
+        [self.engineBridge createTimingMark:trackName layer:0
+                                startTimeMS:[mark[@"startMS"] integerValue]
+                                  endTimeMS:[mark[@"endMS"] integerValue]
+                                      label:mark[@"label"]];
+    }
+
+    [self.engineBridge setActiveTimingTrack:trackName];
+    [self populateTimingTrackSelector];
+    [self reloadTimingMarksForRuler];
+    [self reloadSequenceData];
+
+    NSLog(@"XLSequencerViewController: Imported %lu Audacity timing marks as '%@'",
+          (unsigned long)marks.count, trackName);
 }
 
 #pragma mark - Zoom Level Persistence

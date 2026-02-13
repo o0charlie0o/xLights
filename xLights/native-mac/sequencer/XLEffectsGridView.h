@@ -274,6 +274,25 @@ typedef NS_ENUM(NSInteger, XLEffectHitLocation) {
 - (void)effectsGrid:(XLEffectsGridView *)gridView
     didRequestCreateAlternatingPhonemesAtIndex:(NSInteger)effectIndex;
 
+/// A timing mark label was committed (Enter or Tab).
+/// The delegate should persist the label change and reload the grid data.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didUpdateTimingMarkLabel:(NSString *)newLabel
+          forEffectAtIndex:(NSInteger)effectIndex
+                     inRow:(NSInteger)row;
+
+/// Request to edit the next timing mark label (Tab key in inline editor).
+/// The delegate should commit the current label, then begin editing the next mark.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditNextLabelAfterIndex:(NSInteger)effectIndex
+                                inRow:(NSInteger)row;
+
+/// Request to edit the previous timing mark label (Shift+Tab key in inline editor).
+/// The delegate should commit the current label, then begin editing the previous mark.
+- (void)effectsGrid:(XLEffectsGridView *)gridView
+    didRequestEditPreviousLabelBeforeIndex:(NSInteger)effectIndex
+                                     inRow:(NSInteger)row;
+
 /// Request to find a text label in timing marks.
 - (void)effectsGridDidRequestFindTimingLabel:(XLEffectsGridView *)gridView;
 
@@ -423,11 +442,13 @@ typedef NS_ENUM(NSInteger, XLAlignmentType) {
 
 /// Show an inline text field editor over a timing mark label for editing.
 /// @param row The grid row of the timing mark
+/// @param effectIndex The render index of the timing mark effect (used for Tab navigation)
 /// @param startMS Start time of the timing mark in ms
 /// @param endMS End time of the timing mark in ms
 /// @param currentLabel The current label text
 /// @param completion Called with the new label when editing completes, or nil if cancelled
 - (void)beginEditingLabelAtRow:(NSInteger)row
+                   effectIndex:(NSInteger)effectIndex
                        startMS:(CGFloat)startMS
                          endMS:(CGFloat)endMS
                   currentLabel:(NSString *)currentLabel

@@ -56,8 +56,11 @@
 /// The engine bridge for playback control and rendering.
 @property (nonatomic, weak) XLEngineBridge *engineBridge;
 
-/// The preview view to update with rendered frames.
+/// The preview view to update with rendered frames (house preview).
 @property (nonatomic, weak) XLMetalPreviewView *previewView;
+
+/// Secondary preview view for the sidebar model preview.
+@property (nonatomic, weak) XLMetalPreviewView *sidebarPreviewView;
 
 /// The native audio player for audio playback.
 /// If set, uses AVFoundation for audio; otherwise falls back to engine bridge.

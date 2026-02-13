@@ -172,6 +172,15 @@
 /// Whether to render in 3D perspective (YES) or 2D orthographic (NO)
 @property (nonatomic, assign) BOOL show3D;
 
+/// Extra padding factor for frameAllModels (0.0 = tight fit, 0.15 = 15% margin).
+/// Default is 0.0. The sidebar model preview uses ~0.15 for breathing room.
+@property (nonatomic, assign) float framePadding;
+
+/// Optional set of model names to show. When non-nil and non-empty,
+/// only models whose names are in this set will be loaded by reloadModels.
+/// Set to nil to show all models (default behavior).
+@property (nonatomic, copy, nullable) NSSet<NSString *> *visibleModelFilter;
+
 #pragma mark - Background Image
 
 /// File path to the background image (nil = no background image)

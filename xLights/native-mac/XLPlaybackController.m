@@ -517,7 +517,8 @@
                 if (!strongSelf) return;
 
                 XLMetalPreviewView *preview = strongSelf.previewView;
-                if (preview && frameUpdates.count > 0) {
+                XLMetalPreviewView *sidebarPreview = strongSelf.sidebarPreviewView;
+                if (frameUpdates.count > 0 && (preview || sidebarPreview)) {
                     for (NSDictionary *fb in frameUpdates) {
                         NSData *pixels = fb[@"pixels"];
                         NSUInteger width = [fb[@"width"] unsignedIntegerValue];
@@ -529,10 +530,15 @@
                                               forModel:name
                                                  width:width
                                                 height:height];
+                            [sidebarPreview setRenderedPixels:pixels
+                                                     forModel:name
+                                                        width:width
+                                                       height:height];
                         }
                     }
 
                     [preview updatePreviewForTime:timeMS];
+                    [sidebarPreview updatePreviewForTime:timeMS];
                 }
 
                 strongSelf.renderInProgress = NO;

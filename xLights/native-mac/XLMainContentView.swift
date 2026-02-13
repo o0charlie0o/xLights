@@ -273,23 +273,122 @@ struct XLMainContentView: View {
 
     @ViewBuilder
     private var sidebarContent: some View {
-        VStack(spacing: 0) {
-            if appState.currentTab == .sequencer {
-                // Model preview for sequencer tab (like legacy xLights sidebar)
-                XLSidebarModelPreview(engineBridge: appState.engineBridge)
-            } else {
-                // Tab list for other tabs
-                List(selection: Binding(
-                    get: { appState.currentTab },
-                    set: { appState.currentTab = $0 }
-                )) {
-                    ForEach(XLTab.allCases) { tab in
-                        Label(tab.title, systemImage: tab.icon)
-                            .tag(tab)
+        if appState.currentTab == .sequencer {
+            VStack(spacing: 0) {
+                // Model Preview (top)
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Model Preview")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Spacer()
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(nsColor: .windowBackgroundColor))
+
+                    XLSidebarModelPreview(
+                        engineBridge: appState.engineBridge,
+                        effectSelectionState: appState.effectSelectionState
+                    )
                 }
-                .listStyle(.sidebar)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Divider()
+
+                // Effect Assist (bottom)
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Effect Assist")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color(nsColor: .windowBackgroundColor))
+
+                    effectAssistContent
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .background(Color(nsColor: .controlBackgroundColor))
+        } else {
+            // Tab list for other tabs
+            List(selection: Binding(
+                get: { appState.currentTab },
+                set: { appState.currentTab = $0 }
+            )) {
+                ForEach(XLTab.allCases) { tab in
+                    Label(tab.title, systemImage: tab.icon)
+                        .tag(tab)
+                }
+            }
+            .listStyle(.sidebar)
+        }
+    }
+
+    // MARK: - Effect Assist Content
+
+    @ViewBuilder
+    private var effectAssistContent: some View {
+        if let effectType = appState.effectSelectionState.effectType, !effectType.isEmpty {
+            VStack(spacing: 4) {
+                Image(systemName: effectAssistIcon(for: effectType))
+                    .font(.system(size: 24))
+                    .foregroundColor(.secondary)
+                Text(effectType)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 4) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 24))
+                    .foregroundColor(.secondary.opacity(0.5))
+                Text("Select an effect")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary.opacity(0.5))
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func effectAssistIcon(for effectType: String) -> String {
+        switch effectType.lowercased() {
+        case "text": return "textformat"
+        case "pictures": return "photo"
+        case "faces": return "face.smiling"
+        case "fire": return "flame"
+        case "bars": return "chart.bar"
+        case "butterfly": return "ladybug"
+        case "circles": return "circle.grid.3x3"
+        case "colorwash": return "paintbrush"
+        case "curtain": return "blinds.vertical.closed"
+        case "fireworks": return "sparkles"
+        case "garlands": return "leaf"
+        case "kaleidoscope": return "hexagon"
+        case "life": return "square.grid.3x3"
+        case "marquee": return "arrow.right"
+        case "meteors": return "cloud.rain"
+        case "morph": return "wand.and.stars"
+        case "music": return "music.note"
+        case "on": return "power"
+        case "plasma": return "cloud.sun"
+        case "ripple": return "wave.3.right"
+        case "shimmer": return "sparkle"
+        case "single strand": return "line.diagonal"
+        case "snowflakes": return "snowflake"
+        case "snowstorm": return "cloud.snow"
+        case "spirals": return "tornado"
+        case "spirograph": return "circle.dotted"
+        case "strobe": return "bolt"
+        case "twinkle": return "star"
+        case "video": return "video"
+        case "wave": return "waveform.path.ecg"
+        default: return "sparkles"
         }
     }
 
@@ -909,48 +1008,255 @@ struct ToolbarToggleButtonStyle: ButtonStyle {
 
 // MARK: - Sidebar Model Preview
 
-/// NSViewRepresentable wrapper for XLMetalPreviewView in the sidebar.
-/// Shows a small model preview when the sequencer tab is active.
+/// NSViewRepresentable wrapping XLMetalPreviewView for the sidebar.
+/// Shows only the model(s) affected by the currently selected effect,
+/// zoomed to fit. When the sequence isn't playing, loops a preview of the
+/// selected effect's time range so the user can see the effect live.
 struct XLSidebarModelPreview: NSViewRepresentable {
     let engineBridge: XLEngineBridge
+    let effectSelectionState: EffectSelectionState
 
-    func makeNSView(context: Context) -> NSView {
-        let container = NSView()
-        container.wantsLayer = true
+    func makeNSView(context: Context) -> XLMetalPreviewView {
+        let preview = XLMetalPreviewView(frame: .zero)
+        preview.engineBridge = engineBridge
+        preview.show3D = false
+        preview.showGrid = false
+        preview.scrollbarsEnabled = false
+        preview.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.1, blue: 0.1, alpha: 1.0)
+        preview.showEffectColors = true
+        preview.framePadding = 0.15
 
-        // Try to create the Metal preview view
-        if let previewClass = NSClassFromString("XLMetalPreviewView") as? NSView.Type {
-            let preview = previewClass.init(frame: NSRect(x: 0, y: 0, width: 250, height: 250))
-            preview.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(preview)
-            NSLayoutConstraint.activate([
-                preview.topAnchor.constraint(equalTo: container.topAnchor),
-                preview.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-                preview.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                preview.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            ])
-            // Set the engine bridge on the preview view
-            if preview.responds(to: NSSelectorFromString("setEngineBridge:")) {
-                preview.setValue(engineBridge, forKey: "engineBridge")
-            }
-        } else {
-            // Fallback: placeholder view
-            let label = NSTextField(labelWithString: "Model Preview")
-            label.alignment = .center
-            label.textColor = .secondaryLabelColor
-            label.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(label)
-            NSLayoutConstraint.activate([
-                label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-                label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            ])
+        // Wire to playback controller for real-time pixel data during sequence playback
+        if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController {
+            seqVC.playbackController?.sidebarPreviewView = preview
         }
 
-        return container
+        // Observe effect selection to filter visible models and start preview loop
+        context.coordinator.start(preview: preview, bridge: engineBridge)
+
+        return preview
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {
-        // No updates needed
+    func updateNSView(_ nsView: XLMetalPreviewView, context: Context) {
+        // Re-wire playback controller if it was nil at creation time
+        if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController,
+           seqVC.playbackController?.sidebarPreviewView !== nsView {
+            seqVC.playbackController?.sidebarPreviewView = nsView
+        }
+    }
+
+    static func dismantleNSView(_ nsView: XLMetalPreviewView, coordinator: Coordinator) {
+        if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController,
+           seqVC.playbackController?.sidebarPreviewView === nsView {
+            seqVC.playbackController?.sidebarPreviewView = nil
+        }
+        nsView.stopRenderLoop()
+        coordinator.stop()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    class Coordinator {
+        private var selectionObserver: NSObjectProtocol?
+        private var previewTimer: Timer?
+        private var currentModelName: String?
+
+        // Effect preview loop state
+        private var effectStartMS: Int = 0
+        private var effectEndMS: Int = 0
+        private var loopPositionMS: Int = 0
+        private var frameTimeMS: Int = 50
+        private weak var previewView: XLMetalPreviewView?
+        private weak var bridge: XLEngineBridge?
+        private var effectModelName: String?
+        private var resolvedModelNames: Set<String> = []
+
+        private var renderQueue = DispatchQueue(label: "sidebar.preview.render", qos: .utility)
+        private var renderInProgress = false
+
+        // Coalescing: defer heavy selection work during rapid-fire events (drag)
+        private var pendingSelectionWork: DispatchWorkItem?
+        private var isCleared = false
+
+        /// Resolve a model/group name to the set of individual model names.
+        private func resolveModelNames(_ name: String, bridge: XLEngineBridge) -> Set<String> {
+            if let groupInfo = bridge.getModelGroup(name) as? [String: Any],
+               let members = groupInfo["modelNames"] as? [String], !members.isEmpty {
+                var result = Set<String>()
+                for member in members {
+                    result.formUnion(resolveModelNames(member, bridge: bridge))
+                }
+                return result
+            }
+            return [name]
+        }
+
+        func start(preview: XLMetalPreviewView, bridge: XLEngineBridge) {
+            self.previewView = preview
+            self.bridge = bridge
+            self.frameTimeMS = max(Int(bridge.getFrameTimeMS()), 20)
+
+            selectionObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("XLEffectSelectionDidChangeNotification"),
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                self?.handleSelectionChange(notification)
+            }
+        }
+
+        private func handleSelectionChange(_ notification: Notification) {
+            guard let preview = previewView, let bridge = bridge else { return }
+
+            let effectId = (notification.userInfo?["effectId"] as? NSNumber)?.intValue ?? -1
+
+            if effectId < 0 {
+                // Deselection: clear immediately but skip if already cleared
+                pendingSelectionWork?.cancel()
+                pendingSelectionWork = nil
+                if !isCleared {
+                    stopPreviewLoop()
+                    currentModelName = nil
+                    effectModelName = nil
+                    resolvedModelNames = []
+                    preview.visibleModelFilter = nil
+                    preview.clearRenderedPixels()
+                    preview.reloadModels()
+                    preview.setNeedsRender()
+                    isCleared = true
+                }
+                return
+            }
+
+            // Coalesce rapid-fire selection events (e.g. during drag)
+            pendingSelectionWork?.cancel()
+
+            let work = DispatchWorkItem { [weak self] in
+                self?.processSelection(effectId: effectId, bridge: bridge, preview: preview)
+            }
+            pendingSelectionWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: work)
+        }
+
+        private func processSelection(effectId: Int, bridge: XLEngineBridge, preview: XLMetalPreviewView) {
+            guard self.previewView === preview else { return }
+
+            guard let effectInfo = bridge.getEffect(effectId) as? [String: Any],
+                  let modelName = effectInfo["modelName"] as? String, !modelName.isEmpty else {
+                return
+            }
+
+            isCleared = false
+
+            let startMS = (effectInfo["startTimeMS"] as? NSNumber)?.intValue ?? 0
+            let endMS = (effectInfo["endTimeMS"] as? NSNumber)?.intValue ?? 0
+
+            let modelChanged = modelName != currentModelName
+            let rangeChanged = startMS != effectStartMS || endMS != effectEndMS
+
+            currentModelName = modelName
+            effectModelName = modelName
+            effectStartMS = startMS
+            effectEndMS = endMS
+            loopPositionMS = startMS
+
+            if modelChanged {
+                resolvedModelNames = resolveModelNames(modelName, bridge: bridge)
+                preview.visibleModelFilter = resolvedModelNames
+                preview.reloadModels()
+                preview.frameAllModels()
+            }
+
+            // Only restart the preview loop if the time range changed or no timer exists
+            if rangeChanged || previewTimer == nil {
+                startPreviewLoopIfNeeded()
+            }
+        }
+
+        private func startPreviewLoopIfNeeded() {
+            stopPreviewLoop()
+
+            guard effectEndMS > effectStartMS else { return }
+
+            let interval = TimeInterval(frameTimeMS) / 1000.0
+            previewTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+                self?.previewLoopTick()
+            }
+        }
+
+        private func previewLoopTick() {
+            guard let bridge = bridge, let preview = previewView else {
+                stopPreviewLoop()
+                return
+            }
+
+            // If the main sequence is playing, the playback controller feeds pixel data
+            if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController,
+               seqVC.playbackController?.isPlaying == true {
+                return
+            }
+
+            // Skip if a render is still in flight to prevent queue pile-up
+            guard !renderInProgress else { return }
+
+            let timeMS = loopPositionMS
+
+            // Advance position for next tick, wrapping at effect end
+            loopPositionMS += frameTimeMS
+            if loopPositionMS >= effectEndMS {
+                loopPositionMS = effectStartMS
+            }
+
+            let models = Array(resolvedModelNames)
+            guard !models.isEmpty else { return }
+
+            renderInProgress = true
+            renderQueue.async { [weak self] in
+                var buffers: [(String, [String: Any])] = []
+                for name in models {
+                    bridge.renderModelFrame(name, timeMS: Int(timeMS))
+                    if let fb = bridge.getFrameBuffer(name) as? [String: Any] {
+                        buffers.append((name, fb))
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.renderInProgress = false
+                    guard self.previewView === preview else { return }
+
+                    for (name, fb) in buffers {
+                        if let pixels = fb["pixels"] as? Data,
+                           let width = (fb["width"] as? NSNumber)?.uintValue,
+                           let height = (fb["height"] as? NSNumber)?.uintValue,
+                           pixels.count > 0, width > 0, height > 0 {
+                            preview.setRenderedPixels(pixels, forModel: name,
+                                                      width: UInt(width), height: UInt(height))
+                        }
+                    }
+                    preview.updatePreview(forTime: Int(timeMS))
+                }
+            }
+        }
+
+        private func stopPreviewLoop() {
+            previewTimer?.invalidate()
+            previewTimer = nil
+        }
+
+        func stop() {
+            stopPreviewLoop()
+            if let observer = selectionObserver {
+                NotificationCenter.default.removeObserver(observer)
+                selectionObserver = nil
+            }
+        }
+
+        deinit {
+            stop()
+        }
     }
 }
 
