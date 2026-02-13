@@ -263,6 +263,11 @@
 /// For multi-selection: use selectedModelNames.
 @property (nonatomic, strong, nullable) NSString *selectedModelName;
 
+/// When non-nil, only nodes at these indices within the selected model
+/// are rendered white (1.0); other nodes stay at base gray (0.6).
+/// Used when a submodel is selected in the model tree.
+@property (nonatomic, copy, nullable) NSIndexSet *selectedSubmodelNodeIndices;
+
 /// Names of all currently selected models in the preview.
 /// For single selection this contains one element matching selectedModelName.
 /// For multi-selection (Cmd+click, rubber-band) it may contain multiple names.

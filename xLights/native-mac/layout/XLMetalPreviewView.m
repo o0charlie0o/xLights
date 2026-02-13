@@ -1187,8 +1187,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _scrollbarsDirty = YES;
 }
 
+- (void)setSelectedSubmodelNodeIndices:(NSIndexSet *)selectedSubmodelNodeIndices {
+    _selectedSubmodelNodeIndices = [selectedSubmodelNodeIndices copy];
+    _modelVerticesDirty = YES;
+    _contentDirty = YES;
+}
+
 - (void)selectModel:(NSString *)modelName {
     _selectedModelName = modelName;
+    _selectedSubmodelNodeIndices = nil;
 
     // Update multi-selection set: single select replaces all
     [_selectedModelNamesSet removeAllObjects];
@@ -1328,8 +1335,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         BOOL isSelected = [modelName isEqualToString:_selectedModelName];
         BOOL isMultiSelected = !isSelected && [_selectedModelNamesSet containsObject:modelName];
 
+        // When a submodel is selected, the parent model stays at 0.6
+        // and only the submodel nodes get white (1.0)
+        BOOL hasSubmodelSelection = isSelected && _selectedSubmodelNodeIndices != nil;
+
         float baseGray = 0.6f;
-        if (isSelected) {
+        if (isSelected && !hasSubmodelSelection) {
             baseGray = 1.0f;
         } else if (isMultiSelected) {
             baseGray = 0.95f;
@@ -1354,6 +1365,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             // Get buffer position from node for pixel lookup
             NSInteger bufX = [node[@"bufX"] integerValue];
             NSInteger bufY = [node[@"bufY"] integerValue];
+
+            // Per-node gray: white for submodel nodes, baseGray for others
+            float nodeGray = baseGray;
+            if (hasSubmodelSelection && [_selectedSubmodelNodeIndices containsIndex:nodeIndex]) {
+                nodeGray = 1.0f;
+            }
 
             // Try to get color from rendered pixel data
             BOOL gotPixelColor = NO;
@@ -1381,9 +1398,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                     vertex.color = (simd_float4){0.0f, 0.0f, 0.0f, 1.0f};
                 } else {
                     vertex.color = (simd_float4){
-                        baseGray * (0.3f + 0.7f * defaultR),
-                        baseGray * (0.3f + 0.7f * defaultG),
-                        baseGray * (0.3f + 0.7f * defaultB),
+                        nodeGray * (0.3f + 0.7f * defaultR),
+                        nodeGray * (0.3f + 0.7f * defaultG),
+                        nodeGray * (0.3f + 0.7f * defaultB),
                         1.0f
                     };
                 }
@@ -3478,6 +3495,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)clearModelSelection {
     _selectedModelName = nil;
+    _selectedSubmodelNodeIndices = nil;
     [_selectedModelNamesSet removeAllObjects];
     [_handles clearSelection];
     [_polylineRenderer clearPoints];

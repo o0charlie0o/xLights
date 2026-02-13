@@ -256,7 +256,7 @@ struct XLCommandPaletteView: View {
 
 extension XLCommandPaletteState {
     func loadCommands() {
-        commands = [
+        var cmds: [XLCommand] = [
             // File commands
             XLCommand(title: "New Sequence", subtitle: "Create a new sequence", icon: "doc.badge.plus", category: "File", shortcut: "⌘N") {
                 print("New Sequence")
@@ -369,6 +369,33 @@ extension XLCommandPaletteState {
                 print("Preferences")
             },
         ]
+
+        // Dynamically load all effect types into the command palette
+        cmds.append(contentsOf: Self.buildEffectCommands())
+        commands = cmds
+    }
+
+    private static func buildEffectCommands() -> [XLCommand] {
+        guard let bridge = XLSwiftUIWindowHelper.shared.engineBridge,
+              let effectTypes = bridge.getEffectTypes() as? [String] else {
+            return []
+        }
+        return effectTypes.sorted().map { effectName in
+            let icon = effectIconMapping[effectName] ?? "sparkle"
+            return XLCommand(
+                title: "Add \(effectName)",
+                subtitle: "Add \(effectName) effect to selected cell",
+                icon: icon,
+                category: "Add Effect",
+                shortcut: nil
+            ) {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("XLApplyEffectFromCommandPalette"),
+                    object: nil,
+                    userInfo: ["effectName": effectName]
+                )
+            }
+        }
     }
 }
 

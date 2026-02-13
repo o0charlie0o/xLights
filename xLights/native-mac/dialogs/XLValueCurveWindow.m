@@ -745,20 +745,109 @@ static const CGFloat kCurveViewHeight = 300.0;
     }
 }
 
++ (BOOL)paramNeedsRealScale:(int)paramIndex forType:(NSString *)type {
+    if (paramIndex == 1) {
+        // P1 uses MINVOID/MAXVOID range for these types
+        return ([type isEqualToString:@"Flat"] ||
+                [type isEqualToString:@"Ramp"] ||
+                [type isEqualToString:@"Ramp Up/Down"] ||
+                [type isEqualToString:@"Ramp Up/Down Hold"] ||
+                [type isEqualToString:@"Saw Tooth"] ||
+                [type isEqualToString:@"Square"] ||
+                [type isEqualToString:@"Random"] ||
+                [type isEqualToString:@"Music"] ||
+                [type isEqualToString:@"Inverted Music"] ||
+                [type isEqualToString:@"Music Trigger Fade"] ||
+                [type isEqualToString:@"Timing Track Toggle"] ||
+                [type isEqualToString:@"Timing Track Fade Fixed"] ||
+                [type isEqualToString:@"Timing Track Fade Proportional"]);
+    } else if (paramIndex == 2) {
+        // P2 uses MINVOID/MAXVOID range for these types
+        return ([type isEqualToString:@"Ramp"] ||
+                [type isEqualToString:@"Ramp Up/Down"] ||
+                [type isEqualToString:@"Ramp Up/Down Hold"] ||
+                [type isEqualToString:@"Saw Tooth"] ||
+                [type isEqualToString:@"Square"] ||
+                [type isEqualToString:@"Random"] ||
+                [type isEqualToString:@"Parabolic Down"] ||
+                [type isEqualToString:@"Parabolic Up"] ||
+                [type isEqualToString:@"Logarithmic Up"] ||
+                [type isEqualToString:@"Logarithmic Down"] ||
+                [type isEqualToString:@"Exponential Up"] ||
+                [type isEqualToString:@"Exponential Down"] ||
+                [type isEqualToString:@"Sine"] ||
+                [type isEqualToString:@"Abs Sine"] ||
+                [type isEqualToString:@"Music"] ||
+                [type isEqualToString:@"Inverted Music"] ||
+                [type isEqualToString:@"Music Trigger Fade"] ||
+                [type isEqualToString:@"Timing Track Toggle"] ||
+                [type isEqualToString:@"Timing Track Fade Fixed"] ||
+                [type isEqualToString:@"Timing Track Fade Proportional"]);
+    } else if (paramIndex == 3) {
+        // P3 uses MINVOID/MAXVOID range only for Ramp Up/Down
+        return [type isEqualToString:@"Ramp Up/Down"];
+    } else if (paramIndex == 4) {
+        // P4 uses MINVOID/MAXVOID range only for Sine and Abs Sine
+        return ([type isEqualToString:@"Sine"] ||
+                [type isEqualToString:@"Abs Sine"]);
+    }
+    return NO;
+}
+
+- (float)uiToReal:(float)uiValue {
+    float mn = _curveView.minValue;
+    float mx = _curveView.maxValue;
+    return mn + (uiValue / 100.0f) * (mx - mn);
+}
+
+- (float)realToUI:(float)realValue {
+    float mn = _curveView.minValue;
+    float mx = _curveView.maxValue;
+    if (mx == mn) return 0.0f;
+    return ((realValue - mn) / (mx - mn)) * 100.0f;
+}
+
 - (NSString *)curveDataString {
-    NSMutableString *result = [NSMutableString stringWithString:_curveView.curveType];
+    NSString *type = _curveView.curveType;
+    NSMutableString *result = [NSMutableString string];
 
-    [result appendFormat:@"|%.2f", _curveView.parameter1 * 100];
-    [result appendFormat:@"|%.2f", _curveView.parameter2 * 100];
-    [result appendFormat:@"|%.2f", _curveView.parameter3 * 100];
-    [result appendFormat:@"|%.2f", _curveView.parameter4 * 100];
+    [result appendString:@"Active=TRUE|Id=ValueCurve|"];
+    [result appendFormat:@"Type=%@|", type];
+    [result appendFormat:@"Min=%.2f|Max=%.2f|", _curveView.minValue, _curveView.maxValue];
 
-    if ([_curveView.curveType isEqualToString:@"Custom"]) {
+    if ([type isEqualToString:@"Custom"]) {
+        // Custom curve: colon-separated x:y pairs with semicolons
+        NSMutableString *pointsStr = [NSMutableString string];
         for (NSInteger i = 0; i < _curveView.customPointCount; i++) {
-            [result appendFormat:@"|%.4f,%.4f",
+            if (i > 0) [pointsStr appendString:@";"];
+            [pointsStr appendFormat:@"%.4f:%.4f",
              _curveView.customPoints[i].x, _curveView.customPoints[i].y];
         }
+        [result appendFormat:@"P1=%@|", pointsStr];
+    } else {
+        // Standard params: scale MINVOID params from 0-100 UI to real min/max scale
+        float p1 = _curveView.parameter1 * 100.0f;
+        float p2 = _curveView.parameter2 * 100.0f;
+        float p3 = _curveView.parameter3 * 100.0f;
+        float p4 = _curveView.parameter4 * 100.0f;
+
+        if ([XLValueCurvePanel paramNeedsRealScale:1 forType:type]) {
+            p1 = [self uiToReal:p1];
+        }
+        if ([XLValueCurvePanel paramNeedsRealScale:2 forType:type]) {
+            p2 = [self uiToReal:p2];
+        }
+        if ([XLValueCurvePanel paramNeedsRealScale:3 forType:type]) {
+            p3 = [self uiToReal:p3];
+        }
+        if ([XLValueCurvePanel paramNeedsRealScale:4 forType:type]) {
+            p4 = [self uiToReal:p4];
+        }
+
+        [result appendFormat:@"P1=%.2f|P2=%.2f|P3=%.2f|P4=%.2f|", p1, p2, p3, p4];
     }
+
+    [result appendString:@"RV=TRUE|"];
 
     return result;
 }
@@ -770,10 +859,104 @@ static const CGFloat kCurveViewHeight = 300.0;
         return;
     }
 
+    if ([curveData containsString:@"="]) {
+        [self parseKeyValueCurveData:curveData];
+    } else {
+        [self parseLegacyCurveData:curveData];
+    }
+
+    [self updateParameterVisibility];
+    [_curveView setNeedsDisplay:YES];
+}
+
+- (void)parseKeyValueCurveData:(NSString *)curveData {
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    NSArray *parts = [curveData componentsSeparatedByString:@"|"];
+    for (NSString *part in parts) {
+        NSRange eqRange = [part rangeOfString:@"="];
+        if (eqRange.location != NSNotFound) {
+            NSString *key = [part substringToIndex:eqRange.location];
+            NSString *val = [part substringFromIndex:eqRange.location + 1];
+            dict[key] = val;
+        }
+    }
+
+    NSString *typeStr = dict[@"Type"] ?: @"Flat";
+    _curveView.curveType = typeStr;
+
+    // Select in popup
+    for (int i = 0; i < kCurveTypeCount; i++) {
+        if ([typeStr isEqualToString:[NSString stringWithUTF8String:kCurveTypes[i].typeId]]) {
+            [_curveTypePopup selectItemAtIndex:i];
+            break;
+        }
+    }
+
+    // Read Min/Max if present
+    if (dict[@"Min"]) _curveView.minValue = [dict[@"Min"] floatValue];
+    if (dict[@"Max"]) _curveView.maxValue = [dict[@"Max"] floatValue];
+
+    BOOL hasRV = [dict[@"RV"] isEqualToString:@"TRUE"];
+
+    if ([typeStr isEqualToString:@"Custom"]) {
+        // Parse custom points from P1 as colon-separated x:y pairs with semicolons
+        NSString *pointsStr = dict[@"P1"] ?: @"";
+        _curveView.customPointCount = 0;
+        NSArray *pointPairs = [pointsStr componentsSeparatedByString:@";"];
+        for (NSString *pair in pointPairs) {
+            if (_curveView.customPointCount >= XL_MAX_CURVE_POINTS) break;
+            NSArray *coords = [pair componentsSeparatedByString:@":"];
+            if (coords.count == 2) {
+                _curveView.customPoints[_curveView.customPointCount].x = [coords[0] floatValue];
+                _curveView.customPoints[_curveView.customPointCount].y = [coords[1] floatValue];
+                _curveView.customPointCount++;
+            }
+        }
+    } else {
+        // Parse standard params
+        float p1 = dict[@"P1"] ? [dict[@"P1"] floatValue] : 50.0f;
+        float p2 = dict[@"P2"] ? [dict[@"P2"] floatValue] : 0.0f;
+        float p3 = dict[@"P3"] ? [dict[@"P3"] floatValue] : 0.0f;
+        float p4 = dict[@"P4"] ? [dict[@"P4"] floatValue] : 0.0f;
+
+        // If RV=TRUE, MINVOID params are on real scale; convert back to 0-100 UI
+        if (hasRV) {
+            if ([XLValueCurvePanel paramNeedsRealScale:1 forType:typeStr]) {
+                p1 = [self realToUI:p1];
+            }
+            if ([XLValueCurvePanel paramNeedsRealScale:2 forType:typeStr]) {
+                p2 = [self realToUI:p2];
+            }
+            if ([XLValueCurvePanel paramNeedsRealScale:3 forType:typeStr]) {
+                p3 = [self realToUI:p3];
+            }
+            if ([XLValueCurvePanel paramNeedsRealScale:4 forType:typeStr]) {
+                p4 = [self realToUI:p4];
+            }
+        }
+
+        _curveView.parameter1 = p1 / 100.0f;
+        _parameter1Slider.floatValue = p1;
+        _param1ValueLabel.stringValue = [NSString stringWithFormat:@"%.0f", p1];
+
+        _curveView.parameter2 = p2 / 100.0f;
+        _parameter2Slider.floatValue = p2;
+        _param2ValueLabel.stringValue = [NSString stringWithFormat:@"%.0f", p2];
+
+        _curveView.parameter3 = p3 / 100.0f;
+        _parameter3Slider.floatValue = p3;
+        _param3ValueLabel.stringValue = [NSString stringWithFormat:@"%.0f", p3];
+
+        _curveView.parameter4 = p4 / 100.0f;
+        _parameter4Slider.floatValue = p4;
+        _param4ValueLabel.stringValue = [NSString stringWithFormat:@"%.0f", p4];
+    }
+}
+
+- (void)parseLegacyCurveData:(NSString *)curveData {
     NSArray *parts = [curveData componentsSeparatedByString:@"|"];
     if (parts.count == 0) return;
 
-    // Set curve type
     NSString *typeStr = parts[0];
     _curveView.curveType = typeStr;
 
@@ -785,7 +968,6 @@ static const CGFloat kCurveViewHeight = 300.0;
         }
     }
 
-    // Set parameters
     if (parts.count > 1) {
         _curveView.parameter1 = [parts[1] floatValue] / 100.0;
         _parameter1Slider.floatValue = [parts[1] floatValue];
@@ -819,9 +1001,6 @@ static const CGFloat kCurveViewHeight = 300.0;
             }
         }
     }
-
-    [self updateParameterVisibility];
-    [_curveView setNeedsDisplay:YES];
 }
 
 #pragma mark - XLValueCurveViewDelegate

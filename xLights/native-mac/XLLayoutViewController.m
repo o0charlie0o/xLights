@@ -534,6 +534,55 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     }
 }
 
+- (void)modelTree:(XLModelTreeViewController *)controller didSelectSubmodel:(NSString *)submodelName ofModel:(NSString *)modelName {
+    NSLog(@"XLLayoutViewController: Submodel '%@' selected on model '%@'", submodelName, modelName);
+
+    // Select the parent model in the preview (sets up handles, etc.)
+    [self selectModel:modelName];
+
+    // Get the submodel definition to parse strand ranges
+    NSDictionary *subDef = [_engineBridge getSubmodelDefinition:modelName submodelName:submodelName];
+    if (!subDef) {
+        NSLog(@"XLLayoutViewController: No submodel definition found for '%@/%@'", modelName, submodelName);
+        return;
+    }
+
+    BOOL isRanges = [subDef[@"isRanges"] boolValue];
+    NSArray<NSString *> *strands = subDef[@"strands"];
+    if (!strands || strands.count == 0) return;
+
+    NSMutableIndexSet *indexSet = [[NSMutableIndexSet alloc] init];
+
+    if (isRanges) {
+        // Strand ranges are 1-based comma-separated like "1-10,15,20-25"
+        for (NSString *strand in strands) {
+            NSArray<NSString *> *parts = [strand componentsSeparatedByString:@","];
+            for (NSString *part in parts) {
+                NSString *trimmed = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                if (trimmed.length == 0) continue;
+
+                NSArray<NSString *> *rangeParts = [trimmed componentsSeparatedByString:@"-"];
+                if (rangeParts.count == 2) {
+                    NSInteger start = [rangeParts[0] integerValue];
+                    NSInteger end = [rangeParts[1] integerValue];
+                    if (start > 0 && end >= start) {
+                        // Convert 1-based to 0-based
+                        [indexSet addIndexesInRange:NSMakeRange((NSUInteger)(start - 1), (NSUInteger)(end - start + 1))];
+                    }
+                } else if (rangeParts.count == 1) {
+                    NSInteger val = [trimmed integerValue];
+                    if (val > 0) {
+                        // Convert 1-based to 0-based
+                        [indexSet addIndex:(NSUInteger)(val - 1)];
+                    }
+                }
+            }
+        }
+    }
+
+    _previewView.selectedSubmodelNodeIndices = indexSet;
+}
+
 - (void)modelTree:(XLModelTreeViewController *)controller didMoveModel:(NSString *)modelName toGroup:(NSString *)groupName atIndex:(NSInteger)index {
     NSLog(@"XLLayoutViewController: Model '%@' moved to group '%@' at index %ld", modelName, groupName, (long)index);
 

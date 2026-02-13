@@ -26,6 +26,9 @@
 /// Selection changed in the model tree
 - (void)modelTree:(XLModelTreeViewController *)controller didSelectModel:(NSString *)modelName;
 
+/// A submodel was selected in the model tree
+- (void)modelTree:(XLModelTreeViewController *)controller didSelectSubmodel:(NSString *)submodelName ofModel:(NSString *)modelName;
+
 /// A model was moved via drag-and-drop
 - (void)modelTree:(XLModelTreeViewController *)controller
      didMoveModel:(NSString *)modelName

@@ -54,6 +54,13 @@ typedef struct {
     NSInteger originalRow;
 } XLMultiDragEntry;
 
+// Cascading nudge: stores original positions of timing marks that may be pushed
+typedef struct {
+    NSUInteger renderIndex;
+    CGFloat originalStartMS;
+    CGFloat originalEndMS;
+} XLTimingNudgeEntry;
+
 // Context menu item tags
 static const NSInteger kMenuTagCut = 1001;
 static const NSInteger kMenuTagCopy = 1002;
@@ -138,6 +145,11 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     // Multi-selection drag: original positions of all selected effects (excluding primary)
     XLMultiDragEntry *_multiDragEntries;
     NSUInteger _multiDragCount;
+
+    // Cascading nudge: timing marks on the same row that get pushed during move
+    XLTimingNudgeEntry *_timingNudgeChain;
+    NSUInteger _timingNudgeCount;
+    NSUInteger _timingNudgeCapacity;
 
     // Icon overlay layer for drawing SF Symbols on effect blocks
     CALayer *_iconOverlayLayer;
@@ -492,6 +504,10 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     free(_multiDragEntries);
     _multiDragEntries = NULL;
     _multiDragCount = 0;
+    free(_timingNudgeChain);
+    _timingNudgeChain = NULL;
+    _timingNudgeCount = 0;
+    _timingNudgeCapacity = 0;
     free(_songRegions);
     _songRegions = NULL;
     _songRegionCount = 0;
@@ -1751,6 +1767,55 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
                 NSLog(@"[MULTIDRAG] mouseDown: total multi-drag entries=%lu", (unsigned long)_multiDragCount);
             }
         }
+        // Build cascading nudge chain for timing mark center-drag (move)
+        _timingNudgeCount = 0;
+        if (hitEffectIndex >= 0 && (NSUInteger)hitEffectIndex < _renderEffectCount &&
+            _renderEffects[hitEffectIndex].isTimingMark &&
+            hitLoc == XLEffectHitLocationCenter) {
+            NSInteger dragRow = _renderEffects[hitEffectIndex].row;
+
+            // Count other timing marks on same row
+            NSUInteger otherCount = 0;
+            for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+                if ((NSInteger)i == hitEffectIndex) continue;
+                if (!_renderEffects[i].isTimingMark) continue;
+                if (_renderEffects[i].row != dragRow) continue;
+                otherCount++;
+            }
+
+            if (otherCount > 0) {
+                // Allocate/grow buffer
+                if (otherCount > _timingNudgeCapacity) {
+                    free(_timingNudgeChain);
+                    _timingNudgeCapacity = otherCount;
+                    _timingNudgeChain = calloc(_timingNudgeCapacity, sizeof(XLTimingNudgeEntry));
+                }
+
+                // Collect into chain
+                for (NSUInteger i = 0; i < _renderEffectCount; i++) {
+                    if ((NSInteger)i == hitEffectIndex) continue;
+                    if (!_renderEffects[i].isTimingMark) continue;
+                    if (_renderEffects[i].row != dragRow) continue;
+                    XLTimingNudgeEntry entry;
+                    entry.renderIndex = i;
+                    entry.originalStartMS = _renderEffects[i].startTimeMS;
+                    entry.originalEndMS = _renderEffects[i].endTimeMS;
+                    _timingNudgeChain[_timingNudgeCount++] = entry;
+                }
+
+                // Insertion sort by originalStartMS ascending
+                for (NSUInteger a = 1; a < _timingNudgeCount; a++) {
+                    XLTimingNudgeEntry key = _timingNudgeChain[a];
+                    NSInteger b = (NSInteger)a - 1;
+                    while (b >= 0 && _timingNudgeChain[b].originalStartMS > key.originalStartMS) {
+                        _timingNudgeChain[b + 1] = _timingNudgeChain[b];
+                        b--;
+                    }
+                    _timingNudgeChain[b + 1] = key;
+                }
+            }
+        }
+
         // Find adjacent timing mark for slip-drag
         _adjacentEffectIndex = -1;
         if (hitEffectIndex >= 0 && (NSUInteger)hitEffectIndex < _renderEffectCount &&
@@ -2267,6 +2332,56 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
             }
         }
 
+        // Cascading nudge: push neighboring timing marks out of the way
+        if (_timingNudgeCount > 0 &&
+            (NSUInteger)_mouseDownEffectIndex < _renderEffectCount &&
+            _renderEffects[_mouseDownEffectIndex].isTimingMark) {
+
+            CGFloat draggedStart = _renderEffects[_mouseDownEffectIndex].startTimeMS;
+            CGFloat draggedEnd = _renderEffects[_mouseDownEffectIndex].endTimeMS;
+
+            // First restore all chain marks to their original positions
+            for (NSUInteger n = 0; n < _timingNudgeCount; n++) {
+                NSUInteger idx = _timingNudgeChain[n].renderIndex;
+                if (idx < _renderEffectCount) {
+                    _renderEffects[idx].startTimeMS = _timingNudgeChain[n].originalStartMS;
+                    _renderEffects[idx].endTimeMS = _timingNudgeChain[n].originalEndMS;
+                }
+            }
+
+            // Cascade push RIGHT: walk from dragged mark rightward
+            CGFloat pushEdge = draggedEnd;
+            for (NSUInteger n = 0; n < _timingNudgeCount; n++) {
+                XLTimingNudgeEntry *e = &_timingNudgeChain[n];
+                NSUInteger idx = e->renderIndex;
+                if (idx >= _renderEffectCount) continue;
+                // Only push marks whose original start is to the right of (or overlapping) the dragged mark
+                if (e->originalStartMS < pushEdge && e->originalEndMS > draggedStart) {
+                    CGFloat dur = e->originalEndMS - e->originalStartMS;
+                    _renderEffects[idx].startTimeMS = pushEdge;
+                    _renderEffects[idx].endTimeMS = pushEdge + dur;
+                    pushEdge = pushEdge + dur;
+                }
+            }
+
+            // Cascade push LEFT: walk from dragged mark leftward
+            CGFloat leftPushEdge = draggedStart;
+            for (NSInteger n = (NSInteger)_timingNudgeCount - 1; n >= 0; n--) {
+                XLTimingNudgeEntry *e = &_timingNudgeChain[n];
+                NSUInteger idx = e->renderIndex;
+                if (idx >= _renderEffectCount) continue;
+                // Only push marks whose original end is to the left of (or overlapping) the dragged mark
+                if (e->originalEndMS > leftPushEdge && e->originalStartMS < draggedEnd) {
+                    CGFloat dur = e->originalEndMS - e->originalStartMS;
+                    _renderEffects[idx].endTimeMS = leftPushEdge;
+                    _renderEffects[idx].startTimeMS = leftPushEdge - dur;
+                    leftPushEdge = leftPushEdge - dur;
+                }
+            }
+
+            [self rebuildTimingMarkValuesFromRenderEffects];
+        }
+
         // Also move all other selected effects by the same delta
         for (NSUInteger m = 0; m < _multiDragCount; m++) {
             NSUInteger idx = _multiDragEntries[m].renderIndex;
@@ -2532,6 +2647,27 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
         }
 
         free(secondaryEffectIds);
+
+        // Commit cascading nudge: timing marks that were pushed during the drag
+        if (_timingNudgeCount > 0 &&
+            [_delegate respondsToSelector:@selector(effectsGrid:didResizeEffectAtRow:effectIndex:newStartTimeMS:newEndTimeMS:)]) {
+            for (NSUInteger n = 0; n < _timingNudgeCount; n++) {
+                NSUInteger idx = _timingNudgeChain[n].renderIndex;
+                if (idx >= _renderEffectCount) continue;
+                CGFloat curStart = _renderEffects[idx].startTimeMS;
+                CGFloat curEnd = _renderEffects[idx].endTimeMS;
+                CGFloat origStart = _timingNudgeChain[n].originalStartMS;
+                CGFloat origEnd = _timingNudgeChain[n].originalEndMS;
+                if (fabs(curStart - origStart) > 0.5 || fabs(curEnd - origEnd) > 0.5) {
+                    [_delegate effectsGrid:self
+                       didResizeEffectAtRow:_renderEffects[idx].row
+                              effectIndex:(NSInteger)idx
+                            newStartTimeMS:curStart
+                              newEndTimeMS:curEnd];
+                }
+            }
+            _timingNudgeCount = 0;
+        }
     } else if (_isRubberBanding) {
         CGFloat startTimeMS, endTimeMS;
         NSInteger startRow, endRow;
@@ -2573,6 +2709,7 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     free(_multiDragEntries);
     _multiDragEntries = NULL;
     _multiDragCount = 0;
+    _timingNudgeCount = 0;
     _needsRedraw = YES;
 }
 

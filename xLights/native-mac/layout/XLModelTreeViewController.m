@@ -707,9 +707,21 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
 - (void)outlineViewSelectionDidChange:(NSNotification *)notification {
     if (_suppressSelectionNotification) return;
 
-    NSString *name = [self selectedModelName];
-    if (name && [_delegate respondsToSelector:@selector(modelTree:didSelectModel:)]) {
-        [_delegate modelTree:self didSelectModel:name];
+    NSInteger row = _outlineView.selectedRow;
+    if (row < 0) return;
+
+    XLModelTreeNode *node = [_outlineView itemAtRow:row];
+    if (!node) return;
+
+    if (node.isSubmodel && node.parent) {
+        if ([_delegate respondsToSelector:@selector(modelTree:didSelectSubmodel:ofModel:)]) {
+            [_delegate modelTree:self didSelectSubmodel:node.name ofModel:node.parent.name];
+        }
+    } else {
+        NSString *name = node.name;
+        if (name && [_delegate respondsToSelector:@selector(modelTree:didSelectModel:)]) {
+            [_delegate modelTree:self didSelectModel:name];
+        }
     }
 }
 

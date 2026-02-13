@@ -366,6 +366,17 @@ class EffectDragSourceView: NSView, NSDraggingSource {
 
     override func mouseDown(with event: NSEvent) {
         mouseDownLocation = event.locationInWindow
+
+        // Double-click to add effect to selected cell
+        if event.clickCount == 2 {
+            onSelect?()
+            NotificationCenter.default.post(
+                name: Notification.Name("XLApplyEffectFromCommandPalette"),
+                object: nil,
+                userInfo: ["effectName": effectName]
+            )
+            return
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {

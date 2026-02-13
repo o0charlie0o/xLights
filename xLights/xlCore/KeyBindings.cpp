@@ -1369,6 +1369,16 @@ bool KeyBindingMap::loadFromFile(const std::string& path) noexcept {
         }
     }
 
+    // Ensure TIMING_ADD is not disabled -- it's essential for sequencer operation.
+    // Only restore the default 't' key if TIMING_ADD exists but is disabled;
+    // don't reset all bindings (that would wipe user customizations).
+    for (auto& binding : _bindings) {
+        if (binding.getType() == "TIMING_ADD" && binding.isDisabled()) {
+            binding.setKey("t");
+            break;
+        }
+    }
+
     return true;
 }
 
