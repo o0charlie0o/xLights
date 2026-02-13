@@ -56,17 +56,15 @@ static const CGFloat kStemRowHeightDefault = 30.0;
     [self addTrackingArea:_trackingArea];
 }
 
-- (void)resetCursorRects {
-    [self addCursorRect:self.bounds cursor:[NSCursor resizeUpDownCursor]];
-}
-
 - (void)mouseEntered:(NSEvent *)event {
     _isHovering = YES;
+    [[NSCursor resizeUpDownCursor] push];
     [self updateAppearance];
 }
 
 - (void)mouseExited:(NSEvent *)event {
     _isHovering = NO;
+    [NSCursor pop];
     [self updateAppearance];
 }
 
@@ -626,6 +624,8 @@ static const CGFloat kDragThreshold = 4.0;
 }
 
 - (void)reloadStems {
+    NSUInteger previousStemCount = _miniWaveformViews.count;
+
     // Remove old views
     for (XLMiniWaveformView *mv in _miniWaveformViews) {
         [mv removeFromSuperview];
@@ -690,8 +690,10 @@ static const CGFloat kDragThreshold = 4.0;
     [_stackDocumentView setFrame:NSMakeRect(0, 0, waveWidth, y)];
     [_rowHeadersDocView setFrame:NSMakeRect(0, 0, _rowHeaderWidth, y)];
 
-    // Auto-expand if stems were just added and panel is collapsed
-    if (stems.count > 0 && _collapsed) {
+    // Auto-expand only if stems were freshly added (count went from 0 to >0),
+    // not when reloading the same stems (e.g., during reloadSequenceData).
+    // This prevents the stems panel from reopening when the user had collapsed it.
+    if (stems.count > 0 && previousStemCount == 0 && _collapsed) {
         self.collapsed = NO;
         CGFloat targetHeight = _savedExpandedHeight;
         if ([_delegate respondsToSelector:@selector(stemsContainer:didChangeHeight:)]) {

@@ -1383,8 +1383,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Load audio stems for the sequence
     [self loadStemsForSequence];
 
-    // Load saved zoom level for this sequence (if any)
-    [self loadZoomLevelForCurrentSequence];
+    // NOTE: Zoom level is intentionally NOT loaded here.
+    // loadZoomLevelForCurrentSequence is called only when opening/creating a sequence
+    // (via XLSequenceDataDidChangeNotification), not on every reloadSequenceData call.
+    // This prevents zoom resets when performing effect operations.
 
     // Sync active timing track color with grid view
     [self updateActiveTimingColorIndex];
@@ -2174,13 +2176,25 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)timelineRuler:(XLTimelineRulerView *)ruler didEditSongRegionId:(NSInteger)regionId name:(NSString *)name color:(NSColor *)color {
     if (!_engineBridge || ![_engineBridge isSequenceLoaded]) return;
 
-    // Convert NSColor to 0xAARRGGBB
+    // Look up the existing region's alpha so we preserve it.
+    // The minimal color well does not support alpha editing, so the returned
+    // NSColor always has alpha 1.0.  We keep the original semi-transparent alpha.
+    uint32_t originalAlpha = 0x4D; // fallback ~0.3 alpha
+    NSArray<NSDictionary *> *regions = [_engineBridge getSongStructureRegions];
+    for (NSDictionary *d in regions) {
+        if ([d[@"regionId"] integerValue] == regionId) {
+            uint32_t existingARGB = (uint32_t)[d[@"colorARGB"] unsignedIntValue];
+            originalAlpha = (existingARGB >> 24) & 0xFF;
+            break;
+        }
+    }
+
+    // Convert NSColor to 0xAARRGGBB, preserving original alpha
     NSColor *rgb = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
-    uint32_t a = (uint32_t)(rgb.alphaComponent * 255.0) & 0xFF;
     uint32_t r = (uint32_t)(rgb.redComponent * 255.0) & 0xFF;
     uint32_t g = (uint32_t)(rgb.greenComponent * 255.0) & 0xFF;
     uint32_t b = (uint32_t)(rgb.blueComponent * 255.0) & 0xFF;
-    uint32_t argb = (a << 24) | (r << 16) | (g << 8) | b;
+    uint32_t argb = (originalAlpha << 24) | (r << 16) | (g << 8) | b;
 
     [_engineBridge setSongStructureRegion:regionId name:name colorARGB:argb];
     [self reloadSongRegionsForRuler];
@@ -5102,11 +5116,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _effectsGridView.pinnedTimingRowCount = _timingRowCount;
     _rowHeadingsView.pinnedTimingRowCount = _timingRowCount;
 
-    // Update max scroll for changed row count
+    // Update max scroll for changed row count and clamp current offset
     if (_scrollCoordinator) {
         CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
         CGFloat maxScrollY = _rowCount * _effectsGridView.rowHeight - viewHeight;
         _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
+        [_scrollCoordinator setVerticalScrollOffset:_scrollCoordinator.verticalScrollOffset];
     }
 
     [_rowHeadingsView reloadData];
@@ -5628,11 +5643,14 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         }
     }
 
-    // Update max scroll and reload
+    // Update max scroll and clamp current offset to prevent folder from appearing to move
     if (_scrollCoordinator) {
         CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
         CGFloat maxScrollY = _rowCount * _effectsGridView.rowHeight - viewHeight;
         _scrollCoordinator.maxVerticalScrollOffset = fmax(0, maxScrollY);
+        // Re-clamp the current scroll offset so it doesn't exceed the new max.
+        // Without this, the folder row visually shifts when content height shrinks.
+        [_scrollCoordinator setVerticalScrollOffset:_scrollCoordinator.verticalScrollOffset];
     }
 
     [_rowHeadingsView reloadData];
@@ -5719,9 +5737,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)moveElementAtRow:(NSInteger)row toFolder:(NSString *)folderName {
     if (row < 0 || row >= (NSInteger)_rowCount) return;
 
-    // If this row is part of a multi-selection, move all selected eligible rows
-    NSIndexSet *selectedRows = _rowHeadingsView.selectedRows;
+    // Capture selected rows before any data changes. Use a copy since the
+    // original mutable index set may be cleared before we finish iterating.
+    NSIndexSet *selectedRows = [_rowHeadingsView.selectedRows copy];
+
     if (selectedRows.count > 1 && [selectedRows containsIndex:(NSUInteger)row]) {
+        // Multi-selection: move all selected eligible rows
         [selectedRows enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
             if (idx >= self->_rowCount) return;
             XLRowEntry *entry = &self->_rowData[idx];
@@ -5735,6 +5756,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         NSString *elemName = [NSString stringWithUTF8String:entry->name];
         [self.engineBridge setElement:elemName folder:folderName];
     }
+
+    // Clear selection before reloading so rebuilt cells don't get stale selection
+    _rowHeadingsView.selectedRow = -1;
 
     [self loadRealSequenceData];
     [_rowHeadingsView reloadData];

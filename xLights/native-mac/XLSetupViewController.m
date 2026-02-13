@@ -81,8 +81,10 @@
     portItem.minimumThickness = 450.0;
     [_splitViewController addSplitViewItem:portItem];
 
-    // Right pane: Controller inspector
-    NSSplitViewItem *inspectorItem = [NSSplitViewItem inspectorWithViewController:_inspectorViewController];
+    // Right pane: Controller inspector (use contentList, not inspector,
+    // to prevent the split view from integrating with the toolbar area
+    // when hosted inside the SwiftUI content view)
+    NSSplitViewItem *inspectorItem = [NSSplitViewItem contentListWithViewController:_inspectorViewController];
     inspectorItem.canCollapse = YES;
     inspectorItem.minimumThickness = 260.0;
     inspectorItem.maximumThickness = 400.0;

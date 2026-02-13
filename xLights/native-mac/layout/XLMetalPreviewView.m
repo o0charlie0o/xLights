@@ -63,6 +63,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     CVDisplayLinkRef _displayLink;
     int _renderLogCount;
     BOOL _rightMouseDidDrag;
+    dispatch_block_t _pendingReloadWork;
 }
 
 @property (nonatomic, strong) id<MTLDevice> device;
@@ -1129,57 +1130,42 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         return;
     }
 
-    // Get all model names and their node data
-    NSMutableArray<NSDictionary *> *modelData = [[NSMutableArray alloc] init];
-    NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
-    NSLog(@"[HousePreview] reloadModels: got %lu model names",
-          (unsigned long)modelNames.count);
-
-    NSUInteger skippedCount = 0;
     NSSet<NSString *> *filter = _visibleModelFilter;
     BOOL hasFilter = (filter != nil && filter.count > 0);
 
-    for (NSString *modelName in modelNames) {
-        // If a visible model filter is active, skip models not in the set
-        if (hasFilter && ![filter containsObject:modelName]) {
-            skippedCount++;
-            continue;
-        }
+    // Use batch API: single bridge call fetches info+nodes+bounds for all models.
+    // For filtered views (sidebar), pass only the requested names.
+    NSArray<NSDictionary *> *allData;
+    if (hasFilter) {
+        allData = [_engineBridge getAllModelDataForNames:[filter allObjects]];
+    } else {
+        allData = [_engineBridge getAllModelData];
+    }
 
-        NSDictionary *info = [_engineBridge getModelInfo:modelName];
-        if (!info) {
-            skippedCount++;
-            continue;
-        }
+    NSLog(@"[HousePreview] reloadModels: batch fetched %lu models",
+          (unsigned long)allData.count);
 
-        // Filter by LayoutGroup: only show models in "Default" or "All Previews"
-        // (skip this filter when using visibleModelFilter — sidebar shows specific models)
-        if (!hasFilter) {
+    // Apply LayoutGroup filter for full-view mode (not sidebar filtered views)
+    NSMutableArray<NSDictionary *> *modelData;
+    if (!hasFilter) {
+        modelData = [NSMutableArray arrayWithCapacity:allData.count];
+        for (NSDictionary *entry in allData) {
+            NSDictionary *info = entry[@"info"];
             NSString *layoutGroup = info[@"LayoutGroup"];
             if (layoutGroup && layoutGroup.length > 0 &&
                 ![layoutGroup isEqualToString:@"Default"] &&
                 ![layoutGroup isEqualToString:@"All Previews"]) {
-                skippedCount++;
                 continue;
             }
+            [modelData addObject:entry];
         }
-
-        NSArray<NSDictionary *> *nodes = [_engineBridge getModelNodes:modelName];
-        NSDictionary *bounds = [_engineBridge getModelBounds:modelName];
-
-        if (nodes.count > 0) {
-            [modelData addObject:@{
-                @"name": modelName,
-                @"info": info,
-                @"nodes": nodes,
-                @"bounds": bounds ?: @{},
-            }];
-        }
+    } else {
+        modelData = [allData mutableCopy];
     }
 
     _modelDataCache = [modelData copy];
-    NSLog(@"[HousePreview] reloadModels: cached %lu models (%lu skipped — no info), building vertices...",
-          (unsigned long)_modelDataCache.count, (unsigned long)skippedCount);
+    NSLog(@"[HousePreview] reloadModels: cached %lu models, building vertices...",
+          (unsigned long)_modelDataCache.count);
     [self buildModelVertices];
     NSLog(@"[HousePreview] reloadModels: done — modelVertexCount=%lu",
           (unsigned long)_modelVertexCount);
@@ -1187,10 +1173,83 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _scrollbarsDirty = YES;
 }
 
+- (void)scheduleReloadModels {
+    if (_pendingReloadWork) {
+        dispatch_block_cancel(_pendingReloadWork);
+    }
+    __weak typeof(self) weakSelf = self;
+    _pendingReloadWork = dispatch_block_create(0, ^{
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf) {
+            strongSelf->_pendingReloadWork = nil;
+            [strongSelf reloadModels];
+        }
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(16 * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), _pendingReloadWork);
+}
+
+- (void)cancelPendingReload {
+    if (_pendingReloadWork) {
+        dispatch_block_cancel(_pendingReloadWork);
+        _pendingReloadWork = nil;
+    }
+}
+
 - (void)setSelectedSubmodelNodeIndices:(NSIndexSet *)selectedSubmodelNodeIndices {
     _selectedSubmodelNodeIndices = [selectedSubmodelNodeIndices copy];
     _modelVerticesDirty = YES;
     _contentDirty = YES;
+}
+
+/// Look up the actual world-space bounds for a model from the vertex data cache.
+/// Returns nil if the model is not found or has no bounds.
+- (NSDictionary *)cachedBoundsForModel:(NSString *)modelName {
+    if (!modelName) return nil;
+    for (NSDictionary *modelData in _modelDataCache) {
+        if ([modelData[@"name"] isEqualToString:modelName]) {
+            NSDictionary *bounds = modelData[@"bounds"];
+            if (bounds && bounds.count > 0) return bounds;
+            break;
+        }
+    }
+    return nil;
+}
+
+/// Compute renderWidth/renderHeight/renderDepth from actual vertex bounds when available.
+/// Falls back to RenderWidth/RenderHeight from model info if no cached bounds exist.
+/// For complex models (MegaTree, stars, wreaths), the render buffer dimensions
+/// may not match the actual visual extent, so we use the larger of the two.
+- (void)adjustRenderDimensionsForModel:(NSString *)modelName
+                              position:(simd_float3)position
+                                 scale:(simd_float3)scale
+                           renderWidth:(float *)renderWidth
+                          renderHeight:(float *)renderHeight
+                           renderDepth:(float *)renderDepth {
+    NSDictionary *bounds = [self cachedBoundsForModel:modelName];
+    if (!bounds) return;
+
+    float minX = [bounds[@"minX"] floatValue];
+    float maxX = [bounds[@"maxX"] floatValue];
+    float minY = [bounds[@"minY"] floatValue];
+    float maxY = [bounds[@"maxY"] floatValue];
+    float minZ = [bounds[@"minZ"] floatValue];
+    float maxZ = [bounds[@"maxZ"] floatValue];
+
+    // Compute the world-space extent of the model from its actual vertices
+    float worldWidth = maxX - minX;
+    float worldHeight = maxY - minY;
+    float worldDepth = maxZ - minZ;
+
+    // Convert world-space extent back to local-space (undo scale) for the handles renderer
+    float localWidth = (scale.x > 0.001f) ? worldWidth / scale.x : worldWidth;
+    float localHeight = (scale.y > 0.001f) ? worldHeight / scale.y : worldHeight;
+    float localDepth = (scale.z > 0.001f) ? worldDepth / scale.z : worldDepth;
+
+    // Use the larger of RenderWidth/Height and actual vertex extent
+    if (localWidth > *renderWidth) *renderWidth = localWidth;
+    if (localHeight > *renderHeight) *renderHeight = localHeight;
+    if (localDepth > *renderDepth) *renderDepth = localDepth;
 }
 
 - (void)selectModel:(NSString *)modelName {
@@ -1244,6 +1303,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (renderWidth < 0.001f) renderWidth = 1.0f;
     if (renderHeight < 0.001f) renderHeight = 1.0f;
     if (renderDepth < 0.001f) renderDepth = 2.0f;
+
+    // Adjust render dimensions using actual vertex bounds for complex model types
+    [self adjustRenderDimensionsForModel:modelName
+                                position:(simd_float3){posX, posY, posZ}
+                                   scale:(simd_float3){scaleX, scaleY, scaleZ}
+                             renderWidth:&renderWidth
+                            renderHeight:&renderHeight
+                             renderDepth:&renderDepth];
 
     // Bounding box in local space, centered at origin
     simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
@@ -1808,6 +1875,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                     if (renderWidth < 0.001f) renderWidth = 1.0f;
                     if (renderHeight < 0.001f) renderHeight = 1.0f;
                     if (renderDepth < 0.001f) renderDepth = 2.0f;
+                    [self adjustRenderDimensionsForModel:_selectedModelName
+                                                position:(simd_float3){posX, posY, posZ}
+                                                   scale:(simd_float3){scaleX, scaleY, scaleZ}
+                                             renderWidth:&renderWidth
+                                            renderHeight:&renderHeight
+                                             renderDepth:&renderDepth];
                     BOOL isLocked = [info[@"Locked"] boolValue];
                     BOOL supportsZScaling = _show3D && (renderDepth > 2.1f);
                     simd_float3 bbMin = simd_make_float3(-renderWidth/2, -renderHeight/2, -renderDepth/2);
@@ -3543,6 +3616,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         if (renderWidth < 0.001f) renderWidth = 1.0f;
         if (renderHeight < 0.001f) renderHeight = 1.0f;
         if (renderDepth < 0.001f) renderDepth = 2.0f;
+        [self adjustRenderDimensionsForModel:primaryModel
+                                    position:(simd_float3){posX, posY, posZ}
+                                       scale:(simd_float3){scaleX, scaleY, scaleZ}
+                                 renderWidth:&renderWidth
+                                renderHeight:&renderHeight
+                                 renderDepth:&renderDepth];
         BOOL isLocked = [info[@"Locked"] boolValue];
         BOOL supportsZScaling = _show3D && (renderDepth > 2.1f);
 

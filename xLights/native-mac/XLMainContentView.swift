@@ -18,11 +18,13 @@ import AppKit
 final class XLAppState {
     var currentTab: XLTab = .sequencer
     var inspectorVisible: Bool = true
+    var sidebarVisible: Bool = false
 
     // Top panel visibility - each panel can be toggled independently
     var visibleTopPanels: Set<XLTopPanelTab> = [.effects, .colors, .layerBlending, .layerSettings]
 
     // Persisted sizes for split views
+    var sidebarWidth: CGFloat = 250
     var inspectorWidth: CGFloat = 300
     var topPanelHeight: CGFloat = 250
 
@@ -43,6 +45,7 @@ final class XLAppState {
     var housePreviewVisible: Bool = false
     var snapEnabled: Bool = true
     var songRegionOverlayVisible: Bool = true
+    var commandPaletteVisible: Bool = false
 
     // Shared engine bridge - created once, passed to all view controllers
     let engineBridge: XLEngineBridge
@@ -55,11 +58,23 @@ final class XLAppState {
         !visibleTopPanels.isEmpty
     }
 
+    private var commandPaletteObserver: Any?
+
     init() {
         engineBridge = XLEngineBridge()
         effectSelectionState = EffectSelectionState()
         effectSelectionState.engineBridge = engineBridge
         loadState()
+
+        // Sync command palette visibility state for toolbar button
+        commandPaletteObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("XLCommandPaletteVisibilityChanged"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let visible = (notification.userInfo?["visible"] as? Bool) ?? false
+            self?.commandPaletteVisible = visible
+        }
     }
 
     func toggleTopPanel(_ panel: XLTopPanelTab) {
@@ -81,6 +96,12 @@ final class XLAppState {
         }
         if defaults.object(forKey: "XLInspectorVisible") != nil {
             inspectorVisible = defaults.bool(forKey: "XLInspectorVisible")
+        }
+        if defaults.object(forKey: "XLSidebarVisible") != nil {
+            sidebarVisible = defaults.bool(forKey: "XLSidebarVisible")
+        }
+        if defaults.object(forKey: "XLSidebarWidth") != nil {
+            sidebarWidth = defaults.double(forKey: "XLSidebarWidth")
         }
         if defaults.object(forKey: "XLInspectorWidth") != nil {
             inspectorWidth = defaults.double(forKey: "XLInspectorWidth")
@@ -105,6 +126,8 @@ final class XLAppState {
         defaults.set(currentTab.rawValue, forKey: "XLCurrentTab")
         defaults.set(XLTopPanelTab.bitmask(from: visibleTopPanels), forKey: "XLVisibleTopPanels")
         defaults.set(inspectorVisible, forKey: "XLInspectorVisible")
+        defaults.set(sidebarVisible, forKey: "XLSidebarVisible")
+        defaults.set(sidebarWidth, forKey: "XLSidebarWidth")
         defaults.set(inspectorWidth, forKey: "XLInspectorWidth")
         defaults.set(topPanelHeight, forKey: "XLTopPanelHeight")
         defaults.set(songRegionOverlayVisible, forKey: "XLSongRegionOverlay")
@@ -229,19 +252,19 @@ enum XLTopPanelTab: Int, CaseIterable, Identifiable, Hashable {
 struct XLMainContentView: View {
     @Bindable var appState: XLAppState
 
-    // Split view column visibility — sidebar collapsed by default since tabs are in toolbar
-    @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
-
     var body: some View {
         ZStack {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
+            HStack(spacing: 0) {
                 // Sidebar: Model preview and effect assist (like legacy xLights)
-                sidebarContent
-                    .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 350)
-            } detail: {
-                // Detail: Main content area with inspector
-                // Using HStack with explicit frame control instead of HSplitView
-                // to avoid SwiftUI split view bugs when toggling panels
+                // Uses HStack with conditional visibility instead of NavigationSplitView
+                // to avoid animation glitches and layout breaks when toggling panels
+                if appState.sidebarVisible {
+                    sidebarContent
+                        .frame(width: appState.sidebarWidth)
+                    Divider()
+                }
+
+                // Main content area with inspector
                 HStack(spacing: 0) {
                     // Main content + top panel (at top, like regular xLights)
                     mainContentWithTopPanel
@@ -254,8 +277,8 @@ struct XLMainContentView: View {
                             .frame(width: appState.inspectorWidth)
                     }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationSplitViewStyle(.balanced)
             .toolbar {
                 toolbarContent
             }
@@ -588,6 +611,8 @@ struct XLMainContentView: View {
             }
 
             Button {
+                appState.isRendering = true
+                appState.renderProgress = 0.0
                 XLSwiftUIWindowHelper.shared.sequencerViewController?.renderAll()
             } label: {
                 RenderProgressRing(
@@ -605,6 +630,7 @@ struct XLMainContentView: View {
             } label: {
                 Label("Command Palette", systemImage: "command")
             }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.commandPaletteVisible))
             .help("Command Palette (⇧⌘K)")
 
             Button {
@@ -646,6 +672,14 @@ struct XLMainContentView: View {
             .help("Show Song Regions in Grid")
 
             Button {
+                appState.sidebarVisible.toggle()
+            } label: {
+                Label("Sidebar", systemImage: "sidebar.left")
+            }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.sidebarVisible))
+            .help("Model Preview Sidebar")
+
+            Button {
                 appState.inspectorVisible.toggle()
             } label: {
                 Label("Inspector", systemImage: "sidebar.right")
@@ -658,7 +692,7 @@ struct XLMainContentView: View {
 // MARK: - Render Progress Ring
 
 /// A circular progress indicator for the toolbar render button.
-/// Shows a gear icon when idle, an animated spinning ring when rendering
+/// Shows a palette icon when idle, an animated spinning ring when rendering
 /// with indeterminate progress, or a filling arc for determinate progress.
 struct RenderProgressRing: View {
     let isRendering: Bool
@@ -701,7 +735,7 @@ struct RenderProgressRing: View {
                         }
                 }
             } else {
-                Image(systemName: "gearshape.fill")
+                Image(systemName: "paintpalette.fill")
             }
         }
         .animation(.easeInOut(duration: 0.2), value: isRendering)
