@@ -118,9 +118,9 @@ static double frequencyToSlider(double freq) {
         [path stroke];
     }
 
-    // Draw onset markers
+    // Draw onset markers (cyan to match preview markers on waveform/ruler)
     if (_onsetTimesMS.count > 0 && _sampleRate > 0) {
-        [[NSColor orangeColor] setStroke];
+        [[NSColor cyanColor] setStroke];
         double totalDurationMS = (_sampleCount / _sampleRate) * 1000.0;
         if (totalDurationMS <= 0) return;
 

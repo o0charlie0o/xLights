@@ -519,9 +519,9 @@ static const NSInteger kTimingTagCount = 10;
         CGContextFillRect(ctx, CGRectMake(seqEndX, 0, width - seqEndX, height));
     }
 
-    // Draw preview timing marks (translucent orange lines)
+    // Draw preview timing marks (translucent cyan lines)
     if (_previewTimingMarks.count > 0) {
-        CGContextSetRGBStrokeColor(ctx, 1.0, 0.6, 0.0, 0.4);
+        CGContextSetRGBStrokeColor(ctx, 0.0, 0.9, 1.0, 0.5);
         CGContextSetLineWidth(ctx, 1.0);
         for (NSNumber *timeNum in _previewTimingMarks) {
             CGFloat timeMS = timeNum.doubleValue;

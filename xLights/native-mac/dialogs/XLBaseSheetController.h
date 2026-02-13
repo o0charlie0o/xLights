@@ -61,6 +61,11 @@ typedef void (^XLSheetCompletion)(NSModalResponse response);
 /// Present as a standalone modal window.
 - (void)presentAsModalWithCompletion:(nullable XLSheetCompletion)completion;
 
+/// Present as a non-modal floating panel alongside the parent window.
+/// The panel is movable and does not dim the parent window.
+- (void)presentAsFloatingPanelRelativeTo:(NSWindow *)parentWindow
+                              completion:(nullable XLSheetCompletion)completion;
+
 /// Dismiss the sheet/window with the given response code.
 - (void)dismissWithResponse:(NSModalResponse)response;
 

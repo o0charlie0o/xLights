@@ -319,9 +319,9 @@
     }
 
 playhead:
-    // Draw onset preview markers (orange lines)
+    // Draw onset preview markers (cyan lines — visible against any stem color)
     if (_onsetPreviewTimesMS.count > 0) {
-        CGContextSetRGBStrokeColor(ctx, 1.0, 0.6, 0.0, 0.7);
+        CGContextSetRGBStrokeColor(ctx, 0.0, 0.9, 1.0, 0.8);
         CGContextSetLineWidth(ctx, 1.0);
         for (NSNumber *timeNum in _onsetPreviewTimesMS) {
             CGFloat timeMS = timeNum.doubleValue;

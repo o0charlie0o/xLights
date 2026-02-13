@@ -1044,6 +1044,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                                                  name:@"XLEffectDidChangeNotification"
                                                object:nil];
 
+    // Listen for effect type changes (from inspector dropdown) to reload grid data
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(effectTypeDidChange:)
+                                                 name:@"XLEffectTypeDidChangeNotification"
+                                               object:nil];
+
     // Listen for command palette actions
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleZoomToSelection:)
@@ -1232,12 +1238,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     NSLog(@"XLSequencerViewController: Opening recent sequence: %@", path);
     BOOL success = [engineBridge loadSequence:path];
     if (success) {
-        // Move to top of recents
-        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-        NSMutableArray *recents = [[defaults arrayForKey:@"RecentSequences"] mutableCopy] ?: [NSMutableArray new];
-        [recents removeObject:path];
-        [recents insertObject:path atIndex:0];
-        [defaults setObject:recents forKey:@"RecentSequences"];
+        // Update recents via app delegate (also updates system recent documents and menu)
+        XLAppDelegate *appDelegate = (XLAppDelegate *)[NSApp delegate];
+        [appDelegate addRecentSequence:path];
 
         [swiftHelper notifySequenceDataChanged];
     } else {
@@ -1287,6 +1290,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             }
         }
     }
+}
+
+- (void)effectTypeDidChange:(NSNotification *)notification {
+    [self loadRealSequenceData];
+    [_effectsGridView reloadData];
+    [_playbackController renderCurrentFrame];
 }
 
 - (void)clearSequenceData {
@@ -9460,7 +9469,7 @@ static const CGFloat kZoomFactor = 1.5;
     dialog.existingTrackNames = existingNames;
     dialog.onsetDelegate = self;
 
-    [dialog presentAsSheetForWindow:self.view.window completion:^(NSModalResponse response) {
+    [dialog presentAsFloatingPanelRelativeTo:self.view.window completion:^(NSModalResponse response) {
         if (response == NSModalResponseOK) {
             NSString *trackName = dialog.trackName;
             NSArray<NSNumber *> *onsets = dialog.detectedOnsets;

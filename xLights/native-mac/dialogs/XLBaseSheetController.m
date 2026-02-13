@@ -9,6 +9,7 @@
  **************************************************************/
 
 #import "XLBaseSheetController.h"
+#import <objc/runtime.h>
 
 static const CGFloat kDefaultMinWidth = 400.0;
 static const CGFloat kDefaultMinHeight = 200.0;
@@ -26,6 +27,7 @@ static const CGFloat kEdgePadding = 20.0;
 @property (nonatomic, strong) NSButton *okButton;
 @property (nonatomic, strong) NSButton *cancelButton;
 @property (nonatomic, strong) NSButton *actionButton;
+@property (nonatomic, assign) BOOL isFloatingPanel;
 
 @end
 
@@ -168,10 +170,48 @@ static const CGFloat kEdgePadding = 20.0;
     [self handleDismissWithResponse:response];
 }
 
+- (void)presentAsFloatingPanelRelativeTo:(NSWindow *)parentWindow
+                              completion:(XLSheetCompletion)completion {
+    _parentWindow = parentWindow;
+    _completion = completion;
+    _isFloatingPanel = YES;
+
+    [self buildSheet];
+
+    // Make the window movable and non-modal
+    _sheet.styleMask |= NSWindowStyleMaskClosable;
+    _sheet.level = NSFloatingWindowLevel;
+    _sheet.hidesOnDeactivate = NO;
+
+    // Position to the right of the parent window
+    NSRect parentFrame = parentWindow.frame;
+    CGFloat panelX = NSMaxX(parentFrame) + 12;
+    CGFloat panelY = NSMidY(parentFrame) - (_sheet.frame.size.height / 2);
+
+    // If it would go off-screen, position to the left instead
+    NSRect screenFrame = parentWindow.screen.visibleFrame;
+    if (panelX + _sheet.frame.size.width > NSMaxX(screenFrame)) {
+        panelX = NSMinX(parentFrame) - _sheet.frame.size.width - 12;
+    }
+    // Clamp to screen bounds
+    panelY = MAX(NSMinY(screenFrame), MIN(panelY, NSMaxY(screenFrame) - _sheet.frame.size.height));
+    panelX = MAX(NSMinX(screenFrame), panelX);
+
+    [_sheet setFrameOrigin:NSMakePoint(panelX, panelY)];
+    [_sheet orderFront:nil];
+
+    // Keep the dialog alive by retaining self while the panel is visible
+    objc_setAssociatedObject(_sheet, "sheetController", self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 - (void)dismissWithResponse:(NSModalResponse)response {
     [self sheetWillDismiss];
 
-    if (_parentWindow) {
+    if (_isFloatingPanel) {
+        [_sheet orderOut:nil];
+        objc_setAssociatedObject(_sheet, "sheetController", nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [self handleDismissWithResponse:response];
+    } else if (_parentWindow) {
         [_parentWindow endSheet:_sheet returnCode:response];
     } else {
         [NSApp stopModalWithCode:response];
