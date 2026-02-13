@@ -181,6 +181,10 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
     /// Strong cached reference to the layout VC so it survives SwiftUI tab switches.
     @objc public var cachedLayoutViewController: XLLayoutViewController?
 
+    /// Sidebar model preview view — stored here so the playback controller
+    /// can always find it, even if SwiftUI recreates the view hierarchy.
+    @objc public var sidebarPreviewView: XLMetalPreviewView?
+
     private override init() {
         super.init()
     }

@@ -260,13 +260,19 @@ static const CGFloat kMaxPlaybackRate = 4.0;
 
 - (void)stop {
     _scheduleGeneration++;  // Invalidate any pending completion handlers
+
+    // Capture current position before stopping so seeks after stop are preserved.
+    // Without this, _lastKnownFrame resets to 0 and any prior seekToPosition is lost.
+    if (_playbackState == XLAudioPlaybackStatePlaying && _isScheduled) {
+        _lastKnownFrame = [self currentFramePosition];
+    }
+
     [_playerNode stop];
-    _lastKnownFrame = 0;
     _isScheduled = NO;
     [self setPlaybackState:XLAudioPlaybackStateStopped];
     [self stopPositionTimer];
 
-    NSLog(@"XLAudioPlayer: Stopped");
+    NSLog(@"XLAudioPlayer: Stopped at frame %lld (%.0f ms)", _lastKnownFrame, self.currentPositionMS);
 }
 
 - (void)togglePlayPause {
@@ -291,8 +297,13 @@ static const CGFloat kMaxPlaybackRate = 4.0;
 
     BOOL wasPlaying = (_playbackState == XLAudioPlaybackStatePlaying);
 
-    if (wasPlaying) {
-        _scheduleGeneration++;  // Invalidate old completion handler before stopping
+    // Always stop the player node when seeking — whether playing or paused.
+    // This clears any queued buffers so the next schedulePlaybackFromFrame:
+    // starts fresh. Without this, a seek while paused leaves the old buffer
+    // in the queue, and playerTime.sampleTime becomes cumulative across both
+    // old and new buffers, causing position tracking to jump ahead.
+    if (wasPlaying || _playbackState == XLAudioPlaybackStatePaused) {
+        _scheduleGeneration++;
         [_playerNode stop];
     }
 

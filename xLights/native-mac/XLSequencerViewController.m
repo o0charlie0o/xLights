@@ -7642,16 +7642,19 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _transportBar.isPlaying = YES;
     _timelineRuler.playbackRate = controller.playbackRate;
     _timelineRuler.playing = YES;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"XLPlaybackDidStartNotification" object:self];
 }
 
 - (void)playbackControllerDidPausePlayback:(XLPlaybackController *)controller {
     _transportBar.isPlaying = NO;
     _timelineRuler.playing = NO;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"XLPlaybackDidStopNotification" object:self];
 }
 
 - (void)playbackControllerDidStopPlayback:(XLPlaybackController *)controller {
     _transportBar.isPlaying = NO;
     _timelineRuler.playing = NO;
+    [[NSNotificationCenter defaultCenter] postNotificationName:@"XLPlaybackDidStopNotification" object:self];
     // Position is updated via didUpdatePositionMS: callback from the controller
 }
 
@@ -9416,31 +9419,26 @@ static const CGFloat kZoomFactor = 1.5;
 #pragma mark - Playback Actions (called from SwiftUI toolbar)
 
 - (void)play {
-    _transportBar.isPlaying = YES;
-    [_engineBridge play];
     if (_playbackController) {
         [_playbackController play];
     }
+    _transportBar.isPlaying = YES;
     _timelineRuler.playing = YES;
 }
 
 - (void)pause {
-    _transportBar.isPlaying = NO;
-    [_engineBridge pause];
     if (_playbackController) {
         [_playbackController pause];
     }
+    _transportBar.isPlaying = NO;
     _timelineRuler.playing = NO;
 }
 
 - (void)stop {
-    _transportBar.isPlaying = NO;
-    _transportBar.currentPositionMS = 0.0;
-    [_engineBridge stop];
-    [_engineBridge seek:0];
     if (_playbackController) {
         [_playbackController stop];
     }
+    _transportBar.isPlaying = NO;
     _timelineRuler.playing = NO;
 }
 

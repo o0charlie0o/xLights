@@ -60,7 +60,9 @@
 @property (nonatomic, weak) XLMetalPreviewView *previewView;
 
 /// Secondary preview view for the sidebar model preview.
-@property (nonatomic, weak) XLMetalPreviewView *sidebarPreviewView;
+/// Looked up from XLSwiftUIWindowHelper.shared at render time
+/// because SwiftUI's NSViewRepresentable lifecycle makes weak refs unreliable.
+@property (nonatomic, weak, readonly) XLMetalPreviewView *sidebarPreviewView;
 
 /// The native audio player for audio playback.
 /// If set, uses AVFoundation for audio; otherwise falls back to engine bridge.

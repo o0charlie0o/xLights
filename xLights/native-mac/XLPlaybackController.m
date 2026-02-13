@@ -12,6 +12,7 @@
 #import "XLEngineBridge.h"
 #import "layout/XLMetalPreviewView.h"
 #import "sequencer/XLAudioPlayer.h"
+#import "xLights_Native-Swift.h"
 
 @interface XLPlaybackController () <XLAudioPlayerDelegate> {
     CFAbsoluteTime _lastFrameTime;
@@ -35,6 +36,12 @@
 @end
 
 @implementation XLPlaybackController
+
+@dynamic sidebarPreviewView;
+
+- (XLMetalPreviewView *)sidebarPreviewView {
+    return [XLSwiftUIWindowHelper shared].sidebarPreviewView;
+}
 
 #pragma mark - Initialization
 
@@ -305,16 +312,19 @@
 
     // Start audio playback (if audio is available)
     if (_useNativeAudio && _audioPlayer.isLoaded) {
-        // Stop engine audio first to prevent double playback
+        // Ensure engine audio is stopped to prevent double playback
         if (_engineBridge) {
             [_engineBridge stop];
         }
-        // Use native AVFoundation audio
+        // Use native AVFoundation audio — always specify position explicitly
+        // to ensure we play from _positionMS regardless of audio player's
+        // internal state (which may have been reset by a prior stop)
         [_audioPlayer playFromPosition:(CGFloat)_positionMS];
     } else if (_engineBridge) {
         // Stop native audio first
         [_audioPlayer stop];
-        // Fall back to engine audio
+        // Fall back to engine audio — seek to correct position before playing
+        [_engineBridge seek:_positionMS];
         [_engineBridge play];
     }
     // Note: Playback can continue without audio for sequences without media files
@@ -369,6 +379,8 @@
     [_audioPlayer stop];
     if (_engineBridge) {
         [_engineBridge stop];
+        // Seek engine to return position so it matches UI state
+        [_engineBridge seek:returnPosition];
     }
 
     // Notify delegate
@@ -518,6 +530,7 @@
 
                 XLMetalPreviewView *preview = strongSelf.previewView;
                 XLMetalPreviewView *sidebarPreview = strongSelf.sidebarPreviewView;
+
                 if (frameUpdates.count > 0 && (preview || sidebarPreview)) {
                     for (NSDictionary *fb in frameUpdates) {
                         NSData *pixels = fb[@"pixels"];

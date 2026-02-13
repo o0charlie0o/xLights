@@ -1060,10 +1060,8 @@ struct XLSidebarModelPreview: NSViewRepresentable {
         preview.showEffectColors = true
         preview.framePadding = 0.15
 
-        // Wire to playback controller for real-time pixel data during sequence playback
-        if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController {
-            seqVC.playbackController?.sidebarPreviewView = preview
-        }
+        // Register on the singleton so the playback controller can always find it
+        XLSwiftUIWindowHelper.shared.sidebarPreviewView = preview
 
         // Observe effect selection to filter visible models and start preview loop
         context.coordinator.start(preview: preview, bridge: engineBridge)
@@ -1072,17 +1070,15 @@ struct XLSidebarModelPreview: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: XLMetalPreviewView, context: Context) {
-        // Re-wire playback controller if it was nil at creation time
-        if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController,
-           seqVC.playbackController?.sidebarPreviewView !== nsView {
-            seqVC.playbackController?.sidebarPreviewView = nsView
+        // Ensure singleton always has the current view
+        if XLSwiftUIWindowHelper.shared.sidebarPreviewView !== nsView {
+            XLSwiftUIWindowHelper.shared.sidebarPreviewView = nsView
         }
     }
 
     static func dismantleNSView(_ nsView: XLMetalPreviewView, coordinator: Coordinator) {
-        if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController,
-           seqVC.playbackController?.sidebarPreviewView === nsView {
-            seqVC.playbackController?.sidebarPreviewView = nil
+        if XLSwiftUIWindowHelper.shared.sidebarPreviewView === nsView {
+            XLSwiftUIWindowHelper.shared.sidebarPreviewView = nil
         }
         nsView.stopRenderLoop()
         coordinator.stop()
@@ -1094,8 +1090,11 @@ struct XLSidebarModelPreview: NSViewRepresentable {
 
     class Coordinator {
         private var selectionObserver: NSObjectProtocol?
+        private var playbackStartObserver: NSObjectProtocol?
+        private var playbackStopObserver: NSObjectProtocol?
         private var previewTimer: Timer?
         private var currentModelName: String?
+        private var playbackActive = false
 
         // Effect preview loop state
         private var effectStartMS: Int = 0
@@ -1138,6 +1137,26 @@ struct XLSidebarModelPreview: NSViewRepresentable {
                 queue: .main
             ) { [weak self] notification in
                 self?.handleSelectionChange(notification)
+            }
+
+            playbackStartObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("XLPlaybackDidStartNotification"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.playbackActive = true
+                self?.stopPreviewLoop()
+            }
+
+            playbackStopObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name("XLPlaybackDidStopNotification"),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.playbackActive = false
+                self.loopPositionMS = self.effectStartMS
+                self.startPreviewLoopIfNeeded()
             }
         }
 
@@ -1226,11 +1245,8 @@ struct XLSidebarModelPreview: NSViewRepresentable {
                 return
             }
 
-            // If the main sequence is playing, the playback controller feeds pixel data
-            if let seqVC = XLSwiftUIWindowHelper.shared.sequencerViewController,
-               seqVC.playbackController?.isPlaying == true {
-                return
-            }
+            // During playback, the playback controller feeds pixel data directly
+            guard !playbackActive else { return }
 
             // Skip if a render is still in flight to prevent queue pile-up
             guard !renderInProgress else { return }
@@ -1285,6 +1301,14 @@ struct XLSidebarModelPreview: NSViewRepresentable {
             if let observer = selectionObserver {
                 NotificationCenter.default.removeObserver(observer)
                 selectionObserver = nil
+            }
+            if let observer = playbackStartObserver {
+                NotificationCenter.default.removeObserver(observer)
+                playbackStartObserver = nil
+            }
+            if let observer = playbackStopObserver {
+                NotificationCenter.default.removeObserver(observer)
+                playbackStopObserver = nil
             }
         }
 
