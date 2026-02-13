@@ -653,6 +653,21 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
                    bufferIndex:bufferIndex
                        effects:effects effectCount:effectCount];
 
+    // Cell highlight, drop indicator, and rubber band are scrollable content
+    // and must also be clipped under the pinned timing zone.
+    if (cellHighlightActive && cellHighlightRow >= 0) {
+        [self drawCellHighlightWithEncoder:encoder uniforms:uniforms params:fp
+                                       row:cellHighlightRow
+                                   startMS:cellHighlightStartMS endMS:cellHighlightEndMS];
+    }
+    if (showDropIndicator && dropRow >= 0) {
+        [self drawDropIndicatorWithEncoder:encoder uniforms:uniforms params:fp
+                                       row:dropRow startMS:dropStartMS endMS:dropEndMS];
+    }
+    if (rubberBandActive) {
+        [self drawRubberBandWithEncoder:encoder uniforms:uniforms params:fp rect:rubberBandRect];
+    }
+
     // Reset scissor to full viewport, then draw pinned timing content on top
     if (useScissor) {
         MTLScissorRect fullRect = { 0, 0, texW, texH };
@@ -666,24 +681,6 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     [self drawTimingLabelsWithEncoder:encoder uniforms:uniforms params:fp
                           bufferIndex:bufferIndex
                               effects:effects effectCount:effectCount];
-
-    // Draw cell selection highlight (blue outline for keyboard effect insertion)
-    if (cellHighlightActive && cellHighlightRow >= 0) {
-        [self drawCellHighlightWithEncoder:encoder uniforms:uniforms params:fp
-                                       row:cellHighlightRow
-                                   startMS:cellHighlightStartMS endMS:cellHighlightEndMS];
-    }
-
-    // Draw drop indicator (ghost effect) during palette drag
-    if (showDropIndicator && dropRow >= 0) {
-        [self drawDropIndicatorWithEncoder:encoder uniforms:uniforms params:fp
-                                       row:dropRow startMS:dropStartMS endMS:dropEndMS];
-    }
-
-    // Draw rubber band selection rectangle
-    if (rubberBandActive) {
-        [self drawRubberBandWithEncoder:encoder uniforms:uniforms params:fp rect:rubberBandRect];
-    }
 
     [self drawPlaybackIndicatorWithEncoder:encoder uniforms:uniforms params:fp];
 
