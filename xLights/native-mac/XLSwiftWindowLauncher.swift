@@ -172,6 +172,9 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
     /// caching prevents losing the empty state and other UI state.
     @objc public var cachedSequencerViewController: XLSequencerViewController?
 
+    /// Strong cached reference to the layout VC so it survives SwiftUI tab switches.
+    @objc public var cachedLayoutViewController: XLLayoutViewController?
+
     private override init() {
         super.init()
     }

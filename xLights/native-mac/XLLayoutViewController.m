@@ -200,6 +200,7 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
     // Preview (right pane)
     _previewView = [[XLMetalPreviewView alloc] initWithFrame:NSZeroRect];
     _previewView.delegate = self;
+    _previewView.engineBridge = _engineBridge;
     _previewView.show3D = show3D;
     _previewView.showGrid = YES;
     [_layoutSplitView addSubview:_previewView];
@@ -363,15 +364,11 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 
     // Initialize keyboard handler for processing key bindings in layout scope
     NSString *showFolder = [self.engineBridge getShowFolderPath];
-    NSLog(@"XLLayoutViewController viewDidLoad: showFolder from engineBridge = '%@'", showFolder);
     if (!showFolder || showFolder.length == 0) {
         showFolder = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
-        NSLog(@"XLLayoutViewController: Fallback to UserDefaults showFolder = '%@'", showFolder);
     }
     self.keyboardHandler = [[XLKeyboardHandler alloc] initWithShowFolderPath:showFolder];
     self.keyboardHandler.delegate = self;
-    NSLog(@"XLLayoutViewController: keyboardHandler initialized = %@, bindingCount = %lu",
-          self.keyboardHandler, (unsigned long)[self.keyboardHandler bindingCount]);
 
     // Listen for show folder changes to reload key bindings
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -427,10 +424,18 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
 }
 
 - (void)setEngineBridge:(XLEngineBridge *)engineBridge {
+    BOOL wasNil = (_engineBridge == nil);
     _engineBridge = engineBridge;
     _modelTreeController.engineBridge = engineBridge;
     _previewView.engineBridge = engineBridge;
     _undoController.engineBridge = engineBridge;
+
+    // When the bridge becomes available for the first time, reload everything
+    if (wasNil && engineBridge != nil) {
+        [self reloadLayoutGroupSelector];
+        [_modelTreeController reloadData];
+        [_previewView reloadModels];
+    }
 }
 
 #pragma mark - Layout Group Selector
@@ -2202,6 +2207,11 @@ static NSString * const kLayoutOverlapChecksKey = @"XLLayoutOverlapChecksEnabled
         NSString *showFolder = [self.engineBridge getShowFolderPath];
         [_keyboardHandler setShowFolderPath:showFolder];
     }
+
+    // Reload model data when show folder changes (models may have been loaded)
+    [self reloadLayoutGroupSelector];
+    [_modelTreeController reloadData];
+    [_previewView reloadModels];
 }
 
 #pragma mark - XLKeyboardActionDelegate

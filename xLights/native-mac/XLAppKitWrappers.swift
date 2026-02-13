@@ -31,17 +31,29 @@ struct XLSetupTabView: NSViewControllerRepresentable {
 // MARK: - Layout Tab View Wrapper
 
 /// Wraps XLLayoutViewController (AppKit) for use in SwiftUI.
+/// Caches the VC in XLSwiftUIWindowHelper so it survives tab switches
+/// (SwiftUI recreates NSViewControllerRepresentable views on tab changes).
 struct XLLayoutTabView: NSViewControllerRepresentable {
     let engineBridge: XLEngineBridge
 
     func makeNSViewController(context: Context) -> XLLayoutViewController {
+        // Reuse cached VC if available (survives SwiftUI tab switch lifecycle)
+        if let cached = XLSwiftUIWindowHelper.shared.cachedLayoutViewController {
+            return cached
+        }
         let viewController = XLLayoutViewController()
         viewController.engineBridge = engineBridge
+        XLSwiftUIWindowHelper.shared.cachedLayoutViewController = viewController
         return viewController
     }
 
     func updateNSViewController(_ nsViewController: XLLayoutViewController, context: Context) {
-        // Update if needed when SwiftUI state changes
+        // Re-set the engine bridge whenever SwiftUI re-evaluates this view.
+        // This handles the case where the bridge was nil at makeNSViewController
+        // time but becomes available later (e.g. show folder load after app launch).
+        if nsViewController.engineBridge !== engineBridge {
+            nsViewController.engineBridge = engineBridge
+        }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: XLLayoutViewController, context: Context) -> CGSize? {

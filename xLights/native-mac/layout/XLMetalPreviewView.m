@@ -63,6 +63,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     CVDisplayLinkRef _displayLink;
     int _renderLogCount;
     BOOL _rightMouseDidDrag;
+    BOOL _hasAutoFramed;
     dispatch_block_t _pendingReloadWork;
 }
 
@@ -304,10 +305,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)setFrameSize:(NSSize)newSize {
     [super setFrameSize:newSize];
 
-    CGFloat scale = self.window.backingScaleFactor ?: 1.0;
-    _mlayer.drawableSize = CGSizeMake(newSize.width * scale, newSize.height * scale);
-    _contentDirty = YES;
-    _scrollbarsDirty = YES;
+    // Only update drawable size with valid dimensions (NSSplitView may
+    // initially give us zero width before divider positions are set)
+    if (newSize.width > 0 && newSize.height > 0) {
+        CGFloat scale = self.window.backingScaleFactor ?: 1.0;
+        _mlayer.drawableSize = CGSizeMake(newSize.width * scale, newSize.height * scale);
+        _contentDirty = YES;
+        _scrollbarsDirty = YES;
+    }
 }
 
 - (void)setBoundsSize:(NSSize)newSize {
@@ -811,7 +816,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         _mlayer.contentsScale = scale;
 
         NSSize frameSize = self.frame.size;
-        _mlayer.drawableSize = CGSizeMake(frameSize.width * scale, frameSize.height * scale);
+        if (frameSize.width > 0 && frameSize.height > 0) {
+            _mlayer.drawableSize = CGSizeMake(frameSize.width * scale, frameSize.height * scale);
+        }
 
         if (!_renderLoopRunning) {
             [self startRenderLoop];
@@ -831,6 +838,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)renderFrame {
     @autoreleasepool {
+        CGSize ds = _mlayer.drawableSize;
+        if (ds.width <= 0 || ds.height <= 0) return;
+
         id<CAMetalDrawable> drawable = [_mlayer nextDrawable];
         if (!drawable) {
             if (_renderLogCount < 5) {
@@ -851,12 +861,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
 
         CGSize drawableSize = _mlayer.drawableSize;
-        if (_renderLogCount < 5) {
-            NSLog(@"[HousePreview] renderFrame: drawable OK, size=%.0fx%.0f, modelVertexCount=%lu, gridVertexCount=%lu",
-                  drawableSize.width, drawableSize.height,
-                  (unsigned long)_modelVertexCount, (unsigned long)_gridVertexCount);
-            _renderLogCount++;
-        }
         [self ensureTexturesForSize:drawableSize];
 
         if (!_msaaTexture || !_depthTexture) return;
@@ -1085,9 +1089,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         bbMax.z = fmaxf(bbMax.z, maxZ);
     }
 
-    NSLog(@"[HousePreview] frameAllModels: hasModels=%d, modelDataCache.count=%lu",
-          hasModels, (unsigned long)_modelDataCache.count);
-
     if (!hasModels) {
         // Default scene volume if no models
         bbMin = (simd_float3){-500.0f, 0.0f, -500.0f};
@@ -1102,10 +1103,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         bbMax += pad;
     }
 
-    NSLog(@"[HousePreview] frameAllModels: bb=(%.1f,%.1f,%.1f)-(%.1f,%.1f,%.1f) drawableSize=%.0fx%.0f",
-          bbMin.x, bbMin.y, bbMin.z, bbMax.x, bbMax.y, bbMax.z,
-          _mlayer.drawableSize.width, _mlayer.drawableSize.height);
-
     float aspect = (float)_mlayer.drawableSize.width / (float)_mlayer.drawableSize.height;
     [_cameraController frameBoundingBoxMin:bbMin max:bbMax aspect:aspect];
     _contentDirty = YES;
@@ -1118,11 +1115,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 }
 
 - (void)reloadModels {
-    NSLog(@"[HousePreview] reloadModels: engineBridge=%@, view.frame=%@",
-          _engineBridge, NSStringFromRect(self.frame));
-
     if (!_engineBridge) {
-        NSLog(@"[HousePreview] reloadModels: NO engine bridge — clearing models");
         _modelDataCache = @[];
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
@@ -1141,9 +1134,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     } else {
         allData = [_engineBridge getAllModelData];
     }
-
-    NSLog(@"[HousePreview] reloadModels: batch fetched %lu models",
-          (unsigned long)allData.count);
 
     // Apply LayoutGroup filter for full-view mode (not sidebar filtered views)
     NSMutableArray<NSDictionary *> *modelData;
@@ -1164,13 +1154,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     _modelDataCache = [modelData copy];
-    NSLog(@"[HousePreview] reloadModels: cached %lu models, building vertices...",
-          (unsigned long)_modelDataCache.count);
     [self buildModelVertices];
-    NSLog(@"[HousePreview] reloadModels: done — modelVertexCount=%lu",
-          (unsigned long)_modelVertexCount);
     _contentDirty = YES;
     _scrollbarsDirty = YES;
+
+    // Auto-frame camera on first successful model load
+    if (!_hasAutoFramed && _modelVertexCount > 0) {
+        _hasAutoFramed = YES;
+        [self frameAllModels];
+    }
 }
 
 - (void)scheduleReloadModels {
