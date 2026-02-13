@@ -626,18 +626,46 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
         [self drawSongRegionOverlayWithEncoder:encoder uniforms:uniforms params:fp
                                    songRegions:songRegions songRegionCount:songRegionCount];
     }
+
+    // Scissor effect blocks and icons to the scrollable area below the pinned
+    // timing rows. This clips effects at the pixel level as they scroll under
+    // the timing zone, giving a smooth "slide under" appearance.
+    // Note: viewSize and pinnedHeight are already in pixel coordinates
+    // (pre-scaled by contentsScale in XLEffectsGridView), so no further scaling.
+    NSUInteger pinnedPx = (NSUInteger)ceil(fp.pinnedHeight);
+    // Clamp to actual render target dimensions to avoid Metal validation failures
+    // when the view size and drawable texture are briefly out of sync (e.g. during resize).
+    NSUInteger rtW = drawable.texture.width;
+    NSUInteger rtH = drawable.texture.height;
+    NSUInteger texW = MIN((NSUInteger)ceil(fp.viewSize.width), rtW);
+    NSUInteger texH = MIN((NSUInteger)ceil(fp.viewSize.height), rtH);
+    BOOL useScissor = fp.pinnedTimingRowCount > 0 && pinnedPx < texH && texW > 0 && texH > 0;
+
+    if (useScissor) {
+        MTLScissorRect scrollableRect = { 0, pinnedPx, texW, texH - pinnedPx };
+        [encoder setScissorRect:scrollableRect];
+    }
+
+    [self drawEffectBlocksWithEncoder:encoder uniforms:uniforms params:fp
+                          bufferIndex:bufferIndex
+                              effects:effects effectCount:effectCount];
+    [self drawIconsWithEncoder:encoder uniforms:uniforms params:fp
+                   bufferIndex:bufferIndex
+                       effects:effects effectCount:effectCount];
+
+    // Reset scissor to full viewport, then draw pinned timing content on top
+    if (useScissor) {
+        MTLScissorRect fullRect = { 0, 0, texW, texH };
+        [encoder setScissorRect:fullRect];
+    }
+
+    [self drawPinnedTimingBlocksWithEncoder:encoder uniforms:uniforms params:fp
+                                    effects:effects effectCount:effectCount];
     [self drawTimingTracksWithEncoder:encoder uniforms:uniforms params:fp
                               effects:effects effectCount:effectCount];
     [self drawTimingLabelsWithEncoder:encoder uniforms:uniforms params:fp
                           bufferIndex:bufferIndex
                               effects:effects effectCount:effectCount];
-    [self drawEffectBlocksWithEncoder:encoder uniforms:uniforms params:fp
-                          bufferIndex:bufferIndex
-                              effects:effects effectCount:effectCount];
-
-    [self drawIconsWithEncoder:encoder uniforms:uniforms params:fp
-                   bufferIndex:bufferIndex
-                       effects:effects effectCount:effectCount];
 
     // Draw cell selection highlight (blue outline for keyboard effect insertion)
     if (cellHighlightActive && cellHighlightRow >= 0) {
@@ -920,6 +948,120 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
     [encoder setVertexBuffer:overlayBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vCount];
+}
+
+#pragma mark - Pinned Timing Blocks
+
+/// Draw timing mark effect blocks (colored rectangles) for pinned timing rows.
+/// These are skipped in the main drawEffectBlocks pass (which is scissored to
+/// the scrollable area) and drawn here after the scissor is reset.
+- (void)drawPinnedTimingBlocksWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                                 uniforms:(EffectsGridUniforms)uniforms
+                                   params:(XLGridFrameParams)fp
+                                  effects:(const XLEffectRenderInfo *)effects
+                              effectCount:(NSUInteger)effectCount
+{
+    if (!effects || effectCount == 0 || fp.pinnedTimingRowCount == 0) return;
+
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+    CGFloat msPerPixel = 1.0 / zoomLevel;
+    CGFloat visibleStartMS = fp.scrollOffset.x * msPerPixel;
+    CGFloat visibleEndMS = visibleStartMS + fp.viewSize.width * msPerPixel;
+
+    // Use per-frame allocated buffers (not the triple-buffered pools)
+    static const NSUInteger kMaxPinnedVertices = 2048;
+    RoundedRectVertex blockVerts[kMaxPinnedVertices];
+    RoundedRectVertex outlineVerts[kMaxPinnedVertices];
+    NSUInteger blockCount = 0;
+    NSUInteger outlineCount = 0;
+
+    for (NSUInteger ei = 0; ei < effectCount; ei++) {
+        XLEffectRenderInfo info = effects[ei];
+        if (!info.isTimingMark || info.row >= fp.pinnedTimingRowCount) continue;
+        if (info.endTimeMS < visibleStartMS || info.startTimeMS > visibleEndMS) continue;
+
+        CGFloat yBase = rowYPosition(info.row, fp);
+        CGFloat x1 = info.startTimeMS * zoomLevel - fp.scrollOffset.x + 2.0;
+        CGFloat x2 = info.endTimeMS * zoomLevel - fp.scrollOffset.x - 2.0;
+        if (x2 - x1 < 2.0) continue;
+        if (blockCount + 6 > kMaxPinnedVertices) break;
+
+        CGFloat y1 = yBase + kEffectBlockInset;
+        CGFloat y2 = yBase + rowHeight - kEffectBlockInset;
+
+        simd_float4 color;
+        if (info.timingTrackLayerCount <= 1 || info.label[0] == '\0') {
+            if (!info.selected) continue;
+            CGFloat cr, cg, cb;
+            XLTimingTrackColor(info.timingColorIndex, &cr, &cg, &cb);
+            color = simd_make_float4(cr * 0.5, cg * 0.5, cb * 0.5, 0.5);
+        } else {
+            if (info.layer == 0)      color = simd_make_float4(0.1, 0.55, 0.3, 0.85);
+            else if (info.layer == 1) color = simd_make_float4(0.15, 0.4, 0.75, 0.85);
+            else if (info.layer == 2) color = simd_make_float4(0.7, 0.15, 0.55, 0.85);
+            else                      color = simd_make_float4(0.4, 0.4, 0.4, 0.85);
+        }
+
+        simd_float2 rectMin = simd_make_float2(x1, y1);
+        simd_float2 rectMax = simd_make_float2(x2, y2);
+        float cornerRadius = (float)kEffectBlockCornerRadius;
+
+        RoundedRectVertex *vptr = &blockVerts[blockCount];
+        for (int i = 0; i < 6; i++) {
+            vptr[i].color = color;
+            vptr[i].rectMin = rectMin;
+            vptr[i].rectMax = rectMax;
+            vptr[i].cornerRadius = cornerRadius;
+        }
+        vptr[0].position = simd_make_float2(x1, y1);
+        vptr[1].position = simd_make_float2(x2, y1);
+        vptr[2].position = simd_make_float2(x1, y2);
+        vptr[3].position = simd_make_float2(x2, y1);
+        vptr[4].position = simd_make_float2(x2, y2);
+        vptr[5].position = simd_make_float2(x1, y2);
+        blockCount += 6;
+
+        if (info.selected && outlineCount + 6 <= kMaxPinnedVertices) {
+            simd_float4 selColor = simd_make_float4(0.3, 0.6, 1.0, 1.0);
+            simd_float2 outlineMin = simd_make_float2(x1 - 1, y1 - 1);
+            simd_float2 outlineMax = simd_make_float2(x2 + 1, y2 + 1);
+
+            RoundedRectVertex *optr = &outlineVerts[outlineCount];
+            for (int i = 0; i < 6; i++) {
+                optr[i].color = selColor;
+                optr[i].rectMin = outlineMin;
+                optr[i].rectMax = outlineMax;
+                optr[i].cornerRadius = cornerRadius;
+            }
+            optr[0].position = simd_make_float2(x1 - 1, y1 - 1);
+            optr[1].position = simd_make_float2(x2 + 1, y1 - 1);
+            optr[2].position = simd_make_float2(x1 - 1, y2 + 1);
+            optr[3].position = simd_make_float2(x2 + 1, y1 - 1);
+            optr[4].position = simd_make_float2(x2 + 1, y2 + 1);
+            optr[5].position = simd_make_float2(x1 - 1, y2 + 1);
+            outlineCount += 6;
+        }
+    }
+
+    if (blockCount > 0) {
+        id<MTLBuffer> buf = [_device newBufferWithBytes:blockVerts
+                                                 length:blockCount * sizeof(RoundedRectVertex)
+                                                options:MTLResourceStorageModeShared];
+        [encoder setRenderPipelineState:_effectBlockPipeline];
+        [encoder setVertexBuffer:buf offset:0 atIndex:0];
+        [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:blockCount];
+    }
+    if (outlineCount > 0) {
+        id<MTLBuffer> buf = [_device newBufferWithBytes:outlineVerts
+                                                 length:outlineCount * sizeof(RoundedRectVertex)
+                                                options:MTLResourceStorageModeShared];
+        [encoder setRenderPipelineState:_outlinePipeline];
+        [encoder setVertexBuffer:buf offset:0 atIndex:0];
+        [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:outlineCount];
+    }
 }
 
 #pragma mark - Timing Tracks
@@ -1218,6 +1360,10 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
         // Y-coordinate with pinned timing row support
         CGFloat yBase = rowYPosition(info.row, fp);
         if (yBase + rowHeight < -1 || yBase > viewSize.height + 1) continue;
+
+        // Skip pinned timing row effects — they are drawn in a separate
+        // pass after the scissor rect is reset (see drawPinnedTimingBlocks).
+        if (info.isTimingMark && info.row < fp.pinnedTimingRowCount) continue;
 
         CGFloat x1 = info.startTimeMS * zoomLevel - scrollOffset.x;
         CGFloat x2 = info.endTimeMS * zoomLevel - scrollOffset.x;

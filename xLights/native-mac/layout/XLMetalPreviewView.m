@@ -105,6 +105,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 @property (nonatomic, assign) NSUInteger lastPixelDataGeneration;
 @property (nonatomic, assign) NSUInteger pixelDataGeneration;
 
+// Triple-buffered vertex buffers to avoid GPU/CPU contention on shared storage.
+// nextDrawable provides back-pressure: with 3 drawables and 3 ring buffers,
+// the oldest inflight frame has completed by the time nextDrawable returns.
+@property (nonatomic, assign) NSUInteger currentRingIndex;
+
 @property (nonatomic, assign) NSPoint lastDragPoint;
 @property (nonatomic, assign) BOOL isDragging;
 @property (nonatomic, assign) BOOL isRightDragging;
@@ -150,7 +155,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 @end
 
-@implementation XLMetalPreviewView
+@implementation XLMetalPreviewView {
+    // Triple-buffered vertex buffers (C arrays can't be @property)
+    id<MTLBuffer> _vertexBufferRing[3];
+    NSUInteger _vertexBufferRingCapacity[3]; // in vertices
+}
 
 #pragma mark - Initialization
 
@@ -223,6 +232,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _modelVerticesDirty = YES;
     _pixelDataGeneration = 0;
     _lastPixelDataGeneration = 0;
+    _currentRingIndex = 0;
 
     // Background image defaults
     _backgroundBrightness = 1.0f;
@@ -854,10 +864,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         // Successfully got a drawable — clear the content dirty flag
         _contentDirty = NO;
 
-        // Rebuild model vertices if selection/highlight changed
-        if (_modelVerticesDirty) {
+        // Rebuild model vertices if selection/highlight changed OR pixel data updated.
+        // Pixel data updates (from setRenderedPixels:) increment _pixelDataGeneration;
+        // we coalesce all updates since the last render into a single rebuild here.
+        BOOL pixelDataChanged = _showEffectColors && _lastPixelDataGeneration != _pixelDataGeneration;
+        if (_modelVerticesDirty || pixelDataChanged) {
             _modelVerticesDirty = NO;
-            [self buildModelVertices];
+            _lastPixelDataGeneration = _pixelDataGeneration;
+            [self buildModelVerticesWithEffectColors:_showEffectColors];
         }
 
         CGSize drawableSize = _mlayer.drawableSize;
@@ -1119,6 +1133,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         _modelDataCache = @[];
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
+        for (int i = 0; i < 3; i++) {
+            _vertexBufferRing[i] = nil;
+            _vertexBufferRingCapacity[i] = 0;
+        }
         _contentDirty = YES;
         return;
     }
@@ -1188,7 +1206,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
-- (void)setSelectedSubmodelNodeIndices:(NSIndexSet *)selectedSubmodelNodeIndices {
+- (void)setSelectedSubmodelNodeIndices:(NSDictionary<NSString *, NSIndexSet *> *)selectedSubmodelNodeIndices {
     _selectedSubmodelNodeIndices = [selectedSubmodelNodeIndices copy];
     _modelVerticesDirty = YES;
     _contentDirty = YES;
@@ -1359,44 +1377,69 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         return;
     }
 
-    // Build vertex data - position + color for each node
-    NSMutableData *vertexData = [[NSMutableData alloc] initWithCapacity:totalNodes * sizeof(XLGridVertex)];
+    // Triple-buffering: pick the next ring slot so the GPU can still be
+    // reading from previous slots while we write to this one.
+    NSUInteger ringIdx = _currentRingIndex;
+    _currentRingIndex = (_currentRingIndex + 1) % 3;
+
+    // Grow the ring slot if needed (1.5x headroom to reduce reallocations)
+    if (_vertexBufferRing[ringIdx] == nil || _vertexBufferRingCapacity[ringIdx] < totalNodes) {
+        NSUInteger newCapacity = (NSUInteger)(totalNodes * 1.5);
+        _vertexBufferRing[ringIdx] = [_device newBufferWithLength:newCapacity * sizeof(XLGridVertex)
+                                                          options:MTLResourceStorageModeShared];
+        [_vertexBufferRing[ringIdx] setLabel:@"ModelVertices"];
+        _vertexBufferRingCapacity[ringIdx] = newCapacity;
+    }
+
+    XLGridVertex *vertices = (XLGridVertex *)_vertexBufferRing[ringIdx].contents;
+    NSUInteger vertexWriteIndex = 0;
+
+    // Single lock around entire model loop to avoid per-model lock/unlock cycles.
+    // The lock is held while we read pixel data pointers; actual vertex math runs
+    // with the lock held but the critical section is just dictionary lookups so it's fast.
+    if (useEffectColors) {
+        [_pixelDataLock lock];
+    }
 
     NSUInteger modelIndex = 0;
     for (NSDictionary *modelData in _modelDataCache) {
         NSArray<NSDictionary *> *nodes = modelData[@"nodes"];
         NSString *modelName = modelData[@"name"];
 
-        // Check for rendered pixel data for this model.
-        // Shadow models mirror their source model's pixel data during playback.
-        [_pixelDataLock lock];
-        NSData *pixelData = useEffectColors ? _renderedPixelData[modelName] : nil;
-        NSUInteger pixelWidth = [_renderedPixelWidths[modelName] unsignedIntegerValue];
-        NSUInteger pixelHeight = [_renderedPixelHeights[modelName] unsignedIntegerValue];
-        if (pixelData == nil && useEffectColors) {
-            NSDictionary *mInfo = modelData[@"info"];
-            if (mInfo != nil) {
-                NSString *shadowFor = mInfo[@"ShadowModelFor"];
-                if (shadowFor != nil && [shadowFor isKindOfClass:[NSString class]] && shadowFor.length > 0) {
-                    pixelData = _renderedPixelData[shadowFor];
-                    pixelWidth = [_renderedPixelWidths[shadowFor] unsignedIntegerValue];
-                    pixelHeight = [_renderedPixelHeights[shadowFor] unsignedIntegerValue];
+        // Look up rendered pixel data for this model
+        NSData *pixelData = nil;
+        NSUInteger pixelWidth = 0;
+        NSUInteger pixelHeight = 0;
+
+        if (useEffectColors) {
+            pixelData = _renderedPixelData[modelName];
+            pixelWidth = [_renderedPixelWidths[modelName] unsignedIntegerValue];
+            pixelHeight = [_renderedPixelHeights[modelName] unsignedIntegerValue];
+
+            // Shadow models mirror their source model's pixel data during playback
+            if (pixelData == nil) {
+                NSDictionary *mInfo = modelData[@"info"];
+                if (mInfo != nil) {
+                    NSString *shadowFor = mInfo[@"ShadowModelFor"];
+                    if (shadowFor != nil && [shadowFor isKindOfClass:[NSString class]] && shadowFor.length > 0) {
+                        pixelData = _renderedPixelData[shadowFor];
+                        pixelWidth = [_renderedPixelWidths[shadowFor] unsignedIntegerValue];
+                        pixelHeight = [_renderedPixelHeights[shadowFor] unsignedIntegerValue];
+                    }
                 }
             }
         }
-        [_pixelDataLock unlock];
 
         const uint8_t *pixels = (const uint8_t *)pixelData.bytes;
-        NSUInteger pixelCount = pixelWidth * pixelHeight;
 
         // Determine color - highlighted and selected models get brighter colors
         BOOL isHighlighted = [modelName isEqualToString:_highlightedModelName];
         BOOL isSelected = [modelName isEqualToString:_selectedModelName];
         BOOL isMultiSelected = !isSelected && [_selectedModelNamesSet containsObject:modelName];
 
-        // When a submodel is selected, the parent model stays at 0.6
-        // and only the submodel nodes get white (1.0)
-        BOOL hasSubmodelSelection = isSelected && _selectedSubmodelNodeIndices != nil;
+        // Check if this model has a submodel node index restriction
+        NSIndexSet *submodelIndices = _selectedSubmodelNodeIndices[modelName];
+        BOOL hasSubmodelSelection = (isSelected || isMultiSelected) && submodelIndices != nil;
 
         float baseGray = 0.6f;
         if (isSelected && !hasSubmodelSelection) {
@@ -1414,8 +1457,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
         NSUInteger nodeIndex = 0;
         for (NSDictionary *node in nodes) {
-            XLGridVertex vertex;
-            vertex.position = (simd_float3){
+            XLGridVertex *v = &vertices[vertexWriteIndex];
+            v->position = (simd_float3){
                 [node[@"x"] floatValue],
                 [node[@"y"] floatValue],
                 [node[@"z"] floatValue],
@@ -1428,18 +1471,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             // Determine if this node should render pure white
             BOOL nodeIsWhite = NO;
             if (hasSubmodelSelection) {
-                // Submodel selected: only submodel node indices get white
-                nodeIsWhite = [_selectedSubmodelNodeIndices containsIndex:nodeIndex];
+                nodeIsWhite = [submodelIndices containsIndex:nodeIndex];
             } else if (isSelected || isMultiSelected) {
-                // Full model or multi-selection: all nodes white
                 nodeIsWhite = YES;
             }
 
             if (nodeIsWhite) {
-                // Selected pixels render pure white — matches legacy behavior
-                vertex.color = (simd_float4){1.0f, 1.0f, 1.0f, 1.0f};
+                v->color = (simd_float4){1.0f, 1.0f, 1.0f, 1.0f};
             } else {
-                // Try to get color from rendered pixel data
                 BOOL gotPixelColor = NO;
                 if (pixels && pixelWidth > 0 && pixelHeight > 0) {
                     if (bufX >= 0 && bufX < (NSInteger)pixelWidth &&
@@ -1449,7 +1488,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                             float r = pixels[pixelIdx + 0] / 255.0f;
                             float g = pixels[pixelIdx + 1] / 255.0f;
                             float b = pixels[pixelIdx + 2] / 255.0f;
-                            vertex.color = (simd_float4){r, g, b, 1.0f};
+                            v->color = (simd_float4){r, g, b, 1.0f};
                             gotPixelColor = YES;
                         }
                     }
@@ -1457,9 +1496,9 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
                 if (!gotPixelColor) {
                     if (useEffectColors) {
-                        vertex.color = (simd_float4){0.0f, 0.0f, 0.0f, 1.0f};
+                        v->color = (simd_float4){0.0f, 0.0f, 0.0f, 1.0f};
                     } else {
-                        vertex.color = (simd_float4){
+                        v->color = (simd_float4){
                             baseGray * (0.3f + 0.7f * defaultR),
                             baseGray * (0.3f + 0.7f * defaultG),
                             baseGray * (0.3f + 0.7f * defaultB),
@@ -1469,18 +1508,19 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                 }
             }
 
-            [vertexData appendBytes:&vertex length:sizeof(XLGridVertex)];
+            vertexWriteIndex++;
             nodeIndex++;
         }
 
         modelIndex++;
     }
 
+    if (useEffectColors) {
+        [_pixelDataLock unlock];
+    }
+
     _modelVertexCount = totalNodes;
-    _modelVertexBuffer = [_device newBufferWithBytes:vertexData.bytes
-                                              length:vertexData.length
-                                             options:MTLResourceStorageModeShared];
-    [_modelVertexBuffer setLabel:@"ModelVertices"];
+    _modelVertexBuffer = _vertexBufferRing[ringIdx];
 }
 
 - (void)hueToRGB:(float)hue r:(float *)r g:(float *)g b:(float *)b {
@@ -1541,12 +1581,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)updatePreviewForTime:(NSInteger)timeMS {
     _playbackPositionMS = timeMS;
 
-    // Only rebuild model vertices if pixel data has actually changed
-    if (_showEffectColors && _lastPixelDataGeneration != _pixelDataGeneration) {
-        [self buildModelVerticesWithEffectColors:YES];
-        _lastPixelDataGeneration = _pixelDataGeneration;
-    }
-
+    // Don't rebuild vertices here — just mark dirty and let renderFrame
+    // coalesce all pixel data updates into a single vertex rebuild per render.
     _contentDirty = YES;
     [self setNeedsRender];
 }
