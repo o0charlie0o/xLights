@@ -13966,6 +13966,1281 @@ bool NativeRenderCoordinator::renderNativeEffect(
         return true;
     }
 
+    if (type == "Arpeggio") {
+        // Native Arpeggio effect — port of legacy ArpeggioEffect::Render
+        //
+        // Creates a step-sequencer-like arpeggio pattern that sweeps through
+        // note positions. Supports both the native panel settings (BPM, Steps,
+        // StartNote, EndNote) and legacy settings (TimingTrack, AutoSplit,
+        // PropsPerStep, Order, Pattern, etc.) for backward compatibility.
+        //
+        // Native panel settings:
+        //   E_SLIDER_Arpeggio_BPM       (1-300, default 120)
+        //   E_SLIDER_Arpeggio_Steps     (1-16, default 8)
+        //   E_SLIDER_Arpeggio_StartNote (0-127, default 36)
+        //   E_SLIDER_Arpeggio_EndNote   (0-127, default 84)
+        //
+        // Legacy settings (from sequences created in wx build):
+        //   E_CHOICE_Arpeggio_TimingTrack, E_TEXTCTRL_Arpeggio_Steps,
+        //   E_TEXTCTRL_Arpeggio_AutoSplit, E_TEXTCTRL_Arpeggio_PropsPerStep,
+        //   E_CHECKBOX_Arpeggio_Loop, E_CHOICE_Arpeggio_Order,
+        //   E_CHOICE_Arpeggio_Pattern, E_CHECKBOX_Arpeggio_Shimmer,
+        //   E_CHECKBOX_Arpeggio_PerPropGradient, E_TEXTCTRL_Arpeggio_FadeIn,
+        //   E_TEXTCTRL_Arpeggio_FadeOut, E_TEXTCTRL_Arpeggio_Overlap,
+        //   E_CHECKBOX_Arpeggio_ManualMode, E_TEXTCTRL_Arpeggio_SequencerData
+
+        auto getStr = [&](const char* key, const char* def = "") -> std::string {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? it->second : def;
+        };
+        auto getInt = [&](const char* key, int def = 0) -> int {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? std::atoi(it->second.c_str()) : def;
+        };
+        auto getBool = [&](const char* key, bool def = false) -> bool {
+            auto it = effectInfo.settings.find(key);
+            if (it == effectInfo.settings.end() || it->second.empty()) return def;
+            return it->second == "1" || it->second == "true" || it->second == "yes";
+        };
+
+        // Detect whether this uses native panel settings or legacy settings.
+        // Native panel uses E_SLIDER_Arpeggio_BPM; legacy uses E_TEXTCTRL_Arpeggio_Steps.
+        bool hasNativeSettings = (effectInfo.settings.count("E_SLIDER_Arpeggio_BPM") > 0 ||
+                                  effectInfo.settings.count("E_SLIDER_Arpeggio_StartNote") > 0);
+        bool hasLegacySettings = (effectInfo.settings.count("E_TEXTCTRL_Arpeggio_Steps") > 0 ||
+                                  effectInfo.settings.count("E_CHOICE_Arpeggio_TimingTrack") > 0 ||
+                                  effectInfo.settings.count("E_TEXTCTRL_Arpeggio_AutoSplit") > 0 ||
+                                  effectInfo.settings.count("E_CHECKBOX_Arpeggio_ManualMode") > 0);
+
+        // Current time information
+        int currentMS = buf.curPeriod * buf.frameTimeInMs;
+        int effectStartMS = buf.curEffStartPer * buf.frameTimeInMs;
+        int effectEndMS = buf.curEffEndPer * buf.frameTimeInMs;
+        int effectDurationMS = effectEndMS - effectStartMS;
+        if (effectDurationMS <= 0) return true;
+        int timeIntoEffectMS = currentMS - effectStartMS;
+
+        if (hasLegacySettings && !hasNativeSettings) {
+            // ================================================================
+            // Legacy rendering path — faithful port of ArpeggioEffect::Render
+            // ================================================================
+            std::string timingTrack = getStr("E_CHOICE_Arpeggio_TimingTrack");
+            int steps = getInt("E_TEXTCTRL_Arpeggio_Steps", 0);
+            int autoSplit = getInt("E_TEXTCTRL_Arpeggio_AutoSplit", 8);
+            int propsPerStep = getInt("E_TEXTCTRL_Arpeggio_PropsPerStep", 1);
+            bool loop = getBool("E_CHECKBOX_Arpeggio_Loop", true);
+            bool shimmer = getBool("E_CHECKBOX_Arpeggio_Shimmer", false);
+            bool perPropGradient = getBool("E_CHECKBOX_Arpeggio_PerPropGradient", false);
+            std::string orderStr = getStr("E_CHOICE_Arpeggio_Order", "Forward");
+            std::string pattern = getStr("E_CHOICE_Arpeggio_Pattern", "None");
+            bool manualMode = getBool("E_CHECKBOX_Arpeggio_ManualMode", false);
+            std::string sequencerData = getStr("E_TEXTCTRL_Arpeggio_SequencerData");
+            int fadeIn = getInt("E_TEXTCTRL_Arpeggio_FadeIn", 50);
+            int fadeOut = getInt("E_TEXTCTRL_Arpeggio_FadeOut", 50);
+            int overlap = getInt("E_TEXTCTRL_Arpeggio_Overlap", 0);
+
+            if (autoSplit < 1) autoSplit = 1;
+            if (propsPerStep < 1) propsPerStep = 1;
+
+            // Determine number of steps (props)
+            int numSteps = steps;
+            if (numSteps <= 0) {
+                numSteps = buf.BufferWi;
+                if (numSteps <= 0) numSteps = 1;
+            }
+
+            // Build order mapping
+            std::vector<int> orderMap;
+            if (pattern != "None") {
+                if (pattern == "Center Out") {
+                    int mid = numSteps / 2;
+                    for (int i = 0; i < numSteps; i++) {
+                        int offset = (i + 1) / 2;
+                        if (i % 2 == 0) {
+                            int idx = mid + offset;
+                            if (idx < numSteps) orderMap.push_back(idx);
+                        } else {
+                            int idx = mid - offset;
+                            if (idx >= 0) orderMap.push_back(idx);
+                        }
+                    }
+                } else if (pattern == "Edges In") {
+                    int left = 0, right = numSteps - 1;
+                    while (left < right) {
+                        orderMap.push_back(left);
+                        orderMap.push_back(right);
+                        left++; right--;
+                    }
+                    if (left == right) orderMap.push_back(left);
+                } else if (pattern == "Right to Left") {
+                    for (int i = numSteps - 1; i >= 0; i--) orderMap.push_back(i);
+                } else if (pattern == "Alternating") {
+                    for (int i = 0; i < numSteps; i += 2) orderMap.push_back(i);
+                    for (int i = 1; i < numSteps; i += 2) orderMap.push_back(i);
+                } else if (pattern == "Split") {
+                    int mid = numSteps / 2;
+                    for (int i = 0; i < mid; i++) {
+                        orderMap.push_back(i);
+                        if (mid + i < numSteps) orderMap.push_back(mid + i);
+                    }
+                    if (numSteps % 2 != 0) orderMap.push_back(mid);
+                } else {
+                    for (int i = 0; i < numSteps; i++) orderMap.push_back(i);
+                }
+            } else if (orderStr == "Random") {
+                unsigned int seed = static_cast<unsigned int>(effectStartMS ^ 0x12345);
+                std::srand(seed);
+                for (int i = 0; i < numSteps; i++) orderMap.push_back(i);
+                for (int i = numSteps - 1; i > 0; i--) {
+                    int j = std::rand() % (i + 1);
+                    std::swap(orderMap[i], orderMap[j]);
+                }
+            } else if (orderStr == "Reverse") {
+                for (int i = numSteps - 1; i >= 0; i--) orderMap.push_back(i);
+            } else if (orderStr == "Ping-Pong") {
+                int left = 0, right = numSteps - 1;
+                while (left <= right) {
+                    orderMap.push_back(left);
+                    if (left != right) orderMap.push_back(right);
+                    left++; right--;
+                }
+            } else if (orderStr == "Even") {
+                for (int i = 1; i < numSteps; i += 2) orderMap.push_back(i);
+            } else if (orderStr == "Odd") {
+                for (int i = 0; i < numSteps; i += 2) orderMap.push_back(i);
+            } else {
+                for (int i = 0; i < numSteps; i++) orderMap.push_back(i);
+            }
+
+            // Calculate step times from timing track or auto-split
+            std::vector<std::pair<int, int>> stepTimes;
+            if (!timingTrack.empty()) {
+                auto marks = getTimingMarks(timingTrack);
+                for (const auto& mark : marks) {
+                    int markStart = mark.startTimeMS;
+                    int markEnd = mark.endTimeMS;
+                    if (markStart < effectEndMS && markEnd > effectStartMS) {
+                        markStart = std::max(markStart, effectStartMS);
+                        markEnd = std::min(markEnd, effectEndMS);
+                        stepTimes.push_back({markStart, markEnd});
+                    }
+                }
+            }
+
+            if (stepTimes.empty()) {
+                int stepDuration = effectDurationMS / autoSplit;
+                if (stepDuration < 1) stepDuration = 1;
+                for (int i = 0; i < autoSplit; i++) {
+                    int sms = effectStartMS + i * stepDuration;
+                    int ems = (i == autoSplit - 1) ? effectEndMS : (sms + stepDuration);
+                    stepTimes.push_back({sms, ems});
+                }
+            }
+
+            // Find active step
+            int activeStepIndex = -1;
+            for (size_t i = 0; i < stepTimes.size(); i++) {
+                int sms = stepTimes[i].first;
+                int ems = stepTimes[i].second;
+                int dur = ems - sms;
+                int overlapMS = (dur * overlap) / 200;
+                sms -= overlapMS;
+                ems += overlapMS;
+                if (currentMS >= sms && currentMS < ems) {
+                    activeStepIndex = static_cast<int>(i);
+                    break;
+                }
+            }
+
+            if (activeStepIndex < 0) return true;
+
+            int orderMapSize = static_cast<int>(orderMap.size());
+            if (orderMapSize == 0) return true;
+
+            int orderMapPosition = (activeStepIndex * propsPerStep) % orderMapSize;
+            if (!manualMode && !loop && (activeStepIndex * propsPerStep) >= orderMapSize) {
+                return true;
+            }
+
+            // Determine active prop indices
+            std::vector<int> activePropIndices;
+            if (manualMode && !sequencerData.empty()) {
+                int totalStepsInData = 0;
+                {
+                    std::istringstream countSS(sequencerData);
+                    std::string tmp;
+                    while (std::getline(countSS, tmp, ':')) totalStepsInData++;
+                }
+                int mappedStepIndex = activeStepIndex;
+                if (totalStepsInData > 0 && activeStepIndex >= totalStepsInData) {
+                    if (loop) {
+                        mappedStepIndex = activeStepIndex % totalStepsInData;
+                    } else {
+                        return true;
+                    }
+                }
+                std::istringstream ss(sequencerData);
+                std::string stepData;
+                int stepIndex = 0;
+                while (std::getline(ss, stepData, ':') && stepIndex < mappedStepIndex) {
+                    stepIndex++;
+                }
+                if (stepIndex == mappedStepIndex && !stepData.empty()) {
+                    std::istringstream stepSS(stepData);
+                    std::string propStr;
+                    while (std::getline(stepSS, propStr, '|')) {
+                        if (!propStr.empty() && propStr.find_first_not_of(" \t\n\r") != std::string::npos) {
+                            try {
+                                int propIndex = std::stoi(propStr);
+                                if (propIndex >= 0) activePropIndices.push_back(propIndex);
+                            } catch (...) {}
+                        }
+                    }
+                }
+            } else {
+                for (int p = 0; p < propsPerStep; p++) {
+                    int idx = (orderMapPosition + p) % orderMapSize;
+                    activePropIndices.push_back(orderMap[idx]);
+                }
+            }
+
+            // Calculate intensity from fade
+            int stepStartMS = stepTimes[activeStepIndex].first;
+            int stepEndMS = stepTimes[activeStepIndex].second;
+            int stepDuration = stepEndMS - stepStartMS;
+            int timeIntoStep = currentMS - stepStartMS;
+            int timeFromEnd = stepEndMS - currentMS;
+
+            double intensity = 1.0;
+            if (fadeIn > 0 && timeIntoStep < fadeIn)
+                intensity = (double)timeIntoStep / (double)fadeIn;
+            if (fadeOut > 0 && timeFromEnd < fadeOut)
+                intensity = std::min(intensity, (double)timeFromEnd / (double)fadeOut);
+
+            int cidx = 0;
+            if (shimmer) {
+                int tot = buf.curPeriod - buf.curEffStartPer;
+                if (tot % 2) {
+                    if (buf.palette.Size() <= 1) return true;
+                    cidx = 1;
+                }
+            }
+
+            // Render: each active prop maps to columns in the buffer
+            int colsPerStep = (numSteps > 0) ? std::max(1, buf.BufferWi / numSteps) : buf.BufferWi;
+
+            for (int propIndex : activePropIndices) {
+                if (propIndex >= numSteps) continue;
+
+                xlColor color;
+                if (perPropGradient) {
+                    float stepPosition = (stepDuration > 0) ? (float)timeIntoStep / (float)stepDuration : 0.0f;
+                    stepPosition = std::max(0.0f, std::min(1.0f, stepPosition));
+                    buf.palette.GetColor(cidx % buf.palette.Size(), color, stepPosition);
+                } else {
+                    int colorIndex = (propIndex + cidx) % static_cast<int>(buf.palette.Size());
+                    buf.palette.GetColor(static_cast<size_t>(colorIndex), color);
+                }
+
+                HSVValue hsv = color.asHSV();
+                hsv.value = hsv.value * intensity;
+                color = hsv;
+
+                int xStart = propIndex * colsPerStep;
+                int xEnd = std::min(xStart + colsPerStep, buf.BufferWi);
+                for (int x = xStart; x < xEnd; x++) {
+                    for (int y = 0; y < buf.BufferHt; y++) {
+                        buf.SetPixel(x, y, color);
+                    }
+                }
+            }
+
+            return true;
+
+        } else {
+            // ================================================================
+            // Native rendering path — uses BPM/Steps/StartNote/EndNote
+            // ================================================================
+            // The arpeggio steps through note positions at BPM tempo. Each step
+            // lights up a horizontal band in the buffer corresponding to the
+            // current note position within the StartNote-EndNote range.
+
+            int bpm = getInt("E_SLIDER_Arpeggio_BPM", 120);
+            int steps = getInt("E_SLIDER_Arpeggio_Steps", 8);
+            int startNote = getInt("E_SLIDER_Arpeggio_StartNote", 36);
+            int endNote = getInt("E_SLIDER_Arpeggio_EndNote", 84);
+
+            if (bpm < 1) bpm = 1;
+            if (steps < 1) steps = 1;
+            if (startNote > endNote) std::swap(startNote, endNote);
+            int noteRange = endNote - startNote;
+            if (noteRange < 1) noteRange = 1;
+
+            // Calculate step duration from BPM (one beat = one step cycle)
+            // At 120 BPM, one beat = 500ms. With 8 steps, each step = 62.5ms.
+            double msPerBeat = 60000.0 / (double)bpm;
+            double msPerStep = msPerBeat / (double)steps;
+            if (msPerStep < 1.0) msPerStep = 1.0;
+
+            // Calculate which step is active based on time into effect
+            int totalStepIndex = (int)((double)timeIntoEffectMS / msPerStep);
+            int currentStep = totalStepIndex % steps;
+
+            // Map current step to a note position (linear distribution across range)
+            // Step 0 -> startNote, step (steps-1) -> endNote
+            float notePosition;
+            if (steps == 1) {
+                notePosition = (float)(startNote + endNote) / 2.0f;
+            } else {
+                notePosition = (float)startNote + ((float)currentStep / (float)(steps - 1)) * (float)noteRange;
+            }
+
+            // Map the note position to a vertical row in the buffer
+            // startNote maps to y=0, endNote maps to y=BufferHt-1
+            float normalizedNote = (notePosition - (float)startNote) / (float)noteRange;
+            normalizedNote = std::max(0.0f, std::min(1.0f, normalizedNote));
+
+            int centerY = (int)(normalizedNote * (float)(buf.BufferHt - 1));
+
+            // Each step lights a band. The band height is proportional to buffer
+            // height divided by number of steps, minimum 1 pixel.
+            int bandHeight = std::max(1, buf.BufferHt / steps);
+            int yStart = std::max(0, centerY - bandHeight / 2);
+            int yEnd = std::min(buf.BufferHt, yStart + bandHeight);
+
+            // Get color from palette, cycling through palette colors per step
+            int colorcnt = static_cast<int>(buf.palette.Size());
+            int colorIdx = currentStep % colorcnt;
+            xlColor color;
+            buf.palette.GetColor(static_cast<size_t>(colorIdx), color);
+
+            // Apply a subtle fade based on position within the step
+            double stepProgress = std::fmod((double)timeIntoEffectMS, msPerStep) / msPerStep;
+            // Quick attack, smooth decay envelope
+            double envelope = 1.0;
+            if (stepProgress < 0.1) {
+                envelope = stepProgress / 0.1;  // 10% attack
+            } else {
+                envelope = 1.0 - (stepProgress - 0.1) * 0.3;  // gentle decay
+                if (envelope < 0.3) envelope = 0.3;
+            }
+
+            HSVValue hsv = color.asHSV();
+            hsv.value = hsv.value * envelope;
+            color = hsv;
+
+            // Draw the active band across the full width
+            for (int y = yStart; y < yEnd; y++) {
+                for (int x = 0; x < buf.BufferWi; x++) {
+                    buf.SetPixel(x, y, color);
+                }
+            }
+
+            return true;
+        }
+    }
+
+    // ===================================================================
+    // Piano effect — maps MIDI note data from a timing track to a
+    // visual piano keyboard rendered on the buffer.
+    // ===================================================================
+    if (type == "Piano") {
+        auto getStr = [&](const char* key, const char* def = "") -> std::string {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? it->second : def;
+        };
+        auto getInt = [&](const char* key, int def = 0) -> int {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? std::atoi(it->second.c_str()) : def;
+        };
+        auto getBool = [&](const char* key, bool def = false) -> bool {
+            auto it = effectInfo.settings.find(key);
+            if (it == effectInfo.settings.end() || it->second.empty()) return def;
+            return it->second == "1" || it->second == "true" || it->second == "yes";
+        };
+
+        // Read settings — support both native slider keys and legacy spinctrl keys
+        int startmidi = getInt("E_SLIDER_Piano_StartMIDI",
+                        getInt("E_SPINCTRL_Piano_StartMIDI", 60));
+        int endmidi   = getInt("E_SLIDER_Piano_EndMIDI",
+                        getInt("E_SPINCTRL_Piano_EndMIDI", 72));
+        bool showSharps = getBool("E_CHECKBOX_Piano_ShowSharps", true);
+        std::string pianoType = getStr("E_CHOICE_Piano_Type", "True Piano");
+        int scale = getInt("E_SLIDER_Piano_Scale", 100);
+        int xoffset = getInt("E_SLIDER_Piano_XOffset", 0);
+        bool fadeNotes = getBool("E_CHECKBOX_Piano_FadeNotes", false);
+        std::string midiTrack = getStr("E_CHOICE_Piano_MIDITrack_APPLYLAST", "");
+
+        if (midiTrack.empty()) return true;
+
+        // --- Local helpers (ported from PianoEffect) ---
+
+        auto isSharp = [](int note) -> bool {
+            int x = note % 12;
+            return (x == 1 || x == 3 || x == 6 || x == 8 || x == 10);
+        };
+
+        // Extract note name strings from a timing mark label.
+        // Labels can contain multiple notes separated by : , ; or space
+        auto extractNotes = [](const std::string& label) -> std::list<std::string> {
+            std::string n = label;
+            std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+            std::list<std::string> res;
+            std::string s;
+            for (char ch : n) {
+                if (ch == ':' || ch == ' ' || ch == ';' || ch == ',') {
+                    if (!s.empty()) { res.push_back(s); s.clear(); }
+                } else {
+                    if ((ch >= 'A' && ch <= 'G') || ch == '#' || (ch >= '0' && ch <= '9')) {
+                        s += ch;
+                    }
+                }
+            }
+            if (!s.empty()) res.push_back(s);
+            return res;
+        };
+
+        // Convert a note name like "C4" or "C#4" or a raw number "60" to MIDI 0-127
+        auto convertNote = [](const std::string& note) -> int {
+            std::string n = note;
+            std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+            int nletter;
+            switch (n[0]) {
+                case 'A': nletter = 9; break;
+                case 'B': nletter = 11; break;
+                case 'C': nletter = 0; break;
+                case 'D': nletter = 2; break;
+                case 'E': nletter = 4; break;
+                case 'F': nletter = 5; break;
+                case 'G': nletter = 7; break;
+                default: {
+                    int number = std::atoi(n.c_str());
+                    return std::clamp(number, 0, 127);
+                }
+            }
+            n = n.substr(1);
+            int sharp = 0;
+            if (n.find('#') != std::string::npos) sharp = 1;
+            else if (n.find('B') != std::string::npos) sharp = -1;
+            int octave = 4;
+            if (!n.empty()) {
+                if (n[0] == '#' || n[0] == 'B') n = n.substr(1);
+            }
+            if (!n.empty()) octave = std::atoi(n.c_str());
+            int number = 12 + (octave * 12) + nletter + sharp;
+            return std::clamp(number, 0, 127);
+        };
+
+        // --- Render cache: pre-built timing data ---
+        struct PianoCacheNative : public EffectRenderCache {
+            std::map<int, std::list<std::pair<float, float>>> timings;
+            std::string cachedTrack;
+        };
+
+        int cacheId = 200;
+        auto* cache = static_cast<PianoCacheNative*>(buf.infoCache[cacheId]);
+        if (!cache) {
+            cache = new PianoCacheNative();
+            buf.infoCache[cacheId] = cache;
+        }
+
+        if (buf.needToInit || cache->cachedTrack != midiTrack) {
+            buf.needToInit = false;
+            cache->timings.clear();
+            cache->cachedTrack = midiTrack;
+
+            std::vector<EffectInstanceInfo> marks = getTimingMarks(midiTrack);
+            int intervalMS = buf.frameTimeInMs;
+
+            for (const auto& mark : marks) {
+                std::list<std::pair<float, float>> notes;
+                // Timing mark label is stored in effectType field
+                std::string label = mark.effectType;
+                auto labelIt = mark.settings.find("label");
+                if (labelIt != mark.settings.end() && !labelIt->second.empty()) {
+                    label = labelIt->second;
+                }
+                std::list<std::string> noteLabels = extractNotes(label);
+                for (const auto& s : noteLabels) {
+                    float n = (float)convertNote(s);
+                    if (n >= 0) {
+                        notes.push_back({n, 1.0f});
+                    }
+                }
+                for (int t = mark.startTimeMS; t < mark.endTimeMS; t += intervalMS) {
+                    cache->timings[t] = notes;
+                }
+            }
+
+            // Apply note fading
+            if (fadeNotes && !cache->timings.empty()) {
+                struct NoteTracker { int note; int startFrame; int frames; };
+                std::list<NoteTracker> tracker;
+                int lastTime = 0;
+                for (const auto& entry : cache->timings) {
+                    lastTime = std::max(lastTime, entry.first);
+                }
+
+                auto findTracker = [](std::list<NoteTracker>& tr, int note) -> NoteTracker* {
+                    for (auto& t : tr) {
+                        if (t.note == note) return &t;
+                    }
+                    return nullptr;
+                };
+
+                for (const auto& entry : cache->timings) {
+                    std::list<int> currentNotes;
+                    for (auto& np : entry.second) {
+                        currentNotes.push_back((int)np.first);
+                        auto* t = findTracker(tracker, (int)np.first);
+                        if (!t) {
+                            tracker.push_back({(int)np.first, entry.first, 1});
+                        } else {
+                            t->frames++;
+                        }
+                    }
+                    auto tIt = tracker.begin();
+                    while (tIt != tracker.end()) {
+                        if (std::find(currentNotes.begin(), currentNotes.end(), tIt->note) == currentNotes.end()) {
+                            int sf = tIt->startFrame;
+                            int ef = entry.first;
+                            for (int f = sf; f < ef; f += intervalMS) {
+                                if (cache->timings.find(f) != cache->timings.end()) {
+                                    for (auto& np : cache->timings[f]) {
+                                        if ((int)np.first == tIt->note) {
+                                            np.second = 1.0f - (float)(f - sf) / (float)(ef - sf);
+                                        }
+                                    }
+                                }
+                            }
+                            tIt = tracker.erase(tIt);
+                        } else {
+                            ++tIt;
+                        }
+                    }
+                }
+                for (auto& t : tracker) {
+                    int sf = t.startFrame;
+                    int ef = lastTime + intervalMS;
+                    for (int f = sf; f < ef; f += intervalMS) {
+                        if (cache->timings.find(f) != cache->timings.end()) {
+                            for (auto& np : cache->timings[f]) {
+                                if ((int)np.first == t.note) {
+                                    np.second = 1.0f - (float)(f - sf) / (float)(ef - sf);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Get active notes for current frame ---
+        int curTime = buf.curPeriod * buf.frameTimeInMs;
+        std::list<std::pair<float, float>> noteData;
+        auto tdIt = cache->timings.find(curTime);
+        if (tdIt != cache->timings.end()) {
+            noteData = tdIt->second;
+        }
+
+        int em = endmidi;
+        if (em < startmidi) em = startmidi;
+        if (em - startmidi + 1 > buf.BufferWi) em = startmidi + buf.BufferWi - 1;
+
+        // ReduceChannels: filter sharps and clip to note range
+        {
+            auto ndIt = noteData.begin();
+            while (ndIt != noteData.end()) {
+                if (!showSharps && isSharp((int)ndIt->first)) {
+                    float lowerNote = ndIt->first - 1.0f;
+                    bool found = false;
+                    for (const auto& c : noteData) {
+                        if ((int)c.first == (int)lowerNote) { found = true; break; }
+                    }
+                    if (!found) {
+                        noteData.push_back({lowerNote, 0.0f});
+                    }
+                    ndIt = noteData.erase(ndIt);
+                } else if ((int)ndIt->first < startmidi || (int)ndIt->first > em) {
+                    ndIt = noteData.erase(ndIt);
+                } else {
+                    ++ndIt;
+                }
+            }
+        }
+
+        auto keyDown = [](const std::list<std::pair<float, float>>& data, int ch) -> bool {
+            for (const auto& p : data) {
+                if ((int)p.first == ch) return true;
+            }
+            return false;
+        };
+
+        auto getKeyBrightness = [](const std::list<std::pair<float, float>>& data, int ch) -> float {
+            for (const auto& p : data) {
+                if ((int)p.first == ch) return p.second;
+            }
+            return 0.0f;
+        };
+
+        // Alpha-blend helper: blend foreground over background using fg.alpha
+        auto alphaBlend = [](const xlColor& fg, const xlColor& bg) -> xlColor {
+            float a = (float)fg.alpha / 255.0f;
+            xlColor result;
+            result.red = (uint8_t)(fg.red * a + bg.red * (1.0f - a));
+            result.green = (uint8_t)(fg.green * a + bg.green * (1.0f - a));
+            result.blue = (uint8_t)(fg.blue * a + bg.blue * (1.0f - a));
+            result.alpha = 255;
+            return result;
+        };
+
+        // --- True Piano rendering ---
+        if (pianoType == "True Piano") {
+            int truexoffset = xoffset * buf.BufferWi / 100;
+
+            int whitestart = -1, whiteend = -1;
+            for (int i = startmidi; i <= em; ++i) {
+                if (!isSharp(i)) { whitestart = i; break; }
+            }
+            for (int i = em; i >= startmidi; --i) {
+                if (!isSharp(i)) { whiteend = i; break; }
+            }
+
+            int wkcount = 0;
+            if (whitestart != -1 && whiteend != -1) {
+                for (int i = whitestart; i <= whiteend; ++i) {
+                    if (!isSharp(i)) ++wkcount;
+                }
+            }
+            if (wkcount == 0) wkcount = 1;
+
+            float fwkw = (float)buf.BufferWi / (float)wkcount;
+            float wkw = fwkw;
+            float maxx = (float)wkcount * fwkw;
+            bool border = (wkw > 3);
+            if (border) wkw -= 1.0f;
+
+            xlColor wkcolour, bkcolour, wkdcolour, bkdcolour, kbcolour;
+            if (buf.GetColorCount() > 0) buf.palette.GetColor(0, wkcolour); else wkcolour = xlWHITE;
+            if (buf.GetColorCount() > 1) buf.palette.GetColor(1, bkcolour); else bkcolour = xlBLACK;
+            if (buf.GetColorCount() > 2) buf.palette.GetColor(2, wkdcolour); else wkdcolour = xlMAGENTA;
+            if (buf.GetColorCount() > 3) buf.palette.GetColor(3, bkdcolour); else bkdcolour = xlMAGENTA;
+            if (buf.GetColorCount() > 4) buf.palette.GetColor(4, kbcolour); else kbcolour = xlLIGHT_GREY;
+
+            // Draw white keys
+            float x = (float)truexoffset;
+            for (int i = startmidi; i <= em; ++i) {
+                if (!isSharp(i)) {
+                    if (keyDown(noteData, i)) {
+                        xlColor dc = wkdcolour;
+                        if (fadeNotes) {
+                            dc.alpha = (uint8_t)(getKeyBrightness(noteData, i) * 255.0f);
+                            dc = alphaBlend(dc, wkcolour);
+                        }
+                        buf.DrawBox((int)x, 0, (int)(x + wkw), buf.BufferHt * scale / 100, dc, false);
+                    } else {
+                        buf.DrawBox((int)x, 0, (int)(x + wkw), buf.BufferHt * scale / 100, wkcolour, false);
+                    }
+                    x += fwkw;
+                }
+            }
+
+            // Draw white key borders
+            if (border) {
+                x = fwkw + (float)truexoffset;
+                for (int j = 0; j < wkcount; ++j) {
+                    buf.DrawLine((int)x, 0, (int)x, buf.BufferHt * scale / 100, kbcolour);
+                    x += fwkw;
+                }
+            }
+
+            // Draw black keys
+            if (showSharps) {
+                if (isSharp(startmidi)) {
+                    x = -1.0f * fwkw / 2.0f + (float)truexoffset;
+                } else if (startmidi + 1 <= em && isSharp(startmidi + 1)) {
+                    x = fwkw / 2.0f + (float)truexoffset;
+                } else {
+                    x = fwkw + fwkw / 2.0f + (float)truexoffset;
+                }
+                for (int i = startmidi; i <= em; ++i) {
+                    if (isSharp(i)) {
+                        int bkAdj = (int)std::round(0.3f / 2.0f * fwkw);
+                        float x1 = x + (float)bkAdj;
+                        float x2 = std::min(maxx, x + fwkw - (float)bkAdj);
+                        if (keyDown(noteData, i)) {
+                            xlColor dc = bkdcolour;
+                            if (fadeNotes) {
+                                dc.alpha = (uint8_t)(getKeyBrightness(noteData, i) * 255.0f);
+                                dc = alphaBlend(dc, bkcolour);
+                            }
+                            buf.DrawBox((int)x1, buf.BufferHt * scale / 200,
+                                        (int)x2, buf.BufferHt * scale / 100, dc, false);
+                        } else {
+                            buf.DrawBox((int)x1, buf.BufferHt * scale / 200,
+                                        (int)x2, buf.BufferHt * scale / 100, bkcolour, false);
+                        }
+                        if (i + 1 <= 127 && !isSharp(i + 1) && i + 2 <= 127 && !isSharp(i + 2)) {
+                            x += fwkw + fwkw;
+                        } else {
+                            x += fwkw;
+                        }
+                    }
+                }
+            }
+        }
+        // --- Bars rendering ---
+        else if (pianoType == "Bars") {
+            int truexoffset = xoffset * buf.BufferWi / 100;
+
+            int kcount = 0;
+            if (showSharps) {
+                kcount = em - startmidi + 1;
+            } else {
+                for (int i = startmidi; i <= em; ++i) {
+                    if (!isSharp(i)) ++kcount;
+                }
+            }
+            if (kcount == 0) kcount = 1;
+
+            float fwkw = (float)buf.BufferWi / (float)kcount;
+
+            xlColor wkcolour, bkcolour, wkdcolour, bkdcolour;
+            if (buf.GetColorCount() > 0) buf.palette.GetColor(0, wkcolour); else wkcolour = xlWHITE;
+            if (buf.GetColorCount() > 1) buf.palette.GetColor(1, bkcolour); else bkcolour = xlBLACK;
+            if (buf.GetColorCount() > 2) buf.palette.GetColor(2, wkdcolour); else wkdcolour = xlMAGENTA;
+            if (buf.GetColorCount() > 3) buf.palette.GetColor(3, bkdcolour); else bkdcolour = xlMAGENTA;
+
+            float x = (float)truexoffset;
+            int wkh = buf.BufferHt;
+            if (showSharps) {
+                wkh = (int)(buf.BufferHt * 2.0f * (float)scale / 300.0f);
+            }
+            int bkb = (int)(buf.BufferHt * (float)scale / 300.0f);
+
+            for (int i = startmidi; i <= em; ++i) {
+                if (!isSharp(i)) {
+                    if (keyDown(noteData, i)) {
+                        xlColor dc = wkdcolour;
+                        if (fadeNotes) {
+                            dc.alpha = (uint8_t)(getKeyBrightness(noteData, i) * 255.0f);
+                            dc = alphaBlend(dc, wkcolour);
+                        }
+                        buf.DrawBox((int)x, 0, (int)(x + fwkw - 1), wkh, dc, false);
+                    } else {
+                        buf.DrawBox((int)x, 0, (int)(x + fwkw - 1), wkh, wkcolour, false);
+                    }
+                    x += fwkw;
+                } else if (showSharps) {
+                    if (keyDown(noteData, i)) {
+                        xlColor dc = bkdcolour;
+                        if (fadeNotes) {
+                            dc.alpha = (uint8_t)(getKeyBrightness(noteData, i) * 255.0f);
+                            dc = alphaBlend(dc, bkcolour);
+                        }
+                        buf.DrawBox((int)x, bkb, (int)(x + fwkw - 1),
+                                    buf.BufferHt * scale / 100, dc, false);
+                    } else {
+                        buf.DrawBox((int)x, bkb, (int)(x + fwkw - 1),
+                                    buf.BufferHt * scale / 100, bkcolour, false);
+                    }
+                    x += fwkw;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    // ===================================================================
+    // Guitar effect — renders guitar strings with notes playing at fret
+    // positions, driven by a timing track containing note/chord labels.
+    // ===================================================================
+    if (type == "Guitar") {
+        // --- Read settings ---
+        std::string guitarType = "Guitar";
+        std::string midiTrack;
+        std::string stringAppearance = "On";
+        int maxFrets = 19;
+        bool showStrings = false;
+        bool fade = false;
+        bool collapse = false;
+        double stringWaveFactor = 0.0;
+        double baseWaveFactor = 1.0;
+        bool varyWavelengthBasedOnFret = false;
+
+        auto it = effectInfo.settings.find("E_CHOICE_Guitar_Type");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            guitarType = it->second;
+        it = effectInfo.settings.find("E_CHOICE_Guitar_MIDITrack_APPLYLAST");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            midiTrack = it->second;
+        it = effectInfo.settings.find("E_CHOICE_StringAppearance");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            stringAppearance = it->second;
+        it = effectInfo.settings.find("E_SLIDER_MaxFrets");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            maxFrets = std::atoi(it->second.c_str());
+        it = effectInfo.settings.find("E_CHECKBOX_ShowStrings");
+        if (it != effectInfo.settings.end())
+            showStrings = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Fade");
+        if (it != effectInfo.settings.end())
+            fade = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Collapse");
+        if (it != effectInfo.settings.end())
+            collapse = (it->second == "1");
+        it = effectInfo.settings.find("E_SLIDER_StringWaveFactor");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            stringWaveFactor = std::atof(it->second.c_str()) / 10.0;
+        it = effectInfo.settings.find("E_SLIDER_BaseWaveFactor");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            baseWaveFactor = std::atof(it->second.c_str()) / 10.0;
+        it = effectInfo.settings.find("E_CHECKBOX_VaryWaveLengthOnFret");
+        if (it != effectInfo.settings.end())
+            varyWavelengthBasedOnFret = (it->second == "1");
+
+        if (maxFrets < 1) maxFrets = 1;
+
+        // --- Guitar tuning data (open-string MIDI notes per instrument) ---
+        struct GuitarNote { uint8_t string; uint8_t fret; uint8_t note; };
+
+        static const std::vector<GuitarNote> guitarTuning = {
+            {0,0,40}, {1,0,45}, {2,0,50}, {3,0,55}, {4,0,59}, {5,0,64}
+        };
+        static const std::vector<GuitarNote> bassTuning = {
+            {0,0,28}, {1,0,33}, {2,0,38}, {3,0,43}
+        };
+        static const std::vector<GuitarNote> banjoTuning = {
+            {1,0,50}, {2,0,55}, {3,0,59}, {4,0,62}, {0,0,62}
+        };
+        static const std::vector<GuitarNote> violinTuning = {
+            {1,0,55}, {2,0,62}, {3,0,69}, {4,0,76}
+        };
+
+        const std::vector<GuitarNote>* baseTuning = &guitarTuning;
+        if (guitarType == "Bass Guitar") baseTuning = &bassTuning;
+        else if (guitarType == "Banjo") baseTuning = &banjoTuning;
+        else if (guitarType == "Violin") baseTuning = &violinTuning;
+
+        uint8_t strings = static_cast<uint8_t>(baseTuning->size());
+
+        // --- Chord definitions (name, MIDI notes, fingering) ---
+        struct ChordDef {
+            std::string name;
+            std::vector<uint8_t> notes;
+            std::vector<std::pair<uint8_t,uint8_t>> fingering;
+        };
+
+        static const std::vector<ChordDef> guitarChords = {
+            {"CA",{40,45,52,57,61,64},{{0,0},{1,0},{2,2},{3,2},{4,2},{5,0}}},
+            {"CA#",{50,58,62,65},{{2,0},{3,3},{4,3},{5,1}}},
+            {"CBB",{50,58,62,65},{{2,0},{3,3},{4,3},{5,1}}},
+            {"CB",{54,59,63,66},{{2,4},{3,4},{4,4},{5,2}}},
+            {"CC",{40,48,52,55,60,64},{{0,0},{1,3},{2,2},{3,0},{4,1},{5,0}}},
+            {"CC#",{53,56,61,65},{{2,3},{3,1},{4,2},{5,1}}},
+            {"CDB",{53,56,61,65},{{2,3},{3,1},{4,2},{5,1}}},
+            {"CD",{45,50,57,62,66},{{1,0},{2,0},{3,2},{4,3},{5,2}}},
+            {"CD#",{51,58,63,67},{{2,1},{3,3},{4,4},{5,3}}},
+            {"CEB",{51,58,63,67},{{2,1},{3,3},{4,4},{5,3}}},
+            {"CE",{40,47,52,56,59,64},{{0,0},{1,2},{2,2},{3,1},{4,0},{5,0}}},
+            {"CF",{45,53,57,60,65},{{1,0},{2,3},{3,2},{4,1},{5,1}}},
+            {"CF#",{54,58,61,66},{{2,4},{3,3},{4,2},{5,2}}},
+            {"CGB",{54,58,61,66},{{2,4},{3,3},{4,2},{5,2}}},
+            {"CG",{43,47,50,55,59,67},{{0,3},{1,2},{2,0},{3,0},{4,0},{5,3}}},
+            {"CG#",{51,56,60,68},{{2,1},{3,1},{4,1},{5,4}}},
+            {"CAB",{51,56,60,68},{{2,1},{3,1},{4,1},{5,4}}},
+            {"CAM",{40,45,52,57,60,64},{{0,0},{1,0},{2,2},{3,2},{4,1},{5,0}}},
+            {"CA#M",{53,58,61,65},{{2,3},{3,3},{4,2},{5,1}}},
+            {"CBbM",{53,58,61,65},{{2,3},{3,3},{4,2},{5,1}}},
+            {"CBM",{54,59,62,66},{{2,4},{3,4},{4,3},{5,2}}},
+            {"CCM",{51,55,60,67},{{2,1},{3,0},{4,1},{5,3}}},
+            {"CC#M",{52,56,61,64},{{2,2},{3,1},{4,2},{5,0}}},
+            {"CDbM",{52,56,61,64},{{2,2},{3,1},{4,2},{5,0}}},
+            {"CDM",{45,50,57,62,65},{{1,0},{2,0},{3,2},{4,3},{5,1}}},
+            {"CD#M",{51,58,63,66},{{2,1},{3,3},{4,4},{5,2}}},
+            {"CEBM",{51,58,63,66},{{2,1},{3,3},{4,4},{5,2}}},
+            {"CEM",{40,47,52,55,59,64},{{0,0},{1,2},{2,2},{3,0},{4,0},{5,0}}},
+            {"CFM",{53,56,60,65},{{2,3},{3,1},{4,1},{5,1}}},
+            {"CF#M",{54,57,61,66},{{2,4},{3,2},{4,2},{5,2}}},
+            {"CGBM",{54,57,61,66},{{2,4},{3,2},{4,2},{5,2}}},
+            {"CGM",{50,58,62,67},{{2,0},{3,3},{4,3},{5,3}}},
+            {"CG#M",{56,59,63,68},{{2,6},{3,4},{4,4},{5,4}}},
+            {"CABM",{56,59,63,68},{{2,6},{3,4},{4,4},{5,4}}},
+            {"CA7",{40,45,52,55,61,64},{{0,0},{1,0},{2,2},{3,0},{4,2},{5,0}}},
+            {"CA#7",{53,58,62,68},{{2,3},{3,3},{4,3},{5,4}}},
+            {"CBB7",{53,58,62,68},{{2,3},{3,3},{4,3},{5,4}}},
+            {"CB7",{47,51,57,59,66},{{1,2},{2,1},{3,2},{4,0},{5,2}}},
+            {"CC7",{40,48,52,58,60,64},{{0,0},{1,3},{2,2},{3,3},{4,1},{5,0}}},
+            {"CC#7",{53,56,59,65},{{2,3},{3,1},{4,0},{5,1}}},
+            {"CDB7",{53,56,59,65},{{2,3},{3,1},{4,0},{5,1}}},
+            {"CD7",{45,50,57,60,66},{{1,0},{2,0},{3,2},{4,1},{5,2}}},
+            {"CD#7",{51,58,61,67},{{2,1},{3,3},{4,2},{5,3}}},
+            {"CEB7",{51,58,61,67},{{2,1},{3,3},{4,2},{5,3}}},
+            {"CE7",{40,47,50,56,59,64},{{0,0},{1,2},{2,0},{3,1},{4,0},{5,0}}},
+            {"CF7",{45,51,57,60,65},{{1,0},{2,1},{3,2},{4,1},{5,1}}},
+            {"CF#7",{54,58,61,64},{{2,4},{3,3},{4,2},{5,0}}},
+            {"CGB7",{54,58,61,64},{{2,4},{3,3},{4,2},{5,0}}},
+            {"CG7",{43,47,50,55,59,65},{{0,3},{1,2},{2,0},{3,0},{4,0},{5,1}}},
+            {"CG#7",{51,56,60,66},{{2,1},{3,1},{4,1},{5,2}}},
+            {"CAB7",{51,56,60,66},{{2,1},{3,1},{4,1},{5,2}}},
+        };
+
+        static const std::vector<ChordDef> bassChords = {
+            {"CA",{33,37,40,45},{{0,5},{1,4},{2,2},{3,3}}},
+            {"CB",{30,35,39,47},{{0,2},{1,2},{2,1},{3,4}}},
+            {"CC",{31,36,40,48},{{0,3},{1,3},{2,2},{3,5}}},
+            {"CD",{30,38,39,45},{{0,2},{1,5},{2,0},{3,2}}},
+            {"CE",{28,35,40,44},{{0,0},{1,2},{2,2},{3,1}}},
+            {"CF",{29,36,41,45},{{0,1},{1,3},{2,3},{3,2}}},
+            {"CG",{31,35,38,43},{{0,3},{1,2},{2,0},{3,0}}},
+            {"CAM",{33,36,40,45},{{0,5},{1,3},{2,2},{3,3}}},
+            {"CBM",{30,35,38,47},{{0,2},{1,2},{2,0},{3,4}}},
+            {"CCM",{31,36,39,48},{{0,3},{1,3},{2,1},{3,5}}},
+            {"CDM",{29,38,39,45},{{0,1},{1,5},{2,0},{3,2}}},
+            {"CEM",{28,35,40,43},{{0,0},{1,2},{2,2},{3,0}}},
+            {"CFM",{29,36,41,44},{{0,1},{1,3},{2,3},{3,1}}},
+            {"CGM",{31,34,38,43},{{0,3},{1,1},{2,0},{3,0}}},
+            {"CA7",{31,37,40,45},{{0,3},{1,4},{2,2},{3,3}}},
+            {"CB7",{30,35,39,45},{{0,2},{1,2},{2,1},{3,2}}},
+            {"CC7",{31,36,40,46},{{0,3},{1,3},{2,2},{3,3}}},
+            {"CD7",{30,36,39,45},{{0,2},{1,3},{2,0},{3,2}}},
+            {"CE7",{28,35,38,44},{{0,0},{1,2},{2,0},{3,1}}},
+            {"CF7",{29,36,39,45},{{0,1},{1,3},{2,1},{3,2}}},
+            {"CG7",{29,35,38,43},{{0,1},{1,2},{2,0},{3,0}}},
+        };
+
+        static const std::vector<ChordDef> banjoChords = {
+            {"CA",{52,57,61,64},{{1,2},{2,2},{3,2},{4,2}}},
+            {"CA#",{53,58,62,65},{{1,3},{2,3},{3,3},{4,3}}},
+            {"CBB",{53,58,62,65},{{1,3},{2,3},{3,3},{4,3}}},
+            {"CD",{50,57,62,66},{{1,0},{2,2},{3,3},{4,4}}},
+            {"CE",{52,56,59,64},{{1,2},{2,1},{3,0},{4,2}}},
+            {"CF",{53,57,60,65},{{1,3},{2,2},{3,1},{4,3}}},
+            {"CG",{50,55,59,62},{{1,0},{2,0},{3,0},{4,0}}},
+            {"CAM",{52,57,60,64},{{1,2},{2,2},{3,1},{4,2}}},
+            {"CDM",{53,57,62,65},{{1,3},{2,2},{3,3},{4,3}}},
+            {"CEM",{52,55,59,64},{{1,2},{2,0},{3,0},{4,2}}},
+            {"CD7",{50,57,60,62},{{1,0},{2,2},{3,1},{4,0}}},
+            {"CG7",{50,55,59,65},{{1,0},{2,0},{3,0},{4,3}}},
+        };
+
+        const std::vector<ChordDef>* chords = &guitarChords;
+        if (guitarType == "Bass Guitar") chords = &bassChords;
+        else if (guitarType == "Banjo") chords = &banjoChords;
+
+        // --- Note conversion helpers (ported from GuitarEffect) ---
+
+        auto convertNote = [](const std::string& note) -> int {
+            std::string n = note;
+            std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+            int nletter;
+            switch (n[0]) {
+                case 'S': case 'P': return -1;
+                case 'A': nletter = 9; break;
+                case 'B': nletter = 11; break;
+                case 'C': nletter = 0; break;
+                case 'D': nletter = 2; break;
+                case 'E': nletter = 4; break;
+                case 'F': nletter = 5; break;
+                case 'G': nletter = 7; break;
+                default: {
+                    int number = std::atoi(n.c_str());
+                    if (number < 0) number = 0;
+                    if (number > 127) number = 127;
+                    return number;
+                }
+            }
+            n = n.substr(1);
+            int sharp = 0;
+            if (n.find('#') != std::string::npos) sharp = 1;
+            else if (n.find('B') != std::string::npos) sharp = -1;
+            int octave = 4;
+            if (!n.empty()) {
+                if (n[0] == '#' || n[0] == 'B') n = n.substr(1);
+            }
+            if (!n.empty()) octave = std::atoi(n.c_str());
+            int number = 12 + (octave * 12) + nletter + sharp;
+            if (number < 0) number = 0;
+            if (number > 127) number = 127;
+            return number;
+        };
+
+        auto convertStringPos = [](const std::string& note, uint8_t& outString, uint8_t& outPos) {
+            outString = 0xFF;
+            outPos = 0xFF;
+            std::string n = note;
+            std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+            if (n.empty() || n[0] != 'S') return;
+            outString = 0;
+            size_t index = 1;
+            while (index < n.size() && n[index] >= '0' && n[index] <= '9') {
+                outString = outString * 10 + (uint8_t)(n[index] - '0');
+                ++index;
+            }
+            if (index >= n.size() || n[index] != 'P') { outString = 0xFF; return; }
+            ++index;
+            outPos = 0;
+            while (index < n.size() && n[index] >= '0' && n[index] <= '9') {
+                outPos = outPos * 10 + (uint8_t)(n[index] - '0');
+                ++index;
+            }
+        };
+
+        auto extractNotes = [](const std::string& label) -> std::list<std::string> {
+            std::string n = label;
+            std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+            std::list<std::string> res;
+            std::string s;
+            for (char ch : n) {
+                if (ch == ':' || ch == ' ' || ch == ';' || ch == ',') {
+                    if (!s.empty()) { res.push_back(s); s.clear(); }
+                } else if ((ch >= 'A' && ch <= 'G') || ch == '#' || ch == 'S' ||
+                           ch == 'P' || ch == 'M' || (ch >= '0' && ch <= '9')) {
+                    s += ch;
+                }
+            }
+            if (!s.empty()) res.push_back(s);
+            return res;
+        };
+
+        // --- Finger position and cache structures ---
+        struct FingerPos { uint8_t string; uint8_t fret; };
+
+        struct NativeGuitarTiming {
+            uint32_t startMS = 0;
+            uint32_t endMS = 0;
+            std::list<FingerPos> fingerPos;
+        };
+
+        struct NativeGuitarCache : public EffectRenderCache {
+            std::vector<NativeGuitarTiming> timings;
+            std::string cachedTrack;
+        };
+
+        NativeGuitarCache* cache = dynamic_cast<NativeGuitarCache*>(buf.infoCache[0]);
+        if (!cache) {
+            cache = new NativeGuitarCache();
+            buf.infoCache[0] = cache;
+        }
+
+        // Rebuild timing cache when track changes or on first frame
+        if (buf.needToInit || cache->cachedTrack != midiTrack) {
+            buf.needToInit = false;
+            cache->timings.clear();
+            cache->cachedTrack = midiTrack;
+
+            if (!midiTrack.empty()) {
+                auto marks = getTimingMarks(midiTrack);
+
+                auto getFretPos = [&](uint8_t s, uint8_t note, uint8_t mf) -> int {
+                    if (s >= baseTuning->size()) return -1;
+                    if (note < baseTuning->at(s).note) return -1;
+                    if (note > baseTuning->at(s).note + mf) return -1;
+                    return note - baseTuning->at(s).note;
+                };
+
+                for (const auto& mark : marks) {
+                    NativeGuitarTiming gt;
+                    gt.startMS = static_cast<uint32_t>(mark.startTimeMS);
+                    gt.endMS = static_cast<uint32_t>(mark.endTimeMS);
+
+                    std::string label = mark.effectType;
+                    auto noteLabels = extractNotes(label);
+                    std::list<uint8_t> noteValues;
+
+                    for (const auto& s : noteLabels) {
+                        bool isChord = false;
+                        std::string upper = s;
+                        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+
+                        for (const auto& c : *chords) {
+                            if (upper == c.name) {
+                                for (auto nn : c.notes) noteValues.push_back(nn);
+                                isChord = true;
+                                break;
+                            }
+                        }
+
+                        if (!isChord) {
+                            int noteVal = convertNote(s);
+                            if (noteVal >= 0) {
+                                noteValues.push_back(static_cast<uint8_t>(noteVal));
+                            } else {
+                                uint8_t sn, pos;
+                                convertStringPos(s, sn, pos);
+                                if (sn != 0xFF && sn != 0 && pos != 0xFF && pos <= maxFrets) {
+                                    FingerPos fp;
+                                    fp.string = static_cast<uint8_t>(strings - (sn - 1) - 1);
+                                    fp.fret = pos;
+                                    gt.fingerPos.push_back(fp);
+                                }
+                            }
+                        }
+                    }
+
+                    if (!noteValues.empty()) {
+                        noteValues.sort();
+
+                        // Check against known chords first
+                        bool foundChord = false;
+                        for (const auto& c : *chords) {
+                            if (c.notes.size() == noteValues.size()) {
+                                std::list<uint8_t> cn(c.notes.begin(), c.notes.end());
+                                bool match = true;
+                                for (auto nv : noteValues) {
+                                    if (std::find(cn.begin(), cn.end(), nv) == cn.end()) {
+                                        match = false;
+                                        break;
+                                    }
+                                }
+                                if (match) {
+                                    for (const auto& f : c.fingering) {
+                                        gt.fingerPos.push_back({f.first, f.second});
+                                    }
+                                    foundChord = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (!foundChord) {
+                            uint8_t nextStr = 0;
+                            for (auto note : noteValues) {
+                                for (uint8_t si = nextStr; si < strings; ++si) {
+                                    int fp = getFretPos(si, note, static_cast<uint8_t>(maxFrets));
+                                    if (fp >= 0) {
+                                        gt.fingerPos.push_back({si, static_cast<uint8_t>(fp)});
+                                        nextStr = si + 1;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!gt.fingerPos.empty()) {
+                        cache->timings.push_back(std::move(gt));
+                    }
+                }
+            }
+        }
+
+        // --- Find active timing at current time ---
+        uint32_t guitarTimeMS = static_cast<uint32_t>(buf.curPeriod) * buf.frameTimeInMs;
+        const NativeGuitarTiming* activeTiming = nullptr;
+        for (const auto& t : cache->timings) {
+            if (t.startMS <= guitarTimeMS && t.endMS > guitarTimeMS) {
+                activeTiming = &t;
+                break;
+            }
+        }
+
+        auto flipY = [](int y, int height) -> int {
+            return height - y - 1;
+        };
+
+        // --- Draw active note strings ---
+        if (activeTiming != nullptr) {
+            uint32_t pos = (guitarTimeMS - activeTiming->startMS) / buf.frameTimeInMs;
+            uint32_t len = (activeTiming->endMS - activeTiming->startMS) / buf.frameTimeInMs;
+            if (len < 1) len = 1;
+
+            float perString = (float)buf.BufferHt / strings;
+
+            for (const auto& fp : activeTiming->fingerPos) {
+                xlColor c;
+                buf.palette.GetColor(fp.string % buf.palette.Size(), c);
+                xlColor stringColor = c;
+
+                float alpha = (float)(len - pos) / (float)len;
+                if (alpha < 0.0f) alpha = 0.0f;
+                if (alpha > 1.0f) alpha = 1.0f;
+                if (fade)
+                    c.alpha = static_cast<uint8_t>(255.0f * alpha);
+
+                if (stringAppearance == "Wave") {
+                    uint32_t cycles = (((maxFrets - fp.fret) * buf.BufferWi) / maxFrets) / 10;
+                    double waveMaxX = ((maxFrets - fp.fret) * buf.BufferWi) / maxFrets;
+
+                    if (showStrings) {
+                        for (int x = static_cast<int>(waveMaxX); x < buf.BufferWi; ++x) {
+                            buf.SetPixel(x, flipY(static_cast<int>(perString * fp.string + perString / 2), buf.BufferHt), stringColor);
+                        }
+                    }
+
+                    double diffPerFret = varyWavelengthBasedOnFret ? 0.3 : 0.0;
+                    static constexpr double GUITAR_WAVE_RAMP = 3.0;
+
+                    for (int x = 0; x < static_cast<int>(waveMaxX); ++x) {
+                        double maxY = perString;
+                        if (collapse) maxY *= alpha;
+
+                        if (x < GUITAR_WAVE_RAMP) {
+                            maxY *= ((double)x / GUITAR_WAVE_RAMP);
+                        } else if (x >= static_cast<int>(waveMaxX - GUITAR_WAVE_RAMP - 1)) {
+                            maxY *= (double)(waveMaxX - x - 1) / GUITAR_WAVE_RAMP;
+                        }
+
+                        double waveDiv = ((double)(strings - fp.string - 1) * stringWaveFactor) +
+                                         baseWaveFactor + (maxFrets - fp.fret) * diffPerFret;
+                        if (waveDiv < 0.001) waveDiv = 0.001;
+                        int y = static_cast<int>((maxY / 2.0) *
+                            std::sin((M_PI * 2.0 * cycles * (double)x / waveDiv) / waveMaxX + (pos * 2)));
+                        y += static_cast<int>((perString / 2.0) + (perString * fp.string));
+                        buf.SetPixel(x, flipY(y, buf.BufferHt), c);
+                    }
+                } else {
+                    // "On" mode (default): solid rectangle for each active string
+                    int onMaxX = ((maxFrets - fp.fret) * buf.BufferWi) / maxFrets;
+
+                    if (showStrings) {
+                        for (int x = onMaxX; x < buf.BufferWi; ++x) {
+                            buf.SetPixel(x, flipY(static_cast<int>(perString * fp.string + perString / 2), buf.BufferHt), stringColor);
+                        }
+                    }
+
+                    int centre = static_cast<int>(perString * fp.string + perString / 2);
+                    int height = static_cast<int>(perString);
+                    if (collapse) {
+                        height = static_cast<int>(height * alpha);
+                        if (height < 1) height = 1;
+                    }
+                    int startY = centre - height / 2;
+
+                    for (int x = 0; x < onMaxX; ++x) {
+                        for (int y = startY; y < startY + height; ++y) {
+                            buf.SetPixel(x, flipY(y, buf.BufferHt), c);
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Draw inactive strings when showStrings is enabled ---
+        if (showStrings) {
+            float perString = (float)buf.BufferHt / strings;
+            for (uint8_t s = 0; s < strings; ++s) {
+                bool active = false;
+                if (activeTiming) {
+                    for (const auto& fp : activeTiming->fingerPos) {
+                        if (fp.string == s) { active = true; break; }
+                    }
+                }
+                if (!active) {
+                    xlColor c;
+                    buf.palette.GetColor(s % buf.palette.Size(), c);
+                    int y = flipY(static_cast<int>(perString * s + perString / 2), buf.BufferHt);
+                    for (int x = 0; x < buf.BufferWi; ++x) {
+                        buf.SetPixel(x, y, c);
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
     // Unknown effect type — buffer stays empty (black)
     return false;
 }
