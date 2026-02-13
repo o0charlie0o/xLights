@@ -13,16 +13,24 @@
 #include "NativeRenderBuffer.h"
 #include "NativeDrawingContext.h"
 #include "IRenderContext.h"
+#include "../interfaces/IAudioProvider.h"
 #include "../interfaces/IEffectProvider.h"
 #include "../interfaces/IModelProvider.h"
 #include "../ModelEngine.h"
+
+#include "NativeImageLoader.h"
+#include "NativeVideoReader.h"
+
+#include <Box2D/Box2D.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <list>
+#include <regex>
 #include <sstream>
 #include <thread>
 
@@ -529,6 +537,37 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
 
     job.pixelBuffer->calcOutput(period, validLayers);
 }
+
+// =========================================================================
+// Timing track helpers for Piano/Guitar/Arpeggio effects
+// =========================================================================
+
+size_t NativeRenderCoordinator::findTimingTrackElement(const std::string& trackName) {
+    if (trackName.empty() || !_effectProvider) return SIZE_MAX;
+    size_t count = _effectProvider->getElementCount();
+    for (size_t i = 0; i < count; ++i) {
+        ElementInfo info;
+        if (!_effectProvider->getElement(i, info)) continue;
+        if (info.type == SequenceElementType::Timing && info.name == trackName) {
+            return i;
+        }
+    }
+    return SIZE_MAX;
+}
+
+std::vector<EffectInstanceInfo> NativeRenderCoordinator::getTimingMarks(const std::string& trackName) {
+    size_t elemIdx = findTimingTrackElement(trackName);
+    if (elemIdx == SIZE_MAX) return {};
+    return _effectProvider->getEffectsOnLayer(elemIdx, 0);
+}
+
+bool NativeRenderCoordinator::getTimingMarkAtTime(const std::string& trackName, int timeMS, EffectInstanceInfo& outMark) {
+    size_t elemIdx = findTimingTrackElement(trackName);
+    if (elemIdx == SIZE_MAX) return false;
+    return _effectProvider->getEffectAtTime(elemIdx, 0, timeMS, outMark);
+}
+
+// =========================================================================
 
 bool NativeRenderCoordinator::renderNativeEffect(
     const EffectInstanceInfo& effectInfo, NativeRenderBuffer& buf)
@@ -8031,6 +8070,313 @@ bool NativeRenderCoordinator::renderNativeEffect(
     }
 
 
+
+    if (type == "Sketch") {
+        // Native Sketch effect — port of legacy SketchEffect::Render
+        // Renders user-drawn paths (lines, quadratic/cubic bezier) onto the buffer.
+
+        std::string sketchDef;
+        auto it = effectInfo.settings.find("E_TEXTCTRL_SketchDef");
+        if (it != effectInfo.settings.end()) sketchDef = it->second;
+        if (sketchDef.empty()) {
+            it = effectInfo.settings.find("E_TEXTCTRL_Sketch_SketchDef");
+            if (it != effectInfo.settings.end()) sketchDef = it->second;
+        }
+        if (sketchDef.empty()) return true;
+
+        int skThickness = 3;
+        it = effectInfo.settings.find("E_SLIDER_Sketch_Thickness");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            skThickness = std::atoi(it->second.c_str());
+        else {
+            it = effectInfo.settings.find("E_SLIDER_Thickness");
+            if (it != effectInfo.settings.end() && !it->second.empty())
+                skThickness = std::atoi(it->second.c_str());
+        }
+        if (skThickness < 1) skThickness = 1;
+
+        bool skMotionEnabled = false;
+        it = effectInfo.settings.find("E_CHECKBOX_Sketch_DrawMode");
+        if (it != effectInfo.settings.end()) skMotionEnabled = (it->second == "1");
+        else {
+            it = effectInfo.settings.find("E_CHECKBOX_MotionEnabled");
+            if (it != effectInfo.settings.end()) skMotionEnabled = (it->second == "1");
+        }
+
+        int skMotionPctInt = 100;
+        it = effectInfo.settings.find("E_SLIDER_Sketch_MotionPercentage");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            skMotionPctInt = std::atoi(it->second.c_str());
+        else {
+            it = effectInfo.settings.find("E_SLIDER_MotionPercentage");
+            if (it != effectInfo.settings.end() && !it->second.empty())
+                skMotionPctInt = std::atoi(it->second.c_str());
+        }
+        double skMotionPct = skMotionPctInt * 0.01;
+
+        int skDrawPctInt = 40;
+        it = effectInfo.settings.find("E_SLIDER_DrawPercentage");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            skDrawPctInt = std::atoi(it->second.c_str());
+        double skDrawPct = skDrawPctInt * 0.01;
+
+        float skProgress = buf.GetEffectTimeIntervalPosition(1.0f);
+        int skW = buf.BufferWi;
+        int skH = buf.BufferHt;
+
+        // Parse sketch definition: paths separated by '|', components by ';'
+        // First component = start point x,y. Segments: Lx,y Qcx,cy,x,y Ccx1,cy1,cx2,cy2,x,y c
+        struct SkPt { double x, y; };
+        enum class SkSegType { Line, Quad, Cubic };
+        struct SkSeg { SkSegType tp; SkPt fr, to, c1, c2; };
+        struct SkPath { std::vector<SkSeg> segs; bool closed = false; };
+
+        auto skSegLen = [](const SkSeg& s) -> double {
+            if (s.tp == SkSegType::Line) {
+                double dx = s.to.x - s.fr.x, dy = s.to.y - s.fr.y;
+                return std::sqrt(dx*dx + dy*dy);
+            }
+            const int N = 50;
+            double len = 0.0, px = s.fr.x, py = s.fr.y;
+            for (int i = 1; i <= N; ++i) {
+                double t = (double)i / N, u = 1.0 - t, nx, ny;
+                if (s.tp == SkSegType::Quad) {
+                    nx = u*u*s.fr.x + 2*u*t*s.c1.x + t*t*s.to.x;
+                    ny = u*u*s.fr.y + 2*u*t*s.c1.y + t*t*s.to.y;
+                } else {
+                    nx = u*u*u*s.fr.x + 3*u*u*t*s.c1.x + 3*u*t*t*s.c2.x + t*t*t*s.to.x;
+                    ny = u*u*u*s.fr.y + 3*u*u*t*s.c1.y + 3*u*t*t*s.c2.y + t*t*t*s.to.y;
+                }
+                double dx = nx-px, dy = ny-py;
+                len += std::sqrt(dx*dx + dy*dy);
+                px = nx; py = ny;
+            }
+            return len;
+        };
+
+        auto skPathLen = [&skSegLen](const SkPath& p) -> double {
+            double l = 0; for (const auto& s : p.segs) l += skSegLen(s); return l;
+        };
+
+        std::vector<SkPath> skPaths;
+        {
+            std::istringstream ps(sketchDef);
+            std::string pstr;
+            while (std::getline(ps, pstr, '|')) {
+                if (pstr.empty()) continue;
+                SkPath sp;
+                std::vector<std::string> cps;
+                {
+                    std::istringstream cs(pstr);
+                    std::string c;
+                    while (std::getline(cs, c, ';'))
+                        if (!c.empty()) cps.push_back(c);
+                }
+                if (cps.empty()) continue;
+                SkPt prev = {0, 0};
+                {
+                    auto cm = cps[0].find(',');
+                    if (cm != std::string::npos) {
+                        try {
+                            prev.x = std::stod(cps[0].substr(0, cm));
+                            prev.y = std::stod(cps[0].substr(cm + 1));
+                        } catch (...) {}
+                    }
+                }
+                for (size_t ci = 1; ci < cps.size(); ++ci) {
+                    const std::string& cp = cps[ci];
+                    if (cp.empty()) continue;
+                    char cmd = cp[0];
+                    std::vector<double> vl;
+                    {
+                        std::istringstream vs(cp.substr(1));
+                        std::string v;
+                        while (std::getline(vs, v, ','))
+                            if (!v.empty()) {
+                                try { vl.push_back(std::stod(v)); }
+                                catch (...) { vl.push_back(0); }
+                            }
+                    }
+                    if (cmd == 'L' && vl.size() >= 2) {
+                        SkSeg sg;
+                        sg.tp = SkSegType::Line;
+                        sg.fr = prev;
+                        sg.to = {vl[0], vl[1]};
+                        sp.segs.push_back(sg);
+                        prev = sg.to;
+                    } else if (cmd == 'Q' && vl.size() >= 4) {
+                        SkSeg sg;
+                        sg.tp = SkSegType::Quad;
+                        sg.fr = prev;
+                        sg.c1 = {vl[0], vl[1]};
+                        sg.to = {vl[2], vl[3]};
+                        sp.segs.push_back(sg);
+                        prev = sg.to;
+                    } else if (cmd == 'C' && vl.size() >= 6) {
+                        SkSeg sg;
+                        sg.tp = SkSegType::Cubic;
+                        sg.fr = prev;
+                        sg.c1 = {vl[0], vl[1]};
+                        sg.c2 = {vl[2], vl[3]};
+                        sg.to = {vl[4], vl[5]};
+                        sp.segs.push_back(sg);
+                        prev = sg.to;
+                    } else if (cmd == 'c') {
+                        sp.closed = true;
+                    }
+                }
+                if (!sp.segs.empty())
+                    skPaths.push_back(std::move(sp));
+            }
+        }
+        if (skPaths.empty()) return true;
+
+        // Draw a (partial) segment onto the buffer
+        auto skDraw = [&](const SkSeg& s, double sf, double ef, const xlColor& col) {
+            if (sf >= ef) return;
+            if (s.tp == SkSegType::Line) {
+                double x1 = s.fr.x + sf * (s.to.x - s.fr.x);
+                double y1 = s.fr.y + sf * (s.to.y - s.fr.y);
+                double x2 = s.fr.x + ef * (s.to.x - s.fr.x);
+                double y2 = s.fr.y + ef * (s.to.y - s.fr.y);
+                int px1 = (int)(x1 * (skW - 1) + 0.5);
+                int py1 = (skH - 1) - (int)(y1 * (skH - 1) + 0.5);
+                int px2 = (int)(x2 * (skW - 1) + 0.5);
+                int py2 = (skH - 1) - (int)(y2 * (skH - 1) + 0.5);
+                if (skThickness <= 1)
+                    buf.DrawLine(px1, py1, px2, py2, col);
+                else
+                    buf.DrawThickLine(px1, py1, px2, py2, col, skThickness);
+            } else {
+                const int ST = 30;
+                int iS = (int)(sf * ST), iE = (int)(ef * ST + 0.5);
+                if (iE > ST) iE = ST;
+                double pX, pY;
+                {
+                    double t = (double)iS / ST, u = 1.0 - t;
+                    if (s.tp == SkSegType::Quad) {
+                        pX = u*u*s.fr.x + 2*u*t*s.c1.x + t*t*s.to.x;
+                        pY = u*u*s.fr.y + 2*u*t*s.c1.y + t*t*s.to.y;
+                    } else {
+                        pX = u*u*u*s.fr.x + 3*u*u*t*s.c1.x + 3*u*t*t*s.c2.x + t*t*t*s.to.x;
+                        pY = u*u*u*s.fr.y + 3*u*u*t*s.c1.y + 3*u*t*t*s.c2.y + t*t*t*s.to.y;
+                    }
+                }
+                for (int i = iS + 1; i <= iE; ++i) {
+                    double t = (double)i / ST, u = 1.0 - t;
+                    double nX, nY;
+                    if (s.tp == SkSegType::Quad) {
+                        nX = u*u*s.fr.x + 2*u*t*s.c1.x + t*t*s.to.x;
+                        nY = u*u*s.fr.y + 2*u*t*s.c1.y + t*t*s.to.y;
+                    } else {
+                        nX = u*u*u*s.fr.x + 3*u*u*t*s.c1.x + 3*u*t*t*s.c2.x + t*t*t*s.to.x;
+                        nY = u*u*u*s.fr.y + 3*u*u*t*s.c1.y + 3*u*t*t*s.c2.y + t*t*t*s.to.y;
+                    }
+                    int px1 = (int)(pX * (skW - 1) + 0.5);
+                    int py1 = (skH - 1) - (int)(pY * (skH - 1) + 0.5);
+                    int px2 = (int)(nX * (skW - 1) + 0.5);
+                    int py2 = (skH - 1) - (int)(nY * (skH - 1) + 0.5);
+                    if (skThickness <= 1)
+                        buf.DrawLine(px1, py1, px2, py2, col);
+                    else
+                        buf.DrawThickLine(px1, py1, px2, py2, col, skThickness);
+                    pX = nX;
+                    pY = nY;
+                }
+            }
+        };
+
+        // Compute lengths
+        double skTotalLen = 0;
+        std::vector<double> skPLens;
+        skPLens.reserve(skPaths.size());
+        for (const auto& p : skPaths) {
+            double l = skPathLen(p);
+            skPLens.push_back(l);
+            skTotalLen += l;
+        }
+        if (skTotalLen <= 0) return true;
+
+        // Adjusted progress (legacy logic)
+        double skAdj;
+        if (skMotionEnabled)
+            skAdj = skProgress * (1.0 + skMotionPct);
+        else
+            skAdj = (skDrawPct > 0) ? (skProgress / skDrawPct) : 1.0;
+
+        // Special case: single closed path with motion wraps around
+        if (skMotionEnabled && skPaths.size() == 1 && skPaths[0].closed) {
+            xlColor col;
+            buf.palette.GetColor(0, col);
+            const auto& sp = skPaths[0];
+            double pL = skPLens[0];
+            double sP = skProgress, eP = skProgress + skMotionPct;
+            auto skDrawPart = [&](double ff, double tf) {
+                if (ff >= tf || pL <= 0) return;
+                double cum = 0;
+                for (const auto& sg : sp.segs) {
+                    double sL = skSegLen(sg);
+                    double sS = cum / pL, sE = (cum + sL) / pL;
+                    if (tf > sS && ff < sE) {
+                        double lS = std::max(0.0, (ff - sS) / (sE - sS));
+                        double lE = std::min(1.0, (tf - sS) / (sE - sS));
+                        skDraw(sg, lS, lE, col);
+                    }
+                    cum += sL;
+                }
+            };
+            skDrawPart(sP, std::min(eP, 1.0));
+            if (eP > 1.0)
+                skDrawPart(0.0, eP - 1.0);
+            return true;
+        }
+
+        // General case: iterate paths, draw based on progress
+        double skCumLen = 0;
+        for (size_t pi = 0; pi < skPaths.size(); ++pi) {
+            const auto& sp = skPaths[pi];
+            double pL = skPLens[pi];
+            xlColor col;
+            buf.palette.GetColor(pi % buf.GetColorCount(), col);
+            double pctEnd = (skCumLen + pL) / skTotalLen;
+
+            if (!skMotionEnabled && pctEnd <= skAdj) {
+                // Draw entire path
+                for (const auto& sg : sp.segs)
+                    skDraw(sg, 0.0, 1.0, col);
+            } else {
+                double pctStart = skCumLen / skTotalLen;
+                double rng = pctEnd - pctStart;
+                if (rng > 0 && skAdj > pctStart) {
+                    double thru = std::clamp((skAdj - pctStart) / rng, 0.0, 1.0);
+                    double ds = 0.0;
+                    if (skMotionEnabled) {
+                        double dsProg = skAdj - skMotionPct;
+                        ds = std::clamp((dsProg - pctStart) / rng, 0.0, 1.0);
+                    }
+                    if (pL > 0) {
+                        double cumSeg = 0;
+                        for (const auto& sg : sp.segs) {
+                            double sL = skSegLen(sg);
+                            double sSF = cumSeg / pL, sEF = (cumSeg + sL) / pL;
+                            if (thru > sSF && ds < sEF) {
+                                double lS = std::max(0.0, (ds - sSF) / (sEF - sSF));
+                                double lE = std::min(1.0, (thru - sSF) / (sEF - sSF));
+                                if (lE > lS)
+                                    skDraw(sg, lS, lE, col);
+                            }
+                            cumSeg += sL;
+                        }
+                    }
+                }
+            }
+            skCumLen += pL;
+        }
+
+        return true;
+    }
+
+
     if (type == "Snowflakes") {
         // Native Snowflakes effect — port of legacy SnowflakesEffect::Render
         // Supports three modes: Driving (scrolling pattern), Falling (gravity),
@@ -11471,6 +11817,2152 @@ bool NativeRenderCoordinator::renderNativeEffect(
         }
 
         NativeTextDrawingContext::ReleaseContext(dc);
+        return true;
+    }
+
+    if (type == "Video") {
+        // Native Video effect — port of legacy VideoEffect::Render
+        //
+        // Loads a video file and extracts frames at the correct time offset,
+        // rendering the scaled frame pixels into the buffer.
+        // Uses NativeVideoReader (AVFoundation-based) for frame extraction.
+
+        auto getStr = [&](const char* key, const char* def = "") -> std::string {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? it->second : def;
+        };
+        auto getInt = [&](const char* key, int def = 0) -> int {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? std::atoi(it->second.c_str()) : def;
+        };
+        auto getDouble = [&](const char* key, double def = 0.0) -> double {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? std::atof(it->second.c_str()) : def;
+        };
+        auto getBool = [&](const char* key, bool def = false) -> bool {
+            auto it = effectInfo.settings.find(key);
+            if (it == effectInfo.settings.end() || it->second.empty()) return def;
+            return it->second == "1" || it->second == "true" || it->second == "yes";
+        };
+
+        std::string filename = getStr("E_FILEPICKERCTRL_Video_Filename");
+        double starttime = getDouble("E_TEXTCTRL_Video_Starttime", 0.0);
+        // Speed is stored as slider value / 100 (e.g., 100 = 1.0x)
+        double speed = getDouble("E_SLIDER_Video_Speed", 100.0) / 100.0;
+        bool aspectratio = getBool("E_CHECKBOX_Video_AspectRatio", false);
+        std::string durationTreatment = getStr("E_CHOICE_Video_DurationTreatment", "Normal");
+        bool transparentBlack = getBool("E_CHECKBOX_Video_TransparentBlack", false);
+        int transparentBlackLevel = getInt("E_SLIDER_Video_TransparentBlackLevel", 0);
+
+        int cropLeft = getInt("E_SLIDER_Video_CropLeft", 0);
+        int cropRight = getInt("E_SLIDER_Video_CropRight", 100);
+        int cropTop = getInt("E_SLIDER_Video_CropTop", 100);
+        int cropBottom = getInt("E_SLIDER_Video_CropBottom", 0);
+
+        // Normalize crop values
+        if (cropLeft > cropRight) std::swap(cropLeft, cropRight);
+        if (cropBottom > cropTop) std::swap(cropTop, cropBottom);
+        if (cropLeft == cropRight) { if (cropLeft == 0) cropRight++; else cropLeft--; }
+        if (cropBottom == cropTop) { if (cropBottom == 0) cropTop++; else cropBottom--; }
+
+        if (filename.empty()) {
+            // No filename — fill red to indicate error
+            for (int y = 0; y < buf.BufferHt; y++)
+                for (int x = 0; x < buf.BufferWi; x++)
+                    buf.SetPixel(x, y, xlRED);
+            return true;
+        }
+
+        // Video render cache
+        struct VideoCache : public EffectRenderCache {
+            NativeVideoReader reader;
+            int loops = 0;
+            int frameMS = 50;
+            int nextManualMS = 0;
+            double lastDecodedTime = -1.0;
+        };
+
+        VideoCache* cache = dynamic_cast<VideoCache*>(buf.infoCache[0]);
+        if (!cache) {
+            cache = new VideoCache();
+            buf.infoCache[0] = cache;
+        }
+
+        NativeVideoReader& reader = cache->reader;
+
+        // Open/reopen video on first frame
+        if (buf.needToInit) {
+            buf.needToInit = false;
+            cache->loops = 0;
+            cache->nextManualMS = 0;
+            cache->frameMS = buf.frameTimeInMs;
+            cache->lastDecodedTime = -1.0;
+
+            reader.close();
+
+            if (buf.BufferHt < 2) {
+                // Cannot render video onto a 1 pixel high model
+            } else {
+                int width = buf.BufferWi * 100 / (cropRight - cropLeft);
+                int height = buf.BufferHt * 100 / (cropTop - cropBottom);
+                reader.open(filename, width, height, aspectratio);
+
+                if (reader.isOpen()) {
+                    if (durationTreatment == "Slow/Accelerate") {
+                        int effectFrames = buf.curEffEndPer - buf.curEffStartPer + 1;
+                        int videoFrames = static_cast<int>(
+                            (reader.getDurationMS() - starttime * 1000) / buf.frameTimeInMs);
+                        float speedFactor = static_cast<float>(videoFrames) /
+                                            static_cast<float>(effectFrames);
+                        cache->frameMS = static_cast<int>(buf.frameTimeInMs * speedFactor);
+                    }
+                }
+            }
+        }
+
+        if (!reader.isOpen() || reader.getDurationMS() <= 0) {
+            // Reader failed — fill red
+            for (int y = 0; y < buf.BufferHt; y++)
+                for (int x = 0; x < buf.BufferWi; x++)
+                    buf.SetPixel(x, y, xlRED);
+            return true;
+        }
+
+        // Calculate the video frame time in milliseconds
+        long frameMS = 0;
+
+        if (durationTreatment == "Manual" || durationTreatment == "Manual and Loop") {
+            frameMS = static_cast<long>(starttime * 1000 + cache->nextManualMS);
+            cache->nextManualMS += static_cast<int>(speed * cache->frameMS);
+
+            if (durationTreatment == "Manual and Loop") {
+                int videoLen = reader.getDurationMS();
+                while (frameMS < 0) frameMS += videoLen;
+                while (frameMS > videoLen) frameMS -= videoLen;
+            }
+        } else {
+            frameMS = static_cast<long>(starttime * 1000 +
+                (buf.curPeriod - buf.curEffStartPer) * cache->frameMS -
+                cache->loops * (reader.getDurationMS() + cache->frameMS));
+        }
+
+        // Handle looping
+        if (reader.atEnd(frameMS / 1000.0) && durationTreatment == "Loop") {
+            cache->loops++;
+            frameMS = static_cast<long>(starttime * 1000 +
+                (buf.curPeriod - buf.curEffStartPer) * cache->frameMS -
+                cache->loops * (reader.getDurationMS() + cache->frameMS));
+            if (frameMS < 0) frameMS = 0;
+        }
+
+        if (frameMS < 0) {
+            return true;
+        }
+
+        double frameTimeSec = frameMS / 1000.0;
+
+        // Decode the video frame
+        std::vector<uint8_t> rgbaPixels;
+        if (!reader.getFrameAtTime(frameTimeSec, rgbaPixels)) {
+            if (durationTreatment == "Normal") {
+                // Past end of video — fill blue
+                for (int y = 0; y < buf.BufferHt; y++)
+                    for (int x = 0; x < buf.BufferWi; x++)
+                        buf.SetPixel(x, y, xlBLUE);
+            }
+            return true;
+        }
+
+        // Render decoded frame pixels into the buffer.
+        // The reader returns pixels at (reader.getWidth() x reader.getHeight()),
+        // which accounts for aspect ratio. We need to map the cropped region
+        // into the buffer.
+        int imgW = reader.getWidth();
+        int imgH = reader.getHeight();
+
+        int xoffset = cropLeft * imgW / 100;
+        int yoffset = cropBottom * imgH / 100;
+        int croppedW = imgW * (cropRight - cropLeft) / 100;
+        int croppedH = imgH * (cropTop - cropBottom) / 100;
+
+        if (croppedW <= 0 || croppedH <= 0) return true;
+
+        // Map buffer coords to the cropped region of the image.
+        // Buffer x [0, BufferWi) maps to image x [xoffset, xoffset + croppedW)
+        // Buffer y [0, BufferHt) maps to image y [ytop, ytop + croppedH)
+        // Image is top-left origin; buffer is bottom-left origin.
+        int ytop = (100 - cropTop) * imgH / 100;
+
+        for (int y = 0; y < buf.BufferHt; y++) {
+            for (int x = 0; x < buf.BufferWi; x++) {
+                int srcX = xoffset + x * croppedW / buf.BufferWi;
+                int srcY = ytop + (buf.BufferHt - 1 - y) * croppedH / buf.BufferHt;
+
+                if (srcX < 0 || srcX >= imgW || srcY < 0 || srcY >= imgH) continue;
+
+                size_t pixelOffset = (static_cast<size_t>(srcY) * imgW + srcX) * 4;
+                if (pixelOffset + 3 >= rgbaPixels.size()) continue;
+
+                uint8_t r = rgbaPixels[pixelOffset];
+                uint8_t g = rgbaPixels[pixelOffset + 1];
+                uint8_t b = rgbaPixels[pixelOffset + 2];
+
+                if (transparentBlack) {
+                    if (r <= transparentBlackLevel &&
+                        g <= transparentBlackLevel &&
+                        b <= transparentBlackLevel) {
+                        continue;
+                    }
+                }
+
+                buf.SetPixel(x, y, xlColor(r, g, b));
+            }
+        }
+
+        return true;
+    }
+
+    if (type == "Liquid") {
+        // Native Liquid effect — port of legacy LiquidEffect::Render
+        // Uses LiquidFun (Box2D extension) for particle-based fluid simulation.
+        // Physics world and particle system are cached between frames.
+        // Audio-reactive flow is stubbed (audio not yet wired in native pipeline).
+
+        static const int LIQUID_MAX_PARTICLES = 100000;
+        static const double PI2 = 6.283185307;
+
+        // --- Helper lambdas ---
+        auto getStr = [&](const char* key, const char* def = "") -> std::string {
+            auto it = effectInfo.settings.find(key);
+            if (it != effectInfo.settings.end() && !it->second.empty()) return it->second;
+            return def;
+        };
+        auto getInt = [&](const char* key, int def) -> int {
+            auto it = effectInfo.settings.find(key);
+            if (it != effectInfo.settings.end() && !it->second.empty()) return std::atoi(it->second.c_str());
+            return def;
+        };
+        auto getBool = [&](const char* key, bool def) -> bool {
+            auto it = effectInfo.settings.find(key);
+            if (it != effectInfo.settings.end()) return (it->second == "1");
+            return def;
+        };
+        auto getDouble = [&](const char* key, double def) -> double {
+            auto it = effectInfo.settings.find(key);
+            if (it != effectInfo.settings.end() && !it->second.empty()) return std::atof(it->second.c_str());
+            return def;
+        };
+        auto localRand01 = []() -> double {
+            return static_cast<double>(std::rand()) / static_cast<double>(RAND_MAX);
+        };
+
+        // --- Read settings ---
+        bool topBarrier = getBool("E_CHECKBOX_TopBarrier", false);
+        bool bottomBarrier = getBool("E_CHECKBOX_BottomBarrier", true);
+        bool leftBarrier = getBool("E_CHECKBOX_LeftBarrier", false);
+        bool rightBarrier = getBool("E_CHECKBOX_RightBarrier", false);
+
+        bool holdColor = getBool("E_CHECKBOX_HoldColor", true);
+        bool mixColors = getBool("E_CHECKBOX_MixColors", false);
+
+        int lifetime = getInt("E_SLIDER_LifeTime", 10000);
+        int size = getInt("E_TEXTCTRL_Size", 500);
+        int warmUpFrames = getInt("E_TEXTCTRL_WarmUpFrames", 0);
+        int despeckle = getInt("E_TEXTCTRL_Despeckle", 0);
+
+        std::string particleType = getStr("E_CHOICE_ParticleType", "Elastic");
+
+        double gravity = getDouble("E_SLIDER_Liquid_Gravity", 100) / 10.0;
+        int gravityAngle = getInt("E_SLIDER_Liquid_GravityAngle", 0);
+
+        // Source 1 (always enabled)
+        int x1 = getInt("E_SLIDER_X1", 50);
+        int y1 = getInt("E_SLIDER_Y1", 100);
+        int direction1 = getInt("E_SLIDER_Direction1", 270);
+        int velocity1 = getInt("E_SLIDER_Velocity1", 100);
+        int flow1 = getInt("E_SLIDER_Flow1", 100);
+        int sourceSize1 = getInt("E_SLIDER_Liquid_SourceSize1", 0);
+        bool flowMusic1 = getBool("E_CHECKBOX_FlowMusic1", false);
+
+        // Source 2
+        bool enabled2 = getBool("E_CHECKBOX_Enabled2", false);
+        int x2 = getInt("E_SLIDER_X2", 0);
+        int y2 = getInt("E_SLIDER_Y2", 50);
+        int direction2 = getInt("E_SLIDER_Direction2", 0);
+        int velocity2 = getInt("E_SLIDER_Velocity2", 100);
+        int flow2 = getInt("E_SLIDER_Flow2", 100);
+        int sourceSize2 = getInt("E_SLIDER_Liquid_SourceSize2", 0);
+        bool flowMusic2 = getBool("E_CHECKBOX_FlowMusic2", false);
+
+        // Source 3
+        bool enabled3 = getBool("E_CHECKBOX_Enabled3", false);
+        int x3 = getInt("E_SLIDER_X3", 50);
+        int y3 = getInt("E_SLIDER_Y3", 0);
+        int direction3 = getInt("E_SLIDER_Direction3", 90);
+        int velocity3 = getInt("E_SLIDER_Velocity3", 100);
+        int flow3 = getInt("E_SLIDER_Flow3", 100);
+        int sourceSize3 = getInt("E_SLIDER_Liquid_SourceSize3", 0);
+        bool flowMusic3 = getBool("E_CHECKBOX_FlowMusic3", false);
+
+        // Source 4
+        bool enabled4 = getBool("E_CHECKBOX_Enabled4", false);
+        int x4 = getInt("E_SLIDER_X4", 100);
+        int y4 = getInt("E_SLIDER_Y4", 50);
+        int direction4 = getInt("E_SLIDER_Direction4", 180);
+        int velocity4 = getInt("E_SLIDER_Velocity4", 100);
+        int flow4 = getInt("E_SLIDER_Flow4", 100);
+        int sourceSize4 = getInt("E_SLIDER_Liquid_SourceSize4", 0);
+        bool flowMusic4 = getBool("E_CHECKBOX_FlowMusic4", false);
+
+        bool enabled[4] = { true, enabled2, enabled3, enabled4 };
+
+        // --- Gravity vector ---
+        auto liquidToRadians = [](double degrees) -> double {
+            return 2.0 * M_PI * degrees / 360.0;
+        };
+        float gravityX = static_cast<float>(gravity * std::cos(liquidToRadians(360.0 - (gravityAngle + 90))));
+        float gravityY = static_cast<float>(gravity * std::sin(liquidToRadians(360.0 - (gravityAngle + 90))));
+        b2Vec2 grav(gravityX, gravityY);
+
+        int BufferWi = buf.BufferWi;
+        int BufferHt = buf.BufferHt;
+
+        // --- Render cache: persists the b2World across frames ---
+        struct LiquidNativeCache : public EffectRenderCache {
+            b2World* world = nullptr;
+            ~LiquidNativeCache() override {
+                if (world) { delete world; world = nullptr; }
+            }
+        };
+
+        LiquidNativeCache* cache = dynamic_cast<LiquidNativeCache*>(buf.infoCache[0]);
+        if (!cache) {
+            cache = new LiquidNativeCache();
+            buf.infoCache[0] = cache;
+        }
+        b2World*& world = cache->world;
+
+        // --- Create barrier helper ---
+        auto createBarrier = [](b2World* w, float bx, float by, float bwidth, float bheight) {
+            b2BodyDef groundBodyDef;
+            groundBodyDef.position.Set(bx, by);
+            b2Body* groundBody = w->CreateBody(&groundBodyDef);
+            b2PolygonShape groundBox;
+            groundBox.SetAsBox(bwidth / 2.0f, bheight / 2.0f);
+            groundBody->CreateFixture(static_cast<b2Shape*>(&groundBox), 0.0f);
+        };
+
+        // --- Create particle system helper ---
+        auto createParticleSystem = [&](b2World* w, int lt, int sz) {
+            b2ParticleSystemDef particleSystemDef;
+            auto particleSys = w->CreateParticleSystem(&particleSystemDef);
+            particleSys->SetRadius(static_cast<float>(sz) / 1000.0f);
+            particleSys->SetMaxParticleCount(LIQUID_MAX_PARTICLES);
+            if (lt > 0) {
+                particleSys->SetDestructionByAge(true);
+            }
+        };
+
+        // --- Particle creation helper ---
+        auto createParticles = [&](b2ParticleSystem* particleSys, int px, int py, int dir, int vel,
+                                   int flowCount, bool fMusic, int lt, int w, int h,
+                                   const xlColor& c, const std::string& pType, bool mix,
+                                   float audioLvl, int srcSize) {
+            float posx = static_cast<float>(px) * static_cast<float>(w) / 100.0f;
+            float posy = static_cast<float>(py) * static_cast<float>(h) / 100.0f;
+
+            float velx = static_cast<float>(vel) * 10.0f * std::cos(static_cast<float>(PI2) * static_cast<float>(dir) / 360.0f);
+            float vely = static_cast<float>(vel) * 10.0f * std::sin(static_cast<float>(PI2) * static_cast<float>(dir) / 360.0f);
+
+            float velVariation = static_cast<float>(localRand01()) * 0.1f;
+            velVariation -= velVariation / 2.0f;
+            velx -= velx * velVariation;
+            vely -= vely * velVariation;
+
+            float ltSec = static_cast<float>(lt) / 100.0f;
+
+            int count = flowCount;
+            if (fMusic) {
+                count = static_cast<int>(count * audioLvl);
+            }
+
+            if (particleSys->GetParticleCount() > LIQUID_MAX_PARTICLES - (2 * count)) {
+                for (int i = 0; i < particleSys->GetParticleCount() - (LIQUID_MAX_PARTICLES - 2 * count); ++i) {
+                    particleSys->DestroyOldestParticle(i, true);
+                }
+            }
+
+            for (int i = 0; i < count && particleSys->GetParticleCount() < LIQUID_MAX_PARTICLES; ++i) {
+                b2ParticleDef pd;
+                if (pType == "Elastic") pd.flags = b2_elasticParticle;
+                else if (pType == "Powder") pd.flags = b2_powderParticle;
+                else if (pType == "Tensile") pd.flags = b2_tensileParticle;
+                else if (pType == "Spring") pd.flags = b2_springParticle;
+                else if (pType == "Viscous") pd.flags = b2_viscousParticle;
+                else if (pType == "Static Pressure") pd.flags = b2_staticPressureParticle;
+                else if (pType == "Water") pd.flags = b2_waterParticle;
+                else if (pType == "Reactive") pd.flags = b2_reactiveParticle;
+                else if (pType == "Repulsive") pd.flags = b2_repulsiveParticle;
+
+                if (mix) pd.flags |= b2_colorMixingParticle;
+
+                pd.color.Set(c.Red(), c.Green(), c.Blue(), 255);
+
+                if (srcSize == 0) {
+                    const float angle = static_cast<float>(localRand01()) * 2.0f * b2_pi;
+                    const float distance = static_cast<float>(localRand01());
+                    b2Vec2 posOnCircle(std::sin(angle), std::cos(angle));
+                    pd.position.Set(
+                        posx + posOnCircle.x * distance * 0.5f,
+                        posy + posOnCircle.y * distance * 0.5f);
+                } else {
+                    const float distance = static_cast<float>(localRand01()) * (static_cast<float>(srcSize) - static_cast<float>(srcSize) / 2.0f);
+                    float offx = distance * std::cos(static_cast<float>(PI2) * (static_cast<float>(dir) + 90.0f) / 360.0f);
+                    float offy = distance * std::sin(static_cast<float>(PI2) * (static_cast<float>(dir) + 90.0f) / 360.0f);
+                    pd.position.Set(posx + offx * static_cast<float>(w) / 200.0f,
+                                    posy + offy * static_cast<float>(h) / 200.0f);
+                }
+
+                pd.velocity.x = velx;
+                pd.velocity.y = vely;
+
+                if (lt > 0) {
+                    float randomlt = ltSec + (ltSec * 0.2f * static_cast<float>(localRand01())) - (ltSec * 0.01f);
+                    pd.lifetime = randomlt;
+                }
+                particleSys->CreateParticle(pd);
+            }
+        };
+
+        // --- Step: advance simulation and create new particles ---
+        auto stepSimulation = [&](b2World* w, bool enab[], int lt,
+                                  const std::string& pType, bool mix,
+                                  int sx1, int sy1, int sd1, int sv1, int sf1, int ss1, bool sm1,
+                                  int sx2, int sy2, int sd2, int sv2, int sf2, int ss2, bool sm2,
+                                  int sx3, int sy3, int sd3, int sv3, int sf3, int ss3, bool sm3,
+                                  int sx4, int sy4, int sd4, int sv4, int sf4, int ss4, bool sm4,
+                                  float time) {
+            float timeStep = static_cast<float>(buf.frameTimeInMs) / 1000.0f;
+            int velocityIterations = 6;
+            int positionIterations = 2;
+            int particleIterations = 3;
+            w->Step(timeStep, velocityIterations, positionIterations, particleIterations);
+
+            b2ParticleSystem* particleSys = w->GetParticleSystemList();
+            if (particleSys != nullptr) {
+                // Audio not yet available in native pipeline — use fallback
+                float audioLevel = 0.0001f;
+
+                int j = 0;
+                int srcX[] = { sx1, sx2, sx3, sx4 };
+                int srcY[] = { sy1, sy2, sy3, sy4 };
+                int srcDir[] = { sd1, sd2, sd3, sd4 };
+                int srcVel[] = { sv1, sv2, sv3, sv4 };
+                int srcFlow[] = { sf1, sf2, sf3, sf4 };
+                int srcSSize[] = { ss1, ss2, ss3, ss4 };
+                bool srcMusic[] = { sm1, sm2, sm3, sm4 };
+
+                for (int i = 0; i < 4; ++i) {
+                    if (enab[i]) {
+                        xlColor color;
+                        buf.palette.GetColor(j % buf.GetColorCount(), color, time);
+                        createParticles(particleSys, srcX[i], srcY[i], srcDir[i], srcVel[i],
+                                        srcFlow[i], srcMusic[i], lt,
+                                        BufferWi, BufferHt, color, pType, mix,
+                                        audioLevel, srcSSize[i]);
+                        ++j;
+                    }
+                }
+            }
+        };
+
+        // --- LostForever: check if particle has left the screen permanently ---
+        auto lostForever = [](int px, int py, int w, int h, float gx, float gy) -> bool {
+            if (gx < 0.0001f && gx > -0.0001f) {
+                if (px < -1 || px > w + 1) return true;
+            }
+            if (gx < 0.0001f) {
+                if (px < -1) return true;
+            }
+            if (gx > -0.0001f) {
+                if (px > w + 1) return true;
+            }
+            if (gy < 0.0001f && gy > -0.0001f) {
+                if (py < -1 || py > h + 1) return true;
+            }
+            if (gy > -0.0001f) {
+                if (py < -1) return true;
+            }
+            if (gy < 0.0001f) {
+                if (py > h + 1) return true;
+            }
+            return false;
+        };
+
+        // --- Despeckle helper ---
+        auto getDespeckleColor = [&](int dx, int dy, int dsp) -> xlColor {
+            int red = 0, green = 0, blue = 0, count = 0;
+            int startx = std::max(0, dx - 1);
+            int starty = std::max(0, dy - 1);
+            int endx = std::min(BufferWi - 1, dx + 1);
+            int endy = std::min(BufferHt - 1, dy + 1);
+            int blacks = 0;
+            for (int yy = starty; yy <= endy; ++yy) {
+                for (int xx = startx; xx <= endx; ++xx) {
+                    if (yy != dy || xx != dx) {
+                        const xlColor& c = buf.GetPixel(xx, yy);
+                        if (c == xlBLACK) {
+                            ++blacks;
+                            if (blacks >= dsp) return xlBLACK;
+                        }
+                        red += c.red;
+                        green += c.green;
+                        blue += c.blue;
+                        ++count;
+                    }
+                }
+            }
+            if (count == 0) return xlBLACK;
+            return xlColor(red / count, green / count, blue / count);
+        };
+
+        // --- Initialize world on first frame ---
+        if (buf.needToInit) {
+            buf.needToInit = false;
+            if (world != nullptr) {
+                delete world;
+                world = nullptr;
+            }
+
+            world = new b2World(grav);
+
+            if (bottomBarrier)
+                createBarrier(world, static_cast<float>(BufferWi) / 2.0f, -1.0f, static_cast<float>(BufferWi), 0.001f);
+            if (topBarrier)
+                createBarrier(world, static_cast<float>(BufferWi) / 2.0f, static_cast<float>(BufferHt) + 1.0f, static_cast<float>(BufferWi), 0.001f);
+            if (leftBarrier)
+                createBarrier(world, -1.0f, static_cast<float>(BufferHt) / 2.0f, 0.001f, static_cast<float>(BufferHt));
+            if (rightBarrier)
+                createBarrier(world, static_cast<float>(BufferWi) + 1.0f, static_cast<float>(BufferHt) / 2.0f, 0.001f, static_cast<float>(BufferHt));
+
+            createParticleSystem(world, lifetime, size);
+
+            for (int i = 0; i < warmUpFrames; ++i) {
+                stepSimulation(world, enabled, lifetime, particleType, mixColors,
+                    x1, y1, direction1, velocity1, flow1, sourceSize1, flowMusic1,
+                    x2, y2, direction2, velocity2, flow2, sourceSize2, flowMusic2,
+                    x3, y3, direction3, velocity3, flow3, sourceSize3, flowMusic3,
+                    x4, y4, direction4, velocity4, flow4, sourceSize4, flowMusic4, 0.0f);
+            }
+        }
+
+        if (world == nullptr) return true;
+
+        world->SetGravity(grav);
+
+        // Step the simulation
+        stepSimulation(world, enabled, lifetime, particleType, mixColors,
+            x1, y1, direction1, velocity1, flow1, sourceSize1, flowMusic1,
+            x2, y2, direction2, velocity2, flow2, sourceSize2, flowMusic2,
+            x3, y3, direction3, velocity3, flow3, sourceSize3, flowMusic3,
+            x4, y4, direction4, velocity4, flow4, sourceSize4, flowMusic4,
+            buf.GetEffectTimeIntervalPosition());
+
+        // --- Draw particles ---
+        b2ParticleSystem* liquidPS = world->GetParticleSystemList();
+        if (liquidPS != nullptr) {
+            xlColor baseColor;
+            buf.palette.GetColor(0, baseColor);
+
+            int32 particleCount = liquidPS->GetParticleCount();
+            if (particleCount > 0) {
+                const b2Vec2* positionBuffer = liquidPS->GetPositionBuffer();
+                const b2ParticleColor* colorBuffer = liquidPS->GetColorBuffer();
+
+                for (int i = 0; i < particleCount; ++i) {
+                    int px = static_cast<int>(positionBuffer[i].x);
+                    int py = static_cast<int>(positionBuffer[i].y);
+
+                    if (lostForever(px, py, BufferWi, BufferHt, gravityX, gravityY)) {
+                        liquidPS->DestroyParticle(i);
+                    } else {
+                        if ((holdColor || mixColors) && colorBuffer) {
+                            auto c = colorBuffer[i].GetColor();
+                            buf.SetPixel(static_cast<int>(positionBuffer[i].x),
+                                         static_cast<int>(positionBuffer[i].y),
+                                         xlColor(static_cast<uint8_t>(c.r * 255),
+                                                 static_cast<uint8_t>(c.g * 255),
+                                                 static_cast<uint8_t>(c.b * 255)));
+                        } else {
+                            buf.SetPixel(static_cast<int>(positionBuffer[i].x),
+                                         static_cast<int>(positionBuffer[i].y),
+                                         baseColor);
+                        }
+                    }
+                }
+            }
+
+            // Despeckle pass
+            if (despeckle > 0) {
+                for (int y = 0; y < BufferHt; ++y) {
+                    for (int x = 0; x < BufferWi; ++x) {
+                        if (buf.GetPixel(x, y) == xlBLACK) {
+                            xlColor fillColor = getDespeckleColor(x, y, despeckle);
+                            if (fillColor != xlBLACK) {
+                                buf.SetPixel(x, y, fillColor);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clean up the world on the last frame to free memory
+        if (buf.curPeriod == buf.curEffEndPer) {
+            delete world;
+            world = nullptr;
+        }
+
+        return true;
+    }
+
+    if (type == "Pictures") {
+        // Native Pictures effect — port of legacy PicturesEffect::Render
+        // Loads image files (PNG/JPEG/GIF/BMP) and displays them on the buffer
+        // with support for movement directions, scaling, GIF animation, shimmer,
+        // transparent black, and position offsets.
+
+        std::string filename;
+        auto it = effectInfo.settings.find("E_FILEPICKERCTRL_Pictures_Filename");
+        if (it != effectInfo.settings.end()) filename = it->second;
+
+        std::string dirStr = "none";
+        it = effectInfo.settings.find("E_CHOICE_Pictures_Direction");
+        if (it != effectInfo.settings.end() && !it->second.empty()) dirStr = it->second;
+
+        float movementSpeed = 1.0f;
+        it = effectInfo.settings.find("E_SLIDER_Pictures_Speed");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            movementSpeed = std::atof(it->second.c_str());
+
+        float frameRateAdj = 1.0f;
+        it = effectInfo.settings.find("E_SLIDER_Pictures_FrameRateAdj");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            frameRateAdj = std::atof(it->second.c_str()) / 10.0f;
+
+        int xc_adj = 0, yc_adj = 0;
+        it = effectInfo.settings.find("E_SLIDER_PicturesXC");
+        if (it != effectInfo.settings.end() && !it->second.empty()) xc_adj = std::atoi(it->second.c_str());
+        it = effectInfo.settings.find("E_SLIDER_PicturesYC");
+        if (it != effectInfo.settings.end() && !it->second.empty()) yc_adj = std::atoi(it->second.c_str());
+
+        int xce_adj = 0, yce_adj = 0;
+        it = effectInfo.settings.find("E_SLIDER_PicturesEndXC");
+        if (it != effectInfo.settings.end() && !it->second.empty()) xce_adj = std::atoi(it->second.c_str());
+        it = effectInfo.settings.find("E_SLIDER_PicturesEndYC");
+        if (it != effectInfo.settings.end() && !it->second.empty()) yce_adj = std::atoi(it->second.c_str());
+
+        int startScale = 100, endScale = 100;
+        it = effectInfo.settings.find("E_SLIDER_Pictures_StartScale");
+        if (it != effectInfo.settings.end() && !it->second.empty()) startScale = std::atoi(it->second.c_str());
+        it = effectInfo.settings.find("E_SLIDER_Pictures_EndScale");
+        if (it != effectInfo.settings.end() && !it->second.empty()) endScale = std::atoi(it->second.c_str());
+
+        bool pixelOffsets = false, wrapX = false, shimmer = false;
+        bool transparentBlack = false;
+        int transparentBlackLevel = 0;
+        it = effectInfo.settings.find("E_CHECKBOX_Pictures_PixelOffsets");
+        if (it != effectInfo.settings.end()) pixelOffsets = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Pictures_WrapX");
+        if (it != effectInfo.settings.end()) wrapX = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Pictures_Shimmer");
+        if (it != effectInfo.settings.end()) shimmer = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Pictures_TransparentBlack");
+        if (it != effectInfo.settings.end()) transparentBlack = (it->second == "1");
+        it = effectInfo.settings.find("E_SLIDER_Pictures_TransparentBlackLevel");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            transparentBlackLevel = std::atoi(it->second.c_str());
+
+        std::string scaleToFit = "No Scaling";
+        it = effectInfo.settings.find("E_CHOICE_Scaling");
+        if (it != effectInfo.settings.end() && !it->second.empty()) scaleToFit = it->second;
+
+        bool loopGIF = false;
+        it = effectInfo.settings.find("E_CHECKBOX_LoopGIF");
+        if (it != effectInfo.settings.end()) loopGIF = (it->second == "1");
+
+        // Direction constants matching legacy PicturesEffect
+        enum PicDir {
+            PIC_LEFT = 0, PIC_RIGHT, PIC_UP, PIC_DOWN, PIC_NONE,
+            PIC_UPLEFT, PIC_DOWNLEFT, PIC_UPRIGHT, PIC_DOWNRIGHT,
+            PIC_PEEKABOO_0, PIC_WIGGLE, PIC_ZOOMIN,
+            PIC_PEEKABOO_90, PIC_PEEKABOO_180, PIC_PEEKABOO_270,
+            PIC_VIXREMAP, PIC_FLAGWAVE,
+            PIC_UPONCE, PIC_DOWNONCE, PIC_VECTOR,
+            PIC_TILE_LEFT, PIC_TILE_RIGHT, PIC_TILE_DOWN, PIC_TILE_UP
+        };
+
+        int dir = PIC_NONE;
+        if (dirStr == "left") dir = PIC_LEFT;
+        else if (dirStr == "right") dir = PIC_RIGHT;
+        else if (dirStr == "up") dir = PIC_UP;
+        else if (dirStr == "down") dir = PIC_DOWN;
+        else if (dirStr == "none") dir = PIC_NONE;
+        else if (dirStr == "up-left") dir = PIC_UPLEFT;
+        else if (dirStr == "down-left") dir = PIC_DOWNLEFT;
+        else if (dirStr == "up-right") dir = PIC_UPRIGHT;
+        else if (dirStr == "down-right") dir = PIC_DOWNRIGHT;
+        else if (dirStr == "peekaboo") dir = PIC_PEEKABOO_0;
+        else if (dirStr == "wiggle") dir = PIC_WIGGLE;
+        else if (dirStr == "zoom in") dir = PIC_ZOOMIN;
+        else if (dirStr == "zoom out") dir = PIC_ZOOMIN;
+        else if (dirStr == "peekaboo 90") dir = PIC_PEEKABOO_90;
+        else if (dirStr == "peekaboo 180") dir = PIC_PEEKABOO_180;
+        else if (dirStr == "peekaboo 270") dir = PIC_PEEKABOO_270;
+        else if (dirStr == "flag wave") dir = PIC_FLAGWAVE;
+        else if (dirStr == "up once") dir = PIC_UPONCE;
+        else if (dirStr == "down once") dir = PIC_DOWNONCE;
+        else if (dirStr == "vector") dir = PIC_VECTOR;
+        else if (dirStr == "tile-left") dir = PIC_TILE_LEFT;
+        else if (dirStr == "tile-right") dir = PIC_TILE_RIGHT;
+        else if (dirStr == "tile-down") dir = PIC_TILE_DOWN;
+        else if (dirStr == "tile-up") dir = PIC_TILE_UP;
+
+        struct PicturesCache : public EffectRenderCache {
+            NativeImage image;
+            NativeImage rawImage;
+            std::string pictureName;
+            int imageCount = 0;
+        };
+
+        PicturesCache* cache = dynamic_cast<PicturesCache*>(buf.infoCache[0]);
+        if (!cache) {
+            cache = new PicturesCache();
+            buf.infoCache[0] = cache;
+        }
+
+        int BufferWi = buf.BufferWi;
+        int BufferHt = buf.BufferHt;
+        int curPeriod = buf.curPeriod;
+        int curEffStartPer = buf.curEffStartPer;
+        double position = buf.GetEffectTimeIntervalPosition(movementSpeed);
+        bool noImageFile = false;
+        bool scaleImage = false;
+
+        if (filename.empty()) {
+            noImageFile = true;
+        } else {
+            if (filename != cache->pictureName || buf.needToInit) {
+                buf.needToInit = false;
+                scaleImage = true;
+                cache->pictureName = filename;
+                cache->imageCount = NativeImageLoader::GetFrameCount(filename);
+                if (cache->imageCount <= 0) cache->imageCount = 1;
+
+                if (cache->imageCount > 1) {
+                    cache->rawImage = NativeImageLoader::LoadFrameFromFile(filename, 0);
+                } else {
+                    cache->rawImage = NativeImageLoader::LoadFromFile(filename);
+                }
+                cache->image = cache->rawImage;
+            }
+
+            if (cache->imageCount > 1) {
+                scaleImage = true;
+                int frameIdx;
+                if (loopGIF) {
+                    int elapsed = (curPeriod - curEffStartPer) * buf.frameTimeInMs;
+                    frameIdx = static_cast<int>(elapsed * frameRateAdj / buf.frameTimeInMs) % cache->imageCount;
+                } else {
+                    frameIdx = static_cast<int>(cache->imageCount * buf.GetEffectTimeIntervalPosition(frameRateAdj) * 0.99);
+                }
+                if (frameIdx < 0) frameIdx = 0;
+                if (frameIdx >= cache->imageCount) frameIdx = cache->imageCount - 1;
+                cache->image = NativeImageLoader::LoadFrameFromFile(filename, frameIdx);
+                cache->rawImage = cache->image;
+            }
+
+            if (!cache->image.IsOk()) {
+                noImageFile = true;
+            }
+        }
+
+        if (noImageFile) {
+            for (int x = 0; x < BufferWi; x++)
+                for (int y = 0; y < BufferHt; y++)
+                    buf.SetPixel(x, y, xlRED);
+            return true;
+        }
+
+        NativeImage image = cache->rawImage;
+        int imgwidth = image.GetWidth();
+        int imght = image.GetHeight();
+
+        if (scaleToFit == "Scale To Fit" && (BufferWi != imgwidth || BufferHt != imght)) {
+            image = image.Rescale(BufferWi, BufferHt);
+            imgwidth = image.GetWidth();
+            imght = image.GetHeight();
+        } else if (scaleToFit == "Scale Keep Aspect Ratio" || scaleToFit == "Scale Keep Aspect Ratio Crop") {
+            float xr = (float)BufferWi / (float)imgwidth;
+            float yr = (float)BufferHt / (float)imght;
+            float sc = (scaleToFit.find("Crop") != std::string::npos) ? std::max(xr, yr) : std::min(xr, yr);
+            int newW = std::max(1, (int)(imgwidth * sc));
+            int newH = std::max(1, (int)(imght * sc));
+            image = image.Rescale(newW, newH);
+            imgwidth = image.GetWidth();
+            imght = image.GetHeight();
+        } else if (scaleToFit == "No Scaling" && (startScale != 100 || endScale != 100)) {
+            int deltaScale = endScale - startScale;
+            int currentScale = startScale + static_cast<int>(deltaScale * position);
+            int newW = std::max(1, (imgwidth * currentScale) / 100);
+            int newH = std::max(1, (imght * currentScale) / 100);
+            image = image.Rescale(newW, newH);
+            imgwidth = image.GetWidth();
+            imght = image.GetHeight();
+        }
+
+        cache->image = image;
+
+        int yoffset = (BufferHt + imght) / 2;
+        int xoffset = (imgwidth - BufferWi) / 2;
+
+        float xscale = 0, yscale = 0;
+        int waveX = 0, waveW = 0, waveN = 0;
+
+        switch (dir) {
+        case PIC_ZOOMIN:
+            xscale = (imgwidth > 1) ? (float)BufferWi / imgwidth : 1;
+            yscale = (imght > 1) ? (float)BufferHt / imght : 1;
+            xscale *= position;
+            yscale *= position;
+            break;
+        case PIC_PEEKABOO_0:
+        case PIC_PEEKABOO_180:
+            yoffset = (-BufferHt) * (1.0 - position * 2.0);
+            if (yoffset > 10) yoffset = -yoffset + 10;
+            else if (yoffset > 0) yoffset = 0;
+            break;
+        case PIC_PEEKABOO_90:
+        case PIC_PEEKABOO_270:
+            yoffset = (imght - BufferWi) / 2;
+            xoffset = (-BufferHt) * (1.0 - position * 2.0);
+            if (xoffset > 10) xoffset = -xoffset + 10;
+            else if (xoffset > 0) xoffset = 0;
+            break;
+        case PIC_UPONCE:
+        case PIC_DOWNONCE:
+            position = buf.GetEffectTimeIntervalPosition() * movementSpeed;
+            if (position > 1.0) position = 1.0;
+            break;
+        case PIC_WIGGLE:
+            if (position >= 0.5)
+                xoffset += BufferWi * ((1.0 - position) * 2.0 - 0.5);
+            else
+                xoffset += BufferWi * (position * 2.0 - 0.5);
+            break;
+        case PIC_FLAGWAVE:
+            waveW = BufferWi;
+            waveX = position * 200;
+            waveN = waveW > 0 ? waveX / waveW : 0;
+            break;
+        default:
+            break;
+        }
+
+        int xoffset_adj = xc_adj;
+        int yoffset_adj = yc_adj;
+        if (dir == PIC_VECTOR) {
+            dir = PIC_NONE;
+            xoffset_adj = static_cast<int>(std::round(position * double(xce_adj - xc_adj))) + xc_adj;
+            yoffset_adj = static_cast<int>(std::round(position * double(yce_adj - yc_adj))) + yc_adj;
+        }
+        if (!pixelOffsets) {
+            xoffset_adj = static_cast<int>((xoffset_adj * BufferWi) / 100.0);
+            yoffset_adj = static_cast<int>((yoffset_adj * BufferHt) / 100.0);
+        }
+
+        int calcPosWi = static_cast<int>((imgwidth + BufferWi) * position);
+        int calcPosHt = static_cast<int>((imght + BufferHt) * position);
+
+        auto setPixelTB = [&](int px, int py, const xlColor& c, bool wrap) {
+            if (transparentBlack) {
+                int level = c.red + c.green + c.blue;
+                if (level <= transparentBlackLevel) return;
+            }
+            if (wrap) {
+                buf.ProcessPixel(px, py, c, true);
+            } else {
+                buf.SetPixel(px, py, c);
+            }
+        };
+
+        for (int x = 0; x < imgwidth; x++) {
+            for (int y = 0; y < imght; y++) {
+                xlColor c = image.GetPixel(x, y);
+
+                bool hasAlpha = image.HasAlpha();
+                if (hasAlpha && c.alpha < 10) continue;
+                if (image.IsTransparent(x, y)) continue;
+
+                if (!buf.allowAlpha && hasAlpha && c.alpha < 64) {
+                    c = xlBLACK;
+                }
+
+                switch (dir) {
+                case PIC_LEFT:
+                    setPixelTB(x + xoffset_adj + BufferWi - calcPosWi, yoffset - y - yoffset_adj - 1, c, wrapX);
+                    break;
+                case PIC_RIGHT:
+                    setPixelTB(x + xoffset_adj + calcPosWi - imgwidth, yoffset - y - yoffset_adj - 1, c, wrapX);
+                    break;
+                case PIC_UP:
+                case PIC_UPONCE:
+                    setPixelTB(x - xoffset + xoffset_adj, calcPosHt - y - yoffset_adj, c, wrapX);
+                    break;
+                case PIC_DOWN:
+                case PIC_DOWNONCE:
+                    setPixelTB(x - xoffset + xoffset_adj, BufferHt + imght - y - yoffset_adj - calcPosHt, c, wrapX);
+                    break;
+                case PIC_UPLEFT:
+                    setPixelTB(x + xoffset_adj + BufferWi - calcPosWi, calcPosHt - y - yoffset_adj, c, wrapX);
+                    break;
+                case PIC_DOWNLEFT:
+                    setPixelTB(x + xoffset_adj + BufferWi - calcPosWi, BufferHt + imght - y - yoffset_adj - calcPosHt, c, wrapX);
+                    break;
+                case PIC_UPRIGHT:
+                    setPixelTB(x + xoffset_adj + calcPosWi - imgwidth, calcPosHt - y - yoffset_adj, c, wrapX);
+                    break;
+                case PIC_DOWNRIGHT:
+                    setPixelTB(x + xoffset_adj + calcPosWi - imgwidth, BufferHt + imght - y - yoffset_adj - calcPosHt, c, wrapX);
+                    break;
+                case PIC_PEEKABOO_0:
+                    setPixelTB(x - xoffset + xoffset_adj, BufferHt + yoffset - y - yoffset_adj - 1, c, wrapX);
+                    break;
+                case PIC_ZOOMIN:
+                    setPixelTB(static_cast<int>((x + xoffset_adj) * xscale), static_cast<int>((BufferHt - 1 - y - yoffset_adj) * yscale), c, wrapX);
+                    break;
+                case PIC_PEEKABOO_90:
+                    setPixelTB(BufferWi + xoffset - y + xoffset_adj, x - yoffset - yoffset_adj, c, wrapX);
+                    break;
+                case PIC_PEEKABOO_180:
+                    setPixelTB(x - xoffset + xoffset_adj, y - yoffset - yoffset_adj, c, wrapX);
+                    break;
+                case PIC_PEEKABOO_270:
+                    setPixelTB(y - xoffset + xoffset_adj, BufferHt + yoffset + yoffset_adj - x, c, wrapX);
+                    break;
+                case PIC_FLAGWAVE: {
+                    int waveY = 0;
+                    if (BufferHt < 20) {
+                        waveN = waveW > 0 ? (x - waveX) / waveW : 0;
+                        waveY = !x ? 0 : (waveN & 1) ? -1 : 0;
+                    } else {
+                        waveN = waveW > 0 ? (x - waveX) / waveW : 0;
+                        waveY = !x ? 0 : (waveN & 1) ? 0 : (waveN & 2) ? -1 : +1;
+                        if (waveX < 0) waveY *= -1;
+                    }
+                    setPixelTB(x - xoffset + xoffset_adj, yoffset - y - yoffset_adj + waveY - 1, c, wrapX);
+                    break;
+                }
+                case PIC_TILE_LEFT: {
+                    int xmult = (BufferWi + 2 * imgwidth) / std::max(imgwidth, 1);
+                    int ymult = (BufferHt + 2 * imght) / std::max(imght, 1);
+                    int startx = xoffset_adj - static_cast<int>(static_cast<float>(curPeriod - curEffStartPer) * movementSpeed) % std::max(imgwidth, 1);
+                    int starty = yoffset_adj - imght;
+                    for (int xx = 0; xx < xmult; ++xx)
+                        for (int yy = 0; yy < ymult; ++yy)
+                            setPixelTB(xx * imgwidth + x + startx, yy * imght + (imght - y - 1) + starty, c, false);
+                    break;
+                }
+                case PIC_TILE_RIGHT: {
+                    int xmult = (BufferWi + 2 * imgwidth) / std::max(imgwidth, 1);
+                    int ymult = (BufferHt + 2 * imght) / std::max(imght, 1);
+                    int startx = xoffset_adj - imgwidth + static_cast<int>(static_cast<float>(curPeriod - curEffStartPer) * movementSpeed) % std::max(imgwidth, 1);
+                    int starty = yoffset_adj - imght;
+                    for (int xx = 0; xx < xmult; ++xx)
+                        for (int yy = 0; yy < ymult; ++yy)
+                            setPixelTB(xx * imgwidth + x + startx, yy * imght + (imght - y - 1) + starty, c, false);
+                    break;
+                }
+                case PIC_TILE_DOWN: {
+                    int xmult = (BufferWi + 2 * imgwidth) / std::max(imgwidth, 1);
+                    int ymult = (BufferHt + 2 * imght) / std::max(imght, 1);
+                    int startx = xoffset_adj - imgwidth;
+                    int starty = yoffset_adj - static_cast<int>(static_cast<float>(curPeriod - curEffStartPer) * movementSpeed) % std::max(imght, 1);
+                    for (int xx = 0; xx < xmult; ++xx)
+                        for (int yy = 0; yy < ymult; ++yy)
+                            setPixelTB(xx * imgwidth + x + startx, yy * imght + (imght - y - 1) + starty, c, false);
+                    break;
+                }
+                case PIC_TILE_UP: {
+                    int xmult = (BufferWi + 2 * imgwidth) / std::max(imgwidth, 1);
+                    int ymult = (BufferHt + 2 * imght) / std::max(imght, 1);
+                    int startx = xoffset_adj - imgwidth;
+                    int starty = yoffset_adj - imght + static_cast<int>(static_cast<float>(curPeriod - curEffStartPer) * movementSpeed) % std::max(imght, 1);
+                    for (int xx = 0; xx < xmult; ++xx)
+                        for (int yy = 0; yy < ymult; ++yy)
+                            setPixelTB(xx * imgwidth + x + startx, yy * imght + (imght - y - 1) + starty, c, false);
+                    break;
+                }
+                default:
+                    setPixelTB(x - xoffset + xoffset_adj, yoffset + yoffset_adj - y - 1, c, wrapX);
+                    break;
+                }
+            }
+        }
+
+        if (shimmer) {
+            for (int x = 0; x < BufferWi; x++) {
+                for (int y = 0; y < BufferHt; y++) {
+                    if ((std::rand() % 100) > 50) {
+                        xlColor existing;
+                        buf.GetPixel(x, y, existing);
+                        if (existing.red != 0 || existing.green != 0 || existing.blue != 0) {
+                            buf.SetPixel(x, y, xlBLACK);
+                        }
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+
+    if (type == "Glediator") {
+        // Native Glediator effect — port of legacy GlediatorEffect::Render
+        // Reads binary frame data from .gled files (sequential raw RGB data)
+        // or CSV files (one row per frame, comma-separated channel values).
+        // Frame size for .gled = BufferWi * BufferHt * 3 bytes (RGB per pixel).
+
+        std::string glediatorFilename;
+        auto it = effectInfo.settings.find("E_FILEPICKERCTRL_Glediator_Filename");
+        if (it != effectInfo.settings.end()) glediatorFilename = it->second;
+
+        std::string durationTreatment = "Normal";
+        it = effectInfo.settings.find("E_CHOICE_Glediator_DurationTreatment");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            durationTreatment = it->second;
+
+        struct GlediatorCache : public EffectRenderCache {
+            std::vector<uint8_t> fileData;
+            std::string cachedFilename;
+            size_t frameSize = 0;
+            size_t frameCount = 0;
+            int loops = 0;
+            float frameMS = 50.0f;
+            bool isCSV = false;
+            std::vector<std::vector<uint8_t>> csvFrames;
+        };
+
+        GlediatorCache* cache = dynamic_cast<GlediatorCache*>(buf.infoCache[0]);
+        if (!cache) {
+            cache = new GlediatorCache();
+            buf.infoCache[0] = cache;
+        }
+
+        int BufferWi = buf.BufferWi;
+        int BufferHt = buf.BufferHt;
+
+        auto getExtLower = [](const std::string& path) -> std::string {
+            size_t dot = path.rfind('.');
+            if (dot == std::string::npos) return "";
+            std::string ext = path.substr(dot + 1);
+            for (auto& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            return ext;
+        };
+
+        if (buf.needToInit || cache->cachedFilename != glediatorFilename) {
+            buf.needToInit = false;
+            cache->loops = 0;
+            cache->frameMS = static_cast<float>(buf.frameTimeInMs);
+            cache->cachedFilename = glediatorFilename;
+            cache->fileData.clear();
+            cache->csvFrames.clear();
+            cache->frameCount = 0;
+            cache->frameSize = 0;
+            cache->isCSV = false;
+
+            if (!glediatorFilename.empty()) {
+                std::string ext = getExtLower(glediatorFilename);
+                cache->isCSV = (ext == "csv");
+
+                if (cache->isCSV) {
+                    std::ifstream csvFile(glediatorFilename);
+                    if (csvFile.is_open()) {
+                        std::string line;
+                        while (std::getline(csvFile, line)) {
+                            std::vector<uint8_t> frame;
+                            std::istringstream ss(line);
+                            std::string token;
+                            while (std::getline(ss, token, ',')) {
+                                if (!token.empty()) {
+                                    frame.push_back(static_cast<uint8_t>(std::atoi(token.c_str())));
+                                }
+                            }
+                            cache->csvFrames.push_back(std::move(frame));
+                        }
+                        cache->frameCount = cache->csvFrames.size();
+
+                        if (durationTreatment == "Slow/Accelerate" && cache->frameCount > 0) {
+                            size_t effectFrames = buf.curEffEndPer - buf.curEffStartPer + 1;
+                            float speedFactor = (float)cache->frameCount / (float)effectFrames;
+                            cache->frameMS = static_cast<float>(buf.frameTimeInMs) * speedFactor;
+                        }
+                    }
+                } else {
+                    cache->fileData = NativeImageLoader::LoadBinaryFile(glediatorFilename);
+                    cache->frameSize = static_cast<size_t>(BufferWi) * BufferHt * 3;
+
+                    if (cache->frameSize > 0 && !cache->fileData.empty()) {
+                        cache->frameCount = cache->fileData.size() / cache->frameSize;
+
+                        if (durationTreatment == "Slow/Accelerate" && cache->frameCount > 0) {
+                            size_t effectFrames = buf.curEffEndPer - buf.curEffStartPer + 1;
+                            float speedFactor = (float)cache->frameCount / (float)effectFrames;
+                            cache->frameMS = static_cast<float>(buf.frameTimeInMs) * speedFactor;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (cache->isCSV && !cache->csvFrames.empty()) {
+            size_t frameCount = cache->csvFrames.size();
+            size_t frame = static_cast<size_t>(
+                static_cast<float>((buf.curPeriod - buf.curEffStartPer) - cache->loops * static_cast<int>(frameCount))
+                * cache->frameMS / static_cast<float>(buf.frameTimeInMs));
+
+            if (frame >= frameCount && durationTreatment == "Loop") {
+                cache->loops++;
+                frame = static_cast<size_t>(
+                    static_cast<float>((buf.curPeriod - buf.curEffStartPer) - cache->loops * static_cast<int>(frameCount))
+                    * cache->frameMS / static_cast<float>(buf.frameTimeInMs));
+            }
+
+            if (frame < frameCount) {
+                const auto& frameData = cache->csvFrames[frame];
+                size_t bufsize = static_cast<size_t>(BufferWi) * BufferHt;
+                for (size_t j = 0; j < std::min(bufsize, frameData.size()); j++) {
+                    uint8_t val = frameData[j];
+                    xlColor color(val, val, val);
+                    int x = static_cast<int>(j % BufferWi);
+                    int y = (BufferHt - 1) - static_cast<int>(j / BufferWi);
+                    if (x < BufferWi && y >= 0 && y < BufferHt) {
+                        buf.SetPixel(x, y, color);
+                    }
+                }
+            }
+        } else if (!cache->fileData.empty() && cache->frameSize > 0 && cache->frameCount > 0) {
+            size_t frame = static_cast<size_t>(
+                static_cast<float>((buf.curPeriod - buf.curEffStartPer) - cache->loops * static_cast<int>(cache->frameCount))
+                * cache->frameMS / static_cast<float>(buf.frameTimeInMs));
+
+            if (frame >= cache->frameCount && durationTreatment == "Loop") {
+                cache->loops++;
+                frame = static_cast<size_t>(
+                    static_cast<float>((buf.curPeriod - buf.curEffStartPer) - cache->loops * static_cast<int>(cache->frameCount))
+                    * cache->frameMS / static_cast<float>(buf.frameTimeInMs));
+            }
+
+            if (frame >= cache->frameCount) {
+                for (int y = 0; y < BufferHt; y++)
+                    for (int x = 0; x < BufferWi; x++)
+                        buf.SetPixel(x, y, xlBLACK);
+            } else {
+                size_t offset = frame * cache->frameSize;
+                const uint8_t* frameData = cache->fileData.data() + offset;
+                size_t bufsize = cache->frameSize;
+
+                for (size_t j = 0; j + 2 < bufsize; j += 3) {
+                    xlColor color(frameData[j], frameData[j + 1], frameData[j + 2]);
+                    int x = static_cast<int>((j % (BufferWi * 3)) / 3);
+                    int y = (BufferHt - 1) - static_cast<int>(j / (BufferWi * 3));
+                    if (x < BufferWi && y >= 0 && y < BufferHt) {
+                        buf.SetPixel(x, y, color);
+                    }
+                }
+            }
+        } else {
+            for (int y = 0; y < BufferHt; y++)
+                for (int x = 0; x < BufferWi; x++)
+                    buf.SetPixel(x, y, xlRED);
+        }
+
+        return true;
+    }
+
+    if (type == "Music") {
+        // Native Music effect — port of legacy MusicEffect::Render
+        //
+        // Displays audio spectrum data as animated bars. Each bar represents
+        // a range of MIDI notes from the FFT analysis. Supports five display
+        // modes: Morph, Bounce, Collide, Separate, and On.
+
+        auto getStr = [&](const char* key, const char* def = "") -> std::string {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? it->second : def;
+        };
+        auto getInt = [&](const char* key, int def = 0) -> int {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? std::atoi(it->second.c_str()) : def;
+        };
+        auto getBool = [&](const char* key, bool def = false) -> bool {
+            auto it = effectInfo.settings.find(key);
+            if (it == effectInfo.settings.end() || it->second.empty()) return def;
+            return it->second == "1" || it->second == "true" || it->second == "yes";
+        };
+
+        IAudioProvider* audio = buf.GetAudioProvider();
+        if (!audio) return true;
+
+        int bars = getInt("E_SLIDER_Music_Bars", 20);
+        std::string musicType = getStr("E_CHOICE_Music_Type", "Morph");
+        int sensitivity = getInt("E_SLIDER_Music_Sensitivity", 50);
+        bool scale = getBool("E_CHECKBOX_Music_Scale", false);
+        int offsetx = getInt("E_SLIDER_Music_Offset", 0);
+        int startnote = getInt("E_SLIDER_Music_StartNote", 60);
+        int endnote = getInt("E_SLIDER_Music_EndNote", 80);
+        std::string colourtreatment = getStr("E_CHOICE_Music_Colour", "Distinct");
+        bool fade = getBool("E_CHECKBOX_Music_Fade", false);
+
+        if (startnote > endnote) std::swap(startnote, endnote);
+
+        // Decode display type: 1=Morph, 2=Bounce, 3=Collide, 4=Separate, 5=On
+        int nType = 1;
+        if (musicType == "Morph") nType = 1;
+        else if (musicType == "Bounce") nType = 2;
+        else if (musicType == "Collide") nType = 3;
+        else if (musicType == "Separate") nType = 4;
+        else if (musicType == "On") nType = 5;
+
+        // Decode colour treatment: 1=Distinct, 2=Blend, 3=Cycle
+        int nTreatment = 1;
+        if (colourtreatment == "Distinct") nTreatment = 1;
+        else if (colourtreatment == "Blend") nTreatment = 2;
+        else if (colourtreatment == "Cycle") nTreatment = 3;
+
+        int actualbars = std::min(bars, std::min(endnote - startnote + 1, buf.BufferWi - offsetx));
+        if (actualbars <= 0) actualbars = 1;
+        int notesperbar = (endnote - startnote + 1) / actualbars;
+        if (notesperbar <= 0) notesperbar = 1;
+        float lightsperbar = (float)(buf.BufferWi - offsetx) / (float)actualbars;
+
+        float per = scale ? lightsperbar : 1.0f;
+
+        // Get current frame data
+        int timeMS = buf.curPeriod * buf.frameTimeInMs;
+        const AudioFrameData* frameData = audio->getFrameDataAtTime(timeMS);
+        if (!frameData || frameData->vu.empty()) return true;
+
+        float sns = (float)sensitivity / 100.0f;
+
+        // For each bar, get the max spectrum value across its note range
+        for (int b = 0; b < actualbars; b++) {
+            int noteStart = startnote + b * notesperbar;
+            int noteEnd = std::min(noteStart + notesperbar, (int)frameData->vu.size());
+
+            float val = 0.0f;
+            for (int n = noteStart; n < noteEnd && n < (int)frameData->vu.size(); n++) {
+                val = std::max(val, frameData->vu[n]);
+            }
+
+            bool active = (val > sns);
+
+            for (int xx = (int)((float)b * per) + offsetx;
+                 xx < (int)((float)(b + 1) * per) + offsetx && xx < buf.BufferWi; xx++) {
+
+                if (!active) continue;
+
+                float progress = buf.GetEffectTimeIntervalPosition();
+
+                switch (nType) {
+                    case 1: // Morph - bars rise up
+                    case 2: // Bounce - alternating direction
+                    {
+                        bool up = (b % 2 == 0) || nType == 1;
+                        int length = buf.BufferHt;
+                        int start = -1 * length + progress * 2 * length + 1;
+                        int end = start + length;
+
+                        for (int y = std::max(0, start); y < std::min(end, buf.BufferHt); y++) {
+                            xlColor c = xlWHITE;
+                            float proportion = ((float)end - (float)y) / (float)length;
+                            if (nTreatment == 1) {
+                                float percolour = 1.0f / (float)buf.GetColorCount();
+                                for (size_t i = 0; i < buf.GetColorCount(); i++) {
+                                    if (proportion <= ((float)i + 1.0f) * percolour) {
+                                        buf.palette.GetColor(i, c);
+                                        break;
+                                    }
+                                }
+                            } else if (nTreatment == 2) {
+                                buf.GetMultiColorBlend(proportion, false, c);
+                            } else if (nTreatment == 3) {
+                                buf.palette.GetColor(b % buf.GetColorCount(), c);
+                            }
+                            if (fade) c.alpha = (1.0f - proportion) * 255;
+
+                            if (up) buf.SetPixel(xx, y, c);
+                            else buf.SetPixel(xx, buf.BufferHt - y - 1, c);
+                        }
+                        break;
+                    }
+                    case 3: // Collide - from both edges toward center
+                    {
+                        int mid = buf.BufferHt / 2;
+                        int length = buf.BufferHt;
+                        int leftstart = 0 - mid - 1 + progress * length;
+                        int leftend = leftstart + mid;
+                        if (leftend > mid) leftend = mid;
+                        int loopstart = std::max(0, leftstart);
+
+                        for (int y = loopstart; y < leftend; y++) {
+                            xlColor c = xlWHITE;
+                            float proportion = ((float)y - (float)leftstart) / (float)mid;
+                            if (nTreatment == 1) {
+                                float percolour = 1.0f / (float)buf.GetColorCount();
+                                for (size_t i = 0; i < buf.GetColorCount(); i++) {
+                                    if (proportion <= ((float)i + 1.0f) * percolour) {
+                                        buf.palette.GetColor(i, c);
+                                        break;
+                                    }
+                                }
+                            } else if (nTreatment == 2) {
+                                buf.GetMultiColorBlend(proportion, false, c);
+                            } else if (nTreatment == 3) {
+                                buf.palette.GetColor(b % buf.GetColorCount(), c);
+                            }
+                            if (fade) c.alpha = progress * 255;
+
+                            buf.SetPixel(xx, y, c);
+                            buf.SetPixel(xx, mid - y + mid - 1, c);
+                        }
+                        break;
+                    }
+                    case 4: // Separate - from center outward (inverse collide)
+                    {
+                        float invProgress = 1.0f - progress;
+                        int mid = buf.BufferHt / 2;
+                        int length = buf.BufferHt;
+                        int leftstart = 0 - mid - 1 + invProgress * length;
+                        int leftend = leftstart + mid;
+                        if (leftend > mid) leftend = mid;
+                        int loopstart = std::max(0, leftstart);
+
+                        for (int y = loopstart; y < leftend; y++) {
+                            xlColor c = xlWHITE;
+                            float proportion = ((float)y - (float)leftstart) / (float)mid;
+                            if (nTreatment == 1) {
+                                float percolour = 1.0f / (float)buf.GetColorCount();
+                                for (size_t i = 0; i < buf.GetColorCount(); i++) {
+                                    if (proportion <= ((float)i + 1.0f) * percolour) {
+                                        buf.palette.GetColor(i, c);
+                                        break;
+                                    }
+                                }
+                            } else if (nTreatment == 2) {
+                                buf.GetMultiColorBlend(proportion, false, c);
+                            } else if (nTreatment == 3) {
+                                buf.palette.GetColor(b % buf.GetColorCount(), c);
+                            }
+                            if (fade) c.alpha = invProgress * 255;
+
+                            buf.SetPixel(xx, y, c);
+                            buf.SetPixel(xx, mid - y + mid - 1, c);
+                        }
+                        break;
+                    }
+                    case 5: // On - full height when active
+                    {
+                        for (int y = 0; y < buf.BufferHt; y++) {
+                            xlColor c = xlWHITE;
+                            float proportion = (float)y / (float)buf.BufferHt;
+                            if (nTreatment == 1) {
+                                float percolour = 1.0f / (float)buf.GetColorCount();
+                                for (size_t i = 0; i < buf.GetColorCount(); i++) {
+                                    if (proportion <= ((float)i + 1.0f) * percolour) {
+                                        buf.palette.GetColor(i, c);
+                                        break;
+                                    }
+                                }
+                            } else if (nTreatment == 2) {
+                                buf.GetMultiColorBlend(proportion, false, c);
+                            } else if (nTreatment == 3) {
+                                buf.palette.GetColor(b % buf.GetColorCount(), c);
+                            }
+                            if (fade) c.alpha = (1.0f - progress) * 255;
+                            buf.SetPixel(xx, y, c);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    if (type == "VU Meter") {
+        // Native VU Meter effect — port of legacy VUMeterEffect::Render
+        //
+        // Comprehensive audio-reactive effect with many display sub-types.
+        // Timing-event sub-types are NOT supported in the native pipeline
+        // (they require SequenceElements/EffectLayer data not available here).
+        // All audio-level and note-level sub-types are fully implemented.
+
+        auto getStr = [&](const char* key, const char* def = "") -> std::string {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? it->second : def;
+        };
+        auto getInt = [&](const char* key, int def = 0) -> int {
+            auto it = effectInfo.settings.find(key);
+            return (it != effectInfo.settings.end() && !it->second.empty()) ? std::atoi(it->second.c_str()) : def;
+        };
+        auto getBool = [&](const char* key, bool def = false) -> bool {
+            auto it = effectInfo.settings.find(key);
+            if (it == effectInfo.settings.end() || it->second.empty()) return def;
+            return it->second == "1" || it->second == "true" || it->second == "yes";
+        };
+
+        // ApplyGain helper — matches legacy VUMeterEffect::ApplyGain
+        auto applyGain = [](float value, int gain) -> float {
+            float v = (100.0f + gain) * value / 100.0f;
+            if (v > 1.0f) v = 1.0f;
+            return v;
+        };
+
+        IAudioProvider* audio = buf.GetAudioProvider();
+        if (!audio) return true;
+
+        int bars = getInt("E_SLIDER_VUMeter_Bars", 6);
+        std::string vuType = getStr("E_CHOICE_VUMeter_Type", "Waveform");
+        int sensitivity = getInt("E_SLIDER_VUMeter_Sensitivity", 70);
+        std::string shape = getStr("E_CHOICE_VUMeter_Shape", "Circle");
+        bool slowdownfalls = getBool("E_CHECKBOX_VUMeter_SlowDownFalls", true);
+        int startnote = getInt("E_SLIDER_VUMeter_StartNote", 0);
+        int endnote = getInt("E_SLIDER_VUMeter_EndNote", 127);
+        int xoffset = getInt("E_SLIDER_VUMeter_XOffset", 0);
+        int yoffset = getInt("E_SLIDER_VUMeter_YOffset", 0);
+        int gain = getInt("E_SLIDER_VUMeter_Gain", 0);
+
+        if (startnote > endnote) std::swap(startnote, endnote);
+
+        int usebars = bars;
+        // For most types, limit bars to buffer width
+        if (vuType != "Level Jump" && vuType != "Level Jump 100") {
+            if (usebars > buf.BufferWi) usebars = buf.BufferWi;
+        }
+
+        // Render cache for stateful VUMeter sub-types
+        struct VUMeterCache : public EffectRenderCache {
+            std::vector<float> lastvalues;
+            std::vector<float> lastpeaks;
+            float lastsize = 0.0f;
+            int colourindex = -1;
+            int lasttimingmark = -1;
+            float lastbar = 0.0f;
+            float lastVal = 0.0f;
+        };
+
+        VUMeterCache* cache = dynamic_cast<VUMeterCache*>(buf.infoCache[0]);
+        if (!cache) {
+            cache = new VUMeterCache();
+            buf.infoCache[0] = cache;
+        }
+
+        if (buf.needToInit) {
+            buf.needToInit = false;
+            cache->lastvalues.clear();
+            cache->lastpeaks.clear();
+            cache->lastsize = 0.0f;
+            cache->colourindex = -1;
+            cache->lasttimingmark = -1;
+            cache->lastbar = 0.0f;
+            cache->lastVal = 0.0f;
+        }
+
+        int timeMS = buf.curPeriod * buf.frameTimeInMs;
+        const AudioFrameData* frameData = audio->getFrameDataAtTime(timeMS);
+
+        // ---------------------------------------------------------------
+        // Volume Bars — historical volume level columns scrolling left
+        // ---------------------------------------------------------------
+        if (vuType == "Volume Bars") {
+            if (usebars == 0) usebars = 1;
+            int start = buf.curPeriod - usebars;
+            float cols = (float)buf.BufferWi / (float)usebars;
+            if (cols <= 0.0f) cols = 0.001f;
+            for (int x = 0; x < buf.BufferWi; x++) {
+                int i = start + (int)((float)x / cols);
+                if (i > 0) {
+                    float f = 0.0f;
+                    const AudioFrameData* pf = audio->getFrameData(i);
+                    if (pf) f = applyGain(pf->max, gain);
+                    int colheight = buf.BufferHt * f;
+                    for (int y = 0; y < colheight; y++) {
+                        xlColor color1;
+                        buf.GetMultiColorBlend((double)y / (double)buf.BufferHt, false, color1);
+                        buf.SetPixel(x, y, color1);
+                    }
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Waveform — historical min/max envelope display
+        // ---------------------------------------------------------------
+        if (vuType == "Waveform") {
+            int trueyoffset = yoffset * buf.BufferHt / 2 / 100;
+            int start = buf.curPeriod - usebars;
+            float cols = (float)buf.BufferWi / usebars;
+            int x = 0;
+            for (int i = 0; i < usebars; i++) {
+                if (start + i >= 0) {
+                    float fh = 0.0f, fl = 0.0f;
+                    const AudioFrameData* pf = audio->getFrameData(start + i);
+                    if (pf) {
+                        fh = applyGain(pf->max, gain);
+                        fl = applyGain(pf->min, gain);
+                    }
+                    int s = (1.0f - fl) * buf.BufferHt / 2;
+                    int e = (1.0f + fh) * buf.BufferHt / 2;
+                    if (e < s) e = s;
+                    if (e > buf.BufferHt) e = buf.BufferHt;
+                    for (int j = 0; j < (int)cols; j++) {
+                        for (int y = s; y < e; y++) {
+                            xlColor color1;
+                            buf.GetMultiColorBlend((double)y / (double)buf.BufferHt, false, color1);
+                            buf.SetPixel(x, y + trueyoffset, color1);
+                        }
+                        x++;
+                    }
+                } else {
+                    x += (int)cols;
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Frame Waveform — per-sample waveform within current frame
+        // ---------------------------------------------------------------
+        if (vuType == "Frame Waveform") {
+            int trueyoffset = yoffset * buf.BufferHt / 2 / 100;
+            float barms = (float)buf.frameTimeInMs / usebars;
+            long rate = audio->getSampleRate();
+            float startMS = buf.curPeriod * buf.frameTimeInMs;
+            xlColor color = buf.palette.GetColor(0);
+            int lasty = trueyoffset + buf.BufferHt / 2;
+            int lastx = 0;
+            float cols = (float)buf.BufferWi / usebars;
+            bool up = true;
+            for (int i = 0; i < usebars; i++) {
+                float mn = 0.0f, mx = 0.0f;
+                long startSample = (long)(rate * (startMS + (float)i * barms) / 1000.0f);
+                long endSample = (long)(rate * (startMS + (float)(i + 1) * barms) / 1000.0f);
+                audio->getLeftDataMinMax(startSample, endSample, mn, mx);
+
+                int y;
+                int x = (int)((float)i * cols + cols / 2.0f);
+                if (up) {
+                    mx = applyGain(mx, gain);
+                    y = trueyoffset + buf.BufferHt / 2 + (int)(mx * ((float)buf.BufferHt / 2.0f));
+                } else {
+                    mn = applyGain(mn, gain);
+                    y = trueyoffset + buf.BufferHt / 2 + (int)(mn * ((float)buf.BufferHt / 2.0f));
+                }
+                buf.DrawLine(lastx, lasty, x, y, color);
+                lasty = y;
+                lastx = x;
+                if (i == usebars - 1) {
+                    buf.DrawLine(lastx, lasty, buf.BufferWi - 1, trueyoffset + buf.BufferHt / 2, color);
+                }
+                up = !up;
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Spectrogram / Spectrogram Peak — frequency bars
+        // ---------------------------------------------------------------
+        if (vuType == "Spectrogram" || vuType == "Spectrogram Peak") {
+            if (!frameData || frameData->vu.empty()) return true;
+
+            bool peak = (vuType == "Spectrogram Peak");
+            int noteRange = endnote - startnote + 1;
+            if (noteRange <= 0) return true;
+            if (usebars <= 0) usebars = 1;
+            int notesPerBar = std::max(1, noteRange / usebars);
+            int actualBars = std::min(usebars, noteRange);
+
+            // Ensure lastvalues/lastpeaks are sized correctly
+            if ((int)cache->lastvalues.size() != actualBars) {
+                cache->lastvalues.resize(actualBars, 0.0f);
+                cache->lastpeaks.resize(actualBars, 0.0f);
+            }
+
+            float cols = (float)buf.BufferWi / (float)actualBars;
+
+            for (int b = 0; b < actualBars; b++) {
+                int noteStart = startnote + b * notesPerBar;
+                int noteEnd = std::min(noteStart + notesPerBar, (int)frameData->vu.size());
+
+                float val = 0.0f;
+                for (int n = noteStart; n < noteEnd; n++) {
+                    val = std::max(val, frameData->vu[n]);
+                }
+                val = applyGain(val, gain);
+
+                // Slow-down-falls for bar values
+                if (slowdownfalls) {
+                    if (val < cache->lastvalues[b]) {
+                        cache->lastvalues[b] -= 1.0f / (float)buf.BufferHt;
+                        if (cache->lastvalues[b] < val) cache->lastvalues[b] = val;
+                    } else {
+                        cache->lastvalues[b] = val;
+                    }
+                } else {
+                    cache->lastvalues[b] = val;
+                }
+
+                // Peak tracking
+                if (peak) {
+                    if (val > cache->lastpeaks[b]) {
+                        cache->lastpeaks[b] = val;
+                    } else {
+                        cache->lastpeaks[b] -= 1.0f / (float)(sensitivity > 0 ? sensitivity : 1);
+                        if (cache->lastpeaks[b] < 0) cache->lastpeaks[b] = 0;
+                    }
+                }
+
+                int colheight = (int)(cache->lastvalues[b] * buf.BufferHt);
+                int startx = (int)(b * cols) + xoffset;
+                int endx = (int)((b + 1) * cols) + xoffset;
+
+                for (int x = startx; x < endx && x < buf.BufferWi; x++) {
+                    if (x < 0) continue;
+                    for (int y = 0; y < colheight && y < buf.BufferHt; y++) {
+                        xlColor color1;
+                        buf.GetMultiColorBlend((double)y / (double)buf.BufferHt, false, color1);
+                        buf.SetPixel(x, y + yoffset, color1);
+                    }
+                    if (peak) {
+                        int peaky = (int)(cache->lastpeaks[b] * buf.BufferHt) + yoffset;
+                        if (peaky >= 0 && peaky < buf.BufferHt) {
+                            xlColor peakColor;
+                            buf.palette.GetColor(0, peakColor);
+                            buf.SetPixel(x, peaky, peakColor);
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // On — brightness modulated by audio level
+        // ---------------------------------------------------------------
+        if (vuType == "On") {
+            float f = 0.0f;
+            if (frameData) f = applyGain(frameData->max, gain);
+            xlColor color1;
+            buf.palette.GetColor(0, color1);
+            color1.alpha = f * 255.0f;
+            for (int x = 0; x < buf.BufferWi; x++)
+                for (int y = 0; y < buf.BufferHt; y++)
+                    buf.SetPixel(x, y, color1);
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Color On — level maps to palette blend
+        // ---------------------------------------------------------------
+        if (vuType == "Color On") {
+            float f = 0.0f;
+            if (frameData) f = applyGain(frameData->max, gain);
+            xlColor color1;
+            buf.GetMultiColorBlend(f, false, color1);
+            for (int x = 0; x < buf.BufferWi; x++)
+                for (int y = 0; y < buf.BufferHt; y++)
+                    buf.SetPixel(x, y, color1);
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Intensity Wave — historical intensity blocks
+        // ---------------------------------------------------------------
+        if (vuType == "Intensity Wave") {
+            int start = buf.curPeriod - usebars;
+            int cols = buf.BufferWi / std::max(1, usebars);
+            int x = 0;
+            for (int i = 0; i < usebars; i++) {
+                if (start + i >= 0) {
+                    float f = 0.0f;
+                    const AudioFrameData* pf = audio->getFrameData(start + i);
+                    if (pf) f = applyGain(pf->max, gain);
+                    xlColor color1;
+                    if (buf.palette.Size() < 2) {
+                        buf.palette.GetColor(0, color1);
+                        color1.alpha = f * 255.0f;
+                    } else {
+                        buf.GetMultiColorBlend(1.0f - f, false, color1);
+                    }
+                    for (int j = 0; j < cols; j++) {
+                        for (int y = 0; y < buf.BufferHt; y++)
+                            buf.SetPixel(x, y, color1);
+                        x++;
+                    }
+                } else {
+                    x += cols;
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Level Pulse — fading pulse on level threshold
+        // ---------------------------------------------------------------
+        if (vuType == "Level Pulse") {
+            float f = 0.0f;
+            if (frameData) f = applyGain(frameData->max, gain);
+            if (f > (float)sensitivity / 100.0f) {
+                cache->lasttimingmark = buf.curPeriod;
+            }
+            int fadeframes = usebars;
+            if (fadeframes > 0 && buf.curPeriod - cache->lasttimingmark < fadeframes) {
+                float ff = 1.0f - (((float)buf.curPeriod - (float)cache->lasttimingmark) / (float)fadeframes);
+                if (ff < 0) ff = 0;
+                if (ff > 0.0f) {
+                    xlColor color1;
+                    buf.palette.GetColor(0, color1);
+                    color1.alpha = ff * 255.0f;
+                    for (int x = 0; x < buf.BufferWi; x++)
+                        for (int y = 0; y < buf.BufferHt; y++)
+                            buf.SetPixel(x, y, color1);
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Level Pulse Color — fading pulse with color cycling
+        // ---------------------------------------------------------------
+        if (vuType == "Level Pulse Color") {
+            float f = 0.0f;
+            if (frameData) f = applyGain(frameData->max, gain);
+            if (f > (float)sensitivity / 100.0f) {
+                if (cache->lasttimingmark != buf.curPeriod - 1) {
+                    cache->colourindex++;
+                    if (cache->colourindex >= (int)buf.GetColorCount()) cache->colourindex = 0;
+                }
+                cache->lasttimingmark = buf.curPeriod;
+            }
+            int fadeframes = usebars;
+            if (fadeframes > 0 && buf.curPeriod - cache->lasttimingmark < fadeframes) {
+                float ff = 1.0f - (((float)buf.curPeriod - (float)cache->lasttimingmark) / (float)fadeframes);
+                if (ff < 0) ff = 0;
+                if (ff > 0.0f) {
+                    xlColor color1;
+                    buf.palette.GetColor(std::max(0, cache->colourindex), color1);
+                    color1.alpha = ff * 255.0f;
+                    for (int x = 0; x < buf.BufferWi; x++)
+                        for (int y = 0; y < buf.BufferHt; y++)
+                            buf.SetPixel(x, y, color1);
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Level Color — color cycling on threshold
+        // ---------------------------------------------------------------
+        if (vuType == "Level Color") {
+            float f = 0.0f;
+            if (frameData) f = applyGain(frameData->max, gain);
+            if (f > (float)sensitivity / 100.0f) {
+                if (cache->lasttimingmark != buf.curPeriod - 1) {
+                    cache->colourindex++;
+                    if (cache->colourindex >= (int)buf.GetColorCount()) cache->colourindex = 0;
+                }
+                cache->lasttimingmark = buf.curPeriod;
+            }
+            if (cache->colourindex >= 0) {
+                xlColor color1;
+                buf.palette.GetColor(cache->colourindex, color1);
+                for (int x = 0; x < buf.BufferWi; x++)
+                    for (int y = 0; y < buf.BufferHt; y++)
+                        buf.SetPixel(x, y, color1);
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Level Jump / Level Jump 100 — jumping bar on level threshold
+        // ---------------------------------------------------------------
+        if (vuType == "Level Jump" || vuType == "Level Jump 100") {
+            bool fullJump = (vuType == "Level Jump 100");
+            float f = 0.0f;
+            if (frameData) f = applyGain(frameData->max, gain);
+            if (f > (float)sensitivity / 100.0f) {
+                cache->lasttimingmark = buf.curPeriod;
+                cache->lastVal = fullJump ? 1.0f : f;
+            }
+            int fadeframes = usebars;
+            if (fadeframes > 0 && buf.curPeriod - cache->lasttimingmark < fadeframes) {
+                float ff = cache->lastVal - (cache->lastVal * ((float)buf.curPeriod - (float)cache->lasttimingmark) / (float)fadeframes);
+                if (ff < 0) ff = 0;
+                if (ff > 0.0f) {
+                    for (int y = 0; y < ff * (float)buf.BufferHt; y++) {
+                        xlColor color1;
+                        buf.GetMultiColorBlend((float)y / (float)buf.BufferHt, false, color1);
+                        for (int x = 0; x < buf.BufferWi; x++)
+                            buf.SetPixel(x, y, color1);
+                    }
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Level Bar / Level Random Bar — bar on beat
+        // ---------------------------------------------------------------
+        if (vuType == "Level Bar" || vuType == "Level Random Bar") {
+            bool random = (vuType == "Level Random Bar");
+            if (!frameData) return true;
+            float level = applyGain(frameData->max, gain);
+            if (level > (float)sensitivity / 100.0f) {
+                cache->colourindex++;
+                if (cache->colourindex >= (int)buf.GetColorCount()) cache->colourindex = 0;
+                if (random && usebars > 2) {
+                    int lb = (int)cache->lastbar + 1;
+                    while (lb == (int)cache->lastbar + 1) {
+                        cache->lastbar = 1.0f + static_cast<int>((double)std::rand() / RAND_MAX * usebars);
+                    }
+                    if (cache->lastbar > usebars) cache->lastbar = 1;
+                } else {
+                    cache->lastbar++;
+                    if (cache->lastbar > usebars) cache->lastbar = 1;
+                }
+            }
+            int bar = (int)cache->lastbar - 1;
+            xlColor color1;
+            buf.palette.GetColor(std::max(0, cache->colourindex), color1);
+            int startx = buf.BufferWi / std::max(1, usebars) * bar;
+            int endx = (int)std::ceil((float)buf.BufferWi / std::max(1, usebars)) * (bar + 1);
+            if (endx > buf.BufferWi) endx = buf.BufferWi;
+            if (bar >= 0) {
+                for (int x = startx; x < endx; x++)
+                    for (int y = 0; y < buf.BufferHt; y++)
+                        buf.SetPixel(x, y, color1);
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Level Shape — shape whose size is modulated by audio level
+        // ---------------------------------------------------------------
+        if (vuType == "Level Shape") {
+            if (!frameData) return true;
+            float f = applyGain(frameData->max, gain);
+
+            int truexoffset = xoffset * buf.BufferWi / 2 / 100;
+            int trueyoffset = yoffset * buf.BufferHt / 2 / 100;
+            float scaling = (float)sensitivity / 100.0f * 7.0f;
+
+            int centerx = buf.BufferWi / 2 + truexoffset;
+            int centery = buf.BufferHt / 2 + trueyoffset;
+
+            float maxSize = std::min(buf.BufferHt / 2.0f, buf.BufferWi / 2.0f) * scaling;
+            float size = maxSize * f;
+
+            if (slowdownfalls) {
+                if (size < cache->lastsize) {
+                    cache->lastsize -= std::min(maxSize, (float)std::max(buf.BufferHt / 2.0f, buf.BufferWi / 2.0f)) / 20.0f;
+                    if (cache->lastsize < size) cache->lastsize = size;
+                } else {
+                    cache->lastsize = size;
+                }
+            } else {
+                cache->lastsize = size;
+            }
+
+            float ls = cache->lastsize;
+
+            // Star points
+            int points = std::min(99, usebars) / 25 + 4;
+
+            if (shape == "Circle") {
+                xlColor color1;
+                buf.palette.GetColor(0, color1);
+                color1.alpha = 64;
+                buf.DrawCircle(centerx, centery, (int)(ls - 2), color1);
+                buf.DrawCircle(centerx, centery, (int)(ls + 2), color1);
+                color1.alpha = 128;
+                buf.DrawCircle(centerx, centery, (int)(ls - 1), color1);
+                buf.DrawCircle(centerx, centery, (int)(ls + 1), color1);
+                color1.alpha = 255;
+                buf.DrawCircle(centerx, centery, (int)ls, color1);
+            } else if (shape == "Filled Circle") {
+                for (int r = 0; r <= (int)ls; r++) {
+                    float distance = (ls > 0) ? (float)r / ls : 0;
+                    xlColor color1;
+                    buf.GetMultiColorBlend(distance, false, color1);
+                    buf.DrawCircle(centerx, centery, r, color1, true);
+                }
+            } else if (shape == "Square") {
+                int sx = centerx - (int)(ls / 2.0f);
+                int ex = centerx + (int)(ls / 2.0f);
+                int sy = centery - (int)(ls / 2.0f);
+                int ey = centery + (int)(ls / 2.0f);
+                xlColor color1;
+                buf.palette.GetColor(0, color1);
+                color1.alpha = 64;
+                buf.DrawBox(sx - 2, sy - 2, ex + 2, ey + 2, color1);
+                buf.DrawBox(sx + 2, sy + 2, ex - 2, ey - 2, color1);
+                color1.alpha = 128;
+                buf.DrawBox(sx - 1, sy - 1, ex + 1, ey + 1, color1);
+                buf.DrawBox(sx + 1, sy + 1, ex - 1, ey - 1, color1);
+                color1.alpha = 255;
+                buf.DrawBox(sx, sy, ex, ey, color1);
+            } else if (shape == "Filled Square") {
+                int sx = centerx - (int)(ls / 2.0f);
+                int ex = centerx + (int)(ls / 2.0f);
+                int sy = centery - (int)(ls / 2.0f);
+                int ey = centery + (int)(ls / 2.0f);
+                for (int r = 0; r <= (int)(ls / 2.0f); r++) {
+                    float distance = (ls > 0) ? r / (ls / 2.0f) : 0;
+                    xlColor color1;
+                    buf.GetMultiColorBlend(distance, false, color1);
+                    buf.DrawBox(sx + r, sy + r, ex - r, ey - r, color1);
+                }
+            } else if (shape == "Diamond") {
+                xlColor color1;
+                buf.palette.GetColor(0, color1);
+                auto drawDiamond = [&](int cx, int cy, int sz, xlColor c) {
+                    if (sz <= 0) return;
+                    buf.DrawLine(cx - sz, cy, cx, cy + sz, c);
+                    buf.DrawLine(cx, cy + sz, cx + sz, cy, c);
+                    buf.DrawLine(cx + sz, cy, cx, cy - sz, c);
+                    buf.DrawLine(cx, cy - sz, cx - sz, cy, c);
+                };
+                color1.alpha = 64;
+                drawDiamond(centerx, centery, (int)ls - 2, color1);
+                drawDiamond(centerx, centery, (int)ls + 2, color1);
+                color1.alpha = 128;
+                drawDiamond(centerx, centery, (int)ls - 1, color1);
+                drawDiamond(centerx, centery, (int)ls + 1, color1);
+                color1.alpha = 255;
+                drawDiamond(centerx, centery, (int)ls, color1);
+            } else if (shape == "Filled Diamond") {
+                auto drawDiamond = [&](int cx, int cy, int sz, xlColor c) {
+                    if (sz <= 0) return;
+                    buf.DrawLine(cx - sz, cy, cx, cy + sz, c);
+                    buf.DrawLine(cx, cy + sz, cx + sz, cy, c);
+                    buf.DrawLine(cx + sz, cy, cx, cy - sz, c);
+                    buf.DrawLine(cx, cy - sz, cx - sz, cy, c);
+                };
+                for (int r = 0; r <= (int)ls; r++) {
+                    xlColor color1;
+                    buf.GetMultiColorBlend((ls > 0) ? (float)r / ls : 0, false, color1);
+                    drawDiamond(centerx, centery, r, color1);
+                }
+            } else if (shape == "Star" || shape == "Filled Star") {
+                auto drawStar = [&](int cx, int cy, float radius, xlColor c, int pts) {
+                    if (radius <= 0 || pts < 3) return;
+                    float innerRadius = radius * 0.4f;
+                    for (int i = 0; i < pts * 2; i++) {
+                        float angle1 = (float)i * M_PI / pts - M_PI / 2.0f;
+                        float angle2 = (float)(i + 1) * M_PI / pts - M_PI / 2.0f;
+                        float r1 = (i % 2 == 0) ? radius : innerRadius;
+                        float r2 = ((i + 1) % 2 == 0) ? radius : innerRadius;
+                        int x1 = cx + (int)(r1 * std::cos(angle1));
+                        int y1 = cy + (int)(r1 * std::sin(angle1));
+                        int x2 = cx + (int)(r2 * std::cos(angle2));
+                        int y2 = cy + (int)(r2 * std::sin(angle2));
+                        buf.DrawLine(x1, y1, x2, y2, c);
+                    }
+                };
+                if (shape == "Star") {
+                    xlColor color1;
+                    buf.palette.GetColor(0, color1);
+                    color1.alpha = 64;
+                    drawStar(centerx, centery, ls - 2, color1, points);
+                    drawStar(centerx, centery, ls + 2, color1, points);
+                    color1.alpha = 128;
+                    drawStar(centerx, centery, ls - 1, color1, points);
+                    drawStar(centerx, centery, ls + 1, color1, points);
+                    color1.alpha = 255;
+                    drawStar(centerx, centery, ls, color1, points);
+                } else {
+                    for (float r = 0; r <= ls; r += 0.5f) {
+                        xlColor color1;
+                        buf.GetMultiColorBlend((ls > 0) ? r / ls : 0, false, color1);
+                        drawStar(centerx, centery, r, color1, points);
+                    }
+                }
+            } else {
+                // Default: filled circle for any unrecognized shape
+                for (int r = 0; r <= (int)ls; r++) {
+                    float distance = (ls > 0) ? (float)r / ls : 0;
+                    xlColor color1;
+                    buf.GetMultiColorBlend(distance, false, color1);
+                    buf.DrawCircle(centerx, centery, r, color1, true);
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Note On — alpha based on note activity in range
+        // ---------------------------------------------------------------
+        if (vuType == "Note On") {
+            if (!frameData || frameData->vu.empty()) return true;
+            float level = 0.0f;
+            for (int i = startnote; i <= endnote && i < (int)frameData->vu.size(); i++) {
+                level = std::max(level, frameData->vu[i]);
+            }
+            level = applyGain(level, gain);
+            xlColor color1;
+            buf.palette.GetColor(0, color1);
+            color1.alpha = level * 255.0f;
+            for (int x = 0; x < buf.BufferWi; x++)
+                for (int y = 0; y < buf.BufferHt; y++)
+                    buf.SetPixel(x, y, color1);
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Note Level Pulse — fading pulse triggered by note range level
+        // ---------------------------------------------------------------
+        if (vuType == "Note Level Pulse") {
+            if (!frameData || frameData->vu.empty()) return true;
+            float level = 0.0f;
+            for (int i = startnote; i <= endnote && i < (int)frameData->vu.size(); i++) {
+                level = std::max(level, frameData->vu[i]);
+            }
+            level = applyGain(level, gain);
+            if (level > (float)sensitivity / 100.0f) {
+                cache->lasttimingmark = buf.curPeriod;
+            }
+            int fadeframes = usebars;
+            if (fadeframes > 0 && buf.curPeriod - cache->lasttimingmark < fadeframes) {
+                float ff = 1.0f - (((float)buf.curPeriod - (float)cache->lasttimingmark) / (float)fadeframes);
+                if (ff < 0) ff = 0;
+                if (ff > 0.0f) {
+                    xlColor color1;
+                    buf.palette.GetColor(0, color1);
+                    color1.alpha = ff * 255.0f;
+                    for (int x = 0; x < buf.BufferWi; x++)
+                        for (int y = 0; y < buf.BufferHt; y++)
+                            buf.SetPixel(x, y, color1);
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Note Level Jump / Note Level Jump 100
+        // ---------------------------------------------------------------
+        if (vuType == "Note Level Jump" || vuType == "Note Level Jump 100") {
+            bool fullJump = (vuType == "Note Level Jump 100");
+            if (!frameData || frameData->vu.empty()) return true;
+            float level = 0.0f;
+            for (int i = startnote; i <= endnote && i < (int)frameData->vu.size(); i++) {
+                level = std::max(level, frameData->vu[i]);
+            }
+            level = applyGain(level, gain);
+            if (level > (float)sensitivity / 100.0f) {
+                cache->lasttimingmark = buf.curPeriod;
+                cache->lastVal = fullJump ? 1.0f : level;
+            }
+            int fadeframes = usebars;
+            if (fadeframes > 0 && buf.curPeriod - cache->lasttimingmark < fadeframes) {
+                float ff = cache->lastVal - (cache->lastVal * ((float)buf.curPeriod - (float)cache->lasttimingmark) / (float)fadeframes);
+                if (ff < 0) ff = 0;
+                if (ff > 0.0f) {
+                    for (int y = 0; y < (int)(ff * buf.BufferHt); y++) {
+                        xlColor color1;
+                        buf.GetMultiColorBlend((float)y / (float)buf.BufferHt, false, color1);
+                        for (int x = 0; x < buf.BufferWi; x++)
+                            buf.SetPixel(x, y, color1);
+                    }
+                }
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Note Level Bar / Note Level Random Bar
+        // ---------------------------------------------------------------
+        if (vuType == "Note Level Bar" || vuType == "Note Level Random Bar") {
+            bool random = (vuType == "Note Level Random Bar");
+            if (!frameData || frameData->vu.empty()) return true;
+            float level = 0.0f;
+            for (int i = startnote; i <= endnote && i < (int)frameData->vu.size(); i++) {
+                level = std::max(level, frameData->vu[i]);
+            }
+            level = applyGain(level, gain);
+            if (level > (float)sensitivity / 100.0f) {
+                cache->colourindex++;
+                if (cache->colourindex >= (int)buf.GetColorCount()) cache->colourindex = 0;
+                if (random && usebars > 2) {
+                    int lb = (int)cache->lastbar + 1;
+                    while (lb == (int)cache->lastbar + 1) {
+                        cache->lastbar = 1.0f + static_cast<int>((double)std::rand() / RAND_MAX * usebars);
+                    }
+                    if (cache->lastbar > usebars) cache->lastbar = 1;
+                } else {
+                    cache->lastbar++;
+                    if (cache->lastbar > usebars) cache->lastbar = 1;
+                }
+            }
+            int bar = (int)cache->lastbar - 1;
+            xlColor color1;
+            buf.palette.GetColor(std::max(0, cache->colourindex), color1);
+            int startx = buf.BufferWi / std::max(1, usebars) * bar;
+            int endx = (int)std::ceil((float)buf.BufferWi / std::max(1, usebars)) * (bar + 1);
+            if (endx > buf.BufferWi) endx = buf.BufferWi;
+            if (bar >= 0) {
+                for (int x = startx; x < endx; x++)
+                    for (int y = 0; y < buf.BufferHt; y++)
+                        buf.SetPixel(x, y, color1);
+            }
+            return true;
+        }
+
+        // ---------------------------------------------------------------
+        // Dominant Frequency Colour / Gradient
+        // ---------------------------------------------------------------
+        if (vuType == "Dominant Frequency Colour" || vuType == "Dominant Frequency Colour Gradient") {
+            bool gradient = (vuType == "Dominant Frequency Colour Gradient");
+            if (!frameData || frameData->vu.empty()) return true;
+            float sns = (float)sensitivity / 100.0f;
+            int note = -1;
+            float maxVal = -1000.0f;
+            for (int i = startnote; i <= endnote && i < (int)frameData->vu.size(); i++) {
+                if (frameData->vu[i] > sns && frameData->vu[i] > maxVal) {
+                    maxVal = frameData->vu[i];
+                    note = i;
+                }
+            }
+            if (note >= 0) {
+                xlColor color1;
+                if (gradient) {
+                    buf.GetMultiColorBlend((float)(note - startnote) / (float)(endnote - startnote + 1), false, color1);
+                } else {
+                    int numcolours = buf.palette.Size();
+                    int colour = (float)((note - startnote) * numcolours) / (float)(endnote - startnote + 1);
+                    color1 = buf.palette.GetColor(colour);
+                }
+                for (int x = 0; x < buf.BufferWi; x++)
+                    for (int y = 0; y < buf.BufferHt; y++)
+                        buf.SetPixel(x, y, color1);
+            }
+            return true;
+        }
+
+        // Unrecognized VUMeter sub-type (likely a timing-event type not supported in native)
         return true;
     }
 

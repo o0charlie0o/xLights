@@ -147,6 +147,14 @@ private:
     void writeModelOutput(const ModelJob& job, int frameIndex,
                           NativeSequenceData& output);
 
+    // Timing track helpers for effects like Piano, Guitar, Arpeggio
+    // Returns the element index for a named timing track, or SIZE_MAX if not found.
+    size_t findTimingTrackElement(const std::string& trackName);
+    // Returns all timing mark effects on the first layer of a timing track.
+    std::vector<EffectInstanceInfo> getTimingMarks(const std::string& trackName);
+    // Returns the timing mark active at the given time on the named track.
+    bool getTimingMarkAtTime(const std::string& trackName, int timeMS, EffectInstanceInfo& outMark);
+
     IEffectProvider* _effectProvider;
     IModelProvider* _modelProvider;
     IRenderContext* _context;
