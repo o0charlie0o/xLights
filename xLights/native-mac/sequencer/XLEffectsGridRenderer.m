@@ -528,6 +528,8 @@ activeTimingColorIndex:(NSInteger)activeTimingColorIndex
     cellHighlightRow:(NSInteger)cellHighlightRow
 cellHighlightStartMS:(CGFloat)cellHighlightStartMS
   cellHighlightEndMS:(CGFloat)cellHighlightEndMS
+        songRegions:(const XLSongRegionRenderInfo *)songRegions
+    songRegionCount:(NSUInteger)songRegionCount
 {
     // Wait for a buffer slot to become available (blocks if all 3 are in-flight).
     // This prevents CPU from writing to a buffer the GPU is still reading.
@@ -620,6 +622,10 @@ cellHighlightStartMS:(CGFloat)cellHighlightStartMS
     [self drawGridLinesWithEncoder:encoder uniforms:uniforms params:fp
                        bufferIndex:bufferIndex
                   timingMarkValues:timingMarkValues timingMarkCount:timingMarkCount];
+    if (songRegions && songRegionCount > 0) {
+        [self drawSongRegionOverlayWithEncoder:encoder uniforms:uniforms params:fp
+                                   songRegions:songRegions songRegionCount:songRegionCount];
+    }
     [self drawTimingTracksWithEncoder:encoder uniforms:uniforms params:fp
                               effects:effects effectCount:effectCount];
     [self drawTimingLabelsWithEncoder:encoder uniforms:uniforms params:fp
@@ -800,6 +806,110 @@ static inline CGFloat rowYPosition(NSInteger row, XLGridFrameParams fp) {
     [encoder setVertexBuffer:gridLineBuffer offset:0 atIndex:0];
     [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
     [encoder drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertexCount];
+}
+
+#pragma mark - Song Region Overlay
+
+- (void)drawSongRegionOverlayWithEncoder:(id<MTLRenderCommandEncoder>)encoder
+                                uniforms:(EffectsGridUniforms)uniforms
+                                  params:(XLGridFrameParams)fp
+                             songRegions:(const XLSongRegionRenderInfo *)songRegions
+                         songRegionCount:(NSUInteger)songRegionCount
+{
+    CGSize viewSize = fp.viewSize;
+    CGPoint scrollOffset = fp.scrollOffset;
+    CGFloat zoomLevel = fp.zoomLevel;
+    CGFloat rowHeight = fp.rowHeight;
+    NSInteger totalRows = fp.totalRows;
+    NSInteger pinnedCount = fp.pinnedTimingRowCount;
+    CGFloat pinnedHeight = fp.pinnedHeight;
+
+    // Overlay alpha — subtle tint that doesn't obscure effects
+    static const float kOverlayAlpha = 0.12f;
+
+    // Max vertices: 6 per rectangle (2 triangles), generous budget
+    static const NSUInteger kMaxOverlayVertices = 3072;
+    SimpleVertex overlayVerts[kMaxOverlayVertices];
+    NSUInteger vCount = 0;
+
+    // Visible time range
+    CGFloat msPerPixel = 1.0 / zoomLevel;
+    CGFloat visibleStartMS = scrollOffset.x * msPerPixel;
+    CGFloat visibleEndMS = visibleStartMS + viewSize.width * msPerPixel;
+
+    // Visible scrollable rows
+    CGFloat scrollableViewHeight = viewSize.height - pinnedHeight;
+    NSInteger firstScrollRow = (NSInteger)floor(scrollOffset.y / rowHeight);
+    NSInteger lastScrollRow = (NSInteger)ceil((scrollOffset.y + scrollableViewHeight) / rowHeight);
+
+    for (NSUInteger ri = 0; ri < songRegionCount; ri++) {
+        const XLSongRegionRenderInfo *region = &songRegions[ri];
+
+        // Frustum cull: skip regions entirely outside visible time
+        if (region->endTimeMS <= visibleStartMS || region->startTimeMS >= visibleEndMS) continue;
+
+        // Compute x extents (clipped to view)
+        CGFloat x1 = fmax(0, region->startTimeMS * zoomLevel - scrollOffset.x);
+        CGFloat x2 = fmin(viewSize.width, region->endTimeMS * zoomLevel - scrollOffset.x);
+        if (x2 <= x1) continue;
+
+        simd_float4 color = simd_make_float4(region->colorR, region->colorG, region->colorB, kOverlayAlpha);
+
+        // Draw over pinned timing rows
+        for (NSInteger row = 0; row < pinnedCount && row < totalRows; row++) {
+            if (vCount + 6 > kMaxOverlayVertices) break;
+            CGFloat y1 = row * rowHeight;
+            CGFloat y2 = y1 + rowHeight;
+
+            simd_float2 tl = simd_make_float2(x1, y1);
+            simd_float2 tr = simd_make_float2(x2, y1);
+            simd_float2 bl = simd_make_float2(x1, y2);
+            simd_float2 br = simd_make_float2(x2, y2);
+
+            overlayVerts[vCount++] = (SimpleVertex){ tl, color };
+            overlayVerts[vCount++] = (SimpleVertex){ tr, color };
+            overlayVerts[vCount++] = (SimpleVertex){ bl, color };
+            overlayVerts[vCount++] = (SimpleVertex){ tr, color };
+            overlayVerts[vCount++] = (SimpleVertex){ br, color };
+            overlayVerts[vCount++] = (SimpleVertex){ bl, color };
+        }
+
+        // Draw over scrollable model rows
+        NSInteger scrollStart = MAX(firstScrollRow, 0);
+        NSInteger scrollEnd = MIN(lastScrollRow, totalRows - pinnedCount);
+        for (NSInteger sRow = scrollStart; sRow < scrollEnd; sRow++) {
+            if (vCount + 6 > kMaxOverlayVertices) break;
+            CGFloat y1 = pinnedHeight + sRow * rowHeight - scrollOffset.y;
+            CGFloat y2 = y1 + rowHeight;
+
+            // Clip to visible area below pinned zone
+            if (y2 <= pinnedHeight || y1 >= viewSize.height) continue;
+            y1 = fmax(y1, pinnedHeight);
+            y2 = fmin(y2, viewSize.height);
+
+            simd_float2 tl = simd_make_float2(x1, y1);
+            simd_float2 tr = simd_make_float2(x2, y1);
+            simd_float2 bl = simd_make_float2(x1, y2);
+            simd_float2 br = simd_make_float2(x2, y2);
+
+            overlayVerts[vCount++] = (SimpleVertex){ tl, color };
+            overlayVerts[vCount++] = (SimpleVertex){ tr, color };
+            overlayVerts[vCount++] = (SimpleVertex){ bl, color };
+            overlayVerts[vCount++] = (SimpleVertex){ tr, color };
+            overlayVerts[vCount++] = (SimpleVertex){ br, color };
+            overlayVerts[vCount++] = (SimpleVertex){ bl, color };
+        }
+    }
+
+    if (vCount == 0) return;
+
+    id<MTLBuffer> overlayBuffer = [_device newBufferWithBytes:overlayVerts
+                                                       length:vCount * sizeof(SimpleVertex)
+                                                      options:MTLResourceStorageModeShared];
+    [encoder setRenderPipelineState:_linePipeline];
+    [encoder setVertexBuffer:overlayBuffer offset:0 atIndex:0];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:vCount];
 }
 
 #pragma mark - Timing Tracks

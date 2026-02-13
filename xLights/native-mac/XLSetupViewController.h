@@ -19,8 +19,7 @@
 
 /// View controller for the Setup tab.
 ///
-/// Displays controller list, port configuration, and network discovery.
-/// Layout is a three-pane split view:
+/// Displays a show folder header bar at top, then a three-pane split view:
 ///   - Left: Controller list (XLControllersViewController)
 ///   - Center: Port configuration grid (XLPortConfigurationView)
 ///   - Right: Controller inspector (XLControllerInspectorViewController)
@@ -39,5 +38,8 @@
 
 /// Present the multi-controller bulk upload dialog as a sheet.
 - (void)presentMultiControllerUploadDialog;
+
+/// Update the show folder display (called when folder changes).
+- (void)updateShowFolderDisplay;
 
 @end

@@ -384,6 +384,13 @@ typedef NS_ENUM(NSInteger, XLAlignmentType) {
 /// Set by the view controller; the grid view uses these to populate the submenu.
 @property (nonatomic, copy) NSArray<NSString *> *availableSymbolNames;
 
+/// Whether to show song structure region color overlay behind effects. Default: NO.
+@property (nonatomic, assign) BOOL showSongRegionOverlay;
+
+/// Set song structure region data for grid overlay rendering.
+/// Copies the provided data (caller can free after calling).
+- (void)setSongRegions:(const XLSongRegionRenderInfo *)regions count:(NSUInteger)count;
+
 /// Reload all data from the data source and redraw.
 - (void)reloadData;
 

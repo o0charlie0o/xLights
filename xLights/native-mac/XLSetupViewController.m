@@ -10,6 +10,7 @@
 
 #import "XLSetupViewController.h"
 #import "XLEngineBridge.h"
+#import "XLAppDelegate.h"
 #import "setup/XLControllerInspectorViewController.h"
 #import "setup/XLControllerDefinitionLoader.h"
 #import "setup/XLUploadProgressSheet.h"
@@ -26,6 +27,12 @@
 @property (nonatomic, strong) XLMultiControllerUploadDialogController *multiUploadDialog;
 @property (nonatomic, strong) XLControllerModelWindowController *controllerModelWindowController;
 
+// Show folder header bar
+@property (nonatomic, strong) NSView *showFolderHeaderBar;
+@property (nonatomic, strong) NSTextField *showFolderPathLabel;
+@property (nonatomic, strong) NSButton *changeFolderButton;
+@property (nonatomic, strong) NSButton *changeTempButton;
+
 @end
 
 @implementation XLSetupViewController
@@ -38,6 +45,9 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+
+    // --- Show Folder Header Bar ---
+    [self setupShowFolderHeader];
 
     // Initialize view controllers
     _controllersViewController = [[XLControllersViewController alloc] init];
@@ -57,8 +67,9 @@
     _splitViewController.splitView.vertical = YES;
     _splitViewController.splitView.dividerStyle = NSSplitViewDividerStyleThin;
 
-    // Left pane: Controller list
-    NSSplitViewItem *listItem = [NSSplitViewItem sidebarWithViewController:_controllersViewController];
+    // Left pane: Controller list (use contentList, not sidebar, to avoid
+    // extending into the toolbar area when hosted inside NavigationStack)
+    NSSplitViewItem *listItem = [NSSplitViewItem contentListWithViewController:_controllersViewController];
     listItem.canCollapse = NO;
     listItem.minimumThickness = 280.0;
     listItem.maximumThickness = 400.0;
@@ -83,7 +94,7 @@
     [self.view addSubview:splitView];
 
     [NSLayoutConstraint activateConstraints:@[
-        [splitView.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [splitView.topAnchor constraintEqualToAnchor:_showFolderHeaderBar.bottomAnchor],
         [splitView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
         [splitView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [splitView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
@@ -91,6 +102,139 @@
 
     // Register port view for model drags
     [_portConfigurationView registerForModelDrag];
+
+    // Listen for show folder changes
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(showFolderDidChange:)
+                                                 name:XLShowFolderDidChangeNotification
+                                               object:nil];
+
+    // Initial display
+    [self updateShowFolderDisplay];
+}
+
+#pragma mark - Show Folder Header
+
+- (void)setupShowFolderHeader {
+    _showFolderHeaderBar = [[NSView alloc] init];
+    _showFolderHeaderBar.wantsLayer = YES;
+    _showFolderHeaderBar.layer.backgroundColor = [NSColor colorWithWhite:0.15 alpha:1.0].CGColor;
+    _showFolderHeaderBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_showFolderHeaderBar];
+
+    // Folder icon
+    NSImageView *folderIcon = [[NSImageView alloc] init];
+    folderIcon.image = [NSImage imageWithSystemSymbolName:@"folder.fill"
+                                accessibilityDescription:@"Show Folder"];
+    folderIcon.contentTintColor = [NSColor secondaryLabelColor];
+    folderIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    [_showFolderHeaderBar addSubview:folderIcon];
+
+    // Path label
+    _showFolderPathLabel = [NSTextField labelWithString:@"No show folder selected"];
+    _showFolderPathLabel.font = [NSFont systemFontOfSize:12];
+    _showFolderPathLabel.textColor = [NSColor labelColor];
+    _showFolderPathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _showFolderPathLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_showFolderPathLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_showFolderHeaderBar addSubview:_showFolderPathLabel];
+
+    // "Change Show Folder" button
+    _changeFolderButton = [NSButton buttonWithTitle:@"Change Show Folder"
+                                             target:self
+                                             action:@selector(changeShowFolderClicked:)];
+    _changeFolderButton.bezelStyle = NSBezelStyleAccessoryBarAction;
+    _changeFolderButton.controlSize = NSControlSizeSmall;
+    _changeFolderButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [_showFolderHeaderBar addSubview:_changeFolderButton];
+
+    // "Change Temporarily" / "Restore to Permanent" button
+    _changeTempButton = [NSButton buttonWithTitle:@"Change Temporarily"
+                                           target:self
+                                           action:@selector(changeTempClicked:)];
+    _changeTempButton.bezelStyle = NSBezelStyleAccessoryBarAction;
+    _changeTempButton.controlSize = NSControlSizeSmall;
+    _changeTempButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [_showFolderHeaderBar addSubview:_changeTempButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        // Header bar
+        [_showFolderHeaderBar.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        [_showFolderHeaderBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_showFolderHeaderBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_showFolderHeaderBar.heightAnchor constraintEqualToConstant:32],
+
+        // Folder icon
+        [folderIcon.leadingAnchor constraintEqualToAnchor:_showFolderHeaderBar.leadingAnchor constant:10],
+        [folderIcon.centerYAnchor constraintEqualToAnchor:_showFolderHeaderBar.centerYAnchor],
+        [folderIcon.widthAnchor constraintEqualToConstant:16],
+        [folderIcon.heightAnchor constraintEqualToConstant:16],
+
+        // Path label
+        [_showFolderPathLabel.leadingAnchor constraintEqualToAnchor:folderIcon.trailingAnchor constant:6],
+        [_showFolderPathLabel.centerYAnchor constraintEqualToAnchor:_showFolderHeaderBar.centerYAnchor],
+
+        // Change Temporarily button (right side)
+        [_changeTempButton.trailingAnchor constraintEqualToAnchor:_showFolderHeaderBar.trailingAnchor constant:-10],
+        [_changeTempButton.centerYAnchor constraintEqualToAnchor:_showFolderHeaderBar.centerYAnchor],
+
+        // Change Show Folder button
+        [_changeFolderButton.trailingAnchor constraintEqualToAnchor:_changeTempButton.leadingAnchor constant:-6],
+        [_changeFolderButton.centerYAnchor constraintEqualToAnchor:_showFolderHeaderBar.centerYAnchor],
+
+        // Path label trails before the change folder button
+        [_showFolderPathLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_changeFolderButton.leadingAnchor constant:-10],
+    ]];
+}
+
+- (void)updateShowFolderDisplay {
+    XLAppDelegate *appDelegate = (XLAppDelegate *)[NSApp delegate];
+    NSString *currentFolder = [[NSUserDefaults standardUserDefaults] stringForKey:@"LastShowFolder"];
+    BOOL isTemp = appDelegate.isTemporaryFolder;
+
+    if (currentFolder.length > 0) {
+        _showFolderPathLabel.stringValue = currentFolder;
+    } else {
+        _showFolderPathLabel.stringValue = @"No show folder selected";
+    }
+
+    if (isTemp) {
+        // Bold yellow text when using temporary folder
+        _showFolderPathLabel.textColor = [NSColor systemYellowColor];
+        _showFolderPathLabel.font = [NSFont boldSystemFontOfSize:12];
+        [_changeTempButton setTitle:@"Restore to Permanent"];
+        _changeTempButton.action = @selector(restorePermanentClicked:);
+    } else {
+        // Normal text for permanent folder
+        _showFolderPathLabel.textColor = [NSColor labelColor];
+        _showFolderPathLabel.font = [NSFont systemFontOfSize:12];
+        [_changeTempButton setTitle:@"Change Temporarily"];
+        _changeTempButton.action = @selector(changeTempClicked:);
+    }
+}
+
+- (void)showFolderDidChange:(NSNotification *)notification {
+    [self updateShowFolderDisplay];
+}
+
+- (void)changeShowFolderClicked:(id)sender {
+    XLAppDelegate *appDelegate = (XLAppDelegate *)[NSApp delegate];
+    [appDelegate selectShowFolder:sender];
+}
+
+- (void)changeTempClicked:(id)sender {
+    XLAppDelegate *appDelegate = (XLAppDelegate *)[NSApp delegate];
+    [appDelegate selectShowFolderTemporarily:sender];
+}
+
+- (void)restorePermanentClicked:(id)sender {
+    XLAppDelegate *appDelegate = (XLAppDelegate *)[NSApp delegate];
+    [appDelegate restorePermanentShowFolder];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)setEngineBridge:(XLEngineBridge *)engineBridge {

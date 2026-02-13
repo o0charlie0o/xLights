@@ -290,6 +290,8 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [viewMenu addItemWithTitle:@"Show Preview" action:@selector(togglePreview:) keyEquivalent:@"p"]
         .keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [viewMenu addItemWithTitle:@"Show Stems Panel" action:@selector(toggleStemsPanel:) keyEquivalent:@""];
+    [viewMenu addItemWithTitle:@"Show Song Regions in Grid" action:@selector(toggleSongRegionOverlay:) keyEquivalent:@"r"]
+        .keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
 
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"Zoom In" action:@selector(zoomIn:) keyEquivalent:@"+"];
@@ -457,6 +459,10 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [effectMenu addItem:[NSMenuItem separatorItem]];
     [effectMenu addItemWithTitle:@"Convert Effect Type…" action:@selector(convertEffectType:) keyEquivalent:@""];
     [effectMenu addItemWithTitle:@"Duplicate Effect" action:@selector(duplicateEffect:) keyEquivalent:@"d"];
+
+    [effectMenu addItem:[NSMenuItem separatorItem]];
+    [effectMenu addItemWithTitle:@"Fill Region from Timing" action:@selector(fillRegionFromTiming:) keyEquivalent:@""];
+    [effectMenu addItemWithTitle:@"Fill Region from Timing as Symbol" action:@selector(fillRegionFromTimingAsSymbol:) keyEquivalent:@""];
 
     [effectMenu addItem:[NSMenuItem separatorItem]];
     [effectMenu addItemWithTitle:@"Effect Presets…" action:@selector(showEffectPresets:) keyEquivalent:@""];

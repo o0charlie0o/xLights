@@ -44,6 +44,14 @@ static inline void XLTimingTrackColor(NSInteger colorIndex, CGFloat *r, CGFloat 
     *b = kPalette[idx][2];
 }
 
+/// Describes a song structure region for grid overlay rendering.
+/// Minimal struct — just what the Metal renderer needs to draw a colored band.
+typedef struct {
+    CGFloat startTimeMS;
+    CGFloat endTimeMS;
+    float colorR, colorG, colorB, colorA;
+} XLSongRegionRenderInfo;
+
 /// Describes a single effect block for rendering.
 /// IMPORTANT: This struct must NOT contain ObjC object pointers (NSColor *, NSString *, etc.)
 /// because it is stored in NSValue via valueWithBytes:objCType: which bypasses ARC.
@@ -113,7 +121,9 @@ activeTimingColorIndex:(NSInteger)activeTimingColorIndex
   cellHighlightActive:(BOOL)cellHighlightActive
     cellHighlightRow:(NSInteger)cellHighlightRow
 cellHighlightStartMS:(CGFloat)cellHighlightStartMS
-  cellHighlightEndMS:(CGFloat)cellHighlightEndMS;
+  cellHighlightEndMS:(CGFloat)cellHighlightEndMS
+        songRegions:(const XLSongRegionRenderInfo *)songRegions
+    songRegionCount:(NSUInteger)songRegionCount;
 
 /// Map from effect type index to display color.
 + (NSColor *)colorForEffectIndex:(NSInteger)effectIndex;

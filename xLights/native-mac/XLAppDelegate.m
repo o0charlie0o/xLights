@@ -37,6 +37,8 @@ void XLSetCommandPaletteVisible(bool visible) {
     sCommandPaletteVisible = visible;
 }
 
+NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidChangeNotification";
+
 @interface XLAppDelegate ()
 
 @property (nonatomic, strong) XLDocumentController *documentController;
@@ -50,6 +52,11 @@ void XLSetCommandPaletteVisible(bool visible) {
 @property (nonatomic, strong) XLModelImportSheet *activeImportSheet;
 @property (nonatomic, strong) XLMultiControllerUploadDialogController *multiUploadDialog;
 @property (nonatomic, strong) XLMCPServer *mcpServer;
+
+/// The permanent show folder path (stored in defaults).
+@property (nonatomic, copy) NSString *permanentShowFolder;
+/// YES when the current show folder is a temporary override.
+@property (nonatomic, assign) BOOL isTemporaryFolder;
 
 @end
 
@@ -141,13 +148,15 @@ void XLSetCommandPaletteVisible(bool visible) {
 
     NSLog(@"XLAppDelegate: SwiftUI window launched");
 
-    // Check for last open show folder in user defaults
+    // Initialize permanent folder from saved defaults
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     NSString *lastShowFolder = [defaults stringForKey:@"LastShowFolder"];
+    _permanentShowFolder = [lastShowFolder copy];
+    _isTemporaryFolder = NO;
 
     if (lastShowFolder && [[NSFileManager defaultManager] fileExistsAtPath:lastShowFolder isDirectory:NULL]) {
         // Restore last show folder
-        [self loadShowFolderPath:lastShowFolder];
+        [self loadShowFolderPath:lastShowFolder permanent:YES];
     } else {
         // No saved show folder - prompt user to select one
         [self promptForShowFolder];
@@ -210,6 +219,26 @@ void XLSetCommandPaletteVisible(bool visible) {
     }
 }
 
+- (IBAction)toggleSongRegionOverlay:(id)sender {
+    XLSwiftUIWindowHelper *helper = [XLSwiftUIWindowHelper shared];
+    BOOL newState = ![helper isSongRegionOverlayVisible];
+    [helper setSongRegionOverlayVisible:newState];
+    // Update the grid view directly
+    XLSequencerViewController *vc = helper.sequencerViewController;
+    if (vc) {
+        [vc setSongRegionOverlayVisible:newState];
+    }
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    if (menuItem.action == @selector(toggleSongRegionOverlay:)) {
+        BOOL isOn = [[XLSwiftUIWindowHelper shared] isSongRegionOverlayVisible];
+        menuItem.state = isOn ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    return YES;
+}
+
 - (IBAction)togglePreview:(id)sender {
     // Responder chain fallback — use the stored sequencer VC reference directly.
     XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
@@ -231,7 +260,11 @@ void XLSetCommandPaletteVisible(bool visible) {
 #pragma mark - Private Helpers
 
 - (void)loadShowFolderPath:(NSString *)path {
-    NSLog(@"XLAppDelegate: Loading show folder: %@", path);
+    [self loadShowFolderPath:path permanent:YES];
+}
+
+- (void)loadShowFolderPath:(NSString *)path permanent:(BOOL)permanent {
+    NSLog(@"XLAppDelegate: Loading show folder: %@ (permanent=%d)", path, permanent);
 
     // Load the show folder into the engine bridge
     XLSwiftUIWindowHelper *swiftHelper = [XLSwiftUIWindowHelper shared];
@@ -241,15 +274,27 @@ void XLSetCommandPaletteVisible(bool visible) {
         BOOL success = [engineBridge loadShowFolder:path];
         if (success) {
             NSLog(@"XLAppDelegate: Show folder loaded successfully");
-            // Save as last show folder
-            NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-            [defaults setObject:path forKey:@"LastShowFolder"];
+
+            if (permanent) {
+                // Save as permanent show folder
+                _permanentShowFolder = [path copy];
+                _isTemporaryFolder = NO;
+                NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+                [defaults setObject:path forKey:@"LastShowFolder"];
+                // Add to MRU list
+                [self addRecentShowFolder:path];
+            } else {
+                // Temporary folder — don't save to defaults
+                _isTemporaryFolder = YES;
+            }
+
             // Notify SwiftUI to refresh
             [swiftHelper notifySequenceDataChanged];
             // Notify observers that the show folder changed (for key bindings, etc.)
-            [[NSNotificationCenter defaultCenter] postNotificationName:@"XLShowFolderDidChangeNotification"
+            [[NSNotificationCenter defaultCenter] postNotificationName:XLShowFolderDidChangeNotification
                                                                 object:self
-                                                              userInfo:@{@"path": path}];
+                                                              userInfo:@{@"path": path,
+                                                                         @"permanent": @(permanent)}];
             // Start MCP server if not already running
             if (!_mcpServer) {
                 _mcpServer = [[XLMCPServer alloc] initWithEngineBridge:engineBridge];
@@ -268,7 +313,7 @@ void XLSetCommandPaletteVisible(bool visible) {
         NSLog(@"XLAppDelegate: Engine bridge not available, deferring show folder load");
         // Store path and try again after a short delay
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self loadShowFolderPath:path];
+            [self loadShowFolderPath:path permanent:permanent];
         });
     }
 }
@@ -315,7 +360,60 @@ void XLSetCommandPaletteVisible(bool visible) {
 #pragma mark - File Menu Actions
 
 - (IBAction)selectShowFolder:(id)sender {
+    // "Select Show Folder" from menu always saves permanently
     [self promptForShowFolder];
+}
+
+- (IBAction)selectShowFolderTemporarily:(id)sender {
+    NSLog(@"XLAppDelegate: Selecting temporary show folder");
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    panel.message = @"Select a temporary show folder (will revert on restart)";
+    panel.prompt = @"Use Temporarily";
+
+    [panel beginWithCompletionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URL) {
+            [self loadShowFolderPath:panel.URL.path permanent:NO];
+        }
+    }];
+}
+
+- (void)restorePermanentShowFolder {
+    if (!_isTemporaryFolder) return;
+
+    NSString *perm = _permanentShowFolder;
+    if (perm && [[NSFileManager defaultManager] fileExistsAtPath:perm isDirectory:NULL]) {
+        NSLog(@"XLAppDelegate: Restoring permanent show folder: %@", perm);
+        [self loadShowFolderPath:perm permanent:YES];
+    } else {
+        NSLog(@"XLAppDelegate: No permanent show folder to restore");
+        [self promptForShowFolder];
+    }
+}
+
+#pragma mark - Recent Show Folders
+
+- (NSArray<NSString *> *)recentShowFolders {
+    return [[NSUserDefaults standardUserDefaults] arrayForKey:@"RecentShowFolders"] ?: @[];
+}
+
+- (void)addRecentShowFolder:(NSString *)path {
+    if (!path || path.length == 0) return;
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *recents = [[defaults arrayForKey:@"RecentShowFolders"] mutableCopy] ?: [NSMutableArray new];
+
+    [recents removeObject:path];
+    [recents insertObject:path atIndex:0];
+
+    if (recents.count > 10) {
+        [recents removeObjectsInRange:NSMakeRange(10, recents.count - 10)];
+    }
+
+    [defaults setObject:recents forKey:@"RecentShowFolders"];
 }
 
 - (IBAction)backupShowFolder:(id)sender {

@@ -239,6 +239,26 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Get the song region overlay visibility state.
+    @objc public var isSongRegionOverlayVisible: Bool {
+        return sSwiftAppState?.songRegionOverlayVisible ?? true
+    }
+
+    /// Set the song region overlay visibility state (called from ObjC).
+    @objc public func setSongRegionOverlayVisible(_ visible: Bool) {
+        DispatchQueue.main.async {
+            sSwiftAppState?.songRegionOverlayVisible = visible
+        }
+    }
+
+    /// Toggle the song region overlay visibility.
+    @objc public func toggleSongRegionOverlay() {
+        DispatchQueue.main.async {
+            guard let appState = sSwiftAppState else { return }
+            appState.songRegionOverlayVisible.toggle()
+        }
+    }
+
     // MARK: - Top Panel Toggles
 
     /// Toggle the Effects palette panel visibility.

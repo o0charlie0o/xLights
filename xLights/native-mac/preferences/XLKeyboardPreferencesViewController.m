@@ -374,6 +374,8 @@
     [self addBindingWithType:@"AUDIO_S_1_4_SPEED" shortcut:@"" scope:3 tooltip:@"Playback audio at 1/4 speed."];
     [self addBindingWithType:@"MODEL_TOGGLE" shortcut:@"" scope:3 tooltip:@"Toggle rendering of the selected model."];
     [self addBindingWithType:@"EFFECT_TOGGLE" shortcut:@"" scope:3 tooltip:@"Toggle rendering of the selected effects."];
+    [self addBindingWithType:@"FILL_REGION_TIMING" shortcut:@"" scope:3 tooltip:@"Fill the current song region with copies of the selected effect at each timing mark."];
+    [self addBindingWithType:@"FILL_REGION_TIMING_SYMBOL" shortcut:@"" scope:3 tooltip:@"Fill the current song region with symbol-linked copies of the selected effect at each timing mark."];
 
     // Layout scope bindings
     [self addBindingWithType:@"LOCK_MODEL" shortcut:@"\u2318L" scope:2 tooltip:@"Lock the selected models."];

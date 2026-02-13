@@ -335,6 +335,12 @@ extension XLCommandPaletteState {
             XLCommand(title: "Duplicate Effect", subtitle: "Duplicate selected effects", icon: "plus.square.on.square", category: "Effects", shortcut: "⌘D") {
                 print("Duplicate Effect")
             },
+            XLCommand(title: "Fill Region from Timing", subtitle: "Copy effect to every timing mark in region", icon: "rectangle.stack.badge.plus", category: "Effects", shortcut: nil) {
+                NotificationCenter.default.post(name: NSNotification.Name("XLFillRegionFromTiming"), object: nil, userInfo: ["asSymbol": false])
+            },
+            XLCommand(title: "Fill Region from Timing as Symbol", subtitle: "Fill region with symbol-linked copies", icon: "link.badge.plus", category: "Effects", shortcut: nil) {
+                NotificationCenter.default.post(name: NSNotification.Name("XLFillRegionFromTiming"), object: nil, userInfo: ["asSymbol": true])
+            },
 
             // Timing commands
             XLCommand(title: "Add Timing Mark", subtitle: "Add timing mark at cursor", icon: "metronome", category: "Timing", shortcut: "T") {

@@ -110,6 +110,10 @@
 /// Toggle the floating house preview window.
 - (void)toggleHousePreview;
 
+#pragma mark - Song Region Overlay
+/// Set whether the song region color overlay is visible in the effects grid.
+- (void)setSongRegionOverlayVisible:(BOOL)visible;
+
 #pragma mark - Audio Stems
 /// Toggle stems panel visibility (View menu).
 - (void)toggleStemsPanel:(id)sender;

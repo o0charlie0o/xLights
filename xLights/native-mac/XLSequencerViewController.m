@@ -796,6 +796,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _emptyStateView.layer.backgroundColor = [[NSColor colorWithWhite:0.12 alpha:1.0] CGColor];
     _emptyStateView.hidden = YES;
 
+    // Inner container — holds all content and is centered as a unit in _emptyStateView
+    NSView *contentContainer = [[NSView alloc] initWithFrame:NSZeroRect];
+    contentContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [_emptyStateView addSubview:contentContainer];
+
     // Icon
     NSImageView *emptyIcon = [[NSImageView alloc] initWithFrame:NSZeroRect];
     emptyIcon.translatesAutoresizingMaskIntoConstraints = NO;
@@ -807,7 +812,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         emptyIcon.image = [img imageWithSymbolConfiguration:config];
     }
     emptyIcon.contentTintColor = [NSColor tertiaryLabelColor];
-    [_emptyStateView addSubview:emptyIcon];
+    [contentContainer addSubview:emptyIcon];
 
     // Title label
     NSTextField *emptyTitle = [NSTextField labelWithString:@"No Sequence Open"];
@@ -815,7 +820,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     emptyTitle.font = [NSFont systemFontOfSize:20 weight:NSFontWeightMedium];
     emptyTitle.textColor = [NSColor secondaryLabelColor];
     emptyTitle.alignment = NSTextAlignmentCenter;
-    [_emptyStateView addSubview:emptyTitle];
+    [contentContainer addSubview:emptyTitle];
 
     // Subtitle label
     NSTextField *emptySubtitle = [NSTextField labelWithString:@"Create a new sequence or open an existing one to get started."];
@@ -823,7 +828,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     emptySubtitle.font = [NSFont systemFontOfSize:13];
     emptySubtitle.textColor = [NSColor tertiaryLabelColor];
     emptySubtitle.alignment = NSTextAlignmentCenter;
-    [_emptyStateView addSubview:emptySubtitle];
+    [contentContainer addSubview:emptySubtitle];
 
     // New Sequence button
     NSButton *newSeqButton = [NSButton buttonWithTitle:@"New Sequence"
@@ -836,7 +841,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         newSeqButton.hasDestructiveAction = NO;
     }
     newSeqButton.keyEquivalent = @"";
-    [_emptyStateView addSubview:newSeqButton];
+    [contentContainer addSubview:newSeqButton];
 
     // Open Sequence button
     NSButton *openSeqButton = [NSButton buttonWithTitle:@"Open Sequence\u2026"
@@ -846,30 +851,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     openSeqButton.bezelStyle = NSBezelStyleRounded;
     openSeqButton.controlSize = NSControlSizeLarge;
     openSeqButton.keyEquivalent = @"";
-    [_emptyStateView addSubview:openSeqButton];
-
-    // Stack the empty state content vertically, centered
-    [NSLayoutConstraint activateConstraints:@[
-        [emptyIcon.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
-        [emptyIcon.bottomAnchor constraintEqualToAnchor:emptyTitle.topAnchor constant:-12],
-        [emptyIcon.widthAnchor constraintEqualToConstant:56],
-        [emptyIcon.heightAnchor constraintEqualToConstant:56],
-
-        [emptyTitle.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
-        [emptyTitle.centerYAnchor constraintEqualToAnchor:_emptyStateView.centerYAnchor constant:-20],
-
-        [emptySubtitle.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
-        [emptySubtitle.topAnchor constraintEqualToAnchor:emptyTitle.bottomAnchor constant:6],
-        [emptySubtitle.widthAnchor constraintLessThanOrEqualToConstant:400],
-
-        [newSeqButton.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor constant:-70],
-        [newSeqButton.topAnchor constraintEqualToAnchor:emptySubtitle.bottomAnchor constant:20],
-        [newSeqButton.widthAnchor constraintEqualToConstant:130],
-
-        [openSeqButton.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor constant:70],
-        [openSeqButton.topAnchor constraintEqualToAnchor:emptySubtitle.bottomAnchor constant:20],
-        [openSeqButton.widthAnchor constraintEqualToConstant:140],
-    ]];
+    [contentContainer addSubview:openSeqButton];
 
     // Recent sequences section
     _recentLabel = [NSTextField labelWithString:@"Recent Sequences"];
@@ -877,22 +859,53 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _recentLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
     _recentLabel.textColor = [NSColor tertiaryLabelColor];
     _recentLabel.alignment = NSTextAlignmentCenter;
-    [_emptyStateView addSubview:_recentLabel];
+    [contentContainer addSubview:_recentLabel];
 
     _recentSequencesStack = [[NSStackView alloc] init];
     _recentSequencesStack.translatesAutoresizingMaskIntoConstraints = NO;
     _recentSequencesStack.orientation = NSUserInterfaceLayoutOrientationVertical;
     _recentSequencesStack.spacing = 1;
     _recentSequencesStack.alignment = NSLayoutAttributeLeading;
-    [_emptyStateView addSubview:_recentSequencesStack];
+    [contentContainer addSubview:_recentSequencesStack];
 
+    // Center the content container vertically; span full width for hit testing
     [NSLayoutConstraint activateConstraints:@[
-        [_recentLabel.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
+        [contentContainer.leadingAnchor constraintEqualToAnchor:_emptyStateView.leadingAnchor],
+        [contentContainer.trailingAnchor constraintEqualToAnchor:_emptyStateView.trailingAnchor],
+        [contentContainer.centerYAnchor constraintEqualToAnchor:_emptyStateView.centerYAnchor],
+        [contentContainer.topAnchor constraintGreaterThanOrEqualToAnchor:_emptyStateView.topAnchor constant:20],
+        [contentContainer.bottomAnchor constraintLessThanOrEqualToAnchor:_emptyStateView.bottomAnchor constant:-20],
+    ]];
+
+    // Layout content within the container — top-to-bottom chain
+    [NSLayoutConstraint activateConstraints:@[
+        [emptyIcon.centerXAnchor constraintEqualToAnchor:contentContainer.centerXAnchor],
+        [emptyIcon.topAnchor constraintEqualToAnchor:contentContainer.topAnchor],
+        [emptyIcon.widthAnchor constraintEqualToConstant:56],
+        [emptyIcon.heightAnchor constraintEqualToConstant:56],
+
+        [emptyTitle.centerXAnchor constraintEqualToAnchor:contentContainer.centerXAnchor],
+        [emptyTitle.topAnchor constraintEqualToAnchor:emptyIcon.bottomAnchor constant:12],
+
+        [emptySubtitle.centerXAnchor constraintEqualToAnchor:contentContainer.centerXAnchor],
+        [emptySubtitle.topAnchor constraintEqualToAnchor:emptyTitle.bottomAnchor constant:6],
+        [emptySubtitle.widthAnchor constraintLessThanOrEqualToConstant:400],
+
+        [newSeqButton.centerXAnchor constraintEqualToAnchor:contentContainer.centerXAnchor constant:-70],
+        [newSeqButton.topAnchor constraintEqualToAnchor:emptySubtitle.bottomAnchor constant:20],
+        [newSeqButton.widthAnchor constraintEqualToConstant:130],
+
+        [openSeqButton.centerXAnchor constraintEqualToAnchor:contentContainer.centerXAnchor constant:70],
+        [openSeqButton.topAnchor constraintEqualToAnchor:emptySubtitle.bottomAnchor constant:20],
+        [openSeqButton.widthAnchor constraintEqualToConstant:140],
+
+        [_recentLabel.centerXAnchor constraintEqualToAnchor:contentContainer.centerXAnchor],
         [_recentLabel.topAnchor constraintEqualToAnchor:newSeqButton.bottomAnchor constant:30],
 
-        [_recentSequencesStack.centerXAnchor constraintEqualToAnchor:_emptyStateView.centerXAnchor],
+        [_recentSequencesStack.centerXAnchor constraintEqualToAnchor:contentContainer.centerXAnchor],
         [_recentSequencesStack.topAnchor constraintEqualToAnchor:_recentLabel.bottomAnchor constant:8],
         [_recentSequencesStack.widthAnchor constraintLessThanOrEqualToConstant:400],
+        [_recentSequencesStack.bottomAnchor constraintEqualToAnchor:contentContainer.bottomAnchor],
     ]];
 
     // Observe recent sequences changes
@@ -1044,6 +1057,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleSnapEnabledDidChange:)
                                                  name:@"XLSnapEnabledDidChange"
+                                               object:nil];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleFillRegionFromTimingNotification:)
+                                                 name:@"XLFillRegionFromTiming"
                                                object:nil];
 
     // Listen for stem manager changes to sync with engine bridge
@@ -3078,6 +3096,177 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         [_playbackController renderCurrentFrame];
         [_effectsGridView reloadData];
     }
+}
+
+#pragma mark - Fill Region from Timing
+
+- (void)fillRegionFromTimingMarks:(NSIndexSet *)selected asSymbol:(BOOL)asSymbol {
+    if (!_engineBridge || selected.count == 0) return;
+
+    // Get the first (leftmost) selected effect
+    NSUInteger firstIdx = [selected firstIndex];
+    NSInteger sourceId = [_effectsGridView effectIdAtRenderIndex:firstIdx];
+    if (sourceId < 0) return;
+
+    NSDictionary *sourceEffect = [_engineBridge getEffect:sourceId];
+    if (!sourceEffect) return;
+
+    NSString *modelName = sourceEffect[@"modelName"];
+    NSString *effectType = sourceEffect[@"effectType"];
+    NSInteger layer = [sourceEffect[@"layerIndex"] integerValue];
+    NSInteger sourceStart = [sourceEffect[@"startTimeMS"] integerValue];
+    NSInteger sourceEnd = [sourceEffect[@"endTimeMS"] integerValue];
+    NSInteger sourceDuration = sourceEnd - sourceStart;
+
+    // Get song structure regions
+    NSArray<NSDictionary *> *regions = [_engineBridge getSongStructureRegions];
+    if (!regions || regions.count == 0) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Song Structure Regions";
+        alert.informativeText = @"Please define song structure regions first.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    // Find the region containing the source effect's start time
+    NSDictionary *containingRegion = nil;
+    for (NSDictionary *region in regions) {
+        NSInteger regionStart = [region[@"startTimeMS"] integerValue];
+        NSInteger regionEnd = [region[@"endTimeMS"] integerValue];
+        if (sourceStart >= regionStart && sourceStart < regionEnd) {
+            containingRegion = region;
+            break;
+        }
+    }
+    if (!containingRegion) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Region Found";
+        alert.informativeText = @"The selected effect is not within a song structure region.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    NSInteger regionStartMS = [containingRegion[@"startTimeMS"] integerValue];
+    NSInteger regionEndMS = [containingRegion[@"endTimeMS"] integerValue];
+
+    // Get active timing track
+    NSString *activeTrack = [_engineBridge getActiveTimingTrackName];
+    if (!activeTrack) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"No Active Timing Track";
+        alert.informativeText = @"Please activate a timing track first.";
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+        return;
+    }
+
+    // Find the finest (highest-numbered) timing layer with marks
+    NSArray<NSDictionary *> *tracks = [_engineBridge getTimingTracks];
+    NSInteger finestLayer = 0;
+    for (NSDictionary *track in tracks) {
+        if ([track[@"name"] isEqualToString:activeTrack]) {
+            NSInteger lc = [track[@"layerCount"] integerValue];
+            // Use the highest layer that has marks in the region
+            for (NSInteger l = lc - 1; l >= 0; l--) {
+                NSArray<NSDictionary *> *testMarks = [_engineBridge getTimingMarks:activeTrack layer:l];
+                if (testMarks.count > 0) {
+                    finestLayer = l;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    // Get timing marks on the finest layer, filtered to the region
+    NSArray<NSDictionary *> *allMarks = [_engineBridge getTimingMarks:activeTrack layer:finestLayer];
+    NSMutableArray<NSDictionary *> *marks = [NSMutableArray new];
+    for (NSDictionary *mark in allMarks) {
+        NSInteger markStart = [mark[@"startTimeMS"] integerValue];
+        if (markStart >= regionStartMS && markStart < regionEndMS) {
+            // Skip marks that overlap with the source effect
+            if (markStart >= sourceStart && markStart < sourceEnd) continue;
+            [marks addObject:mark];
+        }
+    }
+
+    if (marks.count == 0) {
+        NSLog(@"Fill Region: no timing marks to fill in region [%ld-%ld]",
+              (long)regionStartMS, (long)regionEndMS);
+        return;
+    }
+
+    NSString *actionName = asSymbol ? @"Fill Region from Timing as Symbol" : @"Fill Region from Timing";
+    [_undoController beginUndoGroupingWithActionName:actionName];
+
+    NSSet<NSNumber *> *excludeIds = [NSSet setWithObject:@(sourceId)];
+    NSString *symbolId = nil;
+
+    if (asSymbol) {
+        [self ensureSymbolLibraryManager];
+        symbolId = [_symbolLibraryManager createSymbolFromEffect:sourceId
+                                                        withName:[NSString stringWithFormat:@"Fill %@", effectType]];
+    }
+
+    BOOL anyCreated = NO;
+    for (NSDictionary *mark in marks) {
+        NSInteger newStart = [mark[@"startTimeMS"] integerValue];
+        NSInteger newEnd = newStart + sourceDuration;
+        if (newEnd > regionEndMS) newEnd = regionEndMS;
+        if (newEnd <= newStart) continue;
+
+        if ([self hasConflictOnModel:modelName layer:layer
+                             startMS:newStart endMS:newEnd
+                          excludeIds:excludeIds]) {
+            continue;
+        }
+
+        NSInteger newId = [_engineBridge createEffect:modelName
+                                                layer:layer
+                                           effectType:effectType
+                                          startTimeMS:newStart
+                                            endTimeMS:newEnd];
+        if (newId >= 0) {
+            if (asSymbol && symbolId) {
+                [_symbolLibraryManager linkEffect:newId toSymbol:symbolId];
+            } else {
+                NSString *settings = [_engineBridge getEffectSettings:sourceId];
+                NSString *palette = [_engineBridge getEffectPalette:sourceId];
+                if (settings) [_engineBridge setEffectSettings:newId settings:settings];
+                if (palette) [_engineBridge setEffectPalette:newId palette:palette];
+            }
+            anyCreated = YES;
+        }
+    }
+
+    [_undoController endUndoGrouping];
+
+    if (anyCreated) {
+        [self reloadSequenceData];
+        [_playbackController renderCurrentFrame];
+        [_effectsGridView reloadData];
+    }
+}
+
+- (void)fillRegionFromTiming:(id)sender {
+    NSIndexSet *selected = _effectsGridView.selectedEffectIndices;
+    if (selected.count == 0) return;
+    [self fillRegionFromTimingMarks:selected asSymbol:NO];
+}
+
+- (void)fillRegionFromTimingAsSymbol:(id)sender {
+    NSIndexSet *selected = _effectsGridView.selectedEffectIndices;
+    if (selected.count == 0) return;
+    [self fillRegionFromTimingMarks:selected asSymbol:YES];
+}
+
+- (void)handleFillRegionFromTimingNotification:(NSNotification *)note {
+    BOOL asSymbol = [note.userInfo[@"asSymbol"] boolValue];
+    NSIndexSet *selected = _effectsGridView.selectedEffectIndices;
+    if (selected.count == 0) return;
+    [self fillRegionFromTimingMarks:selected asSymbol:asSymbol];
 }
 
 #pragma mark - XLEffectsGridDelegate (Effect Operations)
@@ -7678,6 +7867,21 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         return YES;
     }
 
+    // --- Fill Region from Timing ---
+    if ([actionType isEqualToString:@"FILL_REGION_TIMING"] ||
+        [actionType isEqualToString:@"FILL_REGION_TIMING_SYMBOL"]) {
+
+        NSIndexSet *selected = _effectsGridView.selectedEffectIndices;
+        if (!_engineBridge || selected.count == 0) {
+            NSLog(@"XLSequencerViewController: %@ - no effects selected", actionType);
+            return YES;
+        }
+
+        BOOL asSymbol = [actionType isEqualToString:@"FILL_REGION_TIMING_SYMBOL"];
+        [self fillRegionFromTimingMarks:selected asSymbol:asSymbol];
+        return YES;
+    }
+
     // --- Lock/Unlock Effects (Cmd+L / Cmd+U) ---
     if ([actionType isEqualToString:@"LOCK_EFFECT"] ||
         [actionType isEqualToString:@"UNLOCK_EFFECT"]) {
@@ -8089,6 +8293,10 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     if (menuItem.action == @selector(toggleStemsPanel:)) {
         menuItem.state = _stemsPanelVisible ? NSControlStateValueOn : NSControlStateValueOff;
         return YES;
+    }
+    if (menuItem.action == @selector(fillRegionFromTiming:) ||
+        menuItem.action == @selector(fillRegionFromTimingAsSymbol:)) {
+        return _engineBridge && _effectsGridView.selectedEffectIndices.count > 0;
     }
     return YES;
 }

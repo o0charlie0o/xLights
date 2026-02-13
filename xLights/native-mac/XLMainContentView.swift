@@ -42,6 +42,7 @@ final class XLAppState {
     // State synced from ObjC sequencer VC
     var housePreviewVisible: Bool = false
     var snapEnabled: Bool = true
+    var songRegionOverlayVisible: Bool = true
 
     // Shared engine bridge - created once, passed to all view controllers
     let engineBridge: XLEngineBridge
@@ -87,6 +88,9 @@ final class XLAppState {
         if defaults.object(forKey: "XLTopPanelHeight") != nil {
             topPanelHeight = defaults.double(forKey: "XLTopPanelHeight")
         }
+        if defaults.object(forKey: "XLSongRegionOverlay") != nil {
+            songRegionOverlayVisible = defaults.bool(forKey: "XLSongRegionOverlay")
+        }
         if let widthsDict = defaults.dictionary(forKey: "XLPanelWidthProportions") as? [String: Double] {
             for (key, value) in widthsDict {
                 if let rawValue = Int(key), let tab = XLTopPanelTab(rawValue: rawValue) {
@@ -103,6 +107,7 @@ final class XLAppState {
         defaults.set(inspectorVisible, forKey: "XLInspectorVisible")
         defaults.set(inspectorWidth, forKey: "XLInspectorWidth")
         defaults.set(topPanelHeight, forKey: "XLTopPanelHeight")
+        defaults.set(songRegionOverlayVisible, forKey: "XLSongRegionOverlay")
         // Save panel width proportions
         var widthsDict: [String: Double] = [:]
         for (tab, proportion) in panelWidthProportions {
@@ -224,15 +229,15 @@ enum XLTopPanelTab: Int, CaseIterable, Identifiable, Hashable {
 struct XLMainContentView: View {
     @Bindable var appState: XLAppState
 
-    // Split view column visibility
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    // Split view column visibility — sidebar collapsed by default since tabs are in toolbar
+    @State private var columnVisibility: NavigationSplitViewVisibility = .detailOnly
 
     var body: some View {
         ZStack {
             NavigationSplitView(columnVisibility: $columnVisibility) {
-                // Sidebar: Tab selection — fixed width to prevent accidental resizing
+                // Sidebar: Model preview and effect assist (like legacy xLights)
                 sidebarContent
-                    .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 220)
+                    .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 350)
             } detail: {
                 // Detail: Main content area with inspector
                 // Using HStack with explicit frame control instead of HSplitView
@@ -268,16 +273,24 @@ struct XLMainContentView: View {
 
     @ViewBuilder
     private var sidebarContent: some View {
-        List(selection: Binding(
-            get: { appState.currentTab },
-            set: { appState.currentTab = $0 }
-        )) {
-            ForEach(XLTab.allCases) { tab in
-                Label(tab.title, systemImage: tab.icon)
-                    .tag(tab)
+        VStack(spacing: 0) {
+            if appState.currentTab == .sequencer {
+                // Model preview for sequencer tab (like legacy xLights sidebar)
+                XLSidebarModelPreview(engineBridge: appState.engineBridge)
+            } else {
+                // Tab list for other tabs
+                List(selection: Binding(
+                    get: { appState.currentTab },
+                    set: { appState.currentTab = $0 }
+                )) {
+                    ForEach(XLTab.allCases) { tab in
+                        Label(tab.title, systemImage: tab.icon)
+                            .tag(tab)
+                    }
+                }
+                .listStyle(.sidebar)
             }
         }
-        .listStyle(.sidebar)
     }
 
     // MARK: - Main Content with Top Panel
@@ -433,6 +446,19 @@ struct XLMainContentView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // Tab buttons on the left side of the toolbar
+        ToolbarItemGroup(placement: .navigation) {
+            ForEach(XLTab.allCases) { tab in
+                Button {
+                    appState.currentTab = tab
+                } label: {
+                    Label(tab.title, systemImage: tab.icon)
+                }
+                .buttonStyle(TabToolbarButtonStyle(isActive: appState.currentTab == tab))
+                .help(tab.title)
+            }
+        }
+
         // Playback controls centered in toolbar
         // Route through sequencer VC so transport bar, playback controller,
         // and timeline all stay in sync.
@@ -473,7 +499,7 @@ struct XLMainContentView: View {
             .help("Render All")
         }
 
-        // Panel toggles on the right
+        // Panel toggles on the right — blue tint when active
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 XLCommandPaletteState.shared.toggle()
@@ -492,19 +518,40 @@ struct XLMainContentView: View {
             } label: {
                 Label("Palettes", systemImage: "rectangle.split.1x2")
             }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.topPanelVisible))
+
+            Button {
+                appState.snapEnabled.toggle()
+                XLSwiftUIWindowHelper.shared.setSnapEnabled(appState.snapEnabled)
+            } label: {
+                Label("Snap", systemImage: "arrow.right.to.line")
+            }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.snapEnabled))
+            .help("Snap to Timing Marks")
 
             Button {
                 XLSwiftUIWindowHelper.shared.toggleHousePreview()
             } label: {
                 Label("Preview", systemImage: "eye.fill")
             }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.housePreviewVisible))
             .help("House Preview (⇧⌘P)")
+
+            Button {
+                appState.songRegionOverlayVisible.toggle()
+                XLSwiftUIWindowHelper.shared.setSongRegionOverlayVisible(appState.songRegionOverlayVisible)
+            } label: {
+                Label("Song Regions", systemImage: "rectangle.split.3x1")
+            }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.songRegionOverlayVisible))
+            .help("Show Song Regions in Grid")
 
             Button {
                 appState.inspectorVisible.toggle()
             } label: {
                 Label("Inspector", systemImage: "sidebar.right")
             }
+            .buttonStyle(ToolbarToggleButtonStyle(isActive: appState.inspectorVisible))
         }
     }
 }
@@ -828,6 +875,82 @@ class HorizontalResizeHandleNSView: NSView {
         } else {
             layer?.backgroundColor = NSColor.separatorColor.cgColor
         }
+    }
+}
+
+// MARK: - Tab Toolbar Button Style
+
+/// Custom button style for tab buttons in the toolbar.
+/// Shows blue accent color when the tab is active, secondary color when inactive.
+/// SwiftUI `.tint()` does NOT work on macOS toolbar buttons, so we use a custom ButtonStyle.
+struct TabToolbarButtonStyle: ButtonStyle {
+    let isActive: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isActive ? .accentColor : .secondary)
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+    }
+}
+
+// MARK: - Toolbar Toggle Button Style
+
+/// Custom button style for toggle buttons in the right side of the toolbar.
+/// Shows blue accent color when active, secondary color when inactive.
+struct ToolbarToggleButtonStyle: ButtonStyle {
+    let isActive: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isActive ? .accentColor : .secondary)
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+    }
+}
+
+// MARK: - Sidebar Model Preview
+
+/// NSViewRepresentable wrapper for XLMetalPreviewView in the sidebar.
+/// Shows a small model preview when the sequencer tab is active.
+struct XLSidebarModelPreview: NSViewRepresentable {
+    let engineBridge: XLEngineBridge
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+
+        // Try to create the Metal preview view
+        if let previewClass = NSClassFromString("XLMetalPreviewView") as? NSView.Type {
+            let preview = previewClass.init(frame: NSRect(x: 0, y: 0, width: 250, height: 250))
+            preview.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(preview)
+            NSLayoutConstraint.activate([
+                preview.topAnchor.constraint(equalTo: container.topAnchor),
+                preview.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                preview.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                preview.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            ])
+            // Set the engine bridge on the preview view
+            if preview.responds(to: NSSelectorFromString("setEngineBridge:")) {
+                preview.setValue(engineBridge, forKey: "engineBridge")
+            }
+        } else {
+            // Fallback: placeholder view
+            let label = NSTextField(labelWithString: "Model Preview")
+            label.alignment = .center
+            label.textColor = .secondaryLabelColor
+            label.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            ])
+        }
+
+        return container
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // No updates needed
     }
 }
 

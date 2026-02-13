@@ -149,6 +149,10 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     NSTextField *_labelEditor;
     void (^_labelEditCompletion)(NSString * _Nullable);
 
+    // Song region overlay data (plain C, immune to heap corruption)
+    XLSongRegionRenderInfo *_songRegions;
+    NSUInteger _songRegionCount;
+
     // Context menu state: saved when the menu is built
     CGFloat _contextMenuTimeMS;
     NSInteger _contextMenuEffectIndex;
@@ -486,6 +490,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
     free(_multiDragEntries);
     _multiDragEntries = NULL;
     _multiDragCount = 0;
+    free(_songRegions);
+    _songRegions = NULL;
+    _songRegionCount = 0;
 }
 
 #pragma mark - Selection C Array Helpers
@@ -613,6 +620,22 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 
 - (BOOL)acceptsFirstResponder {
     return YES;
+}
+
+#pragma mark - Song Region Overlay
+
+- (void)setSongRegions:(const XLSongRegionRenderInfo *)regions count:(NSUInteger)count {
+    free(_songRegions);
+    _songRegions = NULL;
+    _songRegionCount = 0;
+
+    if (regions && count > 0) {
+        _songRegions = (XLSongRegionRenderInfo *)malloc(sizeof(XLSongRegionRenderInfo) * count);
+        memcpy(_songRegions, regions, sizeof(XLSongRegionRenderInfo) * count);
+        _songRegionCount = count;
+    }
+
+    [self setNeedsDisplay];
 }
 
 #pragma mark - Data Loading
@@ -796,7 +819,9 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
       cellHighlightActive:(_hasCellSelection && ![self isTimingRow:_cellSelectionRow])
         cellHighlightRow:_cellSelectionRow
     cellHighlightStartMS:_cellSelectionStartMS
-      cellHighlightEndMS:_cellSelectionEndMS];
+      cellHighlightEndMS:_cellSelectionEndMS
+            songRegions:(_showSongRegionOverlay ? _songRegions : NULL)
+        songRegionCount:(_showSongRegionOverlay ? _songRegionCount : 0)];
     CFAbsoluteTime metalEnd = CFAbsoluteTimeGetCurrent();
 
     // Draw timing mark labels on their own overlay layer
