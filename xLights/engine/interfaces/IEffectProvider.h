@@ -57,6 +57,7 @@ struct ElementInfo {
 
     // For submodels/strands
     std::string parentElementName;       // Parent element name if this is a submodel/strand
+    int strandIndex = -1;                // For strand elements: 0-based strand index (-1 = not a strand)
 };
 
 // Information about a single effect instance

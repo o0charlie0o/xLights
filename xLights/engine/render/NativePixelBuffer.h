@@ -123,6 +123,16 @@ struct NativeLayerInfo {
     // the effect still renders (for state tracking) but the layer is excluded
     // from calcOutput() blending.
     int suppressUntil = 0;
+
+    // Sub-buffer: viewport sub-region where the effect renders (pixel coords).
+    bool hasSubBuffer = false;
+    int subBufX1 = 0;
+    int subBufY1 = 0;
+    int subBufX2 = 0;
+    int subBufY2 = 0;
+
+    // Buffer style: node-to-buffer mapping ("Default", "Single Line", "As Pixel").
+    std::string bufferStyle = "Default";
 };
 
 // NativePixelBuffer: manages effect layers and blends them for a single model.
@@ -263,6 +273,16 @@ public:
     // Clear a single layer buffer.
     void clearLayer(int layer);
 
+    // Prepare a layer for sub-buffer rendering (resize to sub-region).
+    void prepareSubBuffer(int layer);
+    // Expand sub-buffer back to full size after effect rendering.
+    void expandSubBuffer(int layer);
+
+    // Prepare a layer for non-default buffer style (resize for style).
+    void prepareBufferStyle(int layer);
+    // Expand buffer style back to full size after effect rendering.
+    void expandBufferStyle(int layer);
+
 private:
     // Internal structure holding per-layer state
     struct LayerState {
@@ -276,6 +296,12 @@ private:
         int outputBrightness = 100;
         float outputEffectMixThreshold = 0.0f;
         int outputSparkleCount = 0;
+
+        // Sub-buffer/buffer-style tracking
+        bool subBufferActive = false;
+        int subBufOrigW = 0, subBufOrigH = 0;
+        bool bufferStyleActive = false;
+        int styleOrigW = 0, styleOrigH = 0;
 
         LayerState(IRenderContext* ctx, int w, int h)
             : buffer(ctx, w, h) {}

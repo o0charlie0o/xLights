@@ -1060,7 +1060,7 @@ NativeRenderCoordinator::buildModelJobs()
         jobs.push_back(std::move(job));
     }
 
-    // Second pass: create jobs for submodel and strand elements with effects.
+    // Pass 3: create jobs for submodel and strand elements with effects.
     // These render AFTER their parent model and overlay onto parent channels.
     for (size_t i = 0; i < elementCount; ++i) {
         ElementInfo info;
@@ -1598,7 +1598,7 @@ void NativeRenderCoordinator::renderModel(
 
         int frameIndex = timeMS / frameTimeMS;
 
-        renderModelAtTime(job, timeMS);
+        renderModelAtTime(job, timeMS, &output, frameIndex);
         writeModelOutput(job, frameIndex, output);
 
         {

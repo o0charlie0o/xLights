@@ -68,6 +68,7 @@ struct NativeElement {
 
     // For submodels/strands
     std::string parentElementName;
+    int strandIndex = -1;              // For strands: 0-based strand index
 
     // Track folder membership (empty = not in a folder)
     std::string folder;
@@ -846,6 +847,7 @@ bool NativeEffectProvider::getElement(size_t index, ElementInfo& outInfo) const
     outInfo.fixedTiming = elem->fixedTiming;
     outInfo.isActive = elem->isActive;
     outInfo.parentElementName = elem->parentElementName;
+    outInfo.strandIndex = elem->strandIndex;
 
     return true;
 }
