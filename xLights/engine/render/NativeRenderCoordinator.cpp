@@ -38,6 +38,10 @@
 #include <sstream>
 #include <thread>
 
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#endif
+
 namespace xlEngine {
 
 // =========================================================================
@@ -1134,27 +1138,346 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Parallel batch rendering for live preview
+// ---------------------------------------------------------------------------
+
+std::vector<RenderedFrame> NativeRenderCoordinator::renderAllModelsStateful(
+    const std::vector<std::string>& modelNames, int timeMS)
+{
+    std::vector<RenderedFrame> results(modelNames.size());
+
+    if (!_effectProvider || !_modelProvider || !_context) return results;
+
+    // Phase 1: Prepare all jobs under _stateMutex.
+    // This is typically fast (map lookups for existing jobs, geometry extraction
+    // only on the first frame). We collect pointers to jobs for phase 2.
+    struct PreparedModel {
+        size_t index;           // index into modelNames / results
+        ModelJob* job;          // pointer into _persistentJobs
+        bool hasSubmodels;      // needs submodel compositing after render
+    };
+    std::vector<PreparedModel> prepared;
+    prepared.reserve(modelNames.size());
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+
+        for (size_t i = 0; i < modelNames.size(); ++i) {
+            const auto& name = modelNames[i];
+            results[i].modelName = name;
+            results[i].timeMS = timeMS;
+
+            // Skip models known to have no effects
+            if (_skippedModels.count(name)) continue;
+
+            auto it = _persistentJobs.find(name);
+            if (it == _persistentJobs.end()) {
+                // Create the job — same logic as renderModelFrameStateful
+                ModelGeometry geom = extractGeometry(name);
+                if (geom.bufferWi <= 0 || geom.bufferHt <= 0) {
+                    _skippedModels.insert(name);
+                    continue;
+                }
+
+                size_t ownElemIdx = _effectProvider->getElementIndex(name);
+                bool hasOwnEffects = false;
+                size_t ownLayerCount = 0;
+                if (ownElemIdx != SIZE_MAX) {
+                    ElementInfo info;
+                    if (_effectProvider->getElement(ownElemIdx, info)) {
+                        hasOwnEffects = (info.effectCount > 0);
+                        ownLayerCount = info.effectLayerCount;
+                    }
+                }
+
+                size_t groupIdx = SIZE_MAX;
+                size_t groupLayerCount = 0;
+                std::string matchedGroupName;
+                {
+                    size_t gIdx = findParentGroupElement(name);
+                    if (gIdx != SIZE_MAX) {
+                        ElementInfo groupInfo;
+                        if (_effectProvider->getElement(gIdx, groupInfo)) {
+                            groupIdx = gIdx;
+                            groupLayerCount = groupInfo.effectLayerCount;
+                            matchedGroupName = groupInfo.name;
+                        }
+                    }
+                }
+
+                if (!hasOwnEffects && groupIdx == SIZE_MAX) {
+                    _skippedModels.insert(name);
+                    continue;
+                }
+
+                size_t elemIdx;
+                size_t totalLayerCount;
+                if (groupIdx != SIZE_MAX && hasOwnEffects) {
+                    elemIdx = ownElemIdx;
+                    totalLayerCount = groupLayerCount + ownLayerCount;
+                } else if (groupIdx != SIZE_MAX) {
+                    elemIdx = groupIdx;
+                    totalLayerCount = groupLayerCount;
+                } else {
+                    elemIdx = ownElemIdx;
+                    totalLayerCount = ownLayerCount;
+                }
+                if (totalLayerCount == 0) totalLayerCount = 1;
+
+                ModelJob job;
+                job.elementIndex = elemIdx;
+                job.layerCount = totalLayerCount;
+                job.groupElementIndex = groupIdx;
+                job.groupLayerCount = groupLayerCount;
+                job.pixelBuffer = std::make_unique<NativePixelBuffer>(
+                    _context, geom.bufferWi, geom.bufferHt,
+                    static_cast<int>(totalLayerCount), geom.nodes);
+                job.pixelBuffer->setDimmingCurve(
+                    buildDimmingCurve(_modelProvider->getDimmingInfo(name)));
+                job.geometry = std::move(geom);
+
+                // Submodel mask computation (same as renderModelFrameStateful)
+                if (!matchedGroupName.empty() && name.find('/') == std::string::npos) {
+                    auto groupAttrs = _modelProvider->getModelAttributes(matchedGroupName);
+                    auto membersIt = groupAttrs.find("models");
+                    if (membersIt != groupAttrs.end()) {
+                        bool directMatch = false;
+                        std::vector<std::string> subRefs;
+                        std::set<std::string> visited;
+                        visited.insert(matchedGroupName);
+                        collectSubmodelRefsRecursive(name, membersIt->second,
+                                                     _modelProvider, subRefs, directMatch, visited);
+                        if (!directMatch && !subRefs.empty()) {
+                            auto parentAttrs = _modelProvider->getModelAttributes(name);
+                            auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+                            std::set<std::pair<int,int>> validPos;
+                            for (const auto& ref : subRefs) {
+                                size_t sl = ref.find('/');
+                                std::string subName = ref.substr(sl + 1);
+                                auto subAttrs = _modelProvider->getSubmodelAttributes(name, subName);
+                                if (!subAttrs.empty()) {
+                                    auto nodeIndices = getSubmodelNodeIndices(
+                                        static_cast<int>(allParentNodes.size()), subAttrs);
+                                    for (int idx : nodeIndices) {
+                                        validPos.insert({allParentNodes[idx].bufX,
+                                                         allParentNodes[idx].bufY});
+                                    }
+                                }
+                            }
+                            if (!validPos.empty()) {
+                                job.hasSubmodelMask = true;
+                                job.submodelMaskPositions = validPos;
+                                job.pixelBuffer->setSubmodelMask(validPos);
+                            }
+                        }
+                    }
+                }
+
+                auto [inserted, _] = _persistentJobs.emplace(name, std::move(job));
+                it = inserted;
+            }
+
+            prepared.push_back({i, &it->second, name.find('/') == std::string::npos});
+        }
+
+        // Also prepare submodel/strand jobs that we'll need in phase 3.
+        // This avoids needing _stateMutex during the submodel compositing phase.
+        for (const auto& pm : prepared) {
+            if (!pm.hasSubmodels) continue;
+            const auto& name = modelNames[pm.index];
+            ModelJob& parentJob = *pm.job;
+
+            size_t elCnt = _effectProvider->getElementCount();
+            for (size_t ei = 0; ei < elCnt; ++ei) {
+                ElementInfo subInfo;
+                if (!_effectProvider->getElement(ei, subInfo)) continue;
+                if (subInfo.type != SequenceElementType::Submodel &&
+                    subInfo.type != SequenceElementType::Strand) continue;
+                if (subInfo.renderDisabled || subInfo.effectCount == 0) continue;
+                if (subInfo.parentElementName != name) continue;
+
+                if (_persistentJobs.find(subInfo.name) != _persistentJobs.end()) continue;
+
+                size_t slash = subInfo.name.find('/');
+                if (slash == std::string::npos) continue;
+                std::string pName = subInfo.name.substr(0, slash);
+
+                ModelGeometry subGeom;
+                if (subInfo.type == SequenceElementType::Strand && subInfo.strandIndex >= 0) {
+                    auto pAttrs = _modelProvider->getModelAttributes(pName);
+                    auto pNodes = generateNodesFromAttributes(pAttrs);
+                    auto sNodes = filterNodesToStrand(pNodes, subInfo.strandIndex, pAttrs);
+                    if (sNodes.empty()) continue;
+                    subGeom.name = subInfo.name;
+                    int mBX = 0, mBY = 0;
+                    for (const auto& nc : sNodes) { if (nc.bufX > mBX) mBX = nc.bufX; if (nc.bufY > mBY) mBY = nc.bufY; }
+                    subGeom.bufferWi = mBX + 1;
+                    subGeom.bufferHt = mBY + 1;
+                    subGeom.startChannel = parentJob.geometry.startChannel;
+                    int cpn = 3;
+                    auto stIt = pAttrs.find("StringType");
+                    if (stIt != pAttrs.end()) {
+                        const std::string& st = stIt->second;
+                        if (st.find("RGBW") != std::string::npos || st.find("WRGB") != std::string::npos || st.find("4 Channel") != std::string::npos) cpn = 4;
+                        else if (st.find("Single Color") != std::string::npos) cpn = 1;
+                    }
+                    for (const auto& nc : sNodes) {
+                        NativeNodeInfo nd; nd.bufX = nc.bufX; nd.bufY = nc.bufY;
+                        int ci = (nc.parentNodeIndex >= 0) ? nc.parentNodeIndex : static_cast<int>(&nc - &sNodes[0]);
+                        nd.actChannel = subGeom.startChannel + ci * cpn; nd.channelsPerNode = cpn;
+                        subGeom.nodes.push_back(nd);
+                    }
+                    subGeom.nodeCount = static_cast<uint32_t>(subGeom.nodes.size());
+                    subGeom.channelCount = subGeom.nodeCount * cpn;
+                } else {
+                    subGeom = extractGeometry(subInfo.name);
+                }
+                if (subGeom.bufferWi <= 0 || subGeom.bufferHt <= 0) continue;
+
+                size_t sLC = subInfo.effectLayerCount; if (sLC == 0) sLC = 1;
+                ModelJob sj;
+                sj.elementIndex = ei; sj.layerCount = sLC; sj.isSubmodelJob = true;
+                sj.parentModelName = pName; sj.strandIndex = subInfo.strandIndex;
+                sj.pixelBuffer = std::make_unique<NativePixelBuffer>(
+                    _context, subGeom.bufferWi, subGeom.bufferHt, static_cast<int>(sLC), subGeom.nodes);
+                sj.pixelBuffer->setDimmingCurve(buildDimmingCurve(_modelProvider->getDimmingInfo(pName)));
+                sj.geometry = std::move(subGeom);
+                _persistentJobs.emplace(subInfo.name, std::move(sj));
+            }
+        }
+    }
+    // _stateMutex released — all jobs are now in _persistentJobs.
+
+    if (prepared.empty()) return results;
+
+    // Phase 2: Render all models in parallel.
+    // Each model writes only to its own ModelJob's pixel buffer, so there's
+    // no contention between models. The only shared state is _renderCache,
+    // which is protected by _renderCacheMutex.
+#ifdef __APPLE__
+    dispatch_apply(prepared.size(), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
+        ^(size_t idx) {
+            renderModelAtTime(*prepared[idx].job, timeMS);
+        });
+#else
+    for (auto& pm : prepared) {
+        renderModelAtTime(*pm.job, timeMS);
+    }
+#endif
+
+    // Phase 3: Submodel compositing + pixel extraction (serial).
+    // Submodel overlays must happen after parent rendering is complete.
+    // This is fast compared to effect rendering.
+    for (const auto& pm : prepared) {
+        ModelJob& job = *pm.job;
+        const auto& name = modelNames[pm.index];
+        int w = job.geometry.bufferWi;
+        int h = job.geometry.bufferHt;
+
+        results[pm.index].width = w;
+        results[pm.index].height = h;
+
+        // Submodel compositing
+        if (pm.hasSubmodels) {
+            size_t elCnt = _effectProvider->getElementCount();
+            for (size_t ei = 0; ei < elCnt; ++ei) {
+                ElementInfo subInfo;
+                if (!_effectProvider->getElement(ei, subInfo)) continue;
+                if (subInfo.type != SequenceElementType::Submodel &&
+                    subInfo.type != SequenceElementType::Strand) continue;
+                if (subInfo.renderDisabled || subInfo.effectCount == 0) continue;
+                if (subInfo.parentElementName != name) continue;
+
+                auto subIt = _persistentJobs.find(subInfo.name);
+                if (subIt == _persistentJobs.end()) continue;
+
+                ModelJob& subJob = subIt->second;
+                renderModelAtTime(subJob, timeMS);
+
+                const auto& parentNds = job.geometry.nodes;
+                const auto& subNds = subJob.geometry.nodes;
+                const uint8_t* subPx = subJob.pixelBuffer->getBlendedPixelData();
+                size_t subSz = subJob.pixelBuffer->getBlendedPixelDataSize();
+                if (!subPx || subSz == 0) continue;
+                uint8_t* parPx = const_cast<uint8_t*>(job.pixelBuffer->getBlendedPixelData());
+                size_t parSz = job.pixelBuffer->getBlendedPixelDataSize();
+                if (!parPx || parSz == 0) continue;
+                int subW2 = subJob.geometry.bufferWi;
+
+                std::unordered_map<uint32_t, std::pair<int,int>> chToPos;
+                for (const auto& pn : parentNds) chToPos[pn.actChannel] = {pn.bufX, pn.bufY};
+
+                for (size_t ni = 0; ni < subNds.size(); ++ni) {
+                    auto pit = chToPos.find(subNds[ni].actChannel);
+                    if (pit == chToPos.end()) continue;
+                    size_t si = (static_cast<size_t>(subNds[ni].bufY) * subW2 + subNds[ni].bufX) * 4;
+                    if (si + 3 >= subSz) continue;
+                    if (!subPx[si] && !subPx[si+1] && !subPx[si+2]) continue;
+                    size_t pi2 = (static_cast<size_t>(pit->second.second) * w + pit->second.first) * 4;
+                    if (pi2 + 3 >= parSz) continue;
+                    parPx[pi2] = subPx[si]; parPx[pi2+1] = subPx[si+1];
+                    parPx[pi2+2] = subPx[si+2]; parPx[pi2+3] = subPx[si+3];
+                }
+            }
+        }
+
+        // Extract pixel data
+        const uint8_t* pixelData = job.pixelBuffer->getBlendedPixelData();
+        size_t dataSize = job.pixelBuffer->getBlendedPixelDataSize();
+        if (pixelData && dataSize > 0) {
+            results[pm.index].pixels.resize(dataSize);
+            std::memcpy(results[pm.index].pixels.data(), pixelData, dataSize);
+
+            // Apply submodel mask
+            if (job.hasSubmodelMask && !job.submodelMaskPositions.empty()) {
+                auto& px = results[pm.index].pixels;
+                for (int y = 0; y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        if (job.submodelMaskPositions.find({x, y}) ==
+                            job.submodelMaskPositions.end()) {
+                            size_t pIdx = (static_cast<size_t>(y) * w + x) * 4;
+                            if (pIdx + 3 < px.size()) {
+                                px[pIdx] = 0; px[pIdx+1] = 0;
+                                px[pIdx+2] = 0; px[pIdx+3] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return results;
+}
+
 void NativeRenderCoordinator::resetPersistentState() {
     std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.clear();
     _skippedModels.clear();
-    _renderCache.clear();
+    {
+        std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
+        _renderCache.clear();
+    }
 }
 
 void NativeRenderCoordinator::resetPersistentState(const std::string& modelName) {
     std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.erase(modelName);
     _skippedModels.erase(modelName);
-    _renderCache.clearModel(modelName);
+    {
+        std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
+        _renderCache.clearModel(modelName);
+    }
 }
 
 void NativeRenderCoordinator::invalidateAllCaches() {
-    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+    std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
     _renderCache.clear();
 }
 
 void NativeRenderCoordinator::invalidateCache(const std::string& modelName) {
-    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+    std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
     _renderCache.clearModel(modelName);
 }
 
@@ -2275,12 +2598,15 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             effectHash = RenderFrameCache::hashEffect(
                 effectInfo.effectType, effectInfo.settings, effectInfo.palette);
             RenderFrameCache::CachedLayer cached;
-            if (_renderCache.get(job.geometry.name, static_cast<int>(layer),
-                                 effectHash, timeMS, cached)) {
-                if (cached.width == buf.BufferWi && cached.height == buf.BufferHt) {
-                    std::memcpy(buf.GetPixels(), cached.pixels.data(),
-                                cached.pixels.size() * sizeof(xlColor));
-                    cacheHit = true;
+            {
+                std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
+                if (_renderCache.get(job.geometry.name, static_cast<int>(layer),
+                                     effectHash, timeMS, cached)) {
+                    if (cached.width == buf.BufferWi && cached.height == buf.BufferHt) {
+                        std::memcpy(buf.GetPixels(), cached.pixels.data(),
+                                    cached.pixels.size() * sizeof(xlColor));
+                        cacheHit = true;
+                    }
                 }
             }
         }
@@ -2358,8 +2684,11 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                 toCache.pixels.resize(pixelCount);
                 std::memcpy(toCache.pixels.data(), buf.GetPixels(),
                             pixelCount * sizeof(xlColor));
-                _renderCache.put(job.geometry.name, static_cast<int>(layer),
-                                 effectHash, timeMS, toCache);
+                {
+                    std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
+                    _renderCache.put(job.geometry.name, static_cast<int>(layer),
+                                     effectHash, timeMS, toCache);
+                }
             }
         }
 

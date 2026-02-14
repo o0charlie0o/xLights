@@ -387,8 +387,10 @@ private:
 
     // Persistent coordinator for batch live preview rendering (renderFrame).
     // Kept alive across renderFrame() calls so stateful effects accumulate.
-    std::unique_ptr<NativeRenderCoordinator> _liveCoordinator;
-    std::unique_ptr<IRenderContext> _liveContext;
+    // Uses shared_ptr so the parallel render loop can hold a reference even
+    // if invalidateAllCaches() resets it from another thread.
+    std::shared_ptr<NativeRenderCoordinator> _liveCoordinator;
+    std::shared_ptr<IRenderContext> _liveContext;
     int _lastLiveRenderTimeMS = -1; // for backward scrub detection
 
     // Separate coordinator for per-model sidebar rendering (renderModelFrame).

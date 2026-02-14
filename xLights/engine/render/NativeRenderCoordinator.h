@@ -275,6 +275,14 @@ public:
     // so stateful effects (Fire, etc.) accumulate properly across frames.
     RenderedFrame renderModelFrameStateful(const std::string& modelName, int timeMS);
 
+    // Render all models in parallel using persistent state.
+    // Creates/looks up all ModelJobs under a single lock, then dispatches
+    // rendering across multiple threads via GCD dispatch_apply.
+    // Returns a vector of RenderedFrames (one per model, may be invalid if
+    // the model has no effects).
+    std::vector<RenderedFrame> renderAllModelsStateful(
+        const std::vector<std::string>& modelNames, int timeMS);
+
     // Reset all persistent model state (call on backward scrub or effect edit).
     void resetPersistentState();
 
@@ -440,8 +448,9 @@ private:
 
     // In-memory LRU cache for rendered effect layers. Avoids redundant
     // re-rendering when scrubbing or re-visiting frames with unchanged effects.
-    // Protected by _stateMutex (same lock as _persistentJobs).
+    // Protected by _renderCacheMutex for thread-safe access during parallel rendering.
     RenderFrameCache _renderCache;
+    mutable std::mutex _renderCacheMutex;
 };
 
 } // namespace xlEngine

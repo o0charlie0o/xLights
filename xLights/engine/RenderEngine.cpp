@@ -940,6 +940,11 @@ void RenderEngine::renderFrame(int timeMS)
         // Effect-based live rendering with persistent state.
         // The coordinator and its ModelJobs are kept alive across frames so
         // stateful effects (Fire, etc.) accumulate properly.
+        //
+        // Models are rendered in parallel using GCD dispatch_apply.
+        // Each model has its own pixel buffer, so there is no contention
+        // between models during rendering. The only shared state is the
+        // render cache, which uses its own mutex.
         int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
         if (frameTimeMS <= 0) frameTimeMS = 50;
 
@@ -953,64 +958,65 @@ void RenderEngine::renderFrame(int timeMS)
         auto modelNames = _modelProvider->getModelNames();
 
         auto frameStart = std::chrono::steady_clock::now();
-        int modelsRendered = 0;
 
-        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        // Capture a shared_ptr to the coordinator so it stays alive even if
+        // invalidateAllCaches() resets _liveCoordinator on another thread.
+        std::shared_ptr<NativeRenderCoordinator> coordinator;
+        {
+            std::lock_guard<std::mutex> lock(_bufferCacheMutex);
 
-        // Create or reuse persistent live coordinator.
-        // Must be under _bufferCacheMutex because invalidateAllCaches() can
-        // reset _liveCoordinator from another thread while holding this lock.
-        if (!_liveCoordinator) {
-            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
-            _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
-                _effectProvider, _modelProvider, _liveContext.get());
-            _lastLiveRenderTimeMS = -1;
+            if (!_liveCoordinator) {
+                _liveContext = std::make_shared<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
+                _liveCoordinator = std::make_shared<NativeRenderCoordinator>(
+                    _effectProvider, _modelProvider, _liveContext.get());
+                _lastLiveRenderTimeMS = -1;
+            }
+
+            if (_lastLiveRenderTimeMS >= 0 && timeMS < _lastLiveRenderTimeMS) {
+                _liveCoordinator->resetPersistentState();
+            }
+            _lastLiveRenderTimeMS = timeMS;
+
+            coordinator = _liveCoordinator;
         }
-
-        // Detect backward scrub: if time went backward, reset effect state
-        // so stateful effects restart cleanly rather than showing stale data.
-        if (_lastLiveRenderTimeMS >= 0 && timeMS < _lastLiveRenderTimeMS) {
-            _liveCoordinator->resetPersistentState();
-        }
-        _lastLiveRenderTimeMS = timeMS;
-        _bufferCache.clear();
+        // _bufferCacheMutex released — coordinator is kept alive by shared_ptr.
 
         // Log which rendering path we're on (once)
         static bool sLivePathLogged = false;
         if (!sLivePathLogged) {
-            printf("[SUBDBG] renderFrame(%dms): LIVE EFFECT PATH, %zu models from provider\n",
+            printf("[SUBDBG] renderFrame(%dms): LIVE EFFECT PATH (parallel), %zu models from provider\n",
                    timeMS, modelNames.size());
             sLivePathLogged = true;
         }
 
-        for (const auto& name : modelNames) {
-            auto modelStart = std::chrono::steady_clock::now();
-            RenderedFrame rf = _liveCoordinator->renderModelFrameStateful(name, timeMS);
-            auto modelEnd = std::chrono::steady_clock::now();
-            auto modelUS = std::chrono::duration_cast<std::chrono::microseconds>(modelEnd - modelStart).count();
+        // Render all models in parallel via the coordinator.
+        auto allFrames = coordinator->renderAllModelsStateful(modelNames, timeMS);
 
-            if (rf.isValid()) {
-                if (modelUS > 2000) { // Log models taking > 2ms
-                    printf("[LiveRender] Model '%s' took %.1fms (%dx%d)\n",
-                           name.c_str(), modelUS / 1000.0, rf.width, rf.height);
+        // Write results to _bufferCache under the lock.
+        int modelsRendered = 0;
+        {
+            std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+            _bufferCache.clear();
+
+            for (size_t i = 0; i < allFrames.size(); ++i) {
+                auto& rf = allFrames[i];
+                if (rf.isValid()) {
+                    modelsRendered++;
+                    FrameBuffer fb;
+                    fb.modelName = rf.modelName;
+                    fb.width = rf.width;
+                    fb.height = rf.height;
+                    fb.timeMS = rf.timeMS;
+                    fb.pixels = std::move(rf.pixels);
+                    _bufferCache[modelNames[i]] = std::move(fb);
                 }
-                modelsRendered++;
-                FrameBuffer fb;
-                fb.modelName = rf.modelName;
-                fb.width = rf.width;
-                fb.height = rf.height;
-                fb.timeMS = rf.timeMS;
-                fb.pixels = std::move(rf.pixels);
-                _bufferCache[name] = std::move(fb);
             }
-            // Models with no effects return empty frames — skip them entirely.
-            // No need to create zeroed buffers for 196 inactive models.
         }
 
         auto frameEnd = std::chrono::steady_clock::now();
         auto frameUS = std::chrono::duration_cast<std::chrono::microseconds>(frameEnd - frameStart).count();
-        printf("[LiveRender] Frame @%dms: %d models rendered in %.1fms (budget=%dms)\n",
-               timeMS, modelsRendered, frameUS / 1000.0, frameTimeMS);
+        printf("[LiveRender] Frame @%dms: %d/%zu models in %.1fms (budget=%dms)\n",
+               timeMS, modelsRendered, modelNames.size(), frameUS / 1000.0, frameTimeMS);
 
         notifyFrameRendered(timeMS);
     }
