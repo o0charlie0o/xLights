@@ -406,6 +406,14 @@ typedef struct __attribute__((packed)) {
 /// Clear all rendered pixel data (stop showing preview colors)
 - (void)clearRenderedPixels;
 
+/// Build the per-node color buffer directly from rendered pixel data.
+/// This method is safe to call from any queue (render queue, background queue).
+/// It writes to the next available triple-buffer slot and atomically publishes
+/// the result so the main-queue draw method can pick it up without blocking.
+///
+/// @param frameUpdates Array of @[modelName (NSString), pixelData (NSData), width (NSNumber), height (NSNumber)]
+- (void)buildColorBufferFromFrameUpdates:(NSArray<NSArray *> *)frameUpdates;
+
 /// Set whether to show rendered effect colors on models vs static layout colors
 @property (nonatomic, assign) BOOL showEffectColors;
 

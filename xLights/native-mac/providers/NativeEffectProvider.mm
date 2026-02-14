@@ -419,8 +419,199 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
                     }
                 }
             }
+            std::string parentModelName = element->name;
             _elementsByName[element->name] = _elements.size();
             _elements.push_back(std::move(element));
+
+            // Parse SubModelEffectLayer nodes — submodel effects stored as
+            // children of the parent model's Element node in the XML.
+            NSArray* subModelNodes = [elemNode nodesForXPath:@"SubModelEffectLayer" error:nil];
+            for (NSXMLElement* subNode in subModelNodes) {
+                NSXMLNode* subNameAttr = [subNode attributeForName:@"name"];
+                if (!subNameAttr || subNameAttr.stringValue.length == 0) continue;
+
+                std::string subName = std::string([subNameAttr.stringValue UTF8String]);
+                std::string fullSubName = parentModelName + "/" + subName;
+                int layerIdx = 0;
+                NSXMLNode* layerAttr = [subNode attributeForName:@"layer"];
+                if (layerAttr) layerIdx = [layerAttr.stringValue intValue];
+
+                auto subIt = _elementsByName.find(fullSubName);
+                NativeElement* subElem = nullptr;
+                if (subIt != _elementsByName.end()) {
+                    subElem = _elements[subIt->second].get();
+                } else {
+                    auto newSub = std::make_unique<NativeElement>();
+                    newSub->name = fullSubName;
+                    newSub->fullName = fullSubName;
+                    newSub->modelName = parentModelName;
+                    newSub->type = SequenceElementType::Submodel;
+                    newSub->parentElementName = parentModelName;
+                    newSub->visible = true;
+                    subElem = newSub.get();
+                    _elementsByName[fullSubName] = _elements.size();
+                    _elements.push_back(std::move(newSub));
+                }
+
+                while ((int)subElem->layers.size() <= layerIdx) {
+                    subElem->layers.push_back(std::make_unique<NativeEffectLayer>());
+                }
+
+                NSArray* subEffectNodes = [subNode nodesForXPath:@"Effect" error:nil];
+                for (NSXMLElement* effectNode in subEffectNodes) {
+                    auto effect = std::make_unique<NativeEffect>();
+                    effect->effectId = _nextEffectId++;
+
+                    NSXMLNode* nameAttrEff = [effectNode attributeForName:@"name"];
+                    if (nameAttrEff && nameAttrEff.stringValue.length > 0) {
+                        effect->effectType = std::string([nameAttrEff.stringValue UTF8String]);
+                    }
+
+                    NSXMLNode* refAttr = [effectNode attributeForName:@"ref"];
+                    if (refAttr) {
+                        int refIdx = [refAttr.stringValue intValue];
+                        if (refIdx >= 0 && (size_t)refIdx < effectDBEntries.size()) {
+                            NSString* dbEntry = effectDBEntries[refIdx];
+                            if (dbEntry.length > 0) parseKVString(dbEntry, effect->settings);
+                        }
+                    }
+                    if (effect->settings.empty()) {
+                        NSXMLNode* inlineAttr = [effectNode attributeForName:@"settings"];
+                        if (inlineAttr && inlineAttr.stringValue.length > 0)
+                            parseKVString(inlineAttr.stringValue, effect->settings);
+                    }
+
+                    for (size_t ei = 0; ei < _effectTypes.size(); ++ei) {
+                        if (_effectTypes[ei].name == effect->effectType) {
+                            effect->effectTypeIndex = static_cast<int>(ei);
+                            break;
+                        }
+                    }
+
+                    NSXMLNode* startAttr = [effectNode attributeForName:@"startTime"];
+                    effect->startTimeMS = startAttr ? [startAttr.stringValue intValue] : 0;
+                    NSXMLNode* endAttr = [effectNode attributeForName:@"endTime"];
+                    effect->endTimeMS = endAttr ? [endAttr.stringValue intValue] : 0;
+
+                    NSXMLNode* paletteAttr = [effectNode attributeForName:@"palette"];
+                    if (paletteAttr) {
+                        int palIdx = [paletteAttr.stringValue intValue];
+                        if (palIdx >= 0 && (size_t)palIdx < colorPaletteEntries.size())
+                            parseKVString(colorPaletteEntries[palIdx], effect->palette);
+                    }
+                    if (effect->palette.empty() && paletteAttr && paletteAttr.stringValue.length > 0) {
+                        NSString* palStr = paletteAttr.stringValue;
+                        if ([palStr containsString:@"="]) parseKVString(palStr, effect->palette);
+                    }
+
+                    _effectsById[effect->effectId] = effect.get();
+                    subElem->layers[layerIdx]->effects.push_back(std::move(effect));
+                }
+                subElem->layers[layerIdx]->sortEffects();
+
+                printf("[SUBMODEL_PARSE] '%s': layer=%d effects=%zu\n",
+                       fullSubName.c_str(), layerIdx,
+                       subElem->layers[layerIdx]->effects.size());
+            }
+
+            // Parse Strand nodes — strand effects stored as children of the parent
+            NSArray* strandNodes = [elemNode nodesForXPath:@"Strand" error:nil];
+            for (NSXMLElement* strandNode in strandNodes) {
+                NSXMLNode* indexAttr = [strandNode attributeForName:@"index"];
+                if (!indexAttr) continue;
+                int strandIdx = [indexAttr.stringValue intValue];
+
+                NSXMLNode* strandNameAttr = [strandNode attributeForName:@"name"];
+                std::string strandName;
+                if (strandNameAttr && strandNameAttr.stringValue.length > 0) {
+                    strandName = std::string([strandNameAttr.stringValue UTF8String]);
+                } else {
+                    strandName = "Strand " + std::to_string(strandIdx + 1);
+                }
+                std::string fullStrandName = parentModelName + "/" + strandName;
+
+                int layerIdx = 0;
+                NSXMLNode* layerAttr = [strandNode attributeForName:@"layer"];
+                if (layerAttr) layerIdx = [layerAttr.stringValue intValue];
+
+                auto strandIt = _elementsByName.find(fullStrandName);
+                NativeElement* strandElem = nullptr;
+                if (strandIt != _elementsByName.end()) {
+                    strandElem = _elements[strandIt->second].get();
+                } else {
+                    auto newStrand = std::make_unique<NativeElement>();
+                    newStrand->name = fullStrandName;
+                    newStrand->fullName = fullStrandName;
+                    newStrand->modelName = parentModelName;
+                    newStrand->type = SequenceElementType::Strand;
+                    newStrand->parentElementName = parentModelName;
+                    newStrand->strandIndex = strandIdx;
+                    newStrand->visible = true;
+                    strandElem = newStrand.get();
+                    _elementsByName[fullStrandName] = _elements.size();
+                    _elements.push_back(std::move(newStrand));
+                }
+
+                while ((int)strandElem->layers.size() <= layerIdx) {
+                    strandElem->layers.push_back(std::make_unique<NativeEffectLayer>());
+                }
+
+                NSArray* strandEffectNodes = [strandNode nodesForXPath:@"Effect" error:nil];
+                for (NSXMLElement* effectNode in strandEffectNodes) {
+                    auto effect = std::make_unique<NativeEffect>();
+                    effect->effectId = _nextEffectId++;
+
+                    NSXMLNode* nameAttrEff = [effectNode attributeForName:@"name"];
+                    if (nameAttrEff && nameAttrEff.stringValue.length > 0) {
+                        effect->effectType = std::string([nameAttrEff.stringValue UTF8String]);
+                    }
+
+                    NSXMLNode* refAttr = [effectNode attributeForName:@"ref"];
+                    if (refAttr) {
+                        int refIdx = [refAttr.stringValue intValue];
+                        if (refIdx >= 0 && (size_t)refIdx < effectDBEntries.size()) {
+                            NSString* dbEntry = effectDBEntries[refIdx];
+                            if (dbEntry.length > 0) parseKVString(dbEntry, effect->settings);
+                        }
+                    }
+                    if (effect->settings.empty()) {
+                        NSXMLNode* inlineAttr = [effectNode attributeForName:@"settings"];
+                        if (inlineAttr && inlineAttr.stringValue.length > 0)
+                            parseKVString(inlineAttr.stringValue, effect->settings);
+                    }
+
+                    for (size_t ei = 0; ei < _effectTypes.size(); ++ei) {
+                        if (_effectTypes[ei].name == effect->effectType) {
+                            effect->effectTypeIndex = static_cast<int>(ei);
+                            break;
+                        }
+                    }
+
+                    NSXMLNode* startAttr = [effectNode attributeForName:@"startTime"];
+                    effect->startTimeMS = startAttr ? [startAttr.stringValue intValue] : 0;
+                    NSXMLNode* endAttr = [effectNode attributeForName:@"endTime"];
+                    effect->endTimeMS = endAttr ? [endAttr.stringValue intValue] : 0;
+
+                    NSXMLNode* paletteAttr = [effectNode attributeForName:@"palette"];
+                    if (paletteAttr) {
+                        int palIdx = [paletteAttr.stringValue intValue];
+                        if (palIdx >= 0 && (size_t)palIdx < colorPaletteEntries.size())
+                            parseKVString(colorPaletteEntries[palIdx], effect->palette);
+                    }
+                    if (effect->palette.empty() && paletteAttr && paletteAttr.stringValue.length > 0) {
+                        NSString* palStr = paletteAttr.stringValue;
+                        if ([palStr containsString:@"="]) parseKVString(palStr, effect->palette);
+                    }
+
+                    _effectsById[effect->effectId] = effect.get();
+                    strandElem->layers[layerIdx]->effects.push_back(std::move(effect));
+                }
+                strandElem->layers[layerIdx]->sortEffects();
+
+                printf("[STRAND_PARSE] '%s': strandIdx=%d layer=%d effects=%zu\n",
+                       fullStrandName.c_str(), strandIdx, layerIdx,
+                       strandElem->layers[layerIdx]->effects.size());
+            }
         }
 
         // Parse track folders

@@ -14,6 +14,8 @@
 #import "XLPolylinePointRenderer.h"
 #import "../XLEngineBridge.h"
 #import <QuartzCore/CVDisplayLink.h>
+#import <stdatomic.h>
+#import <os/lock.h>
 
 static const NSUInteger kDefaultMSAASampleCount = 4;
 static const float kGridExtent = 1000.0f;
@@ -173,6 +175,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSArray<NSString *> *_flatModelNames;         // model name per lookup entry
     NSArray<NSString *> *_flatModelShadowSources;  // ShadowModelFor per lookup (nil if none)
     BOOL _flatNodesDirty;                          // rebuilt on next vertex build if YES
+
+    // Render-queue color buffer production (Phase 4: off-main-queue color building).
+    // The render queue writes color data into _renderQueueColorRing slots and
+    // atomically publishes the latest completed slot index. The main-queue draw
+    // method reads this index and uses the corresponding buffer directly.
+    id<MTLBuffer> _renderQueueColorRing[3];
+    NSUInteger _renderQueueColorCapacity[3];       // in nodes
+    atomic_uint _rqLatestColorIndex;               // latest completed ring slot (written by render queue)
+    atomic_uint _rqLatestNodeCount;                // node count for latest completed buffer
+    atomic_uint _rqWriteIndex;                     // next ring slot to write (render queue only)
+    atomic_bool _rqColorAvailable;                 // whether render queue has produced at least one buffer
 }
 
 #pragma mark - Initialization
@@ -256,6 +269,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _flatModelNames = nil;
     _flatModelShadowSources = nil;
     _flatNodesDirty = YES;
+
+    // Render-queue color buffer production
+    atomic_init(&_rqLatestColorIndex, 0);
+    atomic_init(&_rqLatestNodeCount, 0);
+    atomic_init(&_rqWriteIndex, 0);
+    atomic_init(&_rqColorAvailable, false);
 
     // Background image defaults
     _backgroundBrightness = 1.0f;
@@ -890,13 +909,31 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         _contentDirty = NO;
 
         // Rebuild model vertices if selection/highlight changed OR pixel data updated.
-        // Pixel data updates (from setRenderedPixels:) increment _pixelDataGeneration;
-        // we coalesce all updates since the last render into a single rebuild here.
-        BOOL pixelDataChanged = _showEffectColors && _lastPixelDataGeneration != _pixelDataGeneration;
-        if (_modelVerticesDirty || pixelDataChanged) {
+        //
+        // Phase 4 optimization: during playback, the render queue builds color
+        // buffers directly via buildColorBufferFromFrameUpdates:. Check if a
+        // render-queue buffer is available and use it, avoiding the expensive
+        // main-queue buildModelVerticesWithEffectColors: entirely.
+        if (atomic_load(&_rqColorAvailable)) {
+            // Render queue has produced a color buffer — use it directly.
+            unsigned int rqIdx = atomic_load(&_rqLatestColorIndex);
+            unsigned int rqCount = atomic_load(&_rqLatestNodeCount);
+            if (_renderQueueColorRing[rqIdx] != nil && rqCount > 0) {
+                _modelVertexBuffer = _renderQueueColorRing[rqIdx];
+                _modelVertexCount = (NSUInteger)rqCount;
+            }
+            // Clear the dirty flags since we've consumed the render-queue output
             _modelVerticesDirty = NO;
             _lastPixelDataGeneration = _pixelDataGeneration;
-            [self buildModelVerticesWithEffectColors:_showEffectColors];
+        } else {
+            // Fallback: no render-queue buffer available (layout mode, or first frame).
+            // Use the original main-queue path.
+            BOOL pixelDataChanged = _showEffectColors && _lastPixelDataGeneration != _pixelDataGeneration;
+            if (_modelVerticesDirty || pixelDataChanged) {
+                _modelVerticesDirty = NO;
+                _lastPixelDataGeneration = _pixelDataGeneration;
+                [self buildModelVerticesWithEffectColors:_showEffectColors];
+            }
         }
 
         CGSize drawableSize = _mlayer.drawableSize;
@@ -1154,6 +1191,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     if (!_engineBridge) {
         _modelDataCache = @[];
         _flatNodesDirty = YES;
+        atomic_store(&_rqColorAvailable, false);
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
         _positionBuffer = nil;
@@ -1212,6 +1250,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)loadModelData:(NSArray<NSDictionary *> *)modelData {
     _modelDataCache = [modelData copy];
     _flatNodesDirty = YES;
+    atomic_store(&_rqColorAvailable, false);
     [self buildModelVertices];
     _contentDirty = YES;
     _scrollbarsDirty = YES;
@@ -1678,6 +1717,150 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _modelVertexBuffer = _colorBufferRing[ringIdx];
 }
 
+#pragma mark - Render Queue Color Building (Off-Main-Queue)
+
+- (void)buildColorBufferFromFrameUpdates:(NSArray<NSArray *> *)frameUpdates {
+    // This method is called from the render queue (or any background queue).
+    // It builds a color buffer using the pre-flattened node arrays and
+    // atomically publishes the result for the main-queue draw method.
+    //
+    // Safety: reads _flatNodes/_flatModelLookups/_flatModelNames which are
+    // only written on the main queue during rebuildFlatNodeArrays. During
+    // playback, model reloads don't happen (previewRenderingActive gates this),
+    // so there's no data race. If flat nodes haven't been built yet, bail out.
+
+    if (_flatNodes == NULL || _flatNodeCount == 0 || _positionBuffer == nil) {
+        return;
+    }
+
+    // Build a lookup dictionary from frameUpdates: modelName -> (pixels, width, height)
+    NSMutableDictionary<NSString *, NSArray *> *pixelLookup =
+        [[NSMutableDictionary alloc] initWithCapacity:frameUpdates.count];
+    for (NSArray *fb in frameUpdates) {
+        NSString *name = fb[0];
+        NSData *pixels = fb[1];
+        NSNumber *width = fb[2];
+        NSNumber *height = fb[3];
+        if (pixels && [pixels length] > 0 && [width unsignedIntegerValue] > 0) {
+            pixelLookup[name] = @[pixels, width, height];
+        }
+    }
+
+    NSUInteger totalNodes = _flatNodeCount;
+
+    // Pick the next ring slot for writing (render queue owns _rqWriteIndex).
+    unsigned int writeIdx = atomic_load(&_rqWriteIndex);
+    unsigned int ringIdx = writeIdx % 3;
+    atomic_store(&_rqWriteIndex, (writeIdx + 1) % 3);
+
+    // Ensure the ring slot is large enough.
+    if (_renderQueueColorRing[ringIdx] == nil || _renderQueueColorCapacity[ringIdx] < totalNodes) {
+        NSUInteger newCapacity = (NSUInteger)(totalNodes * 1.5);
+        _renderQueueColorRing[ringIdx] = [_device newBufferWithLength:newCapacity * sizeof(XLNodeColor)
+                                                               options:MTLResourceStorageModeShared];
+        [_renderQueueColorRing[ringIdx] setLabel:@"RQModelColors"];
+        _renderQueueColorCapacity[ringIdx] = newCapacity;
+    }
+
+    XLNodeColor *colors = (XLNodeColor *)_renderQueueColorRing[ringIdx].contents;
+
+    // Snapshot selection state from main thread — these are atomic reads of
+    // Obj-C properties. During playback the selection rarely changes, so
+    // a brief inconsistency is acceptable (next frame corrects it).
+    NSString *selectedModel = _selectedModelName;
+    NSOrderedSet<NSString *> *selectedSet = [_selectedModelNamesSet copy];
+    NSDictionary<NSString *, NSIndexSet *> *submodelIndices = [_selectedSubmodelNodeIndices copy];
+
+    for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+        XLModelLookup *lookup = &_flatModelLookups[mi];
+        NSString *modelName = _flatModelNames[mi];
+
+        // Look up pixel data from the frame updates
+        NSArray *pixelInfo = pixelLookup[modelName];
+
+        // Shadow model fallback
+        if (pixelInfo == nil) {
+            id shadowVal = _flatModelShadowSources[mi];
+            if (shadowVal != (id)[NSNull null]) {
+                pixelInfo = pixelLookup[(NSString *)shadowVal];
+            }
+        }
+
+        const uint8_t *pixels = NULL;
+        NSUInteger pixelWidth = 0;
+        NSUInteger pixelHeight = 0;
+        NSUInteger pixelDataLength = 0;
+
+        if (pixelInfo) {
+            NSData *pixelData = pixelInfo[0];
+            pixels = (const uint8_t *)pixelData.bytes;
+            pixelDataLength = pixelData.length;
+            pixelWidth = [pixelInfo[1] unsignedIntegerValue];
+            pixelHeight = [pixelInfo[2] unsignedIntegerValue];
+        }
+
+        // Selection state for this model
+        BOOL isSelected = [modelName isEqualToString:selectedModel];
+        BOOL isMultiSelected = !isSelected && [selectedSet containsObject:modelName];
+        NSIndexSet *subIndices = submodelIndices[modelName];
+        BOOL hasSubmodelSelection = (isSelected || isMultiSelected) && subIndices != nil;
+
+        // Iterate pre-flattened nodes — write 4-byte color per node
+        NSUInteger nodeStart = lookup->nodeStart;
+        NSUInteger nodeEnd = nodeStart + lookup->nodeCount;
+        for (NSUInteger ni = nodeStart; ni < nodeEnd; ni++) {
+            XLFlatNode *fn = &_flatNodes[ni];
+            XLNodeColor *c = &colors[ni];
+
+            // Selection: selected nodes render white
+            NSUInteger nodeLocalIdx = ni - nodeStart;
+            BOOL nodeIsWhite = NO;
+            if (hasSubmodelSelection) {
+                nodeIsWhite = [subIndices containsIndex:nodeLocalIdx];
+            } else if (isSelected || isMultiSelected) {
+                nodeIsWhite = YES;
+            }
+
+            if (nodeIsWhite) {
+                *c = (XLNodeColor){255, 255, 255, 255};
+            } else {
+                int16_t bufX = fn->bufX;
+                int16_t bufY = fn->bufY;
+                BOOL gotPixelColor = NO;
+
+                if (pixels && pixelWidth > 0 && pixelHeight > 0) {
+                    if (bufX >= 0 && bufX < (int16_t)pixelWidth &&
+                        bufY >= 0 && bufY < (int16_t)pixelHeight) {
+                        NSUInteger pixelIdx = ((NSUInteger)bufY * pixelWidth + (NSUInteger)bufX) * 4;
+                        if (pixelIdx + 3 < pixelDataLength) {
+                            *c = (XLNodeColor){
+                                pixels[pixelIdx + 0],
+                                pixels[pixelIdx + 1],
+                                pixels[pixelIdx + 2],
+                                255
+                            };
+                            gotPixelColor = YES;
+                        }
+                    }
+                }
+
+                if (!gotPixelColor) {
+                    *c = (XLNodeColor){0, 0, 0, 255};
+                }
+            }
+        }
+    }
+
+    // Atomically publish the completed buffer for the main-queue draw method.
+    atomic_store(&_rqLatestNodeCount, (unsigned int)totalNodes);
+    atomic_store(&_rqLatestColorIndex, ringIdx);
+    atomic_store(&_rqColorAvailable, true);
+
+    // Signal the display link that new content is ready
+    _contentDirty = YES;
+    _needsRenderFlag = YES;
+}
+
 - (void)hueToRGB:(float)hue r:(float *)r g:(float *)g b:(float *)b {
     float h = hue * 6.0f;
     float c = 1.0f;
@@ -1774,6 +1957,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [_renderedPixelWidths removeAllObjects];
     [_renderedPixelHeights removeAllObjects];
     [_pixelDataLock unlock];
+
+    // Invalidate any render-queue-produced color buffers so the main-queue
+    // draw path falls back to buildModelVerticesWithEffectColors.
+    atomic_store(&_rqColorAvailable, false);
 
     // Rebuild with layout colors
     [self buildModelVerticesWithEffectColors:NO];

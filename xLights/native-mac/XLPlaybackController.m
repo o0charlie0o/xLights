@@ -195,52 +195,38 @@
         }];
 
         CFAbsoluteTime afterCollect = CFAbsoluteTimeGetCurrent();
+
+        // Phase 4: Build color buffers directly on the render queue.
+        // This moves the 20-80ms vertex color building off the main queue.
+        // The preview view's draw method picks up the latest buffer atomically.
+        XLMetalPreviewView *preview = self.previewView;
+        XLMetalPreviewView *sidebarPreview = self.sidebarPreviewView;
+
+        if (frameUpdates.count > 0) {
+            [preview buildColorBufferFromFrameUpdates:frameUpdates];
+            [sidebarPreview buildColorBufferFromFrameUpdates:frameUpdates];
+        }
+
+        CFAbsoluteTime afterColorBuild = CFAbsoluteTimeGetCurrent();
         double renderMS = (afterRender - renderStart) * 1000.0;
         double collectMS = (afterCollect - afterRender) * 1000.0;
-        double totalMS = renderMS + collectMS;
+        double colorBuildMS = (afterColorBuild - afterCollect) * 1000.0;
+        double totalMS = renderMS + collectMS + colorBuildMS;
 
         if (totalMS > 40.0) {
-            NSLog(@"[PlaybackTrace] RenderLoop @%ldms: render=%.1fms collect=%.1fms total=%.1fms models=%lu",
-                  (long)snappedMS, renderMS, collectMS, totalMS,
+            NSLog(@"[PlaybackTrace] RenderLoop @%ldms: render=%.1fms collect=%.1fms colorBuild=%.1fms total=%.1fms models=%lu",
+                  (long)snappedMS, renderMS, collectMS, colorBuildMS, totalMS,
                   (unsigned long)frameUpdates.count);
         }
 
-        // Deliver pixel data to main queue for preview update.
-        // This is fire-and-forget — if the main queue is stalled, pixel updates
-        // queue up and get applied when it unblocks. The render loop continues
-        // independently regardless.
+        // Lightweight main-queue dispatch: only UI updates (delegate notifications).
+        // Color buffer building is already done above on the render queue.
         __weak typeof(self) weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf) return;
 
-            XLMetalPreviewView *preview = strongSelf.previewView;
-            XLMetalPreviewView *sidebarPreview = strongSelf.sidebarPreviewView;
-
-            if (frameUpdates.count > 0 && (preview || sidebarPreview)) {
-                for (NSArray *fb in frameUpdates) {
-                    NSString *name = fb[0];
-                    NSData *pixels = fb[1];
-                    NSUInteger width = [fb[2] unsignedIntegerValue];
-                    NSUInteger height = [fb[3] unsignedIntegerValue];
-
-                    if (pixels.length > 0 && width > 0 && height > 0) {
-                        [preview setRenderedPixels:pixels
-                                          forModel:name
-                                             width:width
-                                            height:height];
-                        [sidebarPreview setRenderedPixels:pixels
-                                                 forModel:name
-                                                    width:width
-                                                   height:height];
-                    }
-                }
-
-                [preview updatePreviewForTime:snappedMS];
-                [sidebarPreview updatePreviewForTime:snappedMS];
-            }
-
-            // Notify delegate
+            // Notify delegate of rendered frame (for playhead position, etc.)
             if ([strongSelf.delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {
                 [strongSelf.delegate playbackController:strongSelf didRenderFrameAtMS:snappedMS];
             }
@@ -684,35 +670,18 @@
 
             atomic_store(&_renderInProgress, false);
 
+            // Phase 4: Build color buffers on the render queue (off main queue).
+            XLMetalPreviewView *preview = self.previewView;
+            XLMetalPreviewView *sidebarPreview = self.sidebarPreviewView;
+
+            if (frameUpdates.count > 0) {
+                [preview buildColorBufferFromFrameUpdates:frameUpdates];
+                [sidebarPreview buildColorBufferFromFrameUpdates:frameUpdates];
+            }
+
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong typeof(weakSelf) strongSelf = weakSelf;
                 if (!strongSelf) return;
-
-                XLMetalPreviewView *preview = strongSelf.previewView;
-                XLMetalPreviewView *sidebarPreview = strongSelf.sidebarPreviewView;
-
-                if (frameUpdates.count > 0 && (preview || sidebarPreview)) {
-                    for (NSArray *fb in frameUpdates) {
-                        NSString *name = fb[0];
-                        NSData *pixels = fb[1];
-                        NSUInteger width = [fb[2] unsignedIntegerValue];
-                        NSUInteger height = [fb[3] unsignedIntegerValue];
-
-                        if (pixels.length > 0 && width > 0 && height > 0) {
-                            [preview setRenderedPixels:pixels
-                                              forModel:name
-                                                 width:width
-                                                height:height];
-                            [sidebarPreview setRenderedPixels:pixels
-                                                     forModel:name
-                                                        width:width
-                                                       height:height];
-                        }
-                    }
-
-                    [preview updatePreviewForTime:timeMS];
-                    [sidebarPreview updatePreviewForTime:timeMS];
-                }
 
                 if ([strongSelf.delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {
                     [strongSelf.delegate playbackController:strongSelf didRenderFrameAtMS:timeMS];

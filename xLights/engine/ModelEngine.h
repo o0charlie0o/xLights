@@ -46,6 +46,7 @@ struct NodeCoord {
     uint32_t actChannel = 0;
     uint32_t channelCount = 0;
     uint32_t stringNum = 0;
+    int parentNodeIndex = -1; // Original index in parent (for submodel/strand channel mapping)
 };
 
 // Generate node coordinates from model XML attributes.

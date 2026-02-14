@@ -1314,6 +1314,7 @@ std::vector<xlEngine::NodeCoord> xlEngine::filterNodesToSubmodel(
                     xlEngine::NodeCoord nc = allParentNodes[idx];
                     nc.bufX = col;
                     nc.bufY = lineIdx;
+                    nc.parentNodeIndex = idx;
                     result.push_back(nc);
                     col++;
                 }
