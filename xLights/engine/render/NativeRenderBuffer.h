@@ -38,6 +38,7 @@
 #include <algorithm>
 
 #include "../../Color.h"
+#include "../../ColorCurve.h"
 
 namespace xlEngine {
 
@@ -53,20 +54,44 @@ public:
 
 // Native-compatible PaletteClass replacing the legacy wx-dependent version.
 // Provides the same API surface that effects use (GetColor, GetHSV, Size)
-// without ColorCurve or wx dependencies.
+// including ColorCurve support for animated palette colors.
 class PaletteClass {
     xlColorVector _colors;
     hsvVector _hsv;
+    xlColorCurveVector _cc;
 
 public:
     PaletteClass() = default;
 
     void Set(const xlColorVector& colors) {
         _colors = colors;
+        _cc.clear();
+        _cc.resize(colors.size());
         _hsv.clear();
         _hsv.reserve(colors.size());
         for (const auto& c : colors) {
             _hsv.push_back(c.asHSV());
+        }
+    }
+
+    void Set(const xlColorVector& colors, const xlColorCurveVector& cc) {
+        _cc = cc;
+        _colors = colors;
+        _hsv.clear();
+        _hsv.reserve(colors.size());
+        for (const auto& c : colors) {
+            _hsv.push_back(c.asHSV());
+        }
+    }
+
+    void UpdateForProgress(float progress) {
+        int i = 0;
+        for (const auto& it : _cc) {
+            if (it.IsActive()) {
+                _colors[i] = xlColor(it.GetValueAt(progress));
+                _hsv[i] = _colors[i].asHSV();
+            }
+            i++;
         }
     }
 
@@ -88,9 +113,21 @@ public:
         c = _colors[idx];
     }
 
-    void GetColor(size_t idx, xlColor& c, float /*progress*/) const {
-        // No ColorCurve support in native build — use static color
-        GetColor(idx, c);
+    void GetColor(size_t idx, xlColor& c, float progress) const {
+        if (idx >= _colors.size()) { c.Set(255, 255, 255); return; }
+        if (idx < _cc.size() && _cc[idx].IsActive()) {
+            c = _cc[idx].GetValueAt(progress);
+        } else {
+            c = _colors[idx];
+        }
+    }
+
+    xlColor GetColor(size_t idx, float progress) const {
+        if (idx >= _colors.size()) return xlWHITE;
+        if (idx < _cc.size() && _cc[idx].IsActive()) {
+            return _cc[idx].GetValueAt(progress);
+        }
+        return _colors[idx];
     }
 
     void GetHSV(size_t idx, HSVValue& hsv) const {
@@ -98,18 +135,60 @@ public:
         hsv = _hsv[idx];
     }
 
-    bool IsSpatial(size_t /*idx*/) const { return false; }
-    bool IsGradient(size_t /*idx*/) const { return false; }
-    bool IsRadial(size_t /*idx*/) const { return false; }
-
-    // Spatial color stubs — IsSpatial always returns false, but effects
-    // still reference these methods so we provide no-op implementations.
-    void GetSpatialColor(size_t idx, float /*x*/, float /*y*/, xlColor& c) const {
-        GetColor(idx, c);
+    bool IsSpatial(size_t idx) const {
+        if (idx >= _colors.size()) return false;
+        return (idx < _cc.size() && _cc[idx].IsActive() && _cc[idx].GetTimeCurve() != TC_TIME);
     }
+
+    bool IsGradient(size_t idx) const {
+        if (idx >= _colors.size()) return false;
+        return (idx < _cc.size() && _cc[idx].IsActive() && _cc[idx].GetTimeCurve() == TC_TIME);
+    }
+
+    bool IsRadial(size_t idx) const {
+        if (idx >= _colors.size()) return false;
+        return (idx < _cc.size() && _cc[idx].IsActive() &&
+                (_cc[idx].GetTimeCurve() == TC_RADIALIN || _cc[idx].GetTimeCurve() == TC_RADIALOUT ||
+                 _cc[idx].GetTimeCurve() == TC_CW || _cc[idx].GetTimeCurve() == TC_CCW));
+    }
+
+    void GetSpatialColor(size_t idx, float x, float y, xlColor& c) const {
+        if (idx >= _colors.size()) { c.Set(255, 255, 255); return; }
+        if (idx < _cc.size() && _cc[idx].IsActive()) {
+            switch (_cc[idx].GetTimeCurve()) {
+                case TC_RIGHT: c = _cc[idx].GetValueAt(x); break;
+                case TC_LEFT:  c = _cc[idx].GetValueAt(1.0f - x); break;
+                case TC_UP:    c = _cc[idx].GetValueAt(y); break;
+                case TC_DOWN:  c = _cc[idx].GetValueAt(1.0f - y); break;
+                default:       c = _colors[idx]; break;
+            }
+        } else {
+            c = _colors[idx];
+        }
+    }
+
     void GetSpatialColor(size_t idx, float /*cx*/, float /*cy*/, float /*ox*/,
-                         float /*oy*/, float /*round*/, float /*radius*/, xlColor& c) const {
-        GetColor(idx, c);
+                         float /*oy*/, float round, float radius, xlColor& c) const {
+        if (idx >= _colors.size()) { c.Set(255, 255, 255); return; }
+        if (idx < _cc.size() && _cc[idx].IsActive()) {
+            switch (_cc[idx].GetTimeCurve()) {
+                case TC_CW:       c = _cc[idx].GetValueAt(static_cast<float>(round)); break;
+                case TC_CCW:      c = _cc[idx].GetValueAt(1.0f - static_cast<float>(round)); break;
+                case TC_RADIALIN: {
+                    float len = radius > 0 ? (radius - std::abs(radius)) / radius : 0;
+                    c = _cc[idx].GetValueAt(len);
+                    break;
+                }
+                case TC_RADIALOUT: {
+                    float len = radius > 0 ? std::abs(radius) / radius : 0;
+                    c = _cc[idx].GetValueAt(len);
+                    break;
+                }
+                default: c = _colors[idx]; break;
+            }
+        } else {
+            c = _colors[idx];
+        }
     }
 
     // Iterator support — some effects iterate the palette directly
@@ -121,6 +200,7 @@ public:
     void push_back(const xlColor& c) {
         _colors.push_back(c);
         _hsv.push_back(c.asHSV());
+        _cc.push_back(ColorCurve());
     }
 };
 
@@ -252,6 +332,7 @@ public:
     // =========================================================================
 
     void SetPalette(xlColorVector& colors);
+    void SetPalette(xlColorVector& colors, xlColorCurveVector& cc);
     size_t GetColorCount() const;
     const PaletteClass& GetPalette() const { return palette; }
 

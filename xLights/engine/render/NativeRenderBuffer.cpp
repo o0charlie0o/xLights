@@ -740,6 +740,7 @@ void NativeRenderBuffer::SetState(int period, bool reset)
         needToInit = true;
     }
     curPeriod = period;
+    palette.UpdateForProgress(GetEffectTimeIntervalPosition());
 }
 
 void NativeRenderBuffer::SetEffectDuration(int startMsec, int endMsec)
@@ -761,6 +762,11 @@ void NativeRenderBuffer::GetEffectPeriods(int& startPer, int& endPer) const
 void NativeRenderBuffer::SetPalette(xlColorVector& colors)
 {
     palette.Set(colors);
+}
+
+void NativeRenderBuffer::SetPalette(xlColorVector& colors, xlColorCurveVector& cc)
+{
+    palette.Set(colors, cc);
 }
 
 size_t NativeRenderBuffer::GetColorCount() const

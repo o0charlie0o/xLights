@@ -39,6 +39,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -48,6 +50,7 @@
 #include <vector>
 
 #include "NativePixelBuffer.h"
+#include "../../Color.h"
 
 class NativeSequenceData;
 class NativeRenderBuffer;
@@ -57,6 +60,154 @@ namespace xlEngine {
 struct EffectInstanceInfo;
 class IEffectProvider;
 class IModelProvider;
+
+// In-memory LRU cache for rendered effect layer output.
+// Avoids redundant re-rendering when the same effect with the same
+// parameters is queried at the same time (e.g., scrubbing back to a
+// frame that was already rendered, or multiple preview passes).
+//
+// Cache key: model name + layer index + effect settings/palette hash + time.
+// Stateful effects (Fire, Life, Meteors, etc.) are excluded from caching
+// because their output depends on accumulated state across frames.
+//
+// Thread safety: NOT thread-safe. Caller must hold appropriate lock
+// or ensure single-threaded access per cache instance.
+class RenderFrameCache {
+public:
+    struct CachedLayer {
+        std::vector<xlColor> pixels;
+        int width = 0;
+        int height = 0;
+    };
+
+    explicit RenderFrameCache(size_t maxEntries = 8192)
+        : _maxEntries(maxEntries) {}
+
+    // Look up a cached layer. Returns true and populates 'out' if found.
+    bool get(const std::string& modelName, int layerIndex,
+             size_t effectHash, int timeMS, CachedLayer& out) {
+        uint64_t key = makeKey(modelName, layerIndex, effectHash, timeMS);
+        auto mapIt = _map.find(key);
+        if (mapIt == _map.end()) {
+            ++_misses;
+            return false;
+        }
+        // Move to front of LRU list
+        _lru.splice(_lru.begin(), _lru, mapIt->second);
+        out = mapIt->second->second;
+        ++_hits;
+        return true;
+    }
+
+    // Store a rendered layer in the cache.
+    void put(const std::string& modelName, int layerIndex,
+             size_t effectHash, int timeMS, const CachedLayer& entry) {
+        uint64_t key = makeKey(modelName, layerIndex, effectHash, timeMS);
+        auto mapIt = _map.find(key);
+        if (mapIt != _map.end()) {
+            // Update existing entry and move to front
+            mapIt->second->second = entry;
+            _lru.splice(_lru.begin(), _lru, mapIt->second);
+            return;
+        }
+        // Evict oldest if at capacity
+        while (_map.size() >= _maxEntries && !_lru.empty()) {
+            auto last = std::prev(_lru.end());
+            _map.erase(last->first);
+            _lru.erase(last);
+        }
+        // Insert new entry at front
+        _lru.emplace_front(key, entry);
+        _map[key] = _lru.begin();
+    }
+
+    // Clear all entries for a specific model.
+    void clearModel(const std::string& modelName) {
+        auto it = _lru.begin();
+        while (it != _lru.end()) {
+            // The model name is embedded in the key via hash, but for
+            // precise per-model invalidation we maintain a secondary index.
+            auto next = std::next(it);
+            if (_modelIndex.count(it->first) &&
+                _modelIndex[it->first] == modelName) {
+                _map.erase(it->first);
+                _modelIndex.erase(it->first);
+                _lru.erase(it);
+            }
+            it = next;
+        }
+    }
+
+    // Clear all cached entries.
+    void clear() {
+        _lru.clear();
+        _map.clear();
+        _modelIndex.clear();
+        _hits = 0;
+        _misses = 0;
+    }
+
+    size_t size() const { return _map.size(); }
+    size_t hits() const { return _hits; }
+    size_t misses() const { return _misses; }
+
+    // Returns true if the given effect type is safe to cache.
+    // Stateful effects that accumulate across frames are excluded.
+    static bool isEffectCacheable(const std::string& effectType) {
+        // Effects that use EffectRenderCache (infoCache) for persistent
+        // state across frames. These produce different output depending
+        // on the history of previous frames, so caching by time alone
+        // would produce incorrect results.
+        static const std::set<std::string> statefulEffects = {
+            "Fire", "Candle", "Circles", "Curtain", "Fireworks",
+            "Life", "Lines", "Meteors", "Shape", "Snowflakes",
+            "Snowstorm", "Strobe", "Twinkle", "Balls"
+        };
+        return statefulEffects.find(effectType) == statefulEffects.end();
+    }
+
+    // Compute a hash of effect settings and palette for cache keying.
+    static size_t hashEffect(const std::string& effectType,
+                             const std::map<std::string, std::string>& settings,
+                             const std::map<std::string, std::string>& palette) {
+        size_t h = std::hash<std::string>{}(effectType);
+        for (const auto& [k, v] : settings) {
+            h ^= std::hash<std::string>{}(k) * 31 + std::hash<std::string>{}(v);
+        }
+        for (const auto& [k, v] : palette) {
+            h ^= std::hash<std::string>{}(k) * 37 + std::hash<std::string>{}(v);
+        }
+        return h;
+    }
+
+private:
+    using Entry = std::pair<uint64_t, CachedLayer>;
+    using LRUList = std::list<Entry>;
+    using LRUIterator = LRUList::iterator;
+
+    uint64_t makeKey(const std::string& modelName, int layerIndex,
+                     size_t effectHash, int timeMS) {
+        // Combine into a single 64-bit key via FNV-like mixing.
+        // Collisions are rare enough for an in-memory cache.
+        size_t h = std::hash<std::string>{}(modelName);
+        h ^= std::hash<int>{}(layerIndex) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= effectHash + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int>{}(timeMS) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        uint64_t key = static_cast<uint64_t>(h);
+
+        // Store model name mapping for per-model invalidation
+        _modelIndex[key] = modelName;
+
+        return key;
+    }
+
+    size_t _maxEntries;
+    LRUList _lru;
+    std::unordered_map<uint64_t, LRUIterator> _map;
+    std::unordered_map<uint64_t, std::string> _modelIndex;
+    size_t _hits = 0;
+    size_t _misses = 0;
+};
 
 // Callback interface for render progress and completion events.
 class RenderCoordinatorListener {
@@ -130,6 +281,12 @@ public:
     // Reset persistent state for a single model.
     void resetPersistentState(const std::string& modelName);
 
+    // Clear the in-memory render cache for all models.
+    void invalidateAllCaches();
+
+    // Clear the in-memory render cache for a specific model.
+    void invalidateCache(const std::string& modelName);
+
     // Abort the current render. Thread-safe.
     void abort();
 
@@ -153,15 +310,36 @@ private:
         size_t groupElementIndex = SIZE_MAX; // SIZE_MAX = no group effects
         size_t groupLayerCount = 0;
 
+        // True when this job renders a group as a combined model (aggregated
+        // member nodes into a single buffer). Group jobs render group effects
+        // onto the combined geometry and distribute output to all member channels.
+        bool isGroupJob = false;
+
+        // Blend layer: when a model has BOTH its own effects AND a parent group
+        // with effects, an extra layer (the last one) is allocated. Before
+        // rendering the model's own effects, existing channel data from the
+        // output buffer is loaded into this blend layer. This allows model
+        // effects to composite on top of the group render output.
+        // Matches legacy PixelBuffer behavior of numLayers + 1.
+        bool hasBlendLayer = false;
+
         // Submodel mask: when a physical model matches a group through
         // submodel refs (e.g. group has "SingingTree/Outline" not "SingingTree"),
         // only these (bufX, bufY) positions should be kept non-black.
         bool hasSubmodelMask = false;
         std::set<std::pair<int,int>> submodelMaskPositions;
+
+        // Submodel/strand overlay: when this job renders a submodel or strand
+        // element that has its own effects in the timeline, it renders AFTER
+        // the parent model and overlays its output onto parent channels.
+        bool isSubmodelJob = false;
+        std::string parentModelName;   // parent model name for channel overlay
+        int strandIndex = -1;          // strand index (-1 = submodel, not strand)
     };
 
     std::vector<ModelJob> buildModelJobs();
     ModelGeometry extractGeometry(const std::string& modelName);
+    ModelGeometry extractGroupGeometry(const std::string& groupName);
     size_t findParentGroupElement(const std::string& modelName);
 
     // Render dependency ordering: partition jobs into tiers where all jobs
@@ -172,10 +350,14 @@ private:
 
     void renderModel(ModelJob& job, int startMS, int endMS,
                      NativeSequenceData& output);
-    void renderModelAtTime(ModelJob& job, int timeMS);
+    void renderModelAtTime(ModelJob& job, int timeMS,
+                           NativeSequenceData* output = nullptr,
+                           int frameIndex = -1);
     bool renderNativeEffect(const EffectInstanceInfo& effectInfo, NativeRenderBuffer& buf);
     void writeModelOutput(const ModelJob& job, int frameIndex,
                           NativeSequenceData& output);
+    void loadBlendLayer(ModelJob& job, NativeSequenceData& output,
+                        int frameIndex);
 
     // Timing track helpers for effects like Piano, Guitar, Arpeggio
     // Returns the element index for a named timing track, or SIZE_MAX if not found.
@@ -213,6 +395,11 @@ private:
     // Set by RenderEngine before renderAll() for correct channel mapping
     // with complex start channel formats (#IP:univ:ch, !Controller:ch, >Model:offset).
     std::unordered_map<std::string, uint32_t> _resolvedStartChannels;
+
+    // In-memory LRU cache for rendered effect layers. Avoids redundant
+    // re-rendering when scrubbing or re-visiting frames with unchanged effects.
+    // Protected by _stateMutex (same lock as _persistentJobs).
+    RenderFrameCache _renderCache;
 };
 
 } // namespace xlEngine

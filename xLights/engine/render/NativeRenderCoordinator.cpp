@@ -901,12 +901,24 @@ void NativeRenderCoordinator::resetPersistentState() {
     std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.clear();
     _skippedModels.clear();
+    _renderCache.clear();
 }
 
 void NativeRenderCoordinator::resetPersistentState(const std::string& modelName) {
     std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.erase(modelName);
     _skippedModels.erase(modelName);
+    _renderCache.clearModel(modelName);
+}
+
+void NativeRenderCoordinator::invalidateAllCaches() {
+    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+    _renderCache.clear();
+}
+
+void NativeRenderCoordinator::invalidateCache(const std::string& modelName) {
+    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+    _renderCache.clearModel(modelName);
 }
 
 void NativeRenderCoordinator::abort() {
@@ -1362,7 +1374,12 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
         NativeNodeInfo& node = geom.nodes[n];
         node.bufX = nodeCoords[n].bufX;
         node.bufY = nodeCoords[n].bufY;
-        node.actChannel = geom.startChannel + n * chansPerNode;
+        // For submodel nodes, use the original parent node index for channel offset
+        // so that channels map to the correct parent model channels.
+        int channelIdx = (nodeCoords[n].parentNodeIndex >= 0)
+                         ? nodeCoords[n].parentNodeIndex
+                         : static_cast<int>(n);
+        node.actChannel = geom.startChannel + channelIdx * chansPerNode;
         node.channelsPerNode = chansPerNode;
         // colorOrder maps output channel index -> source RGBA index.
         // For GRB: ch0=G(1), ch1=R(0), ch2=B(2) -> colorOrder = {1, 0, 2}
@@ -3538,39 +3555,9 @@ bool NativeRenderCoordinator::renderNativeEffect(
 
 
     if (type == "Duplicate") {
-        // The Duplicate effect mirrors another model/layer's effect at the same time.
-        // In legacy xLights, this is handled *outside* the effect Render() method:
-        // Render.cpp detects the Duplicate effect, looks up the source model+layer,
-        // finds the effect at the current time, then renders *that* effect instead,
-        // optionally overriding buffer/timing/palette/color settings.
-        //
-        // The legacy DuplicateEffect::Render() itself just asserts false -- it should
-        // never be called because the render pipeline replaces it before reaching
-        // the effect rendering stage.
-        //
-        // For the native pipeline, proper Duplicate support requires:
-        //   1. Reading E_CHOICE_Duplicate_Model to get the source model name
-        //   2. Reading E_SPINCTRL_Duplicate_Layer to get the source layer (1-based)
-        //   3. Querying IEffectProvider::getEffectAtTime() on the source element/layer
-        //      at the current time to find the effect being duplicated
-        //   4. Recursively calling renderNativeEffect() with the source effect's info
-        //   5. Applying override flags:
-        //      - E_CHECKBOX_Duplicate_Override_Buffer: replace B_* settings
-        //      - E_CHECKBOX_Duplicate_Override_Timing: replace T_* settings
-        //      - E_CHECKBOX_Duplicate_Override_Palette: replace C_BUTTON_Palette*/C_CHECKBOX_Palette*
-        //      - E_CHECKBOX_Duplicate_Override_Color: replace remaining C_* settings
-        //
-        // This requires cross-element access via _effectProvider, which renderNativeEffect()
-        // currently does not have (it only receives the EffectInstanceInfo and buffer).
-        // Full implementation needs refactoring renderNativeEffect() to accept the
-        // coordinator or provider pointer, or moving Duplicate resolution into
-        // renderModelAtTime() (before the renderNativeEffect call), mirroring the
-        // legacy approach in Render.cpp.
-        //
-        // Stub: identify the source effect and attempt to render it if the provider
-        // is accessible. Otherwise, leave the buffer black (unrendered).
-
-        // Read Duplicate settings
+        // Mirrors another model/layer's effect at the same time.
+        // Resolves the source effect via _effectProvider, applies override flags
+        // (buffer/timing/palette/color), then recursively renders the source effect.
         std::string sourceModel;
         int sourceLayer = 1; // 1-based in settings, 0-based for provider
 
@@ -3583,21 +3570,142 @@ bool NativeRenderCoordinator::renderNativeEffect(
             sourceLayer = std::atoi(it->second.c_str());
         }
 
-        if (sourceModel.empty() || sourceLayer < 1) {
-            return false; // Invalid configuration -- no source specified
+        if (sourceModel.empty() || sourceLayer < 1 || !_effectProvider) {
+            return false;
         }
 
-        // TODO: To fully implement, renderNativeEffect needs access to _effectProvider
-        // so it can call:
-        //   size_t srcElementIdx = _effectProvider->getElementIndex(sourceModel);
-        //   EffectInstanceInfo srcEffect;
-        //   _effectProvider->getEffectAtTime(srcElementIdx, sourceLayer - 1, currentTimeMS, srcEffect);
-        //   // Apply override flags from effectInfo.settings to srcEffect
-        //   renderNativeEffect(srcEffect, buf);
-        //
-        // For now, return false to indicate this effect type is not yet rendered.
-        // The buffer stays black, which is the standard behavior for unimplemented effects.
-        return false;
+        size_t srcElementIdx = _effectProvider->getElementIndex(sourceModel);
+        if (srcElementIdx == SIZE_MAX) {
+            return false; // Source model not found
+        }
+
+        // Derive current time from the buffer's timing state
+        int currentTimeMS = buf.curPeriod * buf.frameTimeInMs;
+
+        EffectInstanceInfo srcEffect;
+        if (!_effectProvider->getEffectAtTime(srcElementIdx, static_cast<size_t>(sourceLayer - 1), currentTimeMS, srcEffect)) {
+            return false; // No effect on source model/layer at this time
+        }
+
+        // Prevent duplicating a duplicate (matches legacy guard)
+        if (srcEffect.effectType == "Duplicate") {
+            return false;
+        }
+
+        // Apply override flags from the Duplicate effect's settings to the
+        // resolved source effect, mirroring legacy Render.cpp behavior.
+        bool overrideBuffer = false;
+        bool overrideTiming = false;
+        bool overridePalette = false;
+        bool overrideColor = false;
+
+        it = effectInfo.settings.find("E_CHECKBOX_Duplicate_Override_Buffer");
+        if (it != effectInfo.settings.end()) overrideBuffer = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Duplicate_Override_Timing");
+        if (it != effectInfo.settings.end()) overrideTiming = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Duplicate_Override_Palette");
+        if (it != effectInfo.settings.end()) overridePalette = (it->second == "1");
+        it = effectInfo.settings.find("E_CHECKBOX_Duplicate_Override_Color");
+        if (it != effectInfo.settings.end()) overrideColor = (it->second == "1");
+
+        if (overrideBuffer) {
+            for (auto sit = srcEffect.settings.begin(); sit != srcEffect.settings.end(); ) {
+                if (sit->first.rfind("B_", 0) == 0)
+                    sit = srcEffect.settings.erase(sit);
+                else
+                    ++sit;
+            }
+            for (const auto& s : effectInfo.settings) {
+                if (s.first.rfind("B_", 0) == 0)
+                    srcEffect.settings[s.first] = s.second;
+            }
+        }
+
+        if (overrideTiming) {
+            for (auto sit = srcEffect.settings.begin(); sit != srcEffect.settings.end(); ) {
+                if (sit->first.rfind("T_", 0) == 0)
+                    sit = srcEffect.settings.erase(sit);
+                else
+                    ++sit;
+            }
+            for (const auto& s : effectInfo.settings) {
+                if (s.first.rfind("T_", 0) == 0)
+                    srcEffect.settings[s.first] = s.second;
+            }
+        }
+
+        if (overridePalette) {
+            for (auto pit = srcEffect.palette.begin(); pit != srcEffect.palette.end(); ) {
+                if (pit->first.rfind("C_BUTTON_Palette", 0) == 0 ||
+                    pit->first.rfind("C_CHECKBOX_Palette", 0) == 0)
+                    pit = srcEffect.palette.erase(pit);
+                else
+                    ++pit;
+            }
+            for (const auto& p : effectInfo.palette) {
+                if (p.first.rfind("C_BUTTON_Palette", 0) == 0 ||
+                    p.first.rfind("C_CHECKBOX_Palette", 0) == 0)
+                    srcEffect.palette[p.first] = p.second;
+            }
+        }
+
+        if (overrideColor) {
+            for (auto pit = srcEffect.palette.begin(); pit != srcEffect.palette.end(); ) {
+                if (pit->first.rfind("C_", 0) == 0 &&
+                    pit->first.rfind("C_BUTTON_Palette", 0) != 0 &&
+                    pit->first.rfind("C_CHECKBOX_Palette", 0) != 0)
+                    pit = srcEffect.palette.erase(pit);
+                else
+                    ++pit;
+            }
+            for (const auto& p : effectInfo.palette) {
+                if (p.first.rfind("C_", 0) == 0 &&
+                    p.first.rfind("C_BUTTON_Palette", 0) != 0 &&
+                    p.first.rfind("C_CHECKBOX_Palette", 0) != 0)
+                    srcEffect.palette[p.first] = p.second;
+            }
+        }
+
+        // Reconfigure the buffer's palette from the (possibly overridden) source effect
+        // so the source effect sees the correct colors via buf.palette.GetColor().
+        xlColorVector colors;
+        xlColorCurveVector colorCurves;
+        for (int ci = 1; ci <= 8; ++ci) {
+            std::string checkKey = "C_CHECKBOX_Palette" + std::to_string(ci);
+            auto cit = srcEffect.palette.find(checkKey);
+            if (cit == srcEffect.palette.end() || cit->second != "1") continue;
+
+            std::string key = "C_BUTTON_Palette" + std::to_string(ci);
+            auto pit = srcEffect.palette.find(key);
+            if (pit == srcEffect.palette.end() || pit->second.empty()) continue;
+
+            const std::string& val = pit->second;
+            if (ColorCurve::IsColorCurve(val)) {
+                ColorCurve cv(val);
+                colors.push_back(cv.GetValueAt(0));
+                colorCurves.push_back(cv);
+            } else if (val.size() >= 7 && val[0] == '#') {
+                unsigned int hex = 0;
+                if (std::sscanf(val.c_str() + 1, "%06x", &hex) == 1) {
+                    colors.push_back(xlColor(
+                        static_cast<uint8_t>((hex >> 16) & 0xFF),
+                        static_cast<uint8_t>((hex >> 8) & 0xFF),
+                        static_cast<uint8_t>(hex & 0xFF)));
+                    colorCurves.push_back(ColorCurve());
+                }
+            }
+        }
+        if (colors.empty()) {
+            colors.push_back(xlWHITE);
+            colorCurves.push_back(ColorCurve());
+        }
+        buf.SetPalette(colors, colorCurves);
+
+        // Configure buffer timing for the source effect's duration so
+        // GetEffectTimeIntervalPosition() returns the correct position.
+        buf.SetEffectDuration(srcEffect.startTimeMS, srcEffect.endTimeMS);
+
+        return renderNativeEffect(srcEffect, buf);
     }
 
 

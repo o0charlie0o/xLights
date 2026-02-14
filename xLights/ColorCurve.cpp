@@ -37,6 +37,12 @@ namespace {
     bool StringContains(const std::string& haystack, const std::string& needle) {
         return haystack.find(needle) != std::string::npos;
     }
+
+#ifdef XLIGHTS_NATIVE
+    inline double rand01() {
+        return static_cast<double>(std::rand()) / static_cast<double>(RAND_MAX);
+    }
+#endif
 }
 
 ColorCurve::ColorCurve(const std::string& id, const std::string type, xlColor c)
