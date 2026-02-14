@@ -1688,46 +1688,86 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         buf.SetState(period, period == effectInfo.startTimeMS / frameTimeMS);
         buf.cur_model = job.geometry.name;
 
-        // Set palette colors from the effect's palette map.
-        // Color curves (animated palette colors) are detected via ColorCurve::IsColorCurve()
-        // on the C_BUTTON_Palette* value. When present, the initial color is taken from
-        // the curve at t=0 and the curve is stored for per-frame evaluation.
-        xlColorVector colors;
-        xlColorCurveVector colorCurves;
-        for (int ci = 1; ci <= 8; ++ci) {
-            std::string checkKey = "C_CHECKBOX_Palette" + std::to_string(ci);
-            auto cit = effectInfo.palette.find(checkKey);
-            if (cit == effectInfo.palette.end() || cit->second != "1") continue;
+        // Check render cache for non-stateful, non-persistent effects.
+        // Stateful effects (Fire, Life, etc.) accumulate across frames and
+        // cannot be cached by time alone. Persistent layers also skip caching.
+        bool cacheable = !layerInfo.persistent &&
+                         RenderFrameCache::isEffectCacheable(effectInfo.effectType);
+        size_t effectHash = 0;
+        bool cacheHit = false;
 
-            std::string key = "C_BUTTON_Palette" + std::to_string(ci);
-            auto pit = effectInfo.palette.find(key);
-            if (pit == effectInfo.palette.end() || pit->second.empty()) continue;
-
-            const std::string& val = pit->second;
-            if (ColorCurve::IsColorCurve(val)) {
-                ColorCurve cv(val);
-                colors.push_back(cv.GetValueAt(0));
-                colorCurves.push_back(cv);
-            } else if (val.size() >= 7 && val[0] == '#') {
-                unsigned int hex = 0;
-                if (std::sscanf(val.c_str() + 1, "%06x", &hex) == 1) {
-                    colors.push_back(xlColor(
-                        static_cast<uint8_t>((hex >> 16) & 0xFF),
-                        static_cast<uint8_t>((hex >> 8) & 0xFF),
-                        static_cast<uint8_t>(hex & 0xFF)));
-                    colorCurves.push_back(ColorCurve());
+        if (cacheable) {
+            effectHash = RenderFrameCache::hashEffect(
+                effectInfo.effectType, effectInfo.settings, effectInfo.palette);
+            RenderFrameCache::CachedLayer cached;
+            if (_renderCache.get(job.geometry.name, static_cast<int>(layer),
+                                 effectHash, timeMS, cached)) {
+                if (cached.width == buf.BufferWi && cached.height == buf.BufferHt) {
+                    std::memcpy(buf.GetPixels(), cached.pixels.data(),
+                                cached.pixels.size() * sizeof(xlColor));
+                    cacheHit = true;
                 }
             }
         }
-        if (colors.empty()) {
-            colors.push_back(xlWHITE);
-            colorCurves.push_back(ColorCurve());
-        }
-        buf.SetPalette(colors, colorCurves);
 
-        // Render the effect. Even suppressed layers render (for state tracking
-        // in stateful effects), but suppressed layers are excluded from blending.
-        bool rendered = renderNativeEffect(effectInfo, buf);
+        bool rendered;
+        if (cacheHit) {
+            rendered = true;
+        } else {
+            // Set palette colors from the effect's palette map.
+            // Color curves (animated palette colors) are detected via ColorCurve::IsColorCurve()
+            // on the C_BUTTON_Palette* value. When present, the initial color is taken from
+            // the curve at t=0 and the curve is stored for per-frame evaluation.
+            xlColorVector colors;
+            xlColorCurveVector colorCurves;
+            for (int ci = 1; ci <= 8; ++ci) {
+                std::string checkKey = "C_CHECKBOX_Palette" + std::to_string(ci);
+                auto cit = effectInfo.palette.find(checkKey);
+                if (cit == effectInfo.palette.end() || cit->second != "1") continue;
+
+                std::string key = "C_BUTTON_Palette" + std::to_string(ci);
+                auto pit = effectInfo.palette.find(key);
+                if (pit == effectInfo.palette.end() || pit->second.empty()) continue;
+
+                const std::string& val = pit->second;
+                if (ColorCurve::IsColorCurve(val)) {
+                    ColorCurve cv(val);
+                    colors.push_back(cv.GetValueAt(0));
+                    colorCurves.push_back(cv);
+                } else if (val.size() >= 7 && val[0] == '#') {
+                    unsigned int hex = 0;
+                    if (std::sscanf(val.c_str() + 1, "%06x", &hex) == 1) {
+                        colors.push_back(xlColor(
+                            static_cast<uint8_t>((hex >> 16) & 0xFF),
+                            static_cast<uint8_t>((hex >> 8) & 0xFF),
+                            static_cast<uint8_t>(hex & 0xFF)));
+                        colorCurves.push_back(ColorCurve());
+                    }
+                }
+            }
+            if (colors.empty()) {
+                colors.push_back(xlWHITE);
+                colorCurves.push_back(ColorCurve());
+            }
+            buf.SetPalette(colors, colorCurves);
+
+            // Render the effect. Even suppressed layers render (for state tracking
+            // in stateful effects), but suppressed layers are excluded from blending.
+            rendered = renderNativeEffect(effectInfo, buf);
+
+            // Store successfully rendered cacheable layer in the LRU cache
+            if (rendered && cacheable) {
+                RenderFrameCache::CachedLayer toCache;
+                toCache.width = buf.BufferWi;
+                toCache.height = buf.BufferHt;
+                size_t pixelCount = static_cast<size_t>(buf.BufferWi) * buf.BufferHt;
+                toCache.pixels.resize(pixelCount);
+                std::memcpy(toCache.pixels.data(), buf.GetPixels(),
+                            pixelCount * sizeof(xlColor));
+                _renderCache.put(job.geometry.name, static_cast<int>(layer),
+                                 effectHash, timeMS, toCache);
+            }
+        }
 
         // Compute transition fade/mask factors (mirrors legacy HandleLayerTransitions).
         // fadeInFactor and fadeOutFactor represent how far through the
