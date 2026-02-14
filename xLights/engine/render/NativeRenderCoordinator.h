@@ -14,8 +14,14 @@
 //
 // Dispatches per-model render jobs across multiple threads using a work-stealing
 // pattern. Each model gets its own NativePixelBuffer and renders all frames
-// independently. The output is written to a shared NativeSequenceData buffer
-// (non-overlapping channel ranges per model ensure thread safety).
+// independently. The output is written to a shared NativeSequenceData buffer.
+//
+// Render dependency ordering:
+//   Models sharing channels (groups + member models, overlapping channel ranges)
+//   are partitioned into tiers via buildRenderTiers(). Jobs within a tier have
+//   non-overlapping channels and run in parallel. Tiers execute sequentially,
+//   ensuring deterministic ordering that matches legacy element precedence.
+//   Independent models (no channel overlap) always run in the first tier.
 //
 // Architecture:
 //   - IEffectProvider supplies sequence elements and effect data
@@ -157,6 +163,12 @@ private:
     std::vector<ModelJob> buildModelJobs();
     ModelGeometry extractGeometry(const std::string& modelName);
     size_t findParentGroupElement(const std::string& modelName);
+
+    // Render dependency ordering: partition jobs into tiers where all jobs
+    // within a tier have non-overlapping channel ranges and can run in parallel.
+    // Jobs in tier N+1 depend on at least one job in tier N (or earlier).
+    // Returns vector of tiers, each tier is a vector of indices into the jobs array.
+    std::vector<std::vector<size_t>> buildRenderTiers(const std::vector<ModelJob>& jobs);
 
     void renderModel(ModelJob& job, int startMS, int endMS,
                      NativeSequenceData& output);

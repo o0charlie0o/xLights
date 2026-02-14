@@ -358,39 +358,51 @@ bool NativeRenderCoordinator::renderRange(
         return true;
     }
 
+    // Build render dependency tiers. Jobs within a tier have no channel
+    // overlap and can run in parallel. Tiers execute sequentially so that
+    // models sharing channels (groups + members, overlapping ranges) render
+    // in deterministic order matching legacy element precedence.
+    auto tiers = buildRenderTiers(jobs);
+
     int totalModels = static_cast<int>(jobs.size());
     std::atomic<int> modelsComplete{0};
 
-    // Work-stealing parallel dispatch: each thread grabs the next job atomically
-    unsigned int numThreads = std::min(
-        static_cast<unsigned int>(jobs.size()),
-        std::max(1u, std::thread::hardware_concurrency()));
+    unsigned int maxThreads = std::max(1u, std::thread::hardware_concurrency());
 
-    std::atomic<size_t> nextJobIdx{0};
-    std::vector<std::thread> threads;
-    threads.reserve(numThreads);
+    for (const auto& tierIndices : tiers) {
+        if (_abort.load()) break;
 
-    for (unsigned int t = 0; t < numThreads; ++t) {
-        threads.emplace_back([&]() {
-            size_t idx;
-            while ((idx = nextJobIdx.fetch_add(1)) < jobs.size()) {
-                if (_abort.load()) return;
+        // Dispatch all jobs in this tier in parallel
+        unsigned int numThreads = std::min(
+            static_cast<unsigned int>(tierIndices.size()), maxThreads);
 
-                renderModel(jobs[idx], startMS, endMS, output);
+        std::atomic<size_t> nextInTier{0};
+        std::vector<std::thread> threads;
+        threads.reserve(numThreads);
 
-                int completed = modelsComplete.fetch_add(1) + 1;
-                float pct = static_cast<float>(completed) /
-                            static_cast<float>(totalModels);
-                _progress.store(pct);
-                std::lock_guard<std::mutex> lock(_listenerMutex);
-                if (_listener) {
-                    _listener->onRenderProgress(pct * 100.0f, completed, totalModels);
+        for (unsigned int t = 0; t < numThreads; ++t) {
+            threads.emplace_back([&]() {
+                size_t localIdx;
+                while ((localIdx = nextInTier.fetch_add(1)) < tierIndices.size()) {
+                    if (_abort.load()) return;
+
+                    size_t jobIdx = tierIndices[localIdx];
+                    renderModel(jobs[jobIdx], startMS, endMS, output);
+
+                    int completed = modelsComplete.fetch_add(1) + 1;
+                    float pct = static_cast<float>(completed) /
+                                static_cast<float>(totalModels);
+                    _progress.store(pct);
+                    std::lock_guard<std::mutex> lock(_listenerMutex);
+                    if (_listener) {
+                        _listener->onRenderProgress(pct * 100.0f, completed, totalModels);
+                    }
                 }
-            }
-        });
-    }
+            });
+        }
 
-    for (auto& t : threads) t.join();
+        for (auto& t : threads) t.join();
+    }
 
     bool wasCancelled = _abort.load();
     _rendering.store(false);
@@ -857,6 +869,125 @@ NativeRenderCoordinator::buildModelJobs()
 }
 
 // =========================================================================
+// Render dependency ordering
+// =========================================================================
+
+std::vector<std::vector<size_t>>
+NativeRenderCoordinator::buildRenderTiers(const std::vector<ModelJob>& jobs)
+{
+    if (jobs.empty()) return {};
+
+    // Step 1: Compute merged channel ranges for each job.
+    // Each job's channel range is [startChannel, startChannel + channelCount).
+    // A job may also inherit channels from a parent group, which we detect
+    // via the groupElementIndex field — all jobs sharing the same group
+    // inherently overlap in the group's channel space.
+    struct ChannelRange {
+        uint32_t start = UINT32_MAX;
+        uint32_t end = 0; // exclusive
+    };
+
+    std::vector<ChannelRange> ranges(jobs.size());
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        const auto& geom = jobs[i].geometry;
+        if (geom.nodes.empty()) continue;
+
+        // Compute the actual channel range from node data (most accurate)
+        uint32_t minCh = UINT32_MAX;
+        uint32_t maxCh = 0;
+        for (const auto& node : geom.nodes) {
+            uint32_t nodeStart = node.actChannel;
+            uint32_t nodeEnd = nodeStart + static_cast<uint32_t>(node.channelsPerNode);
+            if (nodeStart < minCh) minCh = nodeStart;
+            if (nodeEnd > maxCh) maxCh = nodeEnd;
+        }
+        ranges[i].start = minCh;
+        ranges[i].end = maxCh;
+    }
+
+    // Step 2: Detect overlaps. Two jobs overlap if their channel ranges
+    // intersect OR if they share the same parent group element.
+    // Build an adjacency list of overlapping job pairs.
+    std::vector<std::vector<size_t>> overlaps(jobs.size());
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        for (size_t j = i + 1; j < jobs.size(); ++j) {
+            bool hasOverlap = false;
+
+            // Check channel range overlap
+            if (ranges[i].start < ranges[j].end &&
+                ranges[j].start < ranges[i].end) {
+                hasOverlap = true;
+            }
+
+            // Check shared parent group (inherently overlapping)
+            if (!hasOverlap &&
+                jobs[i].groupElementIndex != SIZE_MAX &&
+                jobs[i].groupElementIndex == jobs[j].groupElementIndex) {
+                hasOverlap = true;
+            }
+
+            if (hasOverlap) {
+                overlaps[i].push_back(j);
+                overlaps[j].push_back(i);
+            }
+        }
+    }
+
+    // Step 3: Assign jobs to tiers using a greedy coloring approach.
+    // Jobs with no overlaps go in tier 0. A job with overlaps goes in the
+    // first tier where none of its overlapping jobs are already placed.
+    // Element order is preserved within tiers (earlier elements render first
+    // within a tier, matching legacy precedence from sequence element order).
+    std::vector<int> tier(jobs.size(), -1);
+    int maxTier = 0;
+
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        if (overlaps[i].empty()) {
+            // No overlaps — can go in tier 0
+            tier[i] = 0;
+            continue;
+        }
+
+        // Find the minimum tier not occupied by any already-assigned neighbor
+        // that comes BEFORE this job in element order.
+        // Jobs overlapping with earlier jobs must go in a later tier.
+        int minTier = 0;
+        for (size_t neighbor : overlaps[i]) {
+            if (tier[neighbor] >= 0 && neighbor < i) {
+                // This neighbor was assigned and comes before us — we must go after it
+                if (tier[neighbor] >= minTier) {
+                    minTier = tier[neighbor] + 1;
+                }
+            }
+        }
+        tier[i] = minTier;
+        if (minTier > maxTier) maxTier = minTier;
+    }
+
+    // Step 4: Build the tier vectors
+    std::vector<std::vector<size_t>> tiers(maxTier + 1);
+    for (size_t i = 0; i < jobs.size(); ++i) {
+        tiers[tier[i]].push_back(i);
+    }
+
+    // Log the tier structure for debugging
+    if (tiers.size() > 1) {
+        printf("[RENDER_ORDER] %zu jobs split into %zu tiers:\n",
+               jobs.size(), tiers.size());
+        for (size_t t = 0; t < tiers.size(); ++t) {
+            printf("[RENDER_ORDER]   Tier %zu (%zu jobs):", t, tiers[t].size());
+            for (size_t idx : tiers[t]) {
+                printf(" %s[ch%u-%u]", jobs[idx].geometry.name.c_str(),
+                       ranges[idx].start, ranges[idx].end);
+            }
+            printf("\n");
+        }
+    }
+
+    return tiers;
+}
+
+// =========================================================================
 // Model geometry extraction
 // =========================================================================
 
@@ -935,8 +1066,57 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
                modelName.c_str(), scAttrStr.c_str(), geom.startChannel);
     }
 
+    // Determine channels per node and color order from StringType attribute.
+    // StringType formats: "RGB Nodes", "GRB Nodes", "RGBW Nodes", "WRGB Nodes",
+    //                     "4 Channel RGBW", "4 Channel WRGB", "Single Color", etc.
+    int chansPerNode = 3;
+    int rOff = 0, gOff = 1, bOff = 2, wOff = 3;
+    auto stIt = attrs.find("StringType");
+    if (stIt != attrs.end()) {
+        const std::string& st = stIt->second;
+        if (st.find("4 Channel") != std::string::npos ||
+            st.find("RGBW") != std::string::npos ||
+            st.find("WRGB") != std::string::npos) {
+            chansPerNode = 4;
+        } else if (st.find("Single Color") != std::string::npos) {
+            chansPerNode = 1;
+        }
+
+        // Parse color order from StringType
+        if (chansPerNode >= 3 && st.size() >= 3) {
+            std::string colorChars;
+            int baseOffset = 0;
+            if (st[0] == 'W' && st.size() >= 4 && st[1] >= 'A' && st[1] <= 'Z') {
+                colorChars = st.substr(1, 3);
+                baseOffset = 1;
+                wOff = 0;
+            } else if (st.compare(0, 10, "4 Channel ") == 0 && st.size() >= 14) {
+                std::string suffix = st.substr(10);
+                if (suffix[0] == 'W') {
+                    colorChars = suffix.substr(1, 3);
+                    baseOffset = 1;
+                    wOff = 0;
+                } else {
+                    colorChars = suffix.substr(0, 3);
+                    baseOffset = 0;
+                    wOff = 3;
+                }
+            } else if (st[0] >= 'A' && st[0] <= 'Z') {
+                colorChars = st.substr(0, 3);
+                baseOffset = 0;
+            }
+            if (colorChars.size() == 3) {
+                for (int ci = 0; ci < 3; ci++) {
+                    if (colorChars[ci] == 'R') rOff = ci + baseOffset;
+                    else if (colorChars[ci] == 'G') gOff = ci + baseOffset;
+                    else if (colorChars[ci] == 'B') bOff = ci + baseOffset;
+                }
+            }
+        }
+    }
+
     geom.nodeCount = static_cast<uint32_t>(nodeCoords.size());
-    geom.channelCount = geom.nodeCount * 3; // assume RGB
+    geom.channelCount = geom.nodeCount * chansPerNode;
 
     // Build node info with correct bufX/bufY from the model-type-specific generation
     geom.nodes.resize(geom.nodeCount);
@@ -944,12 +1124,16 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
         NativeNodeInfo& node = geom.nodes[n];
         node.bufX = nodeCoords[n].bufX;
         node.bufY = nodeCoords[n].bufY;
-        node.actChannel = geom.startChannel + n * 3;
-        node.channelsPerNode = 3;
-        node.colorOrder[0] = 0; // R
-        node.colorOrder[1] = 1; // G
-        node.colorOrder[2] = 2; // B
-        node.colorOrder[3] = 3;
+        node.actChannel = geom.startChannel + n * chansPerNode;
+        node.channelsPerNode = chansPerNode;
+        // colorOrder maps output channel index -> source RGBA index.
+        // For GRB: ch0=G(1), ch1=R(0), ch2=B(2) -> colorOrder = {1, 0, 2}
+        node.colorOrder[rOff] = 0; // R source
+        node.colorOrder[gOff] = 1; // G source
+        node.colorOrder[bOff] = 2; // B source
+        if (chansPerNode == 4) {
+            node.colorOrder[wOff] = 3; // W source
+        }
     }
 
     return geom;
@@ -15967,7 +16151,8 @@ void NativeRenderCoordinator::writeModelOutput(
     if (!frameData) return;
 
     // getColors() writes channel data at each node's actChannel offset.
-    // Thread-safe as long as models don't share channel ranges.
+    // Thread-safe: models with overlapping channels are in separate render
+    // tiers and never execute concurrently (see buildRenderTiers).
     job.pixelBuffer->getColors(frameData, output.getNumChannels());
 }
 
