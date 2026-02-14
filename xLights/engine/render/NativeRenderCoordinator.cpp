@@ -1180,17 +1180,70 @@ NativeRenderCoordinator::buildModelJobs()
     std::vector<ModelJob> jobs;
 
     size_t elementCount = _effectProvider->getElementCount();
+
+    // =====================================================================
+    // Pass 1: Create group jobs for model groups that have effects.
+    // Each group job renders effects onto a combined buffer aggregating all
+    // member model nodes. The output is written to NativeSequenceData where
+    // member model jobs can later load it via a blend layer.
+    // =====================================================================
+    // Track which group element indices have group jobs, so Pass 2 can
+    // check whether a model's parent group has a combined-geometry job.
+    std::set<size_t> groupJobElements;
+
+    for (size_t i = 0; i < elementCount; ++i) {
+        ElementInfo info;
+        if (!_effectProvider->getElement(i, info)) continue;
+        if (info.type != SequenceElementType::Model) continue;
+        if (info.renderDisabled) continue;
+        if (info.effectCount == 0) continue;
+
+        // Check if this element is a model group
+        if (!_modelProvider) continue;
+        auto attrs = _modelProvider->getModelAttributes(info.name);
+        auto displayAs = attrs.find("DisplayAs");
+        if (displayAs == attrs.end() || displayAs->second != "ModelGroup") continue;
+
+        // This is a group with effects — create a combined-geometry group job.
+        ModelGeometry geom = extractGroupGeometry(info.name);
+        if (geom.bufferWi <= 0 || geom.bufferHt <= 0) continue;
+
+        size_t layerCount = info.effectLayerCount;
+        if (layerCount == 0) layerCount = 1;
+
+        ModelJob job;
+        job.elementIndex = i;
+        job.layerCount = layerCount;
+        job.isGroupJob = true;
+        job.pixelBuffer = std::make_unique<NativePixelBuffer>(
+            _context, geom.bufferWi, geom.bufferHt,
+            static_cast<int>(layerCount), geom.nodes);
+
+        printf("[GROUP_JOB] Created group job for '%s': %dx%d, %zu layers, %zu nodes\n",
+               info.name.c_str(), geom.bufferWi, geom.bufferHt,
+               layerCount, geom.nodes.size());
+
+        job.geometry = std::move(geom);
+        jobs.push_back(std::move(job));
+        groupJobElements.insert(i);
+    }
+
+    // =====================================================================
+    // Pass 2: Create individual model jobs for physical models.
+    // If a model's parent group has a group job (Pass 1), the model gets:
+    //   - A blend layer (+1) if it has its own effects (composites on top)
+    //   - Skipped entirely if it has no own effects (handled by group job)
+    // If a model's parent group has NO group job, cascade group effects
+    // via groupElementIndex (legacy behavior for groups without own element).
+    // =====================================================================
     for (size_t i = 0; i < elementCount; ++i) {
         ElementInfo info;
         if (!_effectProvider->getElement(i, info)) continue;
 
-        // Only render top-level Model elements.
-        // Submodels, strands, and timing elements are skipped.
         if (info.type != SequenceElementType::Model) continue;
         if (info.renderDisabled) continue;
 
-        // Skip model groups — they don't have physical nodes.
-        // Their effects cascade to member models via findParentGroupElement().
+        // Skip model groups — handled in Pass 1
         if (_modelProvider) {
             auto attrs = _modelProvider->getModelAttributes(info.name);
             auto displayAs = attrs.find("DisplayAs");
@@ -1200,15 +1253,11 @@ NativeRenderCoordinator::buildModelJobs()
         ModelGeometry geom = extractGeometry(info.name);
         if (geom.bufferWi <= 0 || geom.bufferHt <= 0) continue;
 
-        // Determine which elements provide effects for this model.
-        // A model can have BOTH its own effects AND inherit effects from a
-        // parent group. Group layers come first, then model's own layers.
         size_t ownElementIdx = i;
         size_t ownLayerCount = info.effectLayerCount;
         bool hasOwnEffects = (info.effectCount > 0);
 
-        // Always check for parent group with effects (group effects cascade
-        // to ALL members, even those with their own effects).
+        // Check for parent group with effects
         size_t groupIdx = SIZE_MAX;
         size_t groupLayerCount = 0;
         std::string matchedGroupName;
@@ -1224,15 +1273,32 @@ NativeRenderCoordinator::buildModelJobs()
             }
         }
 
-        // Compute total layer count: group layers + model layers
+        // Check if the parent group has a combined-geometry group job (Pass 1).
+        bool parentHasGroupJob = (groupIdx != SIZE_MAX &&
+                                  groupJobElements.count(groupIdx) > 0);
+
+        if (parentHasGroupJob && !hasOwnEffects) {
+            // Model has no own effects and parent group renders via group job.
+            // Skip — the group job's writeModelOutput distributes to member channels.
+            continue;
+        }
+
         size_t effectElementIdx;
         size_t totalLayerCount;
-        if (groupIdx != SIZE_MAX && hasOwnEffects) {
-            // Both: group layers first, then model's own layers
-            effectElementIdx = ownElementIdx; // primary element is the model's own
+
+        if (parentHasGroupJob && hasOwnEffects) {
+            // Parent group has a group job AND model has own effects.
+            // Use a blend layer: model's own layers + 1 extra layer for
+            // loading group render output from NativeSequenceData.
+            effectElementIdx = ownElementIdx;
+            totalLayerCount = ownLayerCount + 1; // +1 for blend layer
+        } else if (groupIdx != SIZE_MAX && hasOwnEffects) {
+            // Parent group has effects but NO group job (fallback cascade).
+            // Group layers come first, then model's own layers.
+            effectElementIdx = ownElementIdx;
             totalLayerCount = groupLayerCount + ownLayerCount;
         } else if (groupIdx != SIZE_MAX) {
-            // Group only (model has no own effects)
+            // Group only, no group job (fallback cascade)
             effectElementIdx = groupIdx;
             totalLayerCount = groupLayerCount;
         } else {
@@ -1246,8 +1312,19 @@ NativeRenderCoordinator::buildModelJobs()
         ModelJob job;
         job.elementIndex = effectElementIdx;
         job.layerCount = totalLayerCount;
-        job.groupElementIndex = groupIdx;
-        job.groupLayerCount = groupLayerCount;
+
+        if (parentHasGroupJob && hasOwnEffects) {
+            // Blend layer mode: no group effect cascading (group job handles that).
+            // The blend layer loads existing channel data before model rendering.
+            job.hasBlendLayer = true;
+            job.groupElementIndex = SIZE_MAX; // no cascade
+            job.groupLayerCount = 0;
+        } else {
+            // Legacy cascade mode: group layers prepended to model layers.
+            job.groupElementIndex = groupIdx;
+            job.groupLayerCount = groupLayerCount;
+        }
+
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, geom.bufferWi, geom.bufferHt,
             static_cast<int>(totalLayerCount), geom.nodes);
@@ -1255,7 +1332,6 @@ NativeRenderCoordinator::buildModelJobs()
             buildDimmingCurve(_modelProvider->getDimmingInfo(info.name)));
 
         // Compute submodel mask (same logic as renderModelFrameStateful).
-        // Recurses into nested groups to find all submodel refs for this parent.
         if (!matchedGroupName.empty() && info.name.find('/') == std::string::npos) {
             auto groupAttrs = _modelProvider->getModelAttributes(matchedGroupName);
             auto membersIt = groupAttrs.find("models");
@@ -1291,6 +1367,11 @@ NativeRenderCoordinator::buildModelJobs()
                     }
                 }
             }
+        }
+
+        if (job.hasBlendLayer) {
+            printf("[BLEND_LAYER] Model '%s' has blend layer (+1) for group '%s'\n",
+                   info.name.c_str(), matchedGroupName.c_str());
         }
 
         job.geometry = std::move(geom);
