@@ -136,6 +136,15 @@ public:
     virtual std::map<std::string, std::string> getModelAttributes(const std::string& name) const {
         return {};
     }
+
+    /// Returns dimming curve info for a model.
+    /// The outer map keys are channel names: "all", "red", "green", "blue".
+    /// The inner map contains "gamma", "brightness", and/or "filename" keys.
+    /// Default returns empty — override in providers that parse dimming curves.
+    virtual std::map<std::string, std::map<std::string, std::string>> getDimmingInfo(
+        const std::string& modelName) const {
+        return {};
+    }
 };
 
 } // namespace xlEngine

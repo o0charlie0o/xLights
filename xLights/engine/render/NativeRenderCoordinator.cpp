@@ -44,6 +44,70 @@ namespace xlEngine {
 // Static helpers (needed early for job creation and group lookups)
 // =========================================================================
 
+// Build a gamma LUT for a single channel from brightness and gamma parameters.
+// Matches legacy BasicDimmingCurve::init() from DimmingCurve.cpp.
+static void buildGammaLUT(std::array<uint8_t, 256>& lut, int brightness, float gamma) {
+    if (gamma > 50.0f) gamma = 50.0f;
+    float maxB = (brightness + 100) / 100.0f * 255.0f;
+    for (int x = 0; x < 256; ++x) {
+        float i = (maxB == 0.0f) ? 0.0f : maxB * std::pow(x / 255.0f, gamma);
+        if (i > 255.0f) i = 255.0f;
+        if (i < 0.0f) i = 0.0f;
+        if (std::isnan(i)) i = 0.0f;
+        lut[x] = static_cast<uint8_t>(i);
+    }
+}
+
+// Build a NativeDimmingCurve from model dimming info.
+// dimmingInfo keys: "all", "red", "green", "blue"
+// Each inner map has "gamma", "brightness", and/or "filename" keys.
+static NativeDimmingCurve buildDimmingCurve(
+    const std::map<std::string, std::map<std::string, std::string>>& dimmingInfo)
+{
+    NativeDimmingCurve curve;
+    if (dimmingInfo.empty()) return curve;
+
+    // Check for "all" channel (applied uniformly to R, G, B)
+    auto allIt = dimmingInfo.find("all");
+    if (allIt != dimmingInfo.end()) {
+        const auto& params = allIt->second;
+        auto gammaIt = params.find("gamma");
+        auto brightIt = params.find("brightness");
+        float gamma = (gammaIt != params.end()) ? std::stof(gammaIt->second) : 1.0f;
+        int brightness = (brightIt != params.end()) ? std::stoi(brightIt->second) : 0;
+
+        // Only activate if not identity (gamma=1.0, brightness=0)
+        if (gamma != 1.0f || brightness != 0) {
+            buildGammaLUT(curve.red, brightness, gamma);
+            curve.green = curve.red;
+            curve.blue = curve.red;
+            curve.active = true;
+        }
+        return curve;
+    }
+
+    // Per-channel curves
+    bool anyActive = false;
+    auto applyChannel = [&](const std::string& key, std::array<uint8_t, 256>& lut) {
+        auto it = dimmingInfo.find(key);
+        if (it == dimmingInfo.end()) return;
+        const auto& params = it->second;
+        auto gammaIt = params.find("gamma");
+        auto brightIt = params.find("brightness");
+        float gamma = (gammaIt != params.end()) ? std::stof(gammaIt->second) : 1.0f;
+        int brightness = (brightIt != params.end()) ? std::stoi(brightIt->second) : 0;
+        if (gamma != 1.0f || brightness != 0) {
+            buildGammaLUT(lut, brightness, gamma);
+            anyActive = true;
+        }
+    };
+    applyChannel("red", curve.red);
+    applyChannel("green", curve.green);
+    applyChannel("blue", curve.blue);
+    curve.active = anyActive;
+    return curve;
+}
+
 // Parse comma-separated member list and trim whitespace.
 static std::vector<std::string> parseMemberList(const std::string& members) {
     std::vector<std::string> result;
@@ -483,6 +547,8 @@ RenderedFrame NativeRenderCoordinator::renderModelFrame(
     job.groupLayerCount = groupLayerCount;
     job.pixelBuffer = std::make_unique<NativePixelBuffer>(
         _context, w, h, static_cast<int>(totalLayerCount), geom.nodes);
+    job.pixelBuffer->setDimmingCurve(
+        buildDimmingCurve(_modelProvider->getDimmingInfo(modelName)));
     job.geometry = std::move(geom);
 
     renderModelAtTime(job, timeMS);
@@ -590,6 +656,8 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
         job.groupLayerCount = groupLayerCount;
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, w, h, static_cast<int>(totalLayerCount), geom.nodes);
+        job.pixelBuffer->setDimmingCurve(
+            buildDimmingCurve(_modelProvider->getDimmingInfo(modelName)));
         job.geometry = std::move(geom);
 
         // Compute submodel mask for physical models matched through submodel refs.
@@ -821,6 +889,8 @@ NativeRenderCoordinator::buildModelJobs()
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, geom.bufferWi, geom.bufferHt,
             static_cast<int>(totalLayerCount), geom.nodes);
+        job.pixelBuffer->setDimmingCurve(
+            buildDimmingCurve(_modelProvider->getDimmingInfo(info.name)));
 
         // Compute submodel mask (same logic as renderModelFrameStateful).
         // Recurses into nested groups to find all submodel refs for this parent.

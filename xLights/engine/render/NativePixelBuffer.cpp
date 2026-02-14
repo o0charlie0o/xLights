@@ -580,6 +580,10 @@ void NativePixelBuffer::clearSubmodelMask() {
     _hasSubmodelMask = false;
 }
 
+void NativePixelBuffer::setDimmingCurve(const NativeDimmingCurve& curve) {
+    _dimmingCurve = curve;
+}
+
 // =========================================================================
 // getColors — extract blended data to output channels
 // =========================================================================
@@ -606,10 +610,31 @@ void NativePixelBuffer::getColors(uint8_t* outputBuffer, uint32_t bufferSize) co
         }
 
         int pixIdx = node.bufY * _bufferWi + node.bufX;
-        const xlColor& color = _outputPixels[pixIdx];
+        xlColor color = _outputPixels[pixIdx];
 
-        // Extract RGB(W) channels in the correct order
-        uint8_t channels[4] = { color.red, color.green, color.blue, 0 };
+        // Apply dimming curve (gamma/brightness correction) before channel output.
+        // For single-channel nodes, legacy behavior expands the mono value to RGB
+        // before applying the curve, then uses the dimmed value.
+        if (_dimmingCurve.active) {
+            if (node.channelsPerNode == 1) {
+                // Single-channel: GetForChannels outputs one byte from the node.
+                // Legacy uses the red channel value replicated to RGB, applies curve,
+                // then writes back the red component.
+                xlColor mono(color.red, color.red, color.red);
+                _dimmingCurve.apply(mono);
+                color = mono;
+            } else {
+                _dimmingCurve.apply(color);
+            }
+        }
+
+        // Extract RGB(W) channels in the correct order.
+        // For RGBW (4ch), the W channel uses a simple max(R,G,B) white extraction.
+        uint8_t wChannel = 0;
+        if (node.channelsPerNode == 4) {
+            wChannel = std::min({color.red, color.green, color.blue});
+        }
+        uint8_t channels[4] = { color.red, color.green, color.blue, wChannel };
 
         for (int ch = 0; ch < node.channelsPerNode; ++ch) {
             uint32_t destOffset = node.actChannel + ch;

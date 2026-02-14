@@ -27,6 +27,7 @@
 // Thread safety: Each NativePixelBuffer instance is used by one render thread.
 // Multiple instances can safely run in parallel on different threads.
 
+#include <array>
 #include <vector>
 #include <set>
 #include <cstdint>
@@ -48,6 +49,29 @@ struct NativeNodeInfo {
     uint32_t actChannel = 0;   // Absolute channel offset in the output buffer
     int channelsPerNode = 3;   // 3 for RGB, 4 for RGBW, 1 for single channel
     int colorOrder[4] = {0, 1, 2, 3}; // Channel order offsets (e.g., GRB = {1,0,2})
+};
+
+// Per-model dimming curve: a 256-entry LUT per RGB channel.
+// Built from the model's <dimmingCurve> XML element (gamma/brightness settings).
+// When active is false, no dimming is applied (identity transform).
+struct NativeDimmingCurve {
+    bool active = false;
+    std::array<uint8_t, 256> red;    // Red channel LUT
+    std::array<uint8_t, 256> green;  // Green channel LUT
+    std::array<uint8_t, 256> blue;   // Blue channel LUT
+
+    NativeDimmingCurve() : active(false) {
+        for (int i = 0; i < 256; ++i) {
+            red[i] = green[i] = blue[i] = static_cast<uint8_t>(i);
+        }
+    }
+
+    void apply(xlColor& c) const {
+        if (!active) return;
+        c.red   = red[c.red];
+        c.green = green[c.green];
+        c.blue  = blue[c.blue];
+    }
 };
 
 // Per-layer settings controlling how a layer blends into the final output.
@@ -185,6 +209,10 @@ public:
     // @param bufferSize    Size of outputBuffer in bytes (for bounds checking)
     void getColors(uint8_t* outputBuffer, uint32_t bufferSize) const;
 
+    // Set the dimming curve (gamma/brightness LUT) for this model.
+    // Applied in getColors() before writing each channel to the output buffer.
+    void setDimmingCurve(const NativeDimmingCurve& curve);
+
     // Set a submodel mask. When set, getColors() will only write channel data
     // for nodes whose (bufX, bufY) coordinates are in the mask set. Nodes outside
     // the mask will have their channels written as zero. An empty mask means no masking.
@@ -252,6 +280,9 @@ private:
 
     // Sparkle state: per-node random counters
     std::vector<uint16_t> _sparkleState;
+
+    // Dimming curve (gamma/brightness LUT) for this model
+    NativeDimmingCurve _dimmingCurve;
 };
 
 } // namespace xlEngine
