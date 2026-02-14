@@ -44,6 +44,20 @@ typedef struct {
     float boundsMaxX, boundsMaxY, boundsMaxZ;
 } XLModelLookup;
 
+/// Packed float3 position for the static position buffer (12 bytes per node).
+/// Matches Metal's `packed_float3` layout — three contiguous floats with no
+/// padding, unlike `simd_float3` which pads to 16 bytes.
+typedef struct __attribute__((packed)) {
+    float x, y, z;
+} XLPackedFloat3;  // 12 bytes total
+
+/// Packed RGBA color for the dynamic color buffer (4 bytes per node).
+/// Sent to the GPU each frame; the vertex shader normalizes to float4
+/// using `float4(uchar4) / 255.0` in the shader (nearly free on GPU).
+typedef struct __attribute__((packed)) {
+    uint8_t r, g, b, a;
+} XLNodeColor;  // 4 bytes total
+
 /// Delegate protocol for the Metal preview view.
 ///
 /// Informs the layout controller about user interactions:

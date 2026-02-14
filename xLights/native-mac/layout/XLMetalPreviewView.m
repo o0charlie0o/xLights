@@ -96,8 +96,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSData *> *renderedPixelData;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *renderedPixelWidths;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *renderedPixelHeights;
-@property (nonatomic, strong) id<MTLBuffer> previewColorBuffer;
-@property (nonatomic, assign) NSUInteger previewColorCount;
 @property (nonatomic, strong) NSLock *pixelDataLock;
 
 // Optimization: track when vertex rebuild is actually needed
@@ -156,9 +154,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 @end
 
 @implementation XLMetalPreviewView {
-    // Triple-buffered vertex buffers (C arrays can't be @property)
-    id<MTLBuffer> _vertexBufferRing[3];
-    NSUInteger _vertexBufferRingCapacity[3]; // in vertices
+    // Static position buffer — written once on model reload, never touched per-frame.
+    // Contains packed float3 positions (12 bytes per node).
+    id<MTLBuffer> _positionBuffer;
+    NSUInteger _positionBufferCapacity; // in nodes
+
+    // Triple-buffered color buffers (XLNodeColor = 4 bytes per node).
+    // Only the color data is rewritten each frame — positions stay static.
+    id<MTLBuffer> _colorBufferRing[3];
+    NSUInteger _colorBufferRingCapacity[3]; // in nodes
 
     // Pre-flattened node data: built once on model reload, read every frame.
     // Eliminates NSDictionary/NSNumber unboxing in the hot render path.
@@ -438,15 +442,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         NSLog(@"XLMetalPreviewView: Failed to create grid pipeline: %@", error);
     }
 
-    // Build a separate pipeline for model points with controllable point size
+    // Build a separate pipeline for model points with split position/color buffers.
+    // Buffer 0: static float3 positions (written once on model reload)
+    // Buffer 1: dynamic uchar4 colors (updated per frame, 4 bytes/node)
+    // Buffer 2: uniforms (viewProjection + pointSize)
     NSString *modelShaderSource = @
         "#include <metal_stdlib>\n"
         "using namespace metal;\n"
-        "\n"
-        "struct ModelVertex {\n"
-        "    float3 position [[attribute(0)]];\n"
-        "    float4 color    [[attribute(1)]];\n"
-        "};\n"
         "\n"
         "struct ModelUniforms {\n"
         "    float4x4 viewProjection;\n"
@@ -460,12 +462,14 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         "};\n"
         "\n"
         "vertex ModelOut modelVertexShader(\n"
-        "    ModelVertex in [[stage_in]],\n"
-        "    constant ModelUniforms &uniforms [[buffer(1)]]) {\n"
+        "    uint vid [[vertex_id]],\n"
+        "    const device packed_float3 *positions [[buffer(0)]],\n"
+        "    const device uchar4 *colors [[buffer(1)]],\n"
+        "    constant ModelUniforms &uniforms [[buffer(2)]]) {\n"
         "    ModelOut out;\n"
-        "    out.position = uniforms.viewProjection * float4(in.position, 1.0);\n"
+        "    out.position = uniforms.viewProjection * float4(float3(positions[vid]), 1.0);\n"
         "    out.pointSize = uniforms.pointSize;\n"
-        "    out.color = in.color;\n"
+        "    out.color = float4(colors[vid]) / 255.0;\n"
         "    return out;\n"
         "}\n"
         "\n"
@@ -482,7 +486,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     MTLRenderPipelineDescriptor *modelPipeDesc = [[MTLRenderPipelineDescriptor alloc] init];
     modelPipeDesc.vertexFunction = [modelLib newFunctionWithName:@"modelVertexShader"];
     modelPipeDesc.fragmentFunction = [modelLib newFunctionWithName:@"modelFragmentShader"];
-    modelPipeDesc.vertexDescriptor = vertexDesc; // Same vertex layout
+    // No vertex descriptor needed — we use raw buffer reads via vertex_id
     modelPipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     modelPipeDesc.colorAttachments[0].blendingEnabled = YES;
     modelPipeDesc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
@@ -971,20 +975,24 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             [encoder popDebugGroup];
         }
 
-        // Render model nodes as points
-        if (_modelVertexBuffer && _modelVertexCount > 0 && _modelPipelineState) {
+        // Render model nodes as points (split position/color buffers)
+        if (_positionBuffer && _modelVertexBuffer && _modelVertexCount > 0 && _modelPipelineState) {
             [encoder pushDebugGroup:@"Models"];
             [encoder setRenderPipelineState:_modelPipelineState];
-            [encoder setVertexBuffer:_modelVertexBuffer offset:0 atIndex:0];
 
-            // Pack viewProjection + pointSize into uniforms buffer
+            // Buffer 0: static float3 positions (written once on model reload)
+            [encoder setVertexBuffer:_positionBuffer offset:0 atIndex:0];
+            // Buffer 1: dynamic uchar4 colors (updated per frame, 4 bytes/node)
+            [encoder setVertexBuffer:_modelVertexBuffer offset:0 atIndex:1];
+
+            // Buffer 2: uniforms (viewProjection + pointSize)
             struct {
                 simd_float4x4 viewProjection;
                 float pointSize;
             } modelUniforms;
             modelUniforms.viewProjection = viewProjection;
             modelUniforms.pointSize = 2.0f;
-            [encoder setVertexBytes:&modelUniforms length:sizeof(modelUniforms) atIndex:1];
+            [encoder setVertexBytes:&modelUniforms length:sizeof(modelUniforms) atIndex:2];
 
             [encoder drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:_modelVertexCount];
             [encoder popDebugGroup];
@@ -1148,9 +1156,11 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         _flatNodesDirty = YES;
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
+        _positionBuffer = nil;
+        _positionBufferCapacity = 0;
         for (int i = 0; i < 3; i++) {
-            _vertexBufferRing[i] = nil;
-            _vertexBufferRingCapacity[i] = 0;
+            _colorBufferRing[i] = nil;
+            _colorBufferRingCapacity[i] = 0;
         }
         _contentDirty = YES;
         return;
@@ -1490,15 +1500,40 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _flatModelCount = modelIdx;
     _flatModelNames = [names copy];
     _flatModelShadowSources = [shadowSources copy];
+
+    // Build the static position buffer from the flattened node positions.
+    // This buffer is written once here and never touched per-frame.
+    // Uses XLPackedFloat3 (12 bytes) matching Metal's packed_float3 layout.
+    if (_flatNodeCount > 0) {
+        NSUInteger needed = _flatNodeCount;
+        if (_positionBuffer == nil || _positionBufferCapacity < needed) {
+            NSUInteger newCapacity = (NSUInteger)(needed * 1.5);
+            _positionBuffer = [_device newBufferWithLength:newCapacity * sizeof(XLPackedFloat3)
+                                                   options:MTLResourceStorageModeShared];
+            [_positionBuffer setLabel:@"ModelPositions"];
+            _positionBufferCapacity = newCapacity;
+        }
+        XLPackedFloat3 *positions = (XLPackedFloat3 *)_positionBuffer.contents;
+        for (NSUInteger i = 0; i < _flatNodeCount; i++) {
+            positions[i] = (XLPackedFloat3){
+                _flatNodes[i].position.x,
+                _flatNodes[i].position.y,
+                _flatNodes[i].position.z
+            };
+        }
+    } else {
+        _positionBuffer = nil;
+        _positionBufferCapacity = 0;
+    }
 }
 
 - (void)buildModelVerticesWithEffectColors:(BOOL)useEffectColors {
-    // Rebuild flat arrays if they are stale (model data changed)
+    // Rebuild flat arrays (and static position buffer) if stale
     if (_flatNodesDirty || _flatNodes == NULL) {
         [self rebuildFlatNodeArrays];
     }
 
-    if (_flatNodeCount == 0) {
+    if (_flatNodeCount == 0 || _positionBuffer == nil) {
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
         return;
@@ -1511,16 +1546,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSUInteger ringIdx = _currentRingIndex;
     _currentRingIndex = (_currentRingIndex + 1) % 3;
 
-    // Grow the ring slot if needed (1.5x headroom to reduce reallocations)
-    if (_vertexBufferRing[ringIdx] == nil || _vertexBufferRingCapacity[ringIdx] < totalNodes) {
+    // Grow the color ring slot if needed (1.5x headroom to reduce reallocations).
+    // Each node is just 4 bytes (XLNodeColor) instead of the old 28-byte XLGridVertex.
+    if (_colorBufferRing[ringIdx] == nil || _colorBufferRingCapacity[ringIdx] < totalNodes) {
         NSUInteger newCapacity = (NSUInteger)(totalNodes * 1.5);
-        _vertexBufferRing[ringIdx] = [_device newBufferWithLength:newCapacity * sizeof(XLGridVertex)
-                                                          options:MTLResourceStorageModeShared];
-        [_vertexBufferRing[ringIdx] setLabel:@"ModelVertices"];
-        _vertexBufferRingCapacity[ringIdx] = newCapacity;
+        _colorBufferRing[ringIdx] = [_device newBufferWithLength:newCapacity * sizeof(XLNodeColor)
+                                                         options:MTLResourceStorageModeShared];
+        [_colorBufferRing[ringIdx] setLabel:@"ModelColors"];
+        _colorBufferRingCapacity[ringIdx] = newCapacity;
     }
 
-    XLGridVertex *vertices = (XLGridVertex *)_vertexBufferRing[ringIdx].contents;
+    XLNodeColor *colors = (XLNodeColor *)_colorBufferRing[ringIdx].contents;
 
     // Single lock around entire model loop to avoid per-model lock/unlock cycles.
     if (useEffectColors) {
@@ -1579,14 +1615,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         float defaultR, defaultG, defaultB;
         [self hueToRGB:hue r:&defaultR g:&defaultG b:&defaultB];
 
-        // Iterate pre-flattened nodes — no NSDictionary/NSNumber unboxing
+        // Iterate pre-flattened nodes — write only 4-byte color per node
         NSUInteger nodeStart = lookup->nodeStart;
         NSUInteger nodeEnd = nodeStart + lookup->nodeCount;
         for (NSUInteger ni = nodeStart; ni < nodeEnd; ni++) {
             XLFlatNode *fn = &_flatNodes[ni];
-            XLGridVertex *v = &vertices[ni];
-
-            v->position = fn->position;
+            XLNodeColor *c = &colors[ni];
 
             int16_t bufX = fn->bufX;
             int16_t bufY = fn->bufY;
@@ -1601,7 +1635,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             }
 
             if (nodeIsWhite) {
-                v->color = (simd_float4){1.0f, 1.0f, 1.0f, 1.0f};
+                *c = (XLNodeColor){255, 255, 255, 255};
             } else {
                 BOOL gotPixelColor = NO;
                 if (pixels && pixelWidth > 0 && pixelHeight > 0) {
@@ -1609,10 +1643,12 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                         bufY >= 0 && bufY < (int16_t)pixelHeight) {
                         NSUInteger pixelIdx = ((NSUInteger)bufY * pixelWidth + (NSUInteger)bufX) * 4;
                         if (pixelIdx + 3 < pixelDataLength) {
-                            float r = pixels[pixelIdx + 0] / 255.0f;
-                            float g = pixels[pixelIdx + 1] / 255.0f;
-                            float b = pixels[pixelIdx + 2] / 255.0f;
-                            v->color = (simd_float4){r, g, b, 1.0f};
+                            *c = (XLNodeColor){
+                                pixels[pixelIdx + 0],
+                                pixels[pixelIdx + 1],
+                                pixels[pixelIdx + 2],
+                                255
+                            };
                             gotPixelColor = YES;
                         }
                     }
@@ -1620,13 +1656,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
                 if (!gotPixelColor) {
                     if (useEffectColors) {
-                        v->color = (simd_float4){0.0f, 0.0f, 0.0f, 1.0f};
+                        *c = (XLNodeColor){0, 0, 0, 255};
                     } else {
-                        v->color = (simd_float4){
-                            baseGray * (0.3f + 0.7f * defaultR),
-                            baseGray * (0.3f + 0.7f * defaultG),
-                            baseGray * (0.3f + 0.7f * defaultB),
-                            1.0f
+                        *c = (XLNodeColor){
+                            (uint8_t)(baseGray * (0.3f + 0.7f * defaultR) * 255.0f),
+                            (uint8_t)(baseGray * (0.3f + 0.7f * defaultG) * 255.0f),
+                            (uint8_t)(baseGray * (0.3f + 0.7f * defaultB) * 255.0f),
+                            255
                         };
                     }
                 }
@@ -1639,7 +1675,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     _modelVertexCount = totalNodes;
-    _modelVertexBuffer = _vertexBufferRing[ringIdx];
+    _modelVertexBuffer = _colorBufferRing[ringIdx];
 }
 
 - (void)hueToRGB:(float)hue r:(float *)r g:(float *)g b:(float *)b {
