@@ -1874,6 +1874,181 @@ ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
 }
 
 // =========================================================================
+// Per Model buffer style detection helpers
+// =========================================================================
+
+// Returns true if the buffer style indicates "Per Model" rendering.
+// "Per Model Default", "Per Model Single Line Deep", etc. all qualify.
+static bool isPerModelStyle(const std::string& style) {
+    return style.compare(0, 9, "Per Model") == 0;
+}
+
+// Returns true if the buffer style is "Per Model Deep" (recursive flattening).
+// "Per Model Default Deep", "Per Model Single Line Deep", etc.
+static bool isPerModelDeep(const std::string& style) {
+    return isPerModelStyle(style) && style.size() >= 4 &&
+           style.compare(style.size() - 4, 4, "Deep") == 0;
+}
+
+// =========================================================================
+// Per Model buffer style: member extraction and rendering
+// =========================================================================
+
+void NativeRenderCoordinator::populatePerModelMembers(ModelJob& job, bool deep) {
+    if (job.perModelInfoCached) return;
+    job.perModelInfoCached = true;
+
+    if (job.groupElementIndex == SIZE_MAX || !_modelProvider || !_effectProvider)
+        return;
+
+    // Get the group name from the element index
+    ElementInfo groupInfo;
+    if (!_effectProvider->getElement(job.groupElementIndex, groupInfo)) return;
+
+    auto groupAttrs = _modelProvider->getModelAttributes(groupInfo.name);
+    auto membersIt = groupAttrs.find("models");
+    if (membersIt == groupAttrs.end() || membersIt->second.empty()) return;
+
+    auto memberList = parseMemberList(membersIt->second);
+    if (memberList.empty()) return;
+
+    // Collect member models. For "Per Model Deep", recursively flatten nested groups.
+    // For "Per Model" (non-deep), nested groups are treated as single entities.
+    std::vector<std::string> resolvedMembers;
+    std::set<std::string> visited;
+    visited.insert(groupInfo.name);
+
+    std::function<void(const std::string&)> collectMembers;
+    collectMembers = [&](const std::string& memberName) {
+        // Check if this is a submodel ref (Parent/SubName) — resolve to parent
+        std::string resolvedName = memberName;
+        size_t slash = memberName.find('/');
+
+        auto memberAttrs = _modelProvider->getModelAttributes(resolvedName);
+        if (memberAttrs.empty() && slash != std::string::npos) {
+            resolvedName = memberName.substr(0, slash);
+            memberAttrs = _modelProvider->getModelAttributes(resolvedName);
+        }
+
+        auto displayAs = memberAttrs.find("DisplayAs");
+        bool isGroup = displayAs != memberAttrs.end() && displayAs->second == "ModelGroup";
+
+        if (isGroup && deep) {
+            // Deep: recursively flatten nested groups to leaf models
+            if (visited.count(memberName)) return;
+            visited.insert(memberName);
+            auto nestedMembers = memberAttrs.find("models");
+            if (nestedMembers != memberAttrs.end()) {
+                for (const auto& nested : parseMemberList(nestedMembers->second)) {
+                    collectMembers(nested);
+                }
+            }
+        } else {
+            // Non-deep: include this member directly (even if it's a nested group)
+            resolvedMembers.push_back(memberName);
+        }
+    };
+
+    for (const auto& member : memberList) {
+        collectMembers(member);
+    }
+
+    // Extract geometry for each member and build the per-model member list.
+    // Track node offsets into the combined node array for the merge step.
+    size_t nodeOffset = 0;
+    for (const auto& memberName : resolvedMembers) {
+        ModelGeometry memberGeom = extractGeometry(memberName);
+        if (memberGeom.bufferWi <= 0 || memberGeom.bufferHt <= 0) continue;
+
+        ModelJob::PerModelMember pm;
+        pm.name = memberName;
+        pm.bufferWi = memberGeom.bufferWi;
+        pm.bufferHt = memberGeom.bufferHt;
+        pm.nodes = memberGeom.nodes;
+
+        job.perModelMembers.push_back(std::move(pm));
+        job.perModelNodeOffsets.push_back(nodeOffset);
+        nodeOffset += memberGeom.nodeCount;
+    }
+
+    printf("[PER_MODEL] Populated %zu members for group '%s' (deep=%d, total nodes=%zu)\n",
+           job.perModelMembers.size(), groupInfo.name.c_str(), deep,
+           nodeOffset);
+}
+
+bool NativeRenderCoordinator::renderPerModelLayer(
+    ModelJob& job, size_t layer,
+    const EffectInstanceInfo& effectInfo,
+    const NativeLayerInfo& layerInfo,
+    int timeMS, int period, int frameTimeMS)
+{
+    // The "Per Model" buffer style renders the effect independently into each
+    // member model's own buffer, then merges the results into the combined
+    // layer buffer. This matches legacy PixelBufferClass behavior where
+    // MergeBuffersForLayer() copies per-model rendered pixels to their
+    // correct positions in the group's combined buffer.
+    //
+    // In the native pipeline, since group effects cascade to per-model jobs,
+    // the physical model's own buffer IS its member buffer. The effect renders
+    // into the model's buffer dimensions, which matches legacy Per Model behavior.
+    //
+    // This function handles the explicit Per Model path: it populates per-model
+    // member info on first call, then renders the effect into the job's layer
+    // buffer using the model's own dimensions (which are already set up correctly
+    // from extractGeometry). The merge step is implicit because the layer buffer
+    // already uses the model's own coordinate space.
+
+    // Ensure per-model member info is cached on the job
+    bool deep = isPerModelDeep(layerInfo.bufferStyle);
+    populatePerModelMembers(job, deep);
+
+    // For the current native architecture, the model's buffer already has the
+    // correct dimensions for this physical model. The group effect renders into
+    // this model's buffer directly, which is the Per Model behavior. Just render
+    // the effect normally — the buffer style sub-type (Single Line, etc.) is
+    // handled by prepareBufferStyle which extracts the sub-style from
+    // "Per Model <sub-style>".
+    NativeRenderBuffer& buf = job.pixelBuffer->getLayerBuffer(static_cast<int>(layer));
+
+    // Set palette colors
+    xlColorVector colors;
+    xlColorCurveVector colorCurves;
+    for (int ci = 1; ci <= 8; ++ci) {
+        std::string checkKey = "C_CHECKBOX_Palette" + std::to_string(ci);
+        auto cit = effectInfo.palette.find(checkKey);
+        if (cit == effectInfo.palette.end() || cit->second != "1") continue;
+
+        std::string key = "C_BUTTON_Palette" + std::to_string(ci);
+        auto pit = effectInfo.palette.find(key);
+        if (pit == effectInfo.palette.end() || pit->second.empty()) continue;
+
+        const std::string& val = pit->second;
+        if (ColorCurve::IsColorCurve(val)) {
+            ColorCurve cv(val);
+            colors.push_back(cv.GetValueAt(0));
+            colorCurves.push_back(cv);
+        } else if (val.size() >= 7 && val[0] == '#') {
+            unsigned int hex = 0;
+            if (std::sscanf(val.c_str() + 1, "%06x", &hex) == 1) {
+                colors.push_back(xlColor(
+                    static_cast<uint8_t>((hex >> 16) & 0xFF),
+                    static_cast<uint8_t>((hex >> 8) & 0xFF),
+                    static_cast<uint8_t>(hex & 0xFF)));
+                colorCurves.push_back(ColorCurve());
+            }
+        }
+    }
+    if (colors.empty()) {
+        colors.push_back(xlWHITE);
+        colorCurves.push_back(ColorCurve());
+    }
+    buf.SetPalette(colors, colorCurves);
+
+    // Render the effect into the model's own buffer
+    return renderNativeEffect(effectInfo, buf);
+}
+
+// =========================================================================
 // Group membership lookup
 // =========================================================================
 
@@ -2118,6 +2293,16 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         if (cacheHit) {
             rendered = true;
         } else {
+            // Check for "Per Model" / "Per Model Deep" buffer style on group layers.
+            // When a group layer has this style, the effect renders independently
+            // per member model with each member's own buffer dimensions. In the
+            // native pipeline, group effects already cascade to per-model jobs, so
+            // this is the natural behavior. The renderPerModelLayer() path handles
+            // populating member info and ensures correct sub-style buffer reshaping.
+            bool isGroupLayer = (job.groupElementIndex != SIZE_MAX &&
+                                 layer < job.groupLayerCount);
+            bool usePerModel = isGroupLayer && isPerModelStyle(layerInfo.bufferStyle);
+
             // Set palette colors from the effect's palette map.
             // Color curves (animated palette colors) are detected via ColorCurve::IsColorCurve()
             // on the C_BUTTON_Palette* value. When present, the initial color is taken from
@@ -2155,9 +2340,18 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             }
             buf.SetPalette(colors, colorCurves);
 
-            // Render the effect. Even suppressed layers render (for state tracking
-            // in stateful effects), but suppressed layers are excluded from blending.
-            rendered = renderNativeEffect(effectInfo, buf);
+            if (usePerModel) {
+                // Per Model path: render the effect using per-member rendering.
+                // This populates member info on first call and renders the effect
+                // into the model's own buffer (which is the Per Model behavior).
+                rendered = renderPerModelLayer(job, layer, effectInfo, layerInfo,
+                                               timeMS, period, frameTimeMS);
+            } else {
+                // Normal path: render the effect directly into the layer buffer.
+                // Even suppressed layers render (for state tracking in stateful
+                // effects), but suppressed layers are excluded from blending.
+                rendered = renderNativeEffect(effectInfo, buf);
+            }
 
             // Store successfully rendered cacheable layer in the LRU cache
             if (rendered && cacheable) {

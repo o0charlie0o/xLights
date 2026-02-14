@@ -1240,8 +1240,36 @@ void NativePixelBuffer::expandSubBuffer(int layer) {
 void NativePixelBuffer::prepareBufferStyle(int layer) {
     assert(layer >= 0 && layer < static_cast<int>(_layers.size()));
     auto& ls = _layers[layer];
-    const std::string& style = ls.settings.bufferStyle;
+    std::string style = ls.settings.bufferStyle;
     if (style == "Default" || style.empty()) { ls.bufferStyleActive = false; return; }
+
+    // "Per Model" / "Per Model Deep" buffer styles: the effect renders
+    // independently per member model within a group layer. Since the native
+    // pipeline already renders group effects per-model (each physical model
+    // gets its own render job with group layers cascaded), the "Per Model"
+    // behavior is inherent. Extract the sub-style (e.g., "Per Model Single
+    // Line" → "Single Line") and apply it as a normal buffer style reshape.
+    // "Per Model Deep" flattens nested groups to leaf models, which is also
+    // the default behavior since buildModelJobs() creates leaf-model jobs.
+    if (style.compare(0, 9, "Per Model") == 0) {
+        // Extract sub-style: "Per Model <sub-style>" or "Per Model <sub-style> Deep"
+        std::string subStyle;
+        if (style.size() > 10) {
+            subStyle = style.substr(10); // skip "Per Model "
+        }
+        // Remove trailing " Deep" suffix if present
+        if (subStyle.size() >= 5 &&
+            subStyle.compare(subStyle.size() - 5, 5, " Deep") == 0) {
+            subStyle = subStyle.substr(0, subStyle.size() - 5);
+        }
+        // "Default" or empty sub-style means no reshape needed
+        if (subStyle.empty() || subStyle == "Default") {
+            ls.bufferStyleActive = false;
+            return;
+        }
+        // Otherwise, apply the sub-style (e.g., "Single Line", "As Pixel")
+        style = subStyle;
+    }
 
     int nodeCount = std::max(1, static_cast<int>(_nodes.size()));
     ls.styleOrigW = _bufferWi;

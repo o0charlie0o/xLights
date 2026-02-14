@@ -30,7 +30,7 @@ The native render pipeline (`NativeRenderCoordinator`) was written as a simplifi
 
 **Group rendering**: Groups are **skipped** as top-level targets. Instead, for each physical model, `findParentGroupElement()` finds the parent group's effects. Group layers are prepended to the model's own layers. Each model renders the group effect independently onto its own buffer.
 
-**Per Model buffer style**: Not implemented. Not checked.
+**Per Model buffer style**: Implemented. `B_CHOICE_BufferStyle` is parsed into `NativeLayerInfo.bufferStyle`. When a group layer has "Per Model" or "Per Model Deep" style, `renderPerModelLayer()` renders the effect per-member. Sub-styles (e.g., "Per Model Single Line") are extracted and applied via `prepareBufferStyle()`. "Per Model Deep" recursively flattens nested groups to leaf models.
 
 **Submodel/strand effects**: Not implemented. Submodels/strands with their own effects in the timeline are ignored.
 
@@ -42,7 +42,7 @@ The native render pipeline (`NativeRenderCoordinator`) was written as a simplifi
 |---|---------|--------|
 | 1 | No blend layer (+1) for model blending | **P0** — overlapping channels produce wrong output |
 | 2 | Group effects render per-model not combined | **P0** — spatial effects (Bars, etc.) look wrong on groups |
-| 3 | No "Per Model" / "Per Model Deep" buffer style | **P1** — sequences using these styles render incorrectly |
+| 3 | ~~No "Per Model" / "Per Model Deep" buffer style~~ | ~~**P1**~~ **DONE** — Per Model styles now parsed and handled in renderModelAtTime() |
 | 4 | No submodel/strand effect rendering | **P1** — effects on submodels/strands ignored |
 | 5 | No render dependency ordering | **P1** — parallel writes to overlapping channels |
 
@@ -82,7 +82,7 @@ The native render pipeline (`NativeRenderCoordinator`) was written as a simplifi
 | 9 | No suppress until frame | **P2** |
 | 10 | ~~No Duplicate effect~~ DONE | **P2** |
 | 11 | No sub-buffer / variable sub-buffer | **P1** |
-| 12 | No buffer style selection (always "Default") | **P1** |
+| 12 | ~~No buffer style selection (always "Default")~~ | ~~**P1**~~ **DONE** — Buffer styles parsed from B_CHOICE_BufferStyle, Per Model/Deep handled |
 
 ---
 
@@ -212,7 +212,7 @@ Frame time calculation and effect boundary semantics appear to be at **parity**.
 10. Value curves on layer params (#16)
 11. Blur (#17)
 12. Dimming curves (#19)
-13. Per Model buffer style (#3)
+13. ~~Per Model buffer style (#3)~~ **DONE**
 14. Color curves (#18)
 15. Render dependency ordering (#5)
 

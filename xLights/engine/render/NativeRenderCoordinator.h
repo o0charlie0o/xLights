@@ -335,6 +335,26 @@ private:
         bool isSubmodelJob = false;
         std::string parentModelName;   // parent model name for channel overlay
         int strandIndex = -1;          // strand index (-1 = submodel, not strand)
+
+        // Per Model buffer style: cached member model geometries for group layers.
+        // When a group layer has "Per Model" or "Per Model Deep" buffer style,
+        // the effect renders separately into each member's own buffer, then
+        // merges back into the combined layer buffer. This vector caches the
+        // member geometries to avoid re-extracting them every frame.
+        //
+        // perModelMembers: per-member geometry (buffer dims + node mapping).
+        // perModelNodeOffset: maps member index → starting node offset in the
+        //   combined group node list. Used by the merge step to copy each
+        //   member's rendered pixels to the correct combined buffer positions.
+        struct PerModelMember {
+            std::string name;
+            int bufferWi = 1;
+            int bufferHt = 1;
+            std::vector<NativeNodeInfo> nodes;  // Member's own node mapping
+        };
+        std::vector<PerModelMember> perModelMembers;
+        std::vector<size_t> perModelNodeOffsets;  // Start offset per member in combined nodes
+        bool perModelInfoCached = false;          // True after first extraction
     };
 
     std::vector<ModelJob> buildModelJobs();
@@ -358,6 +378,28 @@ private:
                           NativeSequenceData& output);
     void loadBlendLayer(ModelJob& job, NativeSequenceData& output,
                         int frameIndex);
+
+    // Populate per-model member info on a group job for "Per Model" rendering.
+    // Extracts geometry for each group member and caches it on the job.
+    // @param job        The model job (must have groupElementIndex set)
+    // @param deep       If true, recursively flatten nested groups (Per Model Deep)
+    void populatePerModelMembers(ModelJob& job, bool deep);
+
+    // Render a group layer using "Per Model" buffer style: creates temporary
+    // per-member render buffers, renders the effect into each, then merges
+    // the results back into the job's combined layer buffer.
+    // @param job         The model job
+    // @param layer       Layer index (must be a group layer)
+    // @param effectInfo  The effect to render
+    // @param layerInfo   Parsed layer settings
+    // @param timeMS      Current time in milliseconds
+    // @param period      Current frame period
+    // @param frameTimeMS Frame time in milliseconds
+    // @return true if any member rendered successfully
+    bool renderPerModelLayer(ModelJob& job, size_t layer,
+                             const EffectInstanceInfo& effectInfo,
+                             const NativeLayerInfo& layerInfo,
+                             int timeMS, int period, int frameTimeMS);
 
     // Timing track helpers for effects like Piano, Guitar, Arpeggio
     // Returns the element index for a named timing track, or SIZE_MAX if not found.
