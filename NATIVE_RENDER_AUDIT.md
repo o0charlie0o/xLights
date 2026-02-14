@@ -70,7 +70,7 @@ The native render pipeline (`NativeRenderCoordinator`) was written as a simplifi
 
 **Buffer init per frame**: `job.pixelBuffer->clear()` then `buf.Clear()` for each layer. **Every frame starts from scratch** — no persistent option.
 
-**Duplicate effect**: Not implemented.
+**Duplicate effect**: Implemented. Resolves source model/layer via `_effectProvider`, applies override flags (buffer/timing/palette/color), recursively renders.
 
 ### Gaps
 
@@ -80,7 +80,7 @@ The native render pipeline (`NativeRenderCoordinator`) was written as a simplifi
 | 7 | No persistent layer (overlay background) | **P0** — breaks effects relying on persistence |
 | 8 | No freeze after frame | **P2** |
 | 9 | No suppress until frame | **P2** |
-| 10 | No Duplicate effect | **P2** |
+| 10 | ~~No Duplicate effect~~ DONE | **P2** |
 | 11 | No sub-buffer / variable sub-buffer | **P1** |
 | 12 | No buffer style selection (always "Default") | **P1** |
 
