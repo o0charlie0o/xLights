@@ -266,6 +266,43 @@ When modifying effect files or engine code, always check which `#ifdef` block yo
 
 6. **Metal rendering** — For label/text rendering on the timeline, use the CALayer overlay approach (NSImage → layer.contents), NOT the bitmap→texture approach (has alpha blending issues).
 
+7. **SwiftUI `NSViewRepresentable` weak references** — Views created by `NSViewRepresentable` can be deallocated and recreated by SwiftUI at any time (e.g., tab switches). **Never hold weak references to these views from outside SwiftUI** — they will silently become nil. Instead, store the view on `XLSwiftUIWindowHelper.shared` (a stable singleton) and look it up dynamically. This is the pattern used for `sidebarPreviewView` and `cachedSequencerViewController`.
+
+8. **Optional chain silent assignment failure** — `obj.foo?.bar = value` silently does nothing if `foo` is nil. This caused `sidebarPreviewView` to never get wired up when `playbackController` was nil at `makeNSView` time. Always verify the full chain is non-nil, or use a singleton registry pattern instead.
+
+9. **Metal layer-hosting view compositing** — `XLEffectsGridView` is a layer-hosting view (`self.layer = _metalLayer; self.wantsLayer = YES`). In Core Animation, layer-hosting views can composite above sibling views regardless of AppKit's subview ordering. This caused the transport bar (and any view below the grid) to be hidden behind the Metal layer. The fix requires three things working together:
+   - **Clip container**: Wrap the grid in an `NSView` with `wantsLayer = YES` and `layer.masksToBounds = YES`. Constrain the container to stop at the transport bar's top anchor.
+   - **Metal layer masksToBounds**: Set `_metalLayer.masksToBounds = YES` in `setFrameSize:` to prevent the drawable from rendering outside the view bounds.
+   - **Explicit zPosition**: Set `_transportBar.layer.zPosition = 10` (and `_emptyStateView.layer.zPosition = 20`) in `viewDidLayout` so Core Animation composites them above the Metal layer.
+   - **Do NOT manually set `_metalLayer.frame`** — AppKit manages this for layer-hosting views. Setting it to `(0, 0, w, h)` overrides the Auto Layout position and shifts the grid to the wrong location.
+   - Re-apply `masksToBounds` in `viewDidLayout` since layer-backed views may replace their backing layer.
+
+10. **Stack overflow in `loadView`** — `XLSequencerViewController.loadView` creates dozens of views, constraints, and subview hierarchies, consuming significant stack space. It then calls `reloadSequenceData` which calls further methods. Adding NSLog calls with `NSStringFromRect()` or other complex format specifiers to `reloadSequenceData` can increase the function's stack frame enough to cause `EXC_BAD_ACCESS (code=2)` — a stack overflow. If you need debug logging in this path, use `dispatch_async` to defer it off the `loadView` stack, or add it to `viewDidLayout` instead.
+
+---
+
+## Playback ↔ Sidebar Preview Coordination
+
+During playback, `XLPlaybackController` renders full-sequence frames and sends pixel data to both the house preview and the sidebar model preview. The sidebar's `SidebarModelPreviewView.Coordinator` also has its own timer that loops the selected effect's animation when idle.
+
+**Coordination mechanism**: Notification-based, NOT polling.
+
+- `XLSequencerViewController` posts `XLPlaybackDidStartNotification` and `XLPlaybackDidStopNotification` from its playback delegate callbacks.
+- The Coordinator observes these notifications:
+  - On start → sets `playbackActive = true`, stops its own preview timer
+  - On stop → sets `playbackActive = false`, restarts the effect loop timer
+- `previewLoopTick()` has `guard !playbackActive` as a safety check.
+
+**Sidebar view lookup**: `XLPlaybackController.sidebarPreviewView` is a `readonly` property with a `@dynamic` getter that reads from `XLSwiftUIWindowHelper.shared.sidebarPreviewView`. This ensures the playback controller always finds the current view, even if SwiftUI recreated it.
+
+**Key files**:
+| File | Role |
+|------|------|
+| `XLSequencerViewController.m` | Posts playback start/stop notifications |
+| `XLMainContentView.swift` | Coordinator observes notifications, manages preview timer |
+| `XLPlaybackController.h/m` | Dynamic getter for `sidebarPreviewView` via singleton |
+| `XLSwiftWindowLauncher.swift` | `XLSwiftUIWindowHelper.sidebarPreviewView` storage |
+
 ---
 
 ## Inspector Layout Troubleshooting (Setup Tab)
@@ -919,3 +956,72 @@ The `color` attribute is ARGB hex (alpha first). Loaded/saved via `NativeEffectP
 | `providers/NativeEffectProvider.h/mm` | C++ data model, boundary split/merge logic, XML persistence |
 
 3. **Mouse tracking ownership**: The tracking area on the stems scroll view has `owner:self` (the container), so `mouseMoved:`/`mouseExited:` go to the container, which forwards cursor position to all mini waveforms. The mini waveforms themselves have no mouse handling.
+
+---
+
+## Audio Playback System
+
+### Architecture
+
+The audio system uses **AVAudioEngine + AVAudioPlayerNode** (Apple's professional audio framework). There is no need for AudioKit — it's just a Swift wrapper around the same AVAudioEngine we already use. The issues we've hit are in the orchestration layer, not the audio framework.
+
+```
+XLPlaybackController          — Single source of truth for play/stop/pause/seek
+  ├── XLAudioPlayer            — AVAudioEngine + AVAudioPlayerNode wrapper
+  │     ├── _audioEngine        — AVAudioEngine
+  │     ├── _playerNode         — AVAudioPlayerNode (schedules PCM buffers)
+  │     └── _audioBuffer        — Full PCM data loaded from file
+  └── XLEngineBridge           — C++ engine play/stop/seek (effects rendering)
+```
+
+### Critical Rule: XLPlaybackController Is the Single Source of Truth
+
+There are **three code paths** that trigger play/stop:
+
+| Trigger | Path |
+|---------|------|
+| Spacebar / menu items | `XLMainWindowController.playSequence:` → `[_playbackController play]` |
+| Transport bar buttons | `transportBarView:didClickPlayPause:` → `[_playbackController togglePlayPause]` |
+| SwiftUI toolbar buttons | `seqVC.play()` / `seqVC.stop()` → `[_playbackController play/stop]` |
+
+**All paths MUST delegate to `XLPlaybackController`**. Never call `[_engineBridge play/stop/seek:]` directly from view controllers — that creates conflicting state between the audio player and the engine.
+
+### Spacebar = Toggle (Pause), Not Stop
+
+The keyboard handler maps spacebar to `TOGGLE_PLAY` action, which calls `[_playbackController togglePlayPause]`. This **pauses** (not stops) the playback. The period key (`.`) maps to `stopSequence:` which actually stops. This distinction matters because paused vs stopped state affects buffer queue behavior.
+
+### AVAudioPlayerNode Buffer Queue Gotcha
+
+**Buffers are APPENDED, not replaced.** When you call `scheduleBuffer:atTime:options:0`, the buffer goes into a FIFO queue. If you schedule a new buffer without stopping the node first, the old buffer remains queued ahead of it.
+
+**`playerTime.sampleTime` is CUMULATIVE** across all queued buffers. The position calculation `_scheduledStartFrame + playerTime.sampleTime` breaks if stale buffers remain, because `sampleTime` includes samples from old buffers but `_scheduledStartFrame` only references the new one.
+
+**Fix**: `seekToPosition:` must call `[_playerNode stop]` to clear the buffer queue before scheduling new playback — **even when paused**, not just when playing:
+
+```objc
+- (void)seekToPosition:(CGFloat)positionMS {
+    // Always stop the player node when seeking — whether playing or paused.
+    // This clears stale buffers from the queue. Without this, paused buffers
+    // remain queued and playerTime.sampleTime becomes cumulative across old
+    // and new buffers, causing position calculation drift.
+    if (wasPlaying || _playbackState == XLAudioPlaybackStatePaused) {
+        _scheduleGeneration++;
+        [_playerNode stop];
+    }
+    // ...
+}
+```
+
+### `_scheduleGeneration` Counter
+
+Completion handlers from `scheduleBuffer:completionHandler:` can fire after the player is stopped and re-started. The `_scheduleGeneration` counter invalidates stale handlers — each seek/stop increments it, and the completion handler checks if its captured generation still matches.
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `sequencer/XLAudioPlayer.h/m` | AVAudioEngine wrapper: load, play, pause, stop, seek, position tracking |
+| `XLPlaybackController.h/m` | Orchestrates audio player + engine bridge; single source of truth |
+| `XLSequencerViewController.m` | Delegates play/stop/pause to playback controller (never calls engine directly) |
+| `XLMainWindowController.mm` | Creates playback controller; menu item handlers |
+| `sequencer/XLWaveformView.m` | Click-to-seek fires `waveformView:didSeekToTimeMS:` regardless of playback state |
