@@ -1149,6 +1149,23 @@ static XLEngineBridge *_sharedBridge = nil;
     return result;
 }
 
+- (void)enumerateFrameBuffersWithBlock:(void (^)(NSString *modelName,
+                                                 const uint8_t *pixels,
+                                                 NSUInteger pixelBytes,
+                                                 NSUInteger width,
+                                                 NSUInteger height))block {
+    [self ensureEngineInitialized];
+    if (!_renderEngine || !block) return;
+
+    _renderEngine->visitFrameBuffers(
+        [block](const std::string& name, const uint8_t* pixels,
+                size_t pixelBytes, int w, int h) {
+            NSString *modelName = [NSString stringWithUTF8String:name.c_str()];
+            block(modelName, pixels, (NSUInteger)pixelBytes,
+                  (NSUInteger)w, (NSUInteger)h);
+        });
+}
+
 - (NSDictionary *)getPrerenderedFrameBuffer:(NSString *)modelName timeMS:(NSInteger)timeMS {
     // TODO: Implement when RenderEngine supports getPrerenderedFrameBuffer
     // This requires Phase 7 engine modernization to expose pre-rendered frame data

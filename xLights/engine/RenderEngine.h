@@ -343,6 +343,20 @@ public:
     // Export the most recently rendered data to an FSEQ file.
     // Returns true on success. Only valid after renderAll/renderRange completes.
     bool exportRenderedFSEQ(const std::string& outputPath, int compressionLevel = 2);
+
+    // --- Zero-copy buffer access ---
+
+    // Visitor callback type for zero-copy frame buffer iteration.
+    // The pointer is valid only for the duration of the callback.
+    using FrameBufferVisitor = std::function<void(
+        const std::string& name, const uint8_t* pixels, size_t pixelBytes,
+        int width, int height)>;
+
+    // Iterate all valid frame buffers (batch + sidebar) under lock,
+    // invoking the visitor for each. Avoids the deep-copy overhead of
+    // getAllFrameBuffers(). The visitor must not call back into
+    // RenderEngine (would deadlock).
+    void visitFrameBuffers(const FrameBufferVisitor& visitor) const;
 #endif
 
 private:

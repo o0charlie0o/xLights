@@ -160,6 +160,16 @@
 /// calling getFrameBuffer: for each model individually.
 - (NSArray<NSDictionary *> *)getAllFrameBuffers;
 
+/// Zero-copy frame buffer iteration.  The block is invoked once per valid
+/// buffer while the engine holds its internal lock.  The pixel pointer is
+/// only valid for the duration of the block call; callers that need the
+/// data beyond that must copy it (e.g. into NSData).
+- (void)enumerateFrameBuffersWithBlock:(void (^)(NSString *modelName,
+                                                 const uint8_t *pixels,
+                                                 NSUInteger pixelBytes,
+                                                 NSUInteger width,
+                                                 NSUInteger height))block;
+
 /// Get pre-rendered pixel data for a model at a specific time.
 /// This reads from the pre-rendered SequenceData (after renderAll) and does NOT trigger
 /// a new render. Suitable for use during playback. Returns nil if data is not available.

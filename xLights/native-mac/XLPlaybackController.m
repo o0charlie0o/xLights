@@ -182,8 +182,17 @@
 
         CFAbsoluteTime afterRender = CFAbsoluteTimeGetCurrent();
 
-        // Collect all rendered frame buffers — immutable copies, safe to hand off
-        NSArray<NSDictionary *> *frameUpdates = [bridge getAllFrameBuffers];
+        // Zero-copy collect: visit buffers under engine lock, copying only
+        // the raw pixel bytes into NSData (no intermediate C++ vector copy).
+        NSMutableArray *frameUpdates = [NSMutableArray new];
+        [bridge enumerateFrameBuffersWithBlock:^(NSString *modelName,
+                                                 const uint8_t *pixels,
+                                                 NSUInteger pixelBytes,
+                                                 NSUInteger width,
+                                                 NSUInteger height) {
+            NSData *pixelData = [NSData dataWithBytes:pixels length:pixelBytes];
+            [frameUpdates addObject:@[modelName, pixelData, @(width), @(height)]];
+        }];
 
         CFAbsoluteTime afterCollect = CFAbsoluteTimeGetCurrent();
         double renderMS = (afterRender - renderStart) * 1000.0;
@@ -209,13 +218,13 @@
             XLMetalPreviewView *sidebarPreview = strongSelf.sidebarPreviewView;
 
             if (frameUpdates.count > 0 && (preview || sidebarPreview)) {
-                for (NSDictionary *fb in frameUpdates) {
-                    NSData *pixels = fb[@"pixels"];
-                    NSUInteger width = [fb[@"width"] unsignedIntegerValue];
-                    NSUInteger height = [fb[@"height"] unsignedIntegerValue];
-                    NSString *name = fb[@"modelName"];
+                for (NSArray *fb in frameUpdates) {
+                    NSString *name = fb[0];
+                    NSData *pixels = fb[1];
+                    NSUInteger width = [fb[2] unsignedIntegerValue];
+                    NSUInteger height = [fb[3] unsignedIntegerValue];
 
-                    if (pixels && pixels.length > 0 && width > 0 && height > 0) {
+                    if (pixels.length > 0 && width > 0 && height > 0) {
                         [preview setRenderedPixels:pixels
                                           forModel:name
                                              width:width
@@ -660,7 +669,18 @@
     dispatch_async(_renderQueue, ^{
         @try {
             [bridge renderFrame:timeMS];
-            NSArray<NSDictionary *> *frameUpdates = [bridge getAllFrameBuffers];
+
+            // Zero-copy collect: visit buffers under lock, copying pixels
+            // directly into NSData without intermediate C++ vector copy.
+            NSMutableArray *frameUpdates = [NSMutableArray new];
+            [bridge enumerateFrameBuffersWithBlock:^(NSString *modelName,
+                                                     const uint8_t *pixels,
+                                                     NSUInteger pixelBytes,
+                                                     NSUInteger width,
+                                                     NSUInteger height) {
+                NSData *pixelData = [NSData dataWithBytes:pixels length:pixelBytes];
+                [frameUpdates addObject:@[modelName, pixelData, @(width), @(height)]];
+            }];
 
             atomic_store(&_renderInProgress, false);
 
@@ -672,13 +692,13 @@
                 XLMetalPreviewView *sidebarPreview = strongSelf.sidebarPreviewView;
 
                 if (frameUpdates.count > 0 && (preview || sidebarPreview)) {
-                    for (NSDictionary *fb in frameUpdates) {
-                        NSData *pixels = fb[@"pixels"];
-                        NSUInteger width = [fb[@"width"] unsignedIntegerValue];
-                        NSUInteger height = [fb[@"height"] unsignedIntegerValue];
-                        NSString *name = fb[@"modelName"];
+                    for (NSArray *fb in frameUpdates) {
+                        NSString *name = fb[0];
+                        NSData *pixels = fb[1];
+                        NSUInteger width = [fb[2] unsignedIntegerValue];
+                        NSUInteger height = [fb[3] unsignedIntegerValue];
 
-                        if (pixels && pixels.length > 0 && width > 0 && height > 0) {
+                        if (pixels.length > 0 && width > 0 && height > 0) {
                             [preview setRenderedPixels:pixels
                                               forModel:name
                                                  width:width

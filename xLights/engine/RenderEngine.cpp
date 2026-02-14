@@ -1642,6 +1642,31 @@ std::vector<FrameBuffer> RenderEngine::getAllFrameBuffers() const
     return result;
 }
 
+void RenderEngine::visitFrameBuffers(const FrameBufferVisitor& visitor) const
+{
+    std::set<std::string> seen;
+
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        for (const auto& [name, fb] : _bufferCache) {
+            if (fb.isValid()) {
+                visitor(name, fb.pixels.data(), fb.pixels.size(),
+                        fb.width, fb.height);
+                seen.insert(name);
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        for (const auto& [name, fb] : _sidebarCache) {
+            if (fb.isValid() && seen.find(name) == seen.end()) {
+                visitor(name, fb.pixels.data(), fb.pixels.size(),
+                        fb.width, fb.height);
+            }
+        }
+    }
+}
+
 std::vector<NodeChannelData> RenderEngine::getNodeData(const std::string& modelName) const
 {
     if (!_fseqLoaded) return {};
