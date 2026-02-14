@@ -112,6 +112,17 @@ struct NativeLayerInfo {
 
     // Sparkle color
     xlColor sparklesColour = xlWHITE;
+
+    // Freeze: stop rendering after this many frames into the effect.
+    // Default 999999 means never freeze. When effectFrame >= freezeAfterFrame,
+    // the layer buffer is preserved and the effect is not re-rendered.
+    int freezeAfterFrame = 999999;
+
+    // Suppress: skip blending this layer until this many frames into the effect.
+    // Default 0 means no suppression. When effectFrame < suppressUntil,
+    // the effect still renders (for state tracking) but the layer is excluded
+    // from calcOutput() blending.
+    int suppressUntil = 0;
 };
 
 // NativePixelBuffer: manages effect layers and blends them for a single model.
@@ -220,6 +231,17 @@ public:
 
     // Clear the submodel mask (disable masking).
     void clearSubmodelMask();
+
+    // Load raw channel data from an output buffer into a specific layer.
+    // Used to populate the blend layer with existing rendered data (e.g., group
+    // output) before rendering model effects on top. Reads each node's channels
+    // from the output buffer and sets the corresponding pixel in the layer buffer.
+    // Reverses the dimming curve so the loaded data matches the linear render space.
+    //
+    // @param layer        Layer index to load into
+    // @param outputBuffer Source channel data (full frame)
+    // @param bufferSize   Size of outputBuffer in bytes
+    void loadChannelData(int layer, const uint8_t* outputBuffer, uint32_t bufferSize);
 
     // Get the blended color for a specific pixel coordinate.
     xlColor getBlendedPixel(int x, int y) const;

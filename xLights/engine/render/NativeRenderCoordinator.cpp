@@ -284,17 +284,56 @@ static NativeMixType parseMixType(const std::string& name) {
     return (it != map.end()) ? it->second : NativeMixType::Mix_Normal;
 }
 
+// Resolve a layer/palette parameter that may be overridden by a value curve.
+// Checks for a VC key (e.g. "B_VALUECURVE_Blur" or "C_VALUECURVE_Brightness")
+// in the given map. If found and active, evaluates it at the current time
+// position; otherwise falls back to the static slider value.
+static int getLayerInt(const std::map<std::string, std::string>& map,
+                       const std::string& sliderKey,
+                       const std::string& vcKey,
+                       int defaultVal,
+                       float offset, int startMS, int endMS,
+                       int divisor = 1) {
+    auto vcIt = map.find(vcKey);
+    if (vcIt != map.end() && isValueCurveString(vcIt->second)) {
+        ValueCurve& vc = getCachedValueCurve(vcIt->second, 0, 100, divisor);
+        if (vc.IsActive()) {
+            return static_cast<int>(vc.GetOutputValueAt(offset, startMS, endMS));
+        }
+    }
+    auto it = map.find(sliderKey);
+    if (it != map.end() && !it->second.empty()) {
+        try { return std::stoi(it->second); }
+        catch (...) { return defaultVal; }
+    }
+    return defaultVal;
+}
+
 // Parse layer settings from the effect's settings map (B_ prefixed keys)
-// and populate a NativeLayerInfo struct. Matches legacy SetLayerSettings().
+// and palette map (C_ prefixed keys), with value curve support.
+// Matches legacy SetLayerSettings() + calcOutput() VC evaluation.
+//
+// B_ keys (settings): blur, rotation, zoom, pivots, transitions, canvas, chroma
+// C_ keys (palette):  brightness, sparkle, HSV adjustments, contrast
 static NativeLayerInfo parseLayerSettings(
-    const std::map<std::string, std::string>& settings, int frameTimeMS)
+    const std::map<std::string, std::string>& settings,
+    const std::map<std::string, std::string>& palette,
+    int frameTimeMS, int timeMS, int startTimeMS, int endTimeMS)
 {
     NativeLayerInfo info;
+
+    // Compute time offset within effect duration (0.0 to 1.0)
+    float offset = 0.0f;
+    if (endTimeMS > startTimeMS) {
+        offset = static_cast<float>(timeMS - startTimeMS) /
+                 static_cast<float>(endTimeMS - startTimeMS);
+        offset = std::max(0.0f, std::min(1.0f, offset));
+    }
 
     // Persistent (overlay background)
     info.persistent = getSettingsBool(settings, "B_CHECKBOX_OverlayBkg");
 
-    // Fade in/out (seconds → frames)
+    // Fade in/out (seconds -> frames)
     double fadeInSec = getSettingsDouble(settings, "B_TEXTCTRL_Fadein", 0.0);
     double fadeOutSec = getSettingsDouble(settings, "B_TEXTCTRL_Fadeout", 0.0);
     info.fadeInSteps = (frameTimeMS > 0)
@@ -302,27 +341,41 @@ static NativeLayerInfo parseLayerSettings(
     info.fadeOutSteps = (frameTimeMS > 0)
         ? static_cast<float>((int)(fadeOutSec * 1000) / frameTimeMS) : 0.0f;
 
-    // Blur
-    info.blur = getSettingsInt(settings, "B_SLIDER_Blur", 1);
+    // Blur (B_ settings, supports value curve)
+    info.blur = getLayerInt(settings, "B_SLIDER_Blur", "B_VALUECURVE_Blur",
+                            1, offset, startTimeMS, endTimeMS);
 
-    // Sparkle
-    info.sparkle_count = getSettingsInt(settings, "B_SLIDER_SparkleFrequency", 0);
-    info.use_music_sparkle_count = getSettingsBool(settings, "B_CHECKBOX_MusicSparkles");
+    // Sparkle (C_ palette, supports value curve)
+    info.sparkle_count = getLayerInt(palette, "C_SLIDER_SparkleFrequency",
+                                     "C_VALUECURVE_SparkleFrequency",
+                                     0, offset, startTimeMS, endTimeMS);
+    info.use_music_sparkle_count = getSettingsBool(palette, "C_CHECKBOX_MusicSparkles");
 
-    // Sparkle color
-    std::string sparkColStr = getSettingsStr(settings, "B_COLOURPICKERCTRL_SparklesColour", "#FFFFFF");
+    // Sparkle color (C_ palette)
+    std::string sparkColStr = getSettingsStr(palette, "C_COLOURPICKERCTRL_SparklesColour", "#FFFFFF");
     if (!sparkColStr.empty()) {
         info.sparklesColour.SetFromString(sparkColStr);
     }
 
-    // Brightness / contrast
-    info.brightness = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Brightness", 100));
-    info.contrast = getSettingsInt(settings, "B_SLIDER_Contrast", 0);
+    // Brightness (C_ palette, supports value curve)
+    info.brightness = static_cast<float>(
+        getLayerInt(palette, "C_SLIDER_Brightness", "C_VALUECURVE_Brightness",
+                    100, offset, startTimeMS, endTimeMS));
+    info.contrast = getSettingsInt(palette, "C_SLIDER_Contrast", 0);
 
-    // HSV adjustments
-    info.hueAdjust = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Color_HueAdjust", 0));
-    info.saturationAdjust = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Color_SaturationAdjust", 0));
-    info.valueAdjust = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Color_ValueAdjust", 0));
+    // HSV adjustments (C_ palette, all support value curves)
+    info.hueAdjust = static_cast<float>(
+        getLayerInt(palette, "C_SLIDER_Color_HueAdjust",
+                    "C_VALUECURVE_Color_HueAdjust",
+                    0, offset, startTimeMS, endTimeMS));
+    info.saturationAdjust = static_cast<float>(
+        getLayerInt(palette, "C_SLIDER_Color_SaturationAdjust",
+                    "C_VALUECURVE_Color_SaturationAdjust",
+                    0, offset, startTimeMS, endTimeMS));
+    info.valueAdjust = static_cast<float>(
+        getLayerInt(palette, "C_SLIDER_Color_ValueAdjust",
+                    "C_VALUECURVE_Color_ValueAdjust",
+                    0, offset, startTimeMS, endTimeMS));
 
     // Mix type
     std::string mixName = getSettingsStr(settings, "B_CHOICE_LayerMethod", "Normal");
@@ -347,7 +400,6 @@ static NativeLayerInfo parseLayerSettings(
     // Transition types
     std::string inTransStr = getSettingsStr(settings, "B_CHOICE_In_Transition_Type", "Fade");
     std::string outTransStr = getSettingsStr(settings, "B_CHOICE_Out_Transition_Type", "Fade");
-    // Store as simple integer codes: 0=Fade (only Fade is fully supported for now)
     info.inTransitionType = (inTransStr == "Fade") ? 0 : 1;
     info.outTransitionType = (outTransStr == "Fade") ? 0 : 1;
     info.inTransitionAdjust = static_cast<float>(
@@ -356,6 +408,12 @@ static NativeLayerInfo parseLayerSettings(
         getSettingsInt(settings, "B_SLIDER_Out_Transition_Adjust", 0));
     info.inTransitionReverse = getSettingsBool(settings, "B_CHECKBOX_In_Transition_Reverse");
     info.outTransitionReverse = getSettingsBool(settings, "B_CHECKBOX_Out_Transition_Reverse");
+
+    // Freeze after frame
+    info.freezeAfterFrame = getSettingsInt(settings, "B_SPINCTRL_FreezeEffectAtFrame", 999999);
+
+    // Suppress until frame
+    info.suppressUntil = getSettingsInt(settings, "B_SPINCTRL_SuppressEffectUntil", 0);
 
     return info;
 }
@@ -1332,8 +1390,8 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
     if (frameTimeMS <= 0) frameTimeMS = 50;
     int period = timeMS / frameTimeMS;
 
-    // Don't call pixelBuffer->clear() unconditionally — persistent layers
-    // need their previous frame data to survive. We'll clear each layer
+    // Don't call pixelBuffer->clear() unconditionally — persistent and frozen
+    // layers need their previous frame data to survive. We clear each layer
     // individually below based on its settings.
 
     std::vector<bool> validLayers(job.layerCount, false);
@@ -1359,23 +1417,42 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
         EffectInstanceInfo effectInfo;
         if (!_effectProvider->getEffectAtTime(
                 srcElementIdx, srcLayerIdx, timeMS, effectInfo)) {
-            // No effect on this layer at this time — clear it unless persistent.
-            // (We can't know persistent without the effect, so default to clearing.)
+            // No effect on this layer at this time — always clear.
+            // Even persistent layers clear when there's no active effect,
+            // matching legacy behavior (the second condition in the clear check).
             buf.Clear();
             continue;
         }
 
-        // Parse and apply layer settings (B_ prefix keys) from the effect.
-        // This populates mix type, brightness, contrast, sparkle, HSV adjust,
-        // fade, blur, persistent, canvas, chroma key — matching legacy
-        // SetLayerSettings() behavior.
-        NativeLayerInfo layerInfo = parseLayerSettings(effectInfo.settings, frameTimeMS);
+        // Parse and apply layer settings from the effect.
+        // B_ keys from settings, C_ keys from palette, with value curve evaluation.
+        NativeLayerInfo layerInfo = parseLayerSettings(
+            effectInfo.settings, effectInfo.palette,
+            frameTimeMS, timeMS, effectInfo.startTimeMS, effectInfo.endTimeMS);
         job.pixelBuffer->setLayerSettings(static_cast<int>(layer), layerInfo);
 
-        // Clear the layer buffer unless persistent (overlay background).
+        // Compute how many frames into the effect we are (0-based).
+        // This matches legacy GetEffectFrame(): frame - (ef->GetStartTimeMS() / frameTimeMS)
+        int effectFrame = period - (effectInfo.startTimeMS / frameTimeMS);
+
+        // Determine freeze state: when freezeAfterFrame is set and we've
+        // passed that threshold, stop updating the buffer. The previous
+        // frame's pixel data is preserved and the layer is marked valid.
+        bool freeze = (layerInfo.freezeAfterFrame != 999999 &&
+                       layerInfo.freezeAfterFrame <= effectFrame);
+
+        // Clear the layer buffer unless persistent or frozen.
         // Persistent layers keep previous frame data so effects accumulate.
-        if (!layerInfo.persistent) {
+        // Frozen layers preserve whatever was rendered on the freeze frame.
+        if (!layerInfo.persistent && !freeze) {
             buf.Clear();
+        }
+
+        // If frozen, skip rendering — buffer is preserved from last rendered frame.
+        // Mark the layer as valid so calcOutput() includes it in blending.
+        if (freeze) {
+            validLayers[layer] = true;
+            continue;
         }
 
         // Configure render buffer timing state
@@ -1385,7 +1462,11 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
         buf.cur_model = job.geometry.name;
 
         // Set palette colors from the effect's palette map.
+        // Color curves (animated palette colors) are detected via ColorCurve::IsColorCurve()
+        // on the C_BUTTON_Palette* value. When present, the initial color is taken from
+        // the curve at t=0 and the curve is stored for per-frame evaluation.
         xlColorVector colors;
+        xlColorCurveVector colorCurves;
         for (int ci = 1; ci <= 8; ++ci) {
             std::string checkKey = "C_CHECKBOX_Palette" + std::to_string(ci);
             auto cit = effectInfo.palette.find(checkKey);
@@ -1396,23 +1477,42 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
             if (pit == effectInfo.palette.end() || pit->second.empty()) continue;
 
             const std::string& val = pit->second;
-            if (val.size() >= 7 && val[0] == '#') {
+            if (ColorCurve::IsColorCurve(val)) {
+                ColorCurve cv(val);
+                colors.push_back(cv.GetValueAt(0));
+                colorCurves.push_back(cv);
+            } else if (val.size() >= 7 && val[0] == '#') {
                 unsigned int hex = 0;
                 if (std::sscanf(val.c_str() + 1, "%06x", &hex) == 1) {
                     colors.push_back(xlColor(
                         static_cast<uint8_t>((hex >> 16) & 0xFF),
                         static_cast<uint8_t>((hex >> 8) & 0xFF),
                         static_cast<uint8_t>(hex & 0xFF)));
+                    colorCurves.push_back(ColorCurve());
                 }
             }
         }
         if (colors.empty()) {
             colors.push_back(xlWHITE);
+            colorCurves.push_back(ColorCurve());
         }
-        buf.SetPalette(colors);
+        buf.SetPalette(colors, colorCurves);
 
+        // Render the effect. Even suppressed layers render (for state tracking
+        // in stateful effects), but suppressed layers are excluded from blending.
         bool rendered = renderNativeEffect(effectInfo, buf);
-        validLayers[layer] = rendered;
+
+        // Determine suppress state: when suppressUntil is set and we haven't
+        // reached that frame yet, mark the layer as invalid so calcOutput()
+        // skips it. The effect still rendered above for state continuity.
+        bool suppress = (layerInfo.suppressUntil > 0 &&
+                         layerInfo.suppressUntil > effectFrame);
+
+        if (suppress) {
+            validLayers[layer] = false;
+        } else {
+            validLayers[layer] = rendered;
+        }
     }
 
     job.pixelBuffer->calcOutput(period, validLayers);
