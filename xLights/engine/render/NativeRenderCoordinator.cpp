@@ -20,6 +20,7 @@
 
 #include "NativeImageLoader.h"
 #include "NativeVideoReader.h"
+#include "MetalEffectCompute.h"
 
 #include <Box2D/Box2D.h>
 
@@ -2891,10 +2892,21 @@ bool NativeRenderCoordinator::renderNativeEffect(
     const EffectInstanceInfo& effectInfo, NativeRenderBuffer& buf)
 {
     const std::string& type = effectInfo.effectType;
+    int totalPixels = buf.BufferWi * buf.BufferHt;
+
+    // --- GPU path: dispatch to Metal compute for large buffers ---
+    auto& gpu = MetalEffectCompute::shared();
+    bool useGPU = gpu.isAvailable() && totalPixels >= MetalEffectCompute::minPixelThreshold();
+
+    // Log GPU availability once
+    static bool sGPULogged = false;
+    if (!sGPULogged) {
+        sGPULogged = true;
+        printf("[GPU_EFFECT] Metal effect compute: available=%d, threshold=%d pixels\n",
+               gpu.isAvailable(), MetalEffectCompute::minPixelThreshold());
+    }
 
     if (type == "On") {
-        // Native "On" effect: fill all pixels with the first palette color.
-        // Settings: E_TEXTCTRL_Eff_On_Start (default 100), E_TEXTCTRL_Eff_On_End (default 100)
         int startIntensity = 100;
         int endIntensity = 100;
 
@@ -2907,10 +2919,60 @@ bool NativeRenderCoordinator::renderNativeEffect(
             endIntensity = std::atoi(it->second.c_str());
         }
 
+        bool shimmer = false;
+        it = effectInfo.settings.find("E_CHECKBOX_On_Shimmer");
+        if (it != effectInfo.settings.end()) shimmer = (it->second == "1");
+
+        if (useGPU) {
+            // Build palette as float4 array (r, g, b, a)
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 2) palSize = 2;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            int tot = buf.curPeriod - buf.curEffStartPer;
+
+            GPUOnParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.startIntensity = startIntensity / 100.0f;
+            params.endIntensity = endIntensity / 100.0f;
+            params.effectPosition = buf.GetEffectTimeIntervalPosition();
+            params.shimmer = shimmer ? 1 : 0;
+            params.isShimmerOdd = (shimmer && (tot % 2) == 1) ? 1 : 0;
+
+            if (gpu.renderOn(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                             params, palette)) {
+                static bool sOnGPULogged = false;
+                if (!sOnGPULogged) {
+                    sOnGPULogged = true;
+                    printf("[GPU_EFFECT] On: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
+        // CPU path
         xlColor color;
         buf.palette.GetColor(0, color);
 
-        // Apply intensity ramp
+        if (shimmer) {
+            int tot = buf.curPeriod - buf.curEffStartPer;
+            if (tot % 2 == 1 && buf.GetColorCount() > 1) {
+                buf.palette.GetColor(1, color);
+            }
+        }
+
         if (startIntensity != 100 || endIntensity != 100) {
             float pos = buf.GetEffectTimeIntervalPosition();
             double d = startIntensity + (endIntensity - startIntensity) * (double)pos;
@@ -2925,10 +2987,6 @@ bool NativeRenderCoordinator::renderNativeEffect(
     }
 
     if (type == "Color Wash" || type == "ColorWash") {
-        // Native Color Wash — port of legacy ColorWashEffect::Render
-        float oset = buf.GetEffectTimeIntervalPosition();
-
-        // Read settings
         double cycles = 1.0;
         auto it = effectInfo.settings.find("E_TEXTCTRL_ColorWash_Cycles");
         if (it != effectInfo.settings.end() && !it->second.empty())
@@ -2948,16 +3006,56 @@ bool NativeRenderCoordinator::renderNativeEffect(
         it = effectInfo.settings.find("E_CHECKBOX_ColorWash_CircularPalette");
         if (it != effectInfo.settings.end()) circularPalette = (it->second == "1");
 
-        // Get blended color at current position with cycles
         double position = buf.GetEffectTimeIntervalPosition(cycles);
+        int tot = buf.curPeriod - buf.curEffStartPer;
+        bool shimmerBlack = shimmer && (tot % 2) == 1;
+
+        if (useGPU) {
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUColorWashParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.effectPosition = static_cast<float>(position);
+            params.horizFade = horizFade ? 1 : 0;
+            params.vertFade = vertFade ? 1 : 0;
+            params.reverseFades = reverseFades ? 1 : 0;
+            params.shimmerBlack = shimmerBlack ? 1 : 0;
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.circularPalette = circularPalette ? 1 : 0;
+
+            if (gpu.renderColorWash(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                    params, palette)) {
+                static bool sCWGPULogged = false;
+                if (!sCWGPULogged) {
+                    sCWGPULogged = true;
+                    printf("[GPU_EFFECT] ColorWash: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
+        // CPU path
         xlColor color;
         buf.GetMultiColorBlend(position, circularPalette, color);
 
         int endX = buf.BufferWi - 1;
         int endY = buf.BufferHt - 1;
 
-        int tot = buf.curPeriod - buf.curEffStartPer;
-        if (!shimmer || (tot % 2) == 0) {
+        if (!shimmerBlack) {
             double halfHt = (double)endY / 2.0;
             double halfWi = (double)endX / 2.0;
 
