@@ -140,6 +140,12 @@ private:
         size_t elementIndex = 0;
         size_t layerCount = 0;
         std::unique_ptr<NativePixelBuffer> pixelBuffer;
+
+        // Submodel mask: when a physical model matches a group through
+        // submodel refs (e.g. group has "SingingTree/Outline" not "SingingTree"),
+        // only these (bufX, bufY) positions should be kept non-black.
+        bool hasSubmodelMask = false;
+        std::set<std::pair<int,int>> submodelMaskPositions;
     };
 
     std::vector<ModelJob> buildModelJobs();

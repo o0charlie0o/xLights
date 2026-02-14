@@ -371,11 +371,19 @@ private:
     std::unique_ptr<NativeSequenceData> _renderedData;
     std::string _fseqPath; // Path of currently loaded FSEQ
 
-    // Persistent coordinator for live preview rendering.
+    // Persistent coordinator for batch live preview rendering (renderFrame).
     // Kept alive across renderFrame() calls so stateful effects accumulate.
     std::unique_ptr<NativeRenderCoordinator> _liveCoordinator;
     std::unique_ptr<IRenderContext> _liveContext;
     int _lastLiveRenderTimeMS = -1; // for backward scrub detection
+
+    // Separate coordinator for per-model sidebar rendering (renderModelFrame).
+    // Isolated from the batch path so they don't share _lastLiveRenderTimeMS
+    // or persistent state — prevents mutual resetPersistentState() calls
+    // and _bufferCache.clear() interference during concurrent playback.
+    std::unique_ptr<NativeRenderCoordinator> _sidebarCoordinator;
+    std::unique_ptr<IRenderContext> _sidebarContext;
+    int _lastSidebarRenderTimeMS = -1;
 
     // --- FSEQ Playback State ---
 
@@ -430,6 +438,10 @@ private:
     std::atomic<RenderMode> _renderMode{RenderMode::Auto};
     mutable std::mutex _bufferCacheMutex;
     mutable std::map<std::string, FrameBuffer> _bufferCache;
+
+    // Separate cache for per-model sidebar renders — not cleared by renderFrame().
+    mutable std::mutex _sidebarCacheMutex;
+    mutable std::map<std::string, FrameBuffer> _sidebarCache;
 };
 
 } // namespace xlEngine

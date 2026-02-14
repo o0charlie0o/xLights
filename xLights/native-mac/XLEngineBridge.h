@@ -445,6 +445,12 @@
 /// Batch-fetch for a subset of models. Pass nil for all models.
 - (NSArray<NSDictionary *> *)getAllModelDataForNames:(NSArray<NSString *> *)modelNames;
 
+/// Get 2D buffer-layout node data for a model group.
+/// Returns per-member model data with flattened 2D coordinates suitable for
+/// sidebar preview rendering (compact grid instead of scattered world positions).
+/// Same dictionary format as getAllModelDataForNames: but with remapped coordinates.
+- (NSArray<NSDictionary *> *)getGroupBufferData:(NSString *)groupName;
+
 #pragma mark - Model Import Operations
 
 /// Import a model from a .xmodel file

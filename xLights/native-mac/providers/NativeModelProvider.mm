@@ -241,6 +241,10 @@ std::map<std::string, std::string> NativeModelProvider::getModelAttributes(const
     if (it != _modelAttributes.end()) {
         return it->second;
     }
+    auto git = _groupAttributes.find(name);
+    if (git != _groupAttributes.end()) {
+        return git->second;
+    }
     return {};
 }
 
@@ -787,7 +791,9 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
 
 bool NativeModelProvider::hasModel(const std::string& name) const {
     std::lock_guard<std::mutex> lock(_mutex);
-    return _modelAttributes.find(name) != _modelAttributes.end();
+    if (_modelAttributes.find(name) != _modelAttributes.end()) return true;
+    if (_groupAttributes.find(name) != _groupAttributes.end()) return true;
+    return false;
 }
 
 std::map<std::string, std::string> NativeModelProvider::getModelAttributes(const std::string& name) const {
@@ -795,6 +801,10 @@ std::map<std::string, std::string> NativeModelProvider::getModelAttributes(const
     auto it = _modelAttributes.find(name);
     if (it != _modelAttributes.end()) {
         return it->second;
+    }
+    auto git = _groupAttributes.find(name);
+    if (git != _groupAttributes.end()) {
+        return git->second;
     }
     return {};
 }

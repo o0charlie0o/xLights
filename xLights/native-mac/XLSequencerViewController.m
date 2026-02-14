@@ -1540,18 +1540,6 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         return;
     }
 
-    // First pass: count total effects from ALL layers
-    NSUInteger totalEffects = 0;
-    for (NSUInteger i = 0; i < (NSUInteger)elementCount; i++) {
-        NSDictionary *elem = elements[i];
-        NSInteger originalIndex = [elem[@"index"] integerValue];  // Use original element index
-        NSInteger layerCount = [elem[@"effectLayerCount"] integerValue];
-        for (NSInteger layer = 0; layer < layerCount; layer++) {
-            NSArray *effects = [self.engineBridge getEffectsForElementAtIndex:originalIndex layer:layer];
-            totalEffects += effects.count;
-        }
-    }
-
     // Allocate row data - one row per element initially (collapsed state)
     // Will grow dynamically when layers are expanded
     _rowCapacity = (NSUInteger)elementCount + 32;
@@ -1562,8 +1550,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _effectOffsetCapacity = _rowCapacity;
     _effectOffsetPerRow = (NSUInteger *)calloc(_effectOffsetCapacity, sizeof(NSUInteger));
 
-    // Allocate effect data for ALL layers
-    _effectCapacity = totalEffects + 64;
+    // Allocate effect data with a reasonable estimate — grows dynamically if needed
+    _effectCapacity = (NSUInteger)elementCount * 4 + 64;
     _effectCount = 0;
     _effectData = (XLEffectEntry *)calloc(_effectCapacity, sizeof(XLEffectEntry));
 
@@ -7796,7 +7784,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
             [_engineBridge setEffectSettings:effectId settings:settings];
         }
         [_effectsGridView clearCellSelection];
-        [self reloadSequenceData];
+        [self refreshTimingData];
         NSLog(@"XLSequencerViewController: Created '%@' effect (id=%ld) at row %ld, %ld-%ld ms",
               effectName, (long)effectId, (long)row, (long)(NSInteger)startMS, (long)(NSInteger)endMS);
         return YES;

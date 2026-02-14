@@ -53,6 +53,13 @@ struct NodeCoord {
 std::vector<NodeCoord> generateNodesFromAttributes(
     const std::map<std::string, std::string>& attrs);
 
+// Filter parent model nodes to only the subset referenced by a submodel's strand ranges.
+// subAttrs should come from IModelProvider::getSubmodelAttributes().
+// Returns filtered nodes with reassigned bufX/bufY for compact layout.
+std::vector<NodeCoord> filterNodesToSubmodel(
+    const std::vector<NodeCoord>& allParentNodes,
+    const std::map<std::string, std::string>& subAttrs);
+
 struct ModelInfo {
     std::string name;
     std::string type;           // DisplayAs value (e.g. "Custom", "SingleLine", "Matrix")
@@ -266,6 +273,20 @@ public:
     };
 
     BoundingBox getModelBounds(const std::string& name) const;
+
+    // --- Group Buffer Nodes ---
+
+    /// Per-member model node data with flattened 2D buffer coordinates.
+    struct GroupMemberNodes {
+        std::string modelName;
+        std::vector<NodeCoord> nodes;
+        BoundingBox bounds;
+    };
+
+    /// Generate 2D buffer-coordinate-based nodes for a model group.
+    /// Each member model's nodes are remapped from world coords to a compact
+    /// 2D grid layout (minimalGrid style), suitable for sidebar preview rendering.
+    std::vector<GroupMemberNodes> getGroupBufferNodes(const std::string& groupName) const;
 
     // Called by the existing UI layer to notify the engine of changes
     // that occurred through the old code path. This allows the engine

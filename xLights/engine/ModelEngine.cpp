@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <sstream>
 
 namespace xlEngine {
@@ -1259,6 +1260,69 @@ static std::vector<std::string> parseModelList(const std::string& modelsStr) {
     return result;
 }
 
+// Filter parent model nodes to only the subset referenced by a submodel's strand ranges.
+// Returns filtered nodes with reassigned bufX/bufY for compact layout.
+std::vector<xlEngine::NodeCoord> xlEngine::filterNodesToSubmodel(
+    const std::vector<xlEngine::NodeCoord>& allParentNodes,
+    const std::map<std::string, std::string>& subAttrs)
+{
+    auto typeIt = subAttrs.find("type");
+    bool isRanges = true;
+    if (typeIt != subAttrs.end() && typeIt->second == "subbuffer") {
+        isRanges = false;
+    }
+
+    if (!isRanges) {
+        return allParentNodes;
+    }
+
+    // Ranges type: parse line0, line1, ... to get node indices
+    // Each lineN becomes a row; nodes within become columns
+    std::vector<xlEngine::NodeCoord> result;
+    for (int lineIdx = 0; lineIdx < 100; ++lineIdx) {
+        std::string key = "line" + std::to_string(lineIdx);
+        auto it = subAttrs.find(key);
+        if (it == subAttrs.end() || it->second.empty()) {
+            if (lineIdx > 0) break;
+            continue;
+        }
+        // Parse comma-separated ranges
+        std::istringstream stream(it->second);
+        std::string token;
+        int col = 0;
+        while (std::getline(stream, token, ',')) {
+            size_t start = token.find_first_not_of(" \t");
+            size_t end = token.find_last_not_of(" \t");
+            if (start == std::string::npos) continue;
+            token = token.substr(start, end - start + 1);
+            if (token.empty()) continue;
+
+            size_t dash = token.find('-');
+            int rangeStart, rangeEnd;
+            if (dash != std::string::npos) {
+                rangeStart = std::atoi(token.substr(0, dash).c_str()) - 1;
+                rangeEnd = std::atoi(token.substr(dash + 1).c_str()) - 1;
+                if (rangeStart < 0) rangeStart = 0;
+                if (rangeEnd < rangeStart) std::swap(rangeStart, rangeEnd);
+            } else {
+                rangeStart = rangeEnd = std::atoi(token.c_str()) - 1;
+                if (rangeStart < 0) continue;
+            }
+
+            for (int idx = rangeStart; idx <= rangeEnd; ++idx) {
+                if (idx >= 0 && idx < (int)allParentNodes.size()) {
+                    xlEngine::NodeCoord nc = allParentNodes[idx];
+                    nc.bufX = col;
+                    nc.bufY = lineIdx;
+                    result.push_back(nc);
+                    col++;
+                }
+            }
+        }
+    }
+    return result;
+}
+
 // Helper to get NativeModelProvider from the provider pointer
 static NativeModelProvider* getNativeProvider(IModelProvider* provider) {
     return dynamic_cast<NativeModelProvider*>(provider);
@@ -1458,6 +1522,183 @@ ModelEngine::BoundingBox ModelEngine::getModelBounds(const std::string& name) co
     bb.minY -= pad;  bb.maxY += pad;
     bb.minZ -= pad;  bb.maxZ += pad;
     return bb;
+}
+
+// --- Group Buffer Nodes (native) ---
+
+// Recursively resolve group members to leaf models, expanding nested groups
+// and preserving submodel references (e.g. "Model/Submodel").
+static void resolveGroupMembersRecursive(
+    const std::vector<std::string>& members,
+    NativeModelProvider* provider,
+    std::vector<std::string>& outLeaves,
+    std::set<std::string>& visited,
+    int depth = 0)
+{
+    if (depth > 10) return;
+
+    for (const auto& member : members) {
+        if (visited.count(member)) continue;
+        visited.insert(member);
+
+        // Check if member is a group (has "models" in group attributes)
+        auto groupAttrs = provider->getGroupAttributes(member);
+        auto modelsIt = groupAttrs.find("models");
+        if (modelsIt != groupAttrs.end() && !modelsIt->second.empty()) {
+            auto subMembers = parseModelList(modelsIt->second);
+            resolveGroupMembersRecursive(subMembers, provider, outLeaves, visited, depth + 1);
+            continue;
+        }
+
+        // Leaf model or submodel reference
+        outLeaves.push_back(member);
+    }
+}
+
+std::vector<ModelEngine::GroupMemberNodes> ModelEngine::getGroupBufferNodes(
+    const std::string& groupName) const
+{
+    std::vector<GroupMemberNodes> result;
+    if (!_provider) return result;
+
+    auto* nativeProvider = getNativeProvider(_provider);
+    if (!nativeProvider) return result;
+
+    auto groupAttrs = nativeProvider->getGroupAttributes(groupName);
+    auto modelsIt = groupAttrs.find("models");
+    if (modelsIt == groupAttrs.end() || modelsIt->second.empty()) return result;
+
+    auto directMembers = parseModelList(modelsIt->second);
+    if (directMembers.empty()) return result;
+
+    // Recursively flatten to leaf models/submodel refs
+    std::vector<std::string> leafMembers;
+    std::set<std::string> visited;
+    resolveGroupMembersRecursive(directMembers, nativeProvider, leafMembers, visited);
+    if (leafMembers.empty()) return result;
+
+    // Collect world-space nodes for all leaf members and compute global bounding box
+    struct MemberData {
+        std::string name;
+        std::vector<NodeCoord> nodes;
+    };
+    std::vector<MemberData> allMembers;
+    float globalMinX = 1e30f, globalMaxX = -1e30f;
+    float globalMinY = 1e30f, globalMaxY = -1e30f;
+
+    printf("[GRP] getGroupBufferNodes('%s'): %zu leaves\n", groupName.c_str(), leafMembers.size());
+
+    for (const auto& memberName : leafMembers) {
+        std::vector<NodeCoord> nodes;
+
+        // Check for submodel reference ("ParentModel/SubmodelName")
+        size_t slash = memberName.find('/');
+        if (slash != std::string::npos) {
+            std::string parentName = memberName.substr(0, slash);
+            std::string subName = memberName.substr(slash + 1);
+            auto parentAttrs = _provider->getModelAttributes(parentName);
+            if (!parentAttrs.empty()) {
+                auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+                auto subAttrs = _provider->getSubmodelAttributes(parentName, subName);
+                if (!subAttrs.empty()) {
+                    nodes = filterNodesToSubmodel(allParentNodes, subAttrs);
+                    printf("[GRP]   '%s': %zu→%zu nodes (filtered)\n", memberName.c_str(), allParentNodes.size(), nodes.size());
+                } else {
+                    nodes = std::move(allParentNodes);
+                    printf("[GRP]   '%s': %zu nodes (NO subAttrs!)\n", memberName.c_str(), nodes.size());
+                }
+            } else {
+                printf("[GRP]   '%s': parent '%s' has no attrs!\n", memberName.c_str(), parentName.c_str());
+            }
+        } else {
+            auto attrs = _provider->getModelAttributes(memberName);
+            if (!attrs.empty()) {
+                nodes = generateNodesFromAttributes(attrs);
+                printf("[GRP]   '%s': %zu nodes\n", memberName.c_str(), nodes.size());
+            } else {
+                printf("[GRP]   '%s': NO attrs!\n", memberName.c_str());
+            }
+        }
+
+        if (nodes.empty()) continue;
+
+        for (const auto& n : nodes) {
+            globalMinX = std::min(globalMinX, n.x);
+            globalMaxX = std::max(globalMaxX, n.x);
+            globalMinY = std::min(globalMinY, n.y);
+            globalMaxY = std::max(globalMaxY, n.y);
+        }
+        allMembers.push_back({memberName, std::move(nodes)});
+    }
+
+    if (allMembers.empty()) return result;
+
+    // Remap world coords to 2D buffer layout (minimalGrid style)
+    float rangeX = globalMaxX - globalMinX;
+    float rangeY = globalMaxY - globalMinY;
+    if (rangeX < 1.0f) rangeX = 1.0f;
+    if (rangeY < 1.0f) rangeY = 1.0f;
+
+    int gridSize = 400;
+    auto gsIt = groupAttrs.find("GridSize");
+    if (gsIt != groupAttrs.end() && !gsIt->second.empty()) {
+        try { gridSize = std::stoi(gsIt->second); } catch (...) {}
+    }
+    if (gridSize < 10) gridSize = 400;
+
+    // Determine aspect-preserving grid dimensions
+    float aspect = rangeX / rangeY;
+    int gridW, gridH;
+    if (aspect >= 1.0f) {
+        gridW = gridSize;
+        gridH = std::max(1, (int)(gridSize / aspect));
+    } else {
+        gridH = gridSize;
+        gridW = std::max(1, (int)(gridSize * aspect));
+    }
+
+    result.reserve(allMembers.size());
+    for (auto& md : allMembers) {
+        GroupMemberNodes gmn;
+        gmn.modelName = md.name;
+        gmn.nodes.reserve(md.nodes.size());
+
+        BoundingBox bb;
+        bool first = true;
+
+        for (auto& n : md.nodes) {
+            // Normalize to [0,1] then scale to grid
+            float nx = (n.x - globalMinX) / rangeX;
+            float ny = (n.y - globalMinY) / rangeY;
+            n.x = nx * gridW;
+            n.y = ny * gridH;
+            n.z = 0.0f;
+
+            if (first) {
+                bb.minX = bb.maxX = n.x;
+                bb.minY = bb.maxY = n.y;
+                bb.minZ = bb.maxZ = 0;
+                first = false;
+            } else {
+                bb.minX = std::min(bb.minX, n.x);
+                bb.maxX = std::max(bb.maxX, n.x);
+                bb.minY = std::min(bb.minY, n.y);
+                bb.maxY = std::max(bb.maxY, n.y);
+            }
+
+            gmn.nodes.push_back(n);
+        }
+
+        float pad = 2.0f;
+        bb.minX -= pad; bb.maxX += pad;
+        bb.minY -= pad; bb.maxY += pad;
+        bb.minZ -= pad; bb.maxZ += pad;
+        gmn.bounds = bb;
+
+        result.push_back(std::move(gmn));
+    }
+
+    return result;
 }
 
 // --- Face Definitions (native) ---
@@ -2328,6 +2569,15 @@ ModelEngine::BoundingBox ModelEngine::getModelBounds(const std::string& name) co
     box.maxZ = loc.GetBack();
 
     return box;
+}
+
+// --- Group Buffer Nodes (legacy) ---
+
+std::vector<ModelEngine::GroupMemberNodes> ModelEngine::getGroupBufferNodes(
+    const std::string& groupName) const
+{
+    // Legacy build: not used (sidebar preview uses Model objects directly)
+    return {};
 }
 
 // --- Face Definitions (legacy) ---

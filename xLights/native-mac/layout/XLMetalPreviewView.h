@@ -245,6 +245,10 @@
 /// Reload model data from the engine bridge
 - (void)reloadModels;
 
+/// Load pre-computed model data directly (bypasses engine bridge fetch).
+/// Used when the caller provides remapped coordinates (e.g. group 2D buffer layout).
+- (void)loadModelData:(NSArray<NSDictionary *> *)modelData;
+
 /// Schedule a throttled reload of model data.
 /// Multiple calls within a short window are coalesced into a single reload.
 /// Use this instead of reloadModels for frequent operations like property edits

@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cstring>
 #include <chrono>
+#include <set>
 #include <unordered_map>
 
 namespace xlEngine {
@@ -831,14 +832,31 @@ void RenderEngine::renderFrame(int timeMS)
 
 void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 {
+    bool isSubRef = (modelName.find('/') != std::string::npos);
+
     if (_fseqLoaded && _fseqFile) {
-        // For FSEQ playback, render the full frame (channel data is interleaved)
+        if (isSubRef) {
+            static std::set<std::string> sLogged;
+            if (sLogged.insert(modelName).second)
+                printf("[GRP] renderModelFrame('%s'): PATH=FSEQ (submodel in FSEQ path!)\n", modelName.c_str());
+        }
         renderFrame(timeMS);
     } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
-        // Pre-rendered data available — use the full-frame path which reads from memory
+        if (isSubRef) {
+            static std::set<std::string> sLogged;
+            if (sLogged.insert(modelName).second)
+                printf("[GRP] renderModelFrame('%s'): PATH=prerendered (submodel in prerendered path!)\n", modelName.c_str());
+        }
         renderFrame(timeMS);
     } else if (_effectProvider && _modelProvider) {
-        // Targeted single-model live rendering with persistent state
+        if (isSubRef) {
+            static std::set<std::string> sLogged;
+            if (sLogged.insert(modelName).second)
+                printf("[GRP] renderModelFrame('%s'): PATH=live\n", modelName.c_str());
+        }
+        // Targeted single-model live rendering with persistent state.
+        // Uses a SEPARATE coordinator from renderFrame() so the two paths
+        // don't interfere with each other during concurrent playback.
         int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
         if (frameTimeMS <= 0) frameTimeMS = 50;
 
@@ -849,24 +867,22 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
         }
         double durationSec = durationMS / 1000.0;
 
-        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
 
-        // Create or reuse persistent live coordinator.
-        // Must be under _bufferCacheMutex because invalidateAllCaches() can
-        // reset _liveCoordinator from another thread while holding this lock.
-        if (!_liveCoordinator) {
-            _liveContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
-            _liveCoordinator = std::make_unique<NativeRenderCoordinator>(
-                _effectProvider, _modelProvider, _liveContext.get());
-            _lastLiveRenderTimeMS = -1;
+        // Create or reuse persistent sidebar coordinator.
+        if (!_sidebarCoordinator) {
+            _sidebarContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
+            _sidebarCoordinator = std::make_unique<NativeRenderCoordinator>(
+                _effectProvider, _modelProvider, _sidebarContext.get());
+            _lastSidebarRenderTimeMS = -1;
         }
 
-        if (_lastLiveRenderTimeMS >= 0 && timeMS < _lastLiveRenderTimeMS) {
-            _liveCoordinator->resetPersistentState(modelName);
+        if (_lastSidebarRenderTimeMS >= 0 && timeMS < _lastSidebarRenderTimeMS) {
+            _sidebarCoordinator->resetPersistentState(modelName);
         }
-        _lastLiveRenderTimeMS = timeMS;
+        _lastSidebarRenderTimeMS = timeMS;
 
-        RenderedFrame rf = _liveCoordinator->renderModelFrameStateful(modelName, timeMS);
+        RenderedFrame rf = _sidebarCoordinator->renderModelFrameStateful(modelName, timeMS);
         if (rf.isValid()) {
             FrameBuffer fb;
             fb.modelName = rf.modelName;
@@ -874,9 +890,13 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
             fb.height = rf.height;
             fb.timeMS = rf.timeMS;
             fb.pixels = std::move(rf.pixels);
-            _bufferCache[modelName] = std::move(fb);
+            _sidebarCache[modelName] = std::move(fb);
 
             notifyModelFrameRendered(modelName, timeMS);
+        } else if (isSubRef) {
+            static std::set<std::string> sLogged;
+            if (sLogged.insert(modelName).second)
+                printf("[GRP] renderModelFrame('%s'): INVALID result\n", modelName.c_str());
         }
     }
 }
@@ -1095,22 +1115,53 @@ bool RenderEngine::exportRenderedFSEQ(const std::string& outputPath,
 
 FrameBuffer RenderEngine::getFrameBuffer(const std::string& modelName) const
 {
-    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-    auto it = _bufferCache.find(modelName);
-    if (it != _bufferCache.end()) {
-        return it->second;
+    // Check sidebar cache first — it has the most recent per-model render
+    // (from renderModelFrame), which is more current than batch renderFrame
+    // results that may be stale after playback stops.
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        auto it = _sidebarCache.find(modelName);
+        if (it != _sidebarCache.end()) {
+            return it->second;
+        }
+    }
+    // Fall through to main buffer cache (populated by renderFrame)
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        auto it = _bufferCache.find(modelName);
+        if (it != _bufferCache.end()) {
+            return it->second;
+        }
     }
     return {};
 }
 
 std::vector<FrameBuffer> RenderEngine::getAllFrameBuffers() const
 {
-    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
     std::vector<FrameBuffer> result;
-    result.reserve(_bufferCache.size());
-    for (const auto& [name, fb] : _bufferCache) {
-        if (fb.isValid()) {
-            result.push_back(fb);
+    std::set<std::string> seen;
+
+    // Collect from batch cache first — renderFrame() produces fresh data
+    // each frame for all physical models. This is what the playback
+    // controller needs for the house preview.
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        result.reserve(_bufferCache.size());
+        for (const auto& [name, fb] : _bufferCache) {
+            if (fb.isValid()) {
+                result.push_back(fb);
+                seen.insert(name);
+            }
+        }
+    }
+    // Then add sidebar-only entries (submodel refs like "Singing Tree/Outline"
+    // that aren't rendered by renderFrame's physical-model-only loop)
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        for (const auto& [name, fb] : _sidebarCache) {
+            if (fb.isValid() && seen.find(name) == seen.end()) {
+                result.push_back(fb);
+            }
         }
     }
     return result;
@@ -1188,16 +1239,25 @@ void RenderEngine::invalidateAllCaches()
     // Must be called before taking _bufferCacheMutex (closeFSEQ locks it too).
     closeFSEQ();
 
-    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-    _bufferCache.clear();
-    _currentFrameIndex = -1;
-    // Discard pre-rendered data so the live effect path is used until
-    // the user clicks Render All again.
-    _renderedData.reset();
-    // Destroy the live coordinator so it's recreated fresh
-    _liveCoordinator.reset();
-    _liveContext.reset();
-    _lastLiveRenderTimeMS = -1;
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _bufferCache.clear();
+        _currentFrameIndex = -1;
+        // Discard pre-rendered data so the live effect path is used until
+        // the user clicks Render All again.
+        _renderedData.reset();
+        // Destroy the live coordinator so it's recreated fresh
+        _liveCoordinator.reset();
+        _liveContext.reset();
+        _lastLiveRenderTimeMS = -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        _sidebarCache.clear();
+        _sidebarCoordinator.reset();
+        _sidebarContext.reset();
+        _lastSidebarRenderTimeMS = -1;
+    }
 }
 
 bool RenderEngine::getGPUAvailable() const { return false; }

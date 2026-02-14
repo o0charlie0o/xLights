@@ -32,12 +32,82 @@
 #include <fstream>
 #include <functional>
 #include <list>
+#include <set>
 #include <unordered_map>
 #include <regex>
 #include <sstream>
 #include <thread>
 
 namespace xlEngine {
+
+// =========================================================================
+// Static helpers (needed early for job creation and group lookups)
+// =========================================================================
+
+// Parse comma-separated member list and trim whitespace.
+static std::vector<std::string> parseMemberList(const std::string& members) {
+    std::vector<std::string> result;
+    size_t pos = 0;
+    while (pos < members.size()) {
+        size_t comma = members.find(',', pos);
+        if (comma == std::string::npos) comma = members.size();
+        std::string member = members.substr(pos, comma - pos);
+        while (!member.empty() && member.front() == ' ') member.erase(member.begin());
+        while (!member.empty() && member.back() == ' ') member.pop_back();
+        if (!member.empty()) result.push_back(member);
+        pos = comma + 1;
+    }
+    return result;
+}
+
+// Returns the set of parent node indices that belong to a submodel,
+// based on the submodel's strand range attributes (line0, line1, ...).
+// Used for computing pixel masks when a group contains submodel refs.
+static std::set<int> getSubmodelNodeIndices(
+    int parentNodeCount,
+    const std::map<std::string, std::string>& subAttrs)
+{
+    std::set<int> indices;
+    auto typeIt = subAttrs.find("type");
+    if (typeIt != subAttrs.end() && typeIt->second == "subbuffer") {
+        for (int i = 0; i < parentNodeCount; i++) indices.insert(i);
+        return indices;
+    }
+
+    for (int lineIdx = 0; lineIdx < 100; ++lineIdx) {
+        std::string key = "line" + std::to_string(lineIdx);
+        auto it = subAttrs.find(key);
+        if (it == subAttrs.end() || it->second.empty()) {
+            if (lineIdx > 0) break;
+            continue;
+        }
+        std::istringstream stream(it->second);
+        std::string token;
+        while (std::getline(stream, token, ',')) {
+            size_t start = token.find_first_not_of(" \t");
+            size_t end = token.find_last_not_of(" \t");
+            if (start == std::string::npos) continue;
+            token = token.substr(start, end - start + 1);
+            if (token.empty()) continue;
+
+            size_t dash = token.find('-');
+            int rangeStart, rangeEnd;
+            if (dash != std::string::npos) {
+                rangeStart = std::atoi(token.substr(0, dash).c_str()) - 1;
+                rangeEnd = std::atoi(token.substr(dash + 1).c_str()) - 1;
+                if (rangeStart < 0) rangeStart = 0;
+                if (rangeEnd < rangeStart) std::swap(rangeStart, rangeEnd);
+            } else {
+                rangeStart = rangeEnd = std::atoi(token.c_str()) - 1;
+                if (rangeStart < 0) continue;
+            }
+            for (int idx = rangeStart; idx <= rangeEnd; idx++) {
+                if (idx >= 0 && idx < parentNodeCount) indices.insert(idx);
+            }
+        }
+    }
+    return indices;
+}
 
 // =========================================================================
 // Construction / destruction
@@ -244,11 +314,27 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
                 hasEffects = (info.effectCount > 0);
             }
         }
+        std::string matchedGroupName;
         if (!hasEffects) {
             size_t groupIdx = findParentGroupElement(modelName);
             if (groupIdx != SIZE_MAX) {
+                ElementInfo groupInfo;
+                if (_effectProvider->getElement(groupIdx, groupInfo)) {
+                    matchedGroupName = groupInfo.name;
+                    static std::set<std::string> sLogged;
+                    if (sLogged.insert(modelName).second) {
+                        printf("[GRP] stateful '%s': geom=%dx%d nodes=%u, group='%s'\n",
+                               modelName.c_str(), geom.bufferWi, geom.bufferHt, geom.nodeCount,
+                               groupInfo.name.c_str());
+                    }
+                }
                 elemIdx = groupIdx;
             } else {
+                if (modelName.find('/') != std::string::npos) {
+                    static std::set<std::string> sLogged2;
+                    if (sLogged2.insert(modelName).second)
+                        printf("[GRP] stateful '%s': SKIPPED — no group found\n", modelName.c_str());
+                }
                 _skippedModels.insert(modelName);
                 return result;
             }
@@ -270,6 +356,50 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, w, h, static_cast<int>(layerCount), geom.nodes);
         job.geometry = std::move(geom);
+
+        // Compute submodel mask for physical models matched through submodel refs.
+        // When a group contains "ParentModel/Sub" (not "ParentModel" directly),
+        // only the submodel's nodes should be lit in the house preview.
+        if (!matchedGroupName.empty() && modelName.find('/') == std::string::npos) {
+            auto groupAttrs = _modelProvider->getModelAttributes(matchedGroupName);
+            auto membersIt = groupAttrs.find("models");
+            if (membersIt != groupAttrs.end()) {
+                auto members = parseMemberList(membersIt->second);
+                bool directMatch = false;
+                std::vector<std::string> subRefs;
+                for (const auto& m : members) {
+                    if (m == modelName) { directMatch = true; break; }
+                    size_t sl = m.find('/');
+                    if (sl != std::string::npos && m.substr(0, sl) == modelName) {
+                        subRefs.push_back(m);
+                    }
+                }
+                if (!directMatch && !subRefs.empty()) {
+                    auto parentAttrs = _modelProvider->getModelAttributes(modelName);
+                    auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+                    std::set<std::pair<int,int>> validPos;
+                    for (const auto& ref : subRefs) {
+                        size_t sl = ref.find('/');
+                        std::string subName = ref.substr(sl + 1);
+                        auto subAttrs = _modelProvider->getSubmodelAttributes(modelName, subName);
+                        if (!subAttrs.empty()) {
+                            auto nodeIndices = getSubmodelNodeIndices(
+                                static_cast<int>(allParentNodes.size()), subAttrs);
+                            for (int idx : nodeIndices) {
+                                validPos.insert({allParentNodes[idx].bufX,
+                                                 allParentNodes[idx].bufY});
+                            }
+                        }
+                    }
+                    if (!validPos.empty()) {
+                        job.hasSubmodelMask = true;
+                        job.submodelMaskPositions = std::move(validPos);
+                        printf("[GRP] Submodel mask for '%s': %zu valid pixel positions from %zu refs\n",
+                               modelName.c_str(), job.submodelMaskPositions.size(), subRefs.size());
+                    }
+                }
+            }
+        }
 
         auto [inserted, _] = _persistentJobs.emplace(modelName, std::move(job));
         it = inserted;
@@ -293,6 +423,26 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
     if (pixelData && dataSize > 0) {
         result.pixels.resize(dataSize);
         std::memcpy(result.pixels.data(), pixelData, dataSize);
+
+        // Apply submodel mask: zero out pixels that don't belong to any
+        // matched submodel ref. This ensures the house preview only lights
+        // the submodel's nodes, not the entire parent model.
+        if (job.hasSubmodelMask && !job.submodelMaskPositions.empty()) {
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    if (job.submodelMaskPositions.find({x, y}) ==
+                        job.submodelMaskPositions.end()) {
+                        size_t pIdx = (static_cast<size_t>(y) * w + x) * 4;
+                        if (pIdx + 3 < result.pixels.size()) {
+                            result.pixels[pIdx] = 0;
+                            result.pixels[pIdx + 1] = 0;
+                            result.pixels[pIdx + 2] = 0;
+                            result.pixels[pIdx + 3] = 0;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     return result;
@@ -336,24 +486,84 @@ NativeRenderCoordinator::buildModelJobs()
         ElementInfo info;
         if (!_effectProvider->getElement(i, info)) continue;
 
-        // Only render top-level Model elements for now.
+        // Only render top-level Model elements.
         // Submodels, strands, and timing elements are skipped.
-        // Model groups will be handled via dependency graph in a future pass.
         if (info.type != SequenceElementType::Model) continue;
         if (info.renderDisabled) continue;
 
         ModelGeometry geom = extractGeometry(info.name);
         if (geom.bufferWi <= 0 || geom.bufferHt <= 0) continue;
 
+        // Determine which element provides effects for this model.
+        // If the model has its own effects, use them directly.
+        // Otherwise, check if a parent group has effects (group effects cascade to members).
+        size_t effectElementIdx = i;
         size_t layerCount = info.effectLayerCount;
+
+        std::string matchedGroupName;
+        if (info.effectCount == 0) {
+            size_t groupIdx = findParentGroupElement(info.name);
+            if (groupIdx != SIZE_MAX) {
+                effectElementIdx = groupIdx;
+                ElementInfo groupInfo;
+                if (_effectProvider->getElement(groupIdx, groupInfo)) {
+                    matchedGroupName = groupInfo.name;
+                    layerCount = groupInfo.effectLayerCount;
+                    printf("[GRP] buildJob '%s': group='%s' layers=%zu\n",
+                           info.name.c_str(), groupInfo.name.c_str(), layerCount);
+                }
+            }
+        }
+
         if (layerCount == 0) layerCount = 1;
 
         ModelJob job;
-        job.elementIndex = i;
+        job.elementIndex = effectElementIdx;
         job.layerCount = layerCount;
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, geom.bufferWi, geom.bufferHt,
             static_cast<int>(layerCount), geom.nodes);
+
+        // Compute submodel mask (same logic as renderModelFrameStateful)
+        if (!matchedGroupName.empty() && info.name.find('/') == std::string::npos) {
+            auto groupAttrs = _modelProvider->getModelAttributes(matchedGroupName);
+            auto membersIt = groupAttrs.find("models");
+            if (membersIt != groupAttrs.end()) {
+                auto members = parseMemberList(membersIt->second);
+                bool directMatch = false;
+                std::vector<std::string> subRefs;
+                for (const auto& m : members) {
+                    if (m == info.name) { directMatch = true; break; }
+                    size_t sl = m.find('/');
+                    if (sl != std::string::npos && m.substr(0, sl) == info.name) {
+                        subRefs.push_back(m);
+                    }
+                }
+                if (!directMatch && !subRefs.empty()) {
+                    auto parentAttrs = _modelProvider->getModelAttributes(info.name);
+                    auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+                    std::set<std::pair<int,int>> validPos;
+                    for (const auto& ref : subRefs) {
+                        size_t sl = ref.find('/');
+                        std::string subName = ref.substr(sl + 1);
+                        auto subAttrs = _modelProvider->getSubmodelAttributes(info.name, subName);
+                        if (!subAttrs.empty()) {
+                            auto nodeIndices = getSubmodelNodeIndices(
+                                static_cast<int>(allParentNodes.size()), subAttrs);
+                            for (int idx : nodeIndices) {
+                                validPos.insert({allParentNodes[idx].bufX,
+                                                 allParentNodes[idx].bufY});
+                            }
+                        }
+                    }
+                    if (!validPos.empty()) {
+                        job.hasSubmodelMask = true;
+                        job.submodelMaskPositions = std::move(validPos);
+                    }
+                }
+            }
+        }
+
         job.geometry = std::move(geom);
 
         jobs.push_back(std::move(job));
@@ -374,9 +584,43 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
 
     auto attrs = _modelProvider->getModelAttributes(modelName);
 
+    // Handle submodel references ("ParentModel/SubmodelName"):
+    // use the parent model's attributes for geometry generation,
+    // then filter to just the submodel's node subset.
+    std::string parentName;
+    std::string subName;
+    if (attrs.empty()) {
+        size_t slash = modelName.find('/');
+        if (slash != std::string::npos) {
+            parentName = modelName.substr(0, slash);
+            subName = modelName.substr(slash + 1);
+            attrs = _modelProvider->getModelAttributes(parentName);
+        }
+    }
+
     // Use the shared node generation function to get correct bufX/bufY
-    // for each model type (SingleLine, Matrix, Wreath, Star, PolyLine, etc.)
     auto nodeCoords = generateNodesFromAttributes(attrs);
+
+    // If this is a submodel reference, filter nodes to just the submodel's strand ranges
+    if (!subName.empty() && !nodeCoords.empty()) {
+        auto subAttrs = _modelProvider->getSubmodelAttributes(parentName, subName);
+        if (!subAttrs.empty()) {
+            size_t before = nodeCoords.size();
+            nodeCoords = filterNodesToSubmodel(nodeCoords, subAttrs);
+            static std::set<std::string> sLogged;
+            if (sLogged.insert(modelName).second) {
+                printf("[GRP] extractGeometry('%s'): %zu→%zu nodes (subAttrs=%zu)\n",
+                       modelName.c_str(), before, nodeCoords.size(), subAttrs.size());
+            }
+        } else {
+            static std::set<std::string> sLogged;
+            if (sLogged.insert(modelName).second) {
+                printf("[GRP] extractGeometry('%s'): NO subAttrs for '%s'/'%s' — using all %zu nodes!\n",
+                       modelName.c_str(), parentName.c_str(), subName.c_str(), nodeCoords.size());
+            }
+        }
+    }
+
     if (nodeCoords.empty()) return geom;
 
     // Derive buffer dimensions from actual max bufX/bufY values
@@ -431,6 +675,45 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
 // Group membership lookup
 // =========================================================================
 
+// Recursively check if modelName is contained in a group's member list,
+// expanding nested groups and matching submodel parent models.
+static bool isModelInGroup(const std::string& modelName,
+                           const std::string& membersStr,
+                           IModelProvider* modelProvider,
+                           int depth = 0)
+{
+    if (depth > 10) return false; // prevent infinite recursion
+
+    auto memberList = parseMemberList(membersStr);
+    for (const auto& member : memberList) {
+        // Direct match
+        if (member == modelName) return true;
+
+        // Submodel match: if member is "ParentModel/Sub" and we're looking for "ParentModel"
+        // or if modelName is "ParentModel/Sub" and member is "ParentModel"
+        size_t slash = member.find('/');
+        if (slash != std::string::npos) {
+            std::string parentPart = member.substr(0, slash);
+            if (parentPart == modelName) return true;
+        }
+        slash = modelName.find('/');
+        if (slash != std::string::npos) {
+            std::string parentPart = modelName.substr(0, slash);
+            if (member == parentPart) return true;
+        }
+
+        // Nested group: check if this member is a group and recurse
+        auto memberAttrs = modelProvider->getModelAttributes(member);
+        auto modelsIt = memberAttrs.find("models");
+        if (modelsIt != memberAttrs.end() && !modelsIt->second.empty()) {
+            if (isModelInGroup(modelName, modelsIt->second, modelProvider, depth + 1)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 size_t NativeRenderCoordinator::findParentGroupElement(
     const std::string& modelName)
 {
@@ -447,18 +730,8 @@ size_t NativeRenderCoordinator::findParentGroupElement(
         auto it = attrs.find("models");
         if (it == attrs.end() || it->second.empty()) continue;
 
-        // Parse comma-separated member list
-        const std::string& members = it->second;
-        size_t pos = 0;
-        while (pos < members.size()) {
-            size_t comma = members.find(',', pos);
-            if (comma == std::string::npos) comma = members.size();
-            std::string member = members.substr(pos, comma - pos);
-            // Trim whitespace
-            while (!member.empty() && member.front() == ' ') member.erase(member.begin());
-            while (!member.empty() && member.back() == ' ') member.pop_back();
-            if (member == modelName) return i;
-            pos = comma + 1;
+        if (isModelInGroup(modelName, it->second, _modelProvider)) {
+            return i;
         }
     }
     return SIZE_MAX;

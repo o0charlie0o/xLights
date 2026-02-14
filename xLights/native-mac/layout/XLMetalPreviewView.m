@@ -1183,6 +1183,13 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 }
 
+- (void)loadModelData:(NSArray<NSDictionary *> *)modelData {
+    _modelDataCache = [modelData copy];
+    [self buildModelVertices];
+    _contentDirty = YES;
+    _scrollbarsDirty = YES;
+}
+
 - (void)scheduleReloadModels {
     if (_pendingReloadWork) {
         dispatch_block_cancel(_pendingReloadWork);

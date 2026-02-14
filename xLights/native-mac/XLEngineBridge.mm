@@ -2388,6 +2388,55 @@ static XLEngineBridge *_sharedBridge = nil;
     return result;
 }
 
+- (NSArray<NSDictionary *> *)getGroupBufferData:(NSString *)groupName {
+    [self ensureEngineInitialized];
+    if (!_modelEngine || !groupName) return @[];
+
+    std::string stdGroupName = [groupName UTF8String];
+    auto groupMembers = _modelEngine->getGroupBufferNodes(stdGroupName);
+    if (groupMembers.empty()) return @[];
+
+    NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:groupMembers.size()];
+    for (const auto& member : groupMembers) {
+        NSString *name = [NSString stringWithUTF8String:member.modelName.c_str()];
+
+        // Build info dict (minimal — enough for preview rendering)
+        xlEngine::ModelInfo info = _modelEngine->getModel(member.modelName);
+        NSDictionary *infoDict = [self dictFromModelInfo:info];
+        if (!infoDict) continue;
+
+        NSMutableArray *nodesArray = [NSMutableArray arrayWithCapacity:member.nodes.size()];
+        for (const auto& node : member.nodes) {
+            [nodesArray addObject:@{
+                @"x": @(node.x),
+                @"y": @(node.y),
+                @"z": @(node.z),
+                @"bufX": @(node.bufX),
+                @"bufY": @(node.bufY),
+                @"channel": @(node.actChannel),
+                @"channelCount": @(node.channelCount),
+                @"stringNum": @(node.stringNum),
+            }];
+        }
+
+        NSDictionary *boundsDict = @{
+            @"minX": @(member.bounds.minX), @"maxX": @(member.bounds.maxX),
+            @"minY": @(member.bounds.minY), @"maxY": @(member.bounds.maxY),
+            @"minZ": @(member.bounds.minZ), @"maxZ": @(member.bounds.maxZ),
+        };
+
+        if (nodesArray.count > 0) {
+            [result addObject:@{
+                @"name": name,
+                @"info": infoDict,
+                @"nodes": nodesArray,
+                @"bounds": boundsDict,
+            }];
+        }
+    }
+    return result;
+}
+
 #pragma mark - Model Import Operations
 
 /// Map an .xmodel XML root element name to a user-facing model type string.

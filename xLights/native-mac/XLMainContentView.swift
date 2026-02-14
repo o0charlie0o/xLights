@@ -1145,7 +1145,10 @@ struct XLSidebarModelPreview: NSViewRepresentable {
                 queue: .main
             ) { [weak self] _ in
                 self?.playbackActive = true
-                self?.stopPreviewLoop()
+                // Keep the sidebar preview loop running during playback —
+                // it renders submodel refs that the house preview doesn't handle.
+                // The loop tick will use the bridge's playback position instead of loopPositionMS.
+                self?.startPreviewLoopIfNeeded()
             }
 
             playbackStopObserver = NotificationCenter.default.addObserver(
@@ -1218,7 +1221,16 @@ struct XLSidebarModelPreview: NSViewRepresentable {
             if modelChanged {
                 resolvedModelNames = resolveModelNames(modelName, bridge: bridge)
                 preview.visibleModelFilter = resolvedModelNames
-                preview.reloadModels()
+
+                // For groups, use 2D buffer layout instead of scattered world positions
+                let groupNames = bridge.getGroupNames() as? [String] ?? []
+                if groupNames.contains(modelName),
+                   let bufferData = bridge.getGroupBufferData(modelName),
+                   bufferData.count > 0 {
+                    preview.loadModelData(bufferData)
+                } else {
+                    preview.reloadModels()
+                }
                 preview.frameAllModels()
             }
 
@@ -1245,18 +1257,20 @@ struct XLSidebarModelPreview: NSViewRepresentable {
                 return
             }
 
-            // During playback, the playback controller feeds pixel data directly
-            guard !playbackActive else { return }
-
             // Skip if a render is still in flight to prevent queue pile-up
             guard !renderInProgress else { return }
 
-            let timeMS = loopPositionMS
-
-            // Advance position for next tick, wrapping at effect end
-            loopPositionMS += frameTimeMS
-            if loopPositionMS >= effectEndMS {
-                loopPositionMS = effectStartMS
+            let timeMS: Int
+            if playbackActive {
+                // During playback, use the bridge's current playback position
+                timeMS = Int(bridge.getPosition())
+            } else {
+                timeMS = loopPositionMS
+                // Advance position for next tick, wrapping at effect end
+                loopPositionMS += frameTimeMS
+                if loopPositionMS >= effectEndMS {
+                    loopPositionMS = effectStartMS
+                }
             }
 
             let models = Array(resolvedModelNames)
