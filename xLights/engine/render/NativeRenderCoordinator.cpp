@@ -284,6 +284,35 @@ static NativeMixType parseMixType(const std::string& name) {
     return (it != map.end()) ? it->second : NativeMixType::Mix_Normal;
 }
 
+// =========================================================================
+// Value Curve helpers
+// =========================================================================
+
+// Check if a string value is a value curve definition
+static bool isValueCurveString(const std::string& val) {
+    return val.find("Active=TRUE") != std::string::npos &&
+           val.find("Id=ValueCurve") != std::string::npos;
+}
+
+// Cache of parsed ValueCurve objects, keyed by serialized string.
+// Avoids re-parsing the VC string on every frame.
+static std::unordered_map<std::string, ValueCurve> sValueCurveCache;
+
+static ValueCurve& getCachedValueCurve(const std::string& data,
+                                        int minVal, int maxVal, int divisor) {
+    auto cacheIt = sValueCurveCache.find(data);
+    if (cacheIt != sValueCurveCache.end()) {
+        return cacheIt->second;
+    }
+    ValueCurve& vc = sValueCurveCache[data];
+    vc.SetDivisor(divisor);
+    vc.SetLimits(minVal, maxVal);
+    vc.Deserialise(data);
+    printf("[VC] Parsed ValueCurve: type=%s, min=%d, max=%d, divisor=%d\n",
+           vc.GetType().c_str(), minVal, maxVal, divisor);
+    return vc;
+}
+
 // Resolve a layer/palette parameter that may be overridden by a value curve.
 // Checks for a VC key (e.g. "B_VALUECURVE_Blur" or "C_VALUECURVE_Brightness")
 // in the given map. If found and active, evaluates it at the current time
@@ -398,10 +427,36 @@ static NativeLayerInfo parseLayerSettings(
     }
 
     // Transition types
+    auto parseTransitionType = [](const std::string& s) -> NativeTransitionType {
+        if (s == "Fade")            return NativeTransitionType::Fade;
+        if (s == "Wipe")            return NativeTransitionType::Wipe;
+        if (s == "Clock")           return NativeTransitionType::Clock;
+        if (s == "From Middle")     return NativeTransitionType::FromMiddle;
+        if (s == "Square Explode")  return NativeTransitionType::SquareExplode;
+        if (s == "Circle Explode")  return NativeTransitionType::CircleExplode;
+        if (s == "Blinds")          return NativeTransitionType::Blinds;
+        if (s == "Blend")           return NativeTransitionType::Blend;
+        if (s == "Slide Checks")    return NativeTransitionType::SlideChecks;
+        if (s == "Slide Bars")      return NativeTransitionType::SlideBars;
+        if (s == "Fold")            return NativeTransitionType::Fold;
+        if (s == "Dissolve")        return NativeTransitionType::Dissolve;
+        if (s == "Circular Swirl")  return NativeTransitionType::CircularSwirl;
+        if (s == "Bow Tie")         return NativeTransitionType::BowTie;
+        if (s == "Zoom")            return NativeTransitionType::Zoom;
+        if (s == "Doorway")         return NativeTransitionType::Doorway;
+        if (s == "Blobs")           return NativeTransitionType::Blobs;
+        if (s == "Pinwheel")        return NativeTransitionType::Pinwheel;
+        if (s == "Star")            return NativeTransitionType::Star;
+        if (s == "Swap")            return NativeTransitionType::Swap;
+        if (s == "Shatter")         return NativeTransitionType::Shatter;
+        if (s == "Circles")         return NativeTransitionType::Circles;
+        return NativeTransitionType::Fade;
+    };
+
     std::string inTransStr = getSettingsStr(settings, "B_CHOICE_In_Transition_Type", "Fade");
     std::string outTransStr = getSettingsStr(settings, "B_CHOICE_Out_Transition_Type", "Fade");
-    info.inTransitionType = (inTransStr == "Fade") ? 0 : 1;
-    info.outTransitionType = (outTransStr == "Fade") ? 0 : 1;
+    info.inTransitionType = parseTransitionType(inTransStr);
+    info.outTransitionType = parseTransitionType(outTransStr);
     info.inTransitionAdjust = static_cast<float>(
         getSettingsInt(settings, "B_SLIDER_In_Transition_Adjust", 0));
     info.outTransitionAdjust = static_cast<float>(
@@ -993,6 +1048,46 @@ NativeRenderCoordinator::buildModelJobs()
         jobs.push_back(std::move(job));
     }
 
+    // Second pass: create jobs for submodel and strand elements with effects.
+    // These render AFTER their parent model and overlay onto parent channels.
+    for (size_t i = 0; i < elementCount; ++i) {
+        ElementInfo info;
+        if (!_effectProvider->getElement(i, info)) continue;
+        if (info.type != SequenceElementType::Submodel &&
+            info.type != SequenceElementType::Strand) continue;
+        if (info.renderDisabled) continue;
+        if (info.effectCount == 0) continue;
+
+        // The element name is "ParentModel/SubmodelName" or "ParentModel/Strand N"
+        size_t slash = info.name.find('/');
+        if (slash == std::string::npos) continue;
+        std::string parentName = info.name.substr(0, slash);
+
+        ModelGeometry geom = extractGeometry(info.name);
+        if (geom.bufferWi <= 0 || geom.bufferHt <= 0) continue;
+
+        size_t layerCount = info.effectLayerCount;
+        if (layerCount == 0) layerCount = 1;
+
+        ModelJob job;
+        job.elementIndex = i;
+        job.layerCount = layerCount;
+        job.isSubmodelJob = true;
+        job.parentModelName = parentName;
+        job.pixelBuffer = std::make_unique<NativePixelBuffer>(
+            _context, geom.bufferWi, geom.bufferHt,
+            static_cast<int>(layerCount), geom.nodes);
+        job.pixelBuffer->setDimmingCurve(
+            buildDimmingCurve(_modelProvider->getDimmingInfo(parentName)));
+
+        printf("[SUBMODEL_JOB] Created job for '%s' (parent='%s', %dx%d, %zu layers, %zu effects)\n",
+               info.name.c_str(), parentName.c_str(),
+               geom.bufferWi, geom.bufferHt, layerCount, info.effectCount);
+
+        job.geometry = std::move(geom);
+        jobs.push_back(std::move(job));
+    }
+
     return jobs;
 }
 
@@ -1052,6 +1147,18 @@ NativeRenderCoordinator::buildRenderTiers(const std::vector<ModelJob>& jobs)
                 jobs[i].groupElementIndex != SIZE_MAX &&
                 jobs[i].groupElementIndex == jobs[j].groupElementIndex) {
                 hasOverlap = true;
+            }
+
+            // Submodel/strand jobs overlap with their parent model job.
+            // This ensures submodels render in a later tier than their parent.
+            if (!hasOverlap) {
+                if (jobs[i].isSubmodelJob &&
+                    jobs[i].parentModelName == jobs[j].geometry.name) {
+                    hasOverlap = true;
+                } else if (jobs[j].isSubmodelJob &&
+                           jobs[j].parentModelName == jobs[i].geometry.name) {
+                    hasOverlap = true;
+                }
             }
 
             if (hasOverlap) {
@@ -1180,18 +1287,21 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
     auto scAttrIt = attrs.find("StartChannel");
     std::string scAttrStr = (scAttrIt != attrs.end()) ? scAttrIt->second : "(none)";
 
-    auto resolvedIt = _resolvedStartChannels.find(modelName);
+    // For submodel/strand references, look up the parent model's resolved start channel
+    // since submodels don't have their own entry in the resolved map.
+    std::string channelLookupName = !parentName.empty() ? parentName : modelName;
+    auto resolvedIt = _resolvedStartChannels.find(channelLookupName);
     if (resolvedIt != _resolvedStartChannels.end()) {
         geom.startChannel = resolvedIt->second;
-        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → resolved=%u (from pre-resolved map)\n",
-               modelName.c_str(), scAttrStr.c_str(), geom.startChannel);
+        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → resolved=%u (from pre-resolved map, lookup='%s')\n",
+               modelName.c_str(), scAttrStr.c_str(), geom.startChannel, channelLookupName.c_str());
     } else {
         if (scAttrIt != attrs.end() && !scAttrIt->second.empty()) {
             int sc = std::atoi(scAttrIt->second.c_str());
             if (sc > 0) geom.startChannel = static_cast<uint32_t>(sc - 1);
         }
-        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → atoi=%u (NO pre-resolved entry)\n",
-               modelName.c_str(), scAttrStr.c_str(), geom.startChannel);
+        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → atoi=%u (NO pre-resolved entry for '%s')\n",
+               modelName.c_str(), scAttrStr.c_str(), geom.startChannel, channelLookupName.c_str());
     }
 
     // Determine channels per node and color order from StringType attribute.
@@ -1263,6 +1373,104 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
             node.colorOrder[wOff] = 3; // W source
         }
     }
+
+    return geom;
+}
+
+// =========================================================================
+// Combined group geometry extraction
+// =========================================================================
+
+ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
+    const std::string& groupName)
+{
+    ModelGeometry geom;
+    geom.name = groupName;
+
+    auto groupAttrs = _modelProvider->getModelAttributes(groupName);
+    auto membersIt = groupAttrs.find("models");
+    if (membersIt == groupAttrs.end() || membersIt->second.empty()) return geom;
+
+    auto memberList = parseMemberList(membersIt->second);
+    if (memberList.empty()) return geom;
+
+    // Collect nodes from all member models, resolving submodel refs and nested groups.
+    // Each member's nodes are extracted with their correct absolute channel offsets.
+    // Buffer coordinates are assigned sequentially in a single-line layout to prevent
+    // overlapping buffer positions (matching legacy "Single Line" for blend layer).
+    // However, for combined group rendering we want the effect to span the combined
+    // geometry, so we use a sequential 1D layout across all member nodes.
+    std::vector<NativeNodeInfo> allNodes;
+    std::set<std::string> visited;
+    visited.insert(groupName);
+
+    std::function<void(const std::string&)> collectMemberNodes;
+    collectMemberNodes = [&](const std::string& memberName) {
+        // Check if this is a submodel ref (Parent/SubName)
+        std::string resolvedName = memberName;
+        size_t slash = memberName.find('/');
+
+        // Check if this member is itself a nested group
+        auto memberAttrs = _modelProvider->getModelAttributes(resolvedName);
+        if (memberAttrs.empty() && slash != std::string::npos) {
+            // Try parent model for submodel ref
+            resolvedName = memberName.substr(0, slash);
+            memberAttrs = _modelProvider->getModelAttributes(resolvedName);
+        }
+
+        auto displayAs = memberAttrs.find("DisplayAs");
+        if (displayAs != memberAttrs.end() && displayAs->second == "ModelGroup") {
+            // Nested group — recurse into its members
+            if (visited.count(memberName)) return;
+            visited.insert(memberName);
+            auto nestedMembers = memberAttrs.find("models");
+            if (nestedMembers != memberAttrs.end()) {
+                for (const auto& nested : parseMemberList(nestedMembers->second)) {
+                    collectMemberNodes(nested);
+                }
+            }
+            return;
+        }
+
+        // Physical model — extract its geometry and add nodes
+        ModelGeometry memberGeom = extractGeometry(memberName);
+        for (const auto& node : memberGeom.nodes) {
+            allNodes.push_back(node);
+        }
+    };
+
+    for (const auto& member : memberList) {
+        collectMemberNodes(member);
+    }
+
+    if (allNodes.empty()) return geom;
+
+    // Assign sequential buffer coordinates so the combined buffer is a 1D strip
+    // spanning all member nodes. This matches the legacy approach where a group's
+    // render buffer treats all member nodes as one continuous model.
+    for (size_t i = 0; i < allNodes.size(); ++i) {
+        allNodes[i].bufX = static_cast<int>(i);
+        allNodes[i].bufY = 0;
+    }
+
+    geom.bufferWi = static_cast<int>(allNodes.size());
+    geom.bufferHt = 1;
+    geom.nodeCount = static_cast<uint32_t>(allNodes.size());
+    geom.nodes = std::move(allNodes);
+
+    // Compute total channel count from nodes
+    uint32_t minCh = UINT32_MAX, maxCh = 0;
+    for (const auto& node : geom.nodes) {
+        if (node.actChannel < minCh) minCh = node.actChannel;
+        uint32_t end = node.actChannel + node.channelsPerNode;
+        if (end > maxCh) maxCh = end;
+    }
+    geom.startChannel = (minCh != UINT32_MAX) ? minCh : 0;
+    geom.channelCount = (maxCh > minCh) ? (maxCh - minCh) : 0;
+
+    printf("[GROUP_GEOM] '%s': %u nodes, buffer=%dx%d, channels=%u-%u\n",
+           groupName.c_str(), geom.nodeCount, geom.bufferWi, geom.bufferHt,
+           geom.startChannel, geom.startChannel + geom.channelCount);
 
     return geom;
 }
@@ -1385,7 +1593,9 @@ void NativeRenderCoordinator::renderModel(
     }
 }
 
-void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
+void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
+                                                 NativeSequenceData* output,
+                                                 int frameIndex) {
     int frameTimeMS = _context->getFrameTimeMS();
     if (frameTimeMS <= 0) frameTimeMS = 50;
     int period = timeMS / frameTimeMS;
@@ -1502,6 +1712,59 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
         // in stateful effects), but suppressed layers are excluded from blending.
         bool rendered = renderNativeEffect(effectInfo, buf);
 
+        // Compute transition fade/mask factors (mirrors legacy HandleLayerTransitions).
+        // fadeInFactor and fadeOutFactor represent how far through the
+        // fade-in and fade-out we are (1.0 = fully visible).
+        if (layerInfo.fadeInSteps > 0 || layerInfo.fadeOutSteps > 0) {
+            int effStartPer = effectInfo.startTimeMS / frameTimeMS;
+            int effEndPer = effectInfo.endTimeMS / frameTimeMS;
+
+            float fadeInFactor = 1.0f;
+            float fadeOutFactor = 1.0f;
+
+            if (period < effStartPer + static_cast<int>(layerInfo.fadeInSteps) &&
+                layerInfo.fadeInSteps != 0) {
+                int curStep = period - effStartPer + 1;
+                fadeInFactor = static_cast<float>(curStep) / layerInfo.fadeInSteps;
+            }
+            if (period > effEndPer - static_cast<int>(layerInfo.fadeOutSteps) &&
+                layerInfo.fadeOutSteps != 0) {
+                int curStep = period - (effEndPer - static_cast<int>(layerInfo.fadeOutSteps));
+                fadeOutFactor = 1.0f - static_cast<float>(curStep) / layerInfo.fadeOutSteps;
+            }
+
+            // For Fade transitions: set fadeFactor directly.
+            // For mask-based/non-mask transitions: set inMaskFactor/outMaskFactor
+            // and let calcOutput() apply per-pixel masks.
+            layerInfo.fadeFactor = 1.0f;
+            layerInfo.inMaskFactor = 1.0f;
+            layerInfo.outMaskFactor = 1.0f;
+
+            if (layerInfo.inTransitionType == NativeTransitionType::Fade) {
+                if (fadeInFactor < 1.0f) {
+                    layerInfo.fadeFactor = fadeInFactor;
+                }
+            } else {
+                layerInfo.inMaskFactor = fadeInFactor;
+            }
+
+            if (layerInfo.outTransitionType == NativeTransitionType::Fade) {
+                if (fadeOutFactor < 1.0f) {
+                    if (layerInfo.inTransitionType == NativeTransitionType::Fade &&
+                        fadeInFactor < 1.0f) {
+                        layerInfo.fadeFactor = (fadeInFactor + fadeOutFactor) / 2.0f;
+                    } else {
+                        layerInfo.fadeFactor = fadeOutFactor;
+                    }
+                }
+            } else {
+                layerInfo.outMaskFactor = fadeOutFactor;
+            }
+
+            // Re-apply updated layer settings (fadeFactor, mask factors changed)
+            job.pixelBuffer->setLayerSettings(static_cast<int>(layer), layerInfo);
+        }
+
         // Determine suppress state: when suppressUntil is set and we haven't
         // reached that frame yet, mark the layer as invalid so calcOutput()
         // skips it. The effect still rendered above for state continuity.
@@ -1545,35 +1808,6 @@ bool NativeRenderCoordinator::getTimingMarkAtTime(const std::string& trackName, 
     size_t elemIdx = findTimingTrackElement(trackName);
     if (elemIdx == SIZE_MAX) return false;
     return _effectProvider->getEffectAtTime(elemIdx, 0, timeMS, outMark);
-}
-
-// =========================================================================
-// Value Curve helpers for native effect rendering
-// =========================================================================
-
-// Check if a string value is a value curve definition
-static bool isValueCurveString(const std::string& val) {
-    return val.find("Active=TRUE") != std::string::npos &&
-           val.find("Id=ValueCurve") != std::string::npos;
-}
-
-// Cache of parsed ValueCurve objects, keyed by serialized string.
-// Avoids re-parsing the VC string on every frame.
-static std::unordered_map<std::string, ValueCurve> sValueCurveCache;
-
-static ValueCurve& getCachedValueCurve(const std::string& data,
-                                        int minVal, int maxVal, int divisor) {
-    auto cacheIt = sValueCurveCache.find(data);
-    if (cacheIt != sValueCurveCache.end()) {
-        return cacheIt->second;
-    }
-    ValueCurve& vc = sValueCurveCache[data];
-    vc.SetDivisor(divisor);
-    vc.SetLimits(minVal, maxVal);
-    vc.Deserialise(data);
-    printf("[VC] Parsed ValueCurve: type=%s, min=%d, max=%d, divisor=%d\n",
-           vc.GetType().c_str(), minVal, maxVal, divisor);
-    return vc;
 }
 
 // Read an int parameter with value curve support.
