@@ -275,39 +275,58 @@ RenderedFrame NativeRenderCoordinator::renderModelFrame(
     result.width = geom.bufferWi;
     result.height = geom.bufferHt;
 
-    size_t elemIdx = _effectProvider->getElementIndex(modelName);
+    size_t ownElemIdx = _effectProvider->getElementIndex(modelName);
 
-    // Check if this element actually has effects. If it has an entry but no
-    // effects, check for a parent group that does (group effects cascade to members).
-    bool hasEffects = false;
-    if (elemIdx != SIZE_MAX) {
+    bool hasOwnEffects = false;
+    size_t ownLayerCount = 0;
+    if (ownElemIdx != SIZE_MAX) {
         ElementInfo info;
-        if (_effectProvider->getElement(elemIdx, info)) {
-            hasEffects = (info.effectCount > 0);
+        if (_effectProvider->getElement(ownElemIdx, info)) {
+            hasOwnEffects = (info.effectCount > 0);
+            ownLayerCount = info.effectLayerCount;
         }
     }
-    if (!hasEffects) {
-        size_t groupIdx = findParentGroupElement(modelName);
-        if (groupIdx != SIZE_MAX) {
-            elemIdx = groupIdx;
-        } else {
-            // No effects on this model and no parent group with effects — nothing to render
-            return result;
-        }
-    }
-    if (elemIdx == SIZE_MAX) return result;
 
-    size_t layerCount = _effectProvider->getEffectLayerCount(elemIdx);
-    if (layerCount == 0) layerCount = 1;
+    // Always check for parent group with effects
+    size_t groupIdx = SIZE_MAX;
+    size_t groupLayerCount = 0;
+    {
+        size_t gIdx = findParentGroupElement(modelName);
+        if (gIdx != SIZE_MAX) {
+            ElementInfo groupInfo;
+            if (_effectProvider->getElement(gIdx, groupInfo)) {
+                groupIdx = gIdx;
+                groupLayerCount = groupInfo.effectLayerCount;
+            }
+        }
+    }
+
+    if (!hasOwnEffects && groupIdx == SIZE_MAX) return result;
+
+    size_t elemIdx;
+    size_t totalLayerCount;
+    if (groupIdx != SIZE_MAX && hasOwnEffects) {
+        elemIdx = ownElemIdx;
+        totalLayerCount = groupLayerCount + ownLayerCount;
+    } else if (groupIdx != SIZE_MAX) {
+        elemIdx = groupIdx;
+        totalLayerCount = groupLayerCount;
+    } else {
+        elemIdx = ownElemIdx;
+        totalLayerCount = ownLayerCount;
+    }
+    if (totalLayerCount == 0) totalLayerCount = 1;
 
     int w = geom.bufferWi;
     int h = geom.bufferHt;
 
     ModelJob job;
     job.elementIndex = elemIdx;
-    job.layerCount = layerCount;
+    job.layerCount = totalLayerCount;
+    job.groupElementIndex = groupIdx;
+    job.groupLayerCount = groupLayerCount;
     job.pixelBuffer = std::make_unique<NativePixelBuffer>(
-        _context, w, h, static_cast<int>(layerCount), geom.nodes);
+        _context, w, h, static_cast<int>(totalLayerCount), geom.nodes);
     job.geometry = std::move(geom);
 
     renderModelAtTime(job, timeMS);
@@ -337,67 +356,84 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
     std::lock_guard<std::recursive_mutex> lock(_stateMutex);
 
     // Fast path: skip models already known to have no effects
-    if (_skippedModels.count(modelName)) return result;
+    if (_skippedModels.count(modelName)) {
+        static std::set<std::string> sSkipLogged;
+        if (sSkipLogged.insert(modelName).second)
+            printf("[SUBDBG] renderModelFrameStateful('%s'): SKIPPED (in _skippedModels)\n", modelName.c_str());
+        return result;
+    }
 
     // Look up or create persistent ModelJob for this model
     auto it = _persistentJobs.find(modelName);
     if (it == _persistentJobs.end()) {
         ModelGeometry geom = extractGeometry(modelName);
         if (geom.bufferWi <= 0 || geom.bufferHt <= 0) {
+            printf("[SUBDBG] renderModelFrameStateful('%s'): SKIPPED (bad geometry %dx%d)\n",
+                   modelName.c_str(), geom.bufferWi, geom.bufferHt);
             _skippedModels.insert(modelName);
             return result;
         }
 
-        size_t elemIdx = _effectProvider->getElementIndex(modelName);
+        size_t ownElemIdx = _effectProvider->getElementIndex(modelName);
 
-        bool hasEffects = false;
-        if (elemIdx != SIZE_MAX) {
+        bool hasOwnEffects = false;
+        size_t ownLayerCount = 0;
+        if (ownElemIdx != SIZE_MAX) {
             ElementInfo info;
-            if (_effectProvider->getElement(elemIdx, info)) {
-                hasEffects = (info.effectCount > 0);
+            if (_effectProvider->getElement(ownElemIdx, info)) {
+                hasOwnEffects = (info.effectCount > 0);
+                ownLayerCount = info.effectLayerCount;
             }
         }
+
+        // Always check for parent group with effects (group effects cascade
+        // to ALL members, even those with their own effects).
+        size_t groupIdx = SIZE_MAX;
+        size_t groupLayerCount = 0;
         std::string matchedGroupName;
-        if (!hasEffects) {
-            size_t groupIdx = findParentGroupElement(modelName);
-            if (groupIdx != SIZE_MAX) {
+        {
+            size_t gIdx = findParentGroupElement(modelName);
+            if (gIdx != SIZE_MAX) {
                 ElementInfo groupInfo;
-                if (_effectProvider->getElement(groupIdx, groupInfo)) {
+                if (_effectProvider->getElement(gIdx, groupInfo)) {
+                    groupIdx = gIdx;
+                    groupLayerCount = groupInfo.effectLayerCount;
                     matchedGroupName = groupInfo.name;
-                    static std::set<std::string> sLogged;
-                    if (sLogged.insert(modelName).second) {
-                        printf("[GRP] stateful '%s': geom=%dx%d nodes=%u, group='%s'\n",
-                               modelName.c_str(), geom.bufferWi, geom.bufferHt, geom.nodeCount,
-                               groupInfo.name.c_str());
-                    }
                 }
-                elemIdx = groupIdx;
-            } else {
-                if (modelName.find('/') != std::string::npos) {
-                    static std::set<std::string> sLogged2;
-                    if (sLogged2.insert(modelName).second)
-                        printf("[GRP] stateful '%s': SKIPPED — no group found\n", modelName.c_str());
-                }
-                _skippedModels.insert(modelName);
-                return result;
             }
         }
-        if (elemIdx == SIZE_MAX) {
+
+        // Need at least one source of effects
+        if (!hasOwnEffects && groupIdx == SIZE_MAX) {
             _skippedModels.insert(modelName);
             return result;
         }
 
-        size_t layerCount = _effectProvider->getEffectLayerCount(elemIdx);
-        if (layerCount == 0) layerCount = 1;
+        // Compute total layers: group layers + model's own layers
+        size_t elemIdx; // primary element for the job
+        size_t totalLayerCount;
+        if (groupIdx != SIZE_MAX && hasOwnEffects) {
+            elemIdx = ownElemIdx;
+            totalLayerCount = groupLayerCount + ownLayerCount;
+        } else if (groupIdx != SIZE_MAX) {
+            elemIdx = groupIdx;
+            totalLayerCount = groupLayerCount;
+        } else {
+            elemIdx = ownElemIdx;
+            totalLayerCount = ownLayerCount;
+        }
+        if (totalLayerCount == 0) totalLayerCount = 1;
 
         int w = geom.bufferWi;
         int h = geom.bufferHt;
 
         ModelJob job;
         job.elementIndex = elemIdx;
-        job.layerCount = layerCount;
+        job.layerCount = totalLayerCount;
+        job.groupElementIndex = groupIdx;
+        job.groupLayerCount = groupLayerCount;
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
-            _context, w, h, static_cast<int>(layerCount), geom.nodes);
+            _context, w, h, static_cast<int>(totalLayerCount), geom.nodes);
         job.geometry = std::move(geom);
 
         // Compute submodel mask for physical models matched through submodel refs.
@@ -466,10 +502,26 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
         result.pixels.resize(dataSize);
         std::memcpy(result.pixels.data(), pixelData, dataSize);
 
+        // Count non-black pixels before mask (once per model)
+        {
+            static std::set<std::string> sPixDbg;
+            if (sPixDbg.insert(modelName).second) {
+                int nonBlack = 0;
+                for (size_t px = 0; px < dataSize; px += 4) {
+                    if (result.pixels[px] || result.pixels[px+1] || result.pixels[px+2])
+                        nonBlack++;
+                }
+                printf("[SUBDBG] stateful '%s': %dx%d, %d non-black pixels BEFORE mask, hasMask=%d maskSize=%zu\n",
+                       modelName.c_str(), w, h, nonBlack,
+                       job.hasSubmodelMask, job.submodelMaskPositions.size());
+            }
+        }
+
         // Apply submodel mask: zero out pixels that don't belong to any
         // matched submodel ref. This ensures the house preview only lights
         // the submodel's nodes, not the entire parent model.
         if (job.hasSubmodelMask && !job.submodelMaskPositions.empty()) {
+            int kept = 0, zeroed = 0;
             for (int y = 0; y < h; y++) {
                 for (int x = 0; x < w; x++) {
                     if (job.submodelMaskPositions.find({x, y}) ==
@@ -480,11 +532,29 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
                             result.pixels[pIdx + 1] = 0;
                             result.pixels[pIdx + 2] = 0;
                             result.pixels[pIdx + 3] = 0;
+                            zeroed++;
                         }
+                    } else {
+                        kept++;
                     }
                 }
             }
+            static std::set<std::string> sMaskDbg;
+            if (sMaskDbg.insert(modelName).second) {
+                int nonBlackAfter = 0;
+                for (size_t px = 0; px < result.pixels.size(); px += 4) {
+                    if (result.pixels[px] || result.pixels[px+1] || result.pixels[px+2])
+                        nonBlackAfter++;
+                }
+                printf("[SUBDBG] stateful '%s': AFTER mask: kept=%d zeroed=%d nonBlackAfter=%d\n",
+                       modelName.c_str(), kept, zeroed, nonBlackAfter);
+            }
         }
+    } else {
+        static std::set<std::string> sNoData;
+        if (sNoData.insert(modelName).second)
+            printf("[SUBDBG] stateful '%s': NO blended pixel data (pixelData=%p dataSize=%zu)\n",
+                   modelName.c_str(), (void*)pixelData, dataSize);
     }
 
     return result;
@@ -533,38 +603,68 @@ NativeRenderCoordinator::buildModelJobs()
         if (info.type != SequenceElementType::Model) continue;
         if (info.renderDisabled) continue;
 
+        // Skip model groups — they don't have physical nodes.
+        // Their effects cascade to member models via findParentGroupElement().
+        if (_modelProvider) {
+            auto attrs = _modelProvider->getModelAttributes(info.name);
+            auto displayAs = attrs.find("DisplayAs");
+            if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+        }
+
         ModelGeometry geom = extractGeometry(info.name);
         if (geom.bufferWi <= 0 || geom.bufferHt <= 0) continue;
 
-        // Determine which element provides effects for this model.
-        // If the model has its own effects, use them directly.
-        // Otherwise, check if a parent group has effects (group effects cascade to members).
-        size_t effectElementIdx = i;
-        size_t layerCount = info.effectLayerCount;
+        // Determine which elements provide effects for this model.
+        // A model can have BOTH its own effects AND inherit effects from a
+        // parent group. Group layers come first, then model's own layers.
+        size_t ownElementIdx = i;
+        size_t ownLayerCount = info.effectLayerCount;
+        bool hasOwnEffects = (info.effectCount > 0);
 
+        // Always check for parent group with effects (group effects cascade
+        // to ALL members, even those with their own effects).
+        size_t groupIdx = SIZE_MAX;
+        size_t groupLayerCount = 0;
         std::string matchedGroupName;
-        if (info.effectCount == 0) {
-            size_t groupIdx = findParentGroupElement(info.name);
-            if (groupIdx != SIZE_MAX) {
-                effectElementIdx = groupIdx;
+        {
+            size_t gIdx = findParentGroupElement(info.name);
+            if (gIdx != SIZE_MAX) {
                 ElementInfo groupInfo;
-                if (_effectProvider->getElement(groupIdx, groupInfo)) {
+                if (_effectProvider->getElement(gIdx, groupInfo)) {
+                    groupIdx = gIdx;
+                    groupLayerCount = groupInfo.effectLayerCount;
                     matchedGroupName = groupInfo.name;
-                    layerCount = groupInfo.effectLayerCount;
-                    printf("[GRP] buildJob '%s': group='%s' layers=%zu\n",
-                           info.name.c_str(), groupInfo.name.c_str(), layerCount);
                 }
             }
         }
 
-        if (layerCount == 0) layerCount = 1;
+        // Compute total layer count: group layers + model layers
+        size_t effectElementIdx;
+        size_t totalLayerCount;
+        if (groupIdx != SIZE_MAX && hasOwnEffects) {
+            // Both: group layers first, then model's own layers
+            effectElementIdx = ownElementIdx; // primary element is the model's own
+            totalLayerCount = groupLayerCount + ownLayerCount;
+        } else if (groupIdx != SIZE_MAX) {
+            // Group only (model has no own effects)
+            effectElementIdx = groupIdx;
+            totalLayerCount = groupLayerCount;
+        } else {
+            // Model only (no parent group)
+            effectElementIdx = ownElementIdx;
+            totalLayerCount = ownLayerCount;
+        }
+
+        if (totalLayerCount == 0) totalLayerCount = 1;
 
         ModelJob job;
         job.elementIndex = effectElementIdx;
-        job.layerCount = layerCount;
+        job.layerCount = totalLayerCount;
+        job.groupElementIndex = groupIdx;
+        job.groupLayerCount = groupLayerCount;
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, geom.bufferWi, geom.bufferHt,
-            static_cast<int>(layerCount), geom.nodes);
+            static_cast<int>(totalLayerCount), geom.nodes);
 
         // Compute submodel mask (same logic as renderModelFrameStateful).
         // Recurses into nested groups to find all submodel refs for this parent.
@@ -606,7 +706,6 @@ NativeRenderCoordinator::buildModelJobs()
         }
 
         job.geometry = std::move(geom);
-
         jobs.push_back(std::move(job));
     }
 
@@ -760,7 +859,14 @@ size_t NativeRenderCoordinator::findParentGroupElement(
 {
     if (!_effectProvider || !_modelProvider) return SIZE_MAX;
 
+    static const std::set<std::string> sMissingModels = {
+        "Large Gift 1", "Flake Icicle 41", "Pixel Stake 50",
+        "Pixel Stake 52", "Pixel Stake 54"
+    };
+    bool debugThis = sMissingModels.count(modelName) > 0;
+
     size_t elementCount = _effectProvider->getElementCount();
+    int groupsWithEffects = 0;
     for (size_t i = 0; i < elementCount; ++i) {
         ElementInfo info;
         if (!_effectProvider->getElement(i, info)) continue;
@@ -771,8 +877,26 @@ size_t NativeRenderCoordinator::findParentGroupElement(
         auto it = attrs.find("models");
         if (it == attrs.end() || it->second.empty()) continue;
 
-        if (isModelInGroup(modelName, it->second, _modelProvider)) {
+        groupsWithEffects++;
+        bool found = isModelInGroup(modelName, it->second, _modelProvider);
+        if (debugThis) {
+            static std::set<std::string> sLogged;
+            std::string key = modelName + "|" + info.name;
+            if (sLogged.insert(key).second) {
+                printf("[FIND_GROUP] '%s': checking group '%s' (effects=%zu, members=%zu chars) → %s\n",
+                       modelName.c_str(), info.name.c_str(), info.effectCount,
+                       it->second.size(), found ? "MATCH" : "no");
+            }
+        }
+        if (found) {
             return i;
+        }
+    }
+    if (debugThis) {
+        static std::set<std::string> sLogged2;
+        if (sLogged2.insert(modelName).second) {
+            printf("[FIND_GROUP] '%s': NO match found (checked %d groups with effects out of %zu elements)\n",
+                   modelName.c_str(), groupsWithEffects, elementCount);
         }
     }
     return SIZE_MAX;
@@ -819,9 +943,23 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
             static_cast<int>(layer));
         buf.Clear();
 
+        // Determine which element and layer index to query.
+        // Group layers come first (0..groupLayerCount-1), then model's own layers.
+        size_t srcElementIdx;
+        size_t srcLayerIdx;
+        if (job.groupElementIndex != SIZE_MAX && layer < job.groupLayerCount) {
+            srcElementIdx = job.groupElementIndex;
+            srcLayerIdx = layer;
+        } else {
+            srcElementIdx = job.elementIndex;
+            srcLayerIdx = (job.groupElementIndex != SIZE_MAX)
+                          ? layer - job.groupLayerCount
+                          : layer;
+        }
+
         EffectInstanceInfo effectInfo;
         if (!_effectProvider->getEffectAtTime(
-                job.elementIndex, layer, timeMS, effectInfo)) {
+                srcElementIdx, srcLayerIdx, timeMS, effectInfo)) {
             continue;
         }
 
@@ -832,9 +970,6 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
         buf.cur_model = job.geometry.name;
 
         // Set palette colors from the effect's palette map.
-        // Palette entries use keys like "C_BUTTON_Palette1" through "C_BUTTON_Palette8".
-        // Each value is a hex color string "#RRGGBB".
-        // Only include colors where "C_CHECKBOX_PaletteN" is "1" (active).
         xlColorVector colors;
         for (int ci = 1; ci <= 8; ++ci) {
             std::string checkKey = "C_CHECKBOX_Palette" + std::to_string(ci);
@@ -861,11 +996,7 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
         }
         buf.SetPalette(colors);
 
-        // Native effect rendering — implement simple effects directly here.
-        // Full effect integration (via EffectManager/RenderableEffect) requires
-        // unguarding effect Render() methods from #ifndef XLIGHTS_NATIVE.
         bool rendered = renderNativeEffect(effectInfo, buf);
-
         validLayers[layer] = rendered;
     }
 

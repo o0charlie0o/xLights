@@ -424,9 +424,20 @@ private:
     void buildModelTotalChannelsMap();
     uint32_t resolveStartChannel(const std::string& startChannelStr);
 
+    // Compute the minimum channel buffer size needed to hold all model data.
+    // Scans all models and returns the highest end channel (start + nodeCount * chansPerNode).
+    int32_t computeRequiredChannels();
+
     // Synthesize a submodel-specific FrameBuffer from the parent model's channel
     // data (FSEQ or pre-rendered). Stores result in _sidebarCache.
     void synthesizeSubmodelBuffer(const std::string& subRefName, int timeMS);
+
+    // Synthesize a submodel FrameBuffer from parent's channel data and store
+    // in _bufferCache. Used by the FSEQ/prerendered renderFrame() paths.
+    // Caller must hold _bufferCacheMutex.
+    void synthesizeSubmodelFrameBuffer(const std::string& subRefName,
+                                       const ModelChannelInfo& parentChInfo,
+                                       int timeMS);
 #else
     // Owned adapter when constructed with xLightsFrame* (legacy mode)
     std::unique_ptr<class RenderContextAdapter> _ownedAdapter;

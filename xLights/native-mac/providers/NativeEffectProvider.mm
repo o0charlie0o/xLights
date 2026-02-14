@@ -394,6 +394,30 @@ bool NativeEffectProvider::loadFromSequenceXML(const std::string& xmlContent)
                 element->layers.push_back(std::make_unique<NativeEffectLayer>());
             }
 
+            // Debug: check for unexpected effect counts on known models
+            {
+                bool isMissing = (element->name == "Pixel Stake 50" ||
+                                  element->name == "Pixel Stake 52" ||
+                                  element->name == "Pixel Stake 54" ||
+                                  element->name == "Large Gift 1" ||
+                                  element->name == "Flake Icicle 41");
+                if (isMissing) {
+                    size_t effCount = element->getEffectCount();
+                    printf("[PARSE_CHECK] '%s': idx=%zu layers=%zu effects=%zu\n",
+                           element->name.c_str(), _elements.size(),
+                           element->layers.size(), effCount);
+                    // Print layer details
+                    for (size_t li = 0; li < element->layers.size(); ++li) {
+                        printf("[PARSE_CHECK]   layer %zu: %zu effects\n",
+                               li, element->layers[li]->effects.size());
+                        if (!element->layers[li]->effects.empty()) {
+                            auto& eff = element->layers[li]->effects[0];
+                            printf("[PARSE_CHECK]     first: '%s' %d-%dms\n",
+                                   eff->effectType.c_str(), eff->startTimeMS, eff->endTimeMS);
+                        }
+                    }
+                }
+            }
             _elementsByName[element->name] = _elements.size();
             _elements.push_back(std::move(element));
         }

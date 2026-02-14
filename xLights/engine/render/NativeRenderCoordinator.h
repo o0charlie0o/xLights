@@ -141,6 +141,12 @@ private:
         size_t layerCount = 0;
         std::unique_ptr<NativePixelBuffer> pixelBuffer;
 
+        // Group effect cascading: when a model has its own effects AND belongs
+        // to a group with effects, both need to be rendered. Group layers come
+        // first (indices 0..groupLayerCount-1), model layers follow after.
+        size_t groupElementIndex = SIZE_MAX; // SIZE_MAX = no group effects
+        size_t groupLayerCount = 0;
+
         // Submodel mask: when a physical model matches a group through
         // submodel refs (e.g. group has "SingingTree/Outline" not "SingingTree"),
         // only these (bufX, bufY) positions should be kept non-black.

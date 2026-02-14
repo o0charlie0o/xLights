@@ -414,6 +414,41 @@ uint32_t RenderEngine::resolveStartChannel(const std::string& startChannelStr)
     return result;
 }
 
+int32_t RenderEngine::computeRequiredChannels()
+{
+    if (!_modelProvider) return 0;
+
+    int32_t maxEndChannel = 0;
+    auto modelNames = _modelProvider->getModelNames();
+    ModelEngine tempEngine(_modelProvider);
+
+    for (const auto& name : modelNames) {
+        auto attrs = _modelProvider->getModelAttributes(name);
+        auto displayAs = attrs.find("DisplayAs");
+        if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+        auto scIt = attrs.find("StartChannel");
+        if (scIt == attrs.end() || scIt->second.empty()) continue;
+
+        uint32_t startCh = resolveStartChannel(scIt->second);
+        auto nodes = tempEngine.getModelNodes(name);
+        if (nodes.empty()) continue;
+
+        uint32_t chansPerNode = 3;
+        auto stIt = attrs.find("StringType");
+        if (stIt != attrs.end()) {
+            const auto& st = stIt->second;
+            if (st.find("4 Channel") != std::string::npos ||
+                st.find("RGBW") != std::string::npos) chansPerNode = 4;
+            else if (st.find("Single Color") != std::string::npos) chansPerNode = 1;
+        }
+        uint32_t endCh = startCh + static_cast<uint32_t>(nodes.size()) * chansPerNode;
+        if (static_cast<int32_t>(endCh) > maxEndChannel) {
+            maxEndChannel = static_cast<int32_t>(endCh);
+        }
+    }
+    return maxEndChannel;
+}
+
 // --- Model Channel Map ---
 
 void RenderEngine::buildModelChannelMap()
@@ -583,6 +618,98 @@ void RenderEngine::buildModelChannelMap()
         _modelChannelMap[name] = std::move(info);
     }
 
+    // Second pass: for submodel refs like "Singing Tree/Outline", ensure the parent
+    // model "Singing Tree" is in the map. The batch render writes channel data for parent
+    // models, but getModelNames() may only return submodel refs.
+    printf("[CHANNEL_MAP] Second pass: checking %zu model names for submodel refs\n", modelNames.size());
+    int subRefCount = 0;
+    std::set<std::string> parentsSeen;
+    for (const auto& name : modelNames) {
+        size_t slash = name.find('/');
+        if (slash == std::string::npos) continue;
+        subRefCount++;
+        std::string parentName = name.substr(0, slash);
+        if (_modelChannelMap.count(parentName)) {
+            printf("[CHANNEL_MAP]   subref '%s' → parent '%s' ALREADY in map\n", name.c_str(), parentName.c_str());
+            continue;
+        }
+        if (!parentsSeen.insert(parentName).second) continue; // already tried
+
+        printf("[CHANNEL_MAP]   subref '%s' → trying to add parent '%s'\n", name.c_str(), parentName.c_str());
+        auto parentAttrs = _modelProvider->getModelAttributes(parentName);
+        if (parentAttrs.empty()) {
+            printf("[CHANNEL_MAP]   Parent '%s' — empty attributes, skipping\n", parentName.c_str());
+            continue;
+        }
+        auto displayAs = parentAttrs.find("DisplayAs");
+        if (displayAs != parentAttrs.end() && displayAs->second == "ModelGroup") continue;
+
+        auto scIt = parentAttrs.find("StartChannel");
+        if (scIt == parentAttrs.end() || scIt->second.empty()) continue;
+
+        uint32_t absStart = resolveStartChannel(scIt->second);
+        auto parentNodes = tempEngine.getModelNodes(parentName);
+        if (parentNodes.empty()) continue;
+
+        uint32_t chansPerNode = 3;
+        uint8_t rOff = 0, gOff = 1, bOff = 2;
+        auto stIt = parentAttrs.find("StringType");
+        if (stIt != parentAttrs.end()) {
+            const std::string& st = stIt->second;
+            if (st.find("4 Channel") != std::string::npos ||
+                st.find("RGBW") != std::string::npos) {
+                chansPerNode = 4;
+            } else if (st.find("Single Color") != std::string::npos) {
+                chansPerNode = 1;
+            }
+            if (chansPerNode >= 3 && st.size() >= 3) {
+                std::string colorChars;
+                int baseOffset = 0;
+                if (st[0] == 'W' && st.size() >= 4 && st[1] >= 'A' && st[1] <= 'Z') {
+                    colorChars = st.substr(1, 3); baseOffset = 1;
+                } else if (st.compare(0, 10, "4 Channel ") == 0 && st.size() >= 14) {
+                    std::string suffix = st.substr(10);
+                    if (suffix[0] == 'W') { colorChars = suffix.substr(1, 3); baseOffset = 1; }
+                    else { colorChars = suffix.substr(0, 3); baseOffset = 0; }
+                } else if (st[0] >= 'A' && st[0] <= 'Z') {
+                    colorChars = st.substr(0, 3); baseOffset = 0;
+                }
+                if (colorChars.size() == 3) {
+                    for (int ci = 0; ci < 3; ci++) {
+                        if (colorChars[ci] == 'R') rOff = static_cast<uint8_t>(ci + baseOffset);
+                        else if (colorChars[ci] == 'G') gOff = static_cast<uint8_t>(ci + baseOffset);
+                        else if (colorChars[ci] == 'B') bOff = static_cast<uint8_t>(ci + baseOffset);
+                    }
+                }
+            }
+        }
+
+        int maxBufX = 0, maxBufY = 0;
+        for (const auto& node : parentNodes) {
+            if (node.bufX > maxBufX) maxBufX = node.bufX;
+            if (node.bufY > maxBufY) maxBufY = node.bufY;
+        }
+
+        ModelChannelInfo info;
+        info.absStartChannel = absStart;
+        info.nodeCount = static_cast<uint32_t>(parentNodes.size());
+        info.chansPerNode = chansPerNode;
+        info.bufferWidth = maxBufX + 1;
+        info.bufferHeight = maxBufY + 1;
+        info.rOffset = rOff;
+        info.gOffset = gOff;
+        info.bOffset = bOff;
+        info.nodeBufCoords.reserve(parentNodes.size());
+        for (const auto& node : parentNodes) {
+            info.nodeBufCoords.push_back({node.bufX, node.bufY});
+        }
+
+        printf("[CHANNEL_MAP] Added parent '%s' from subref '%s': startCh=%u nodes=%u buffer=%dx%d\n",
+               parentName.c_str(), name.c_str(), absStart, info.nodeCount,
+               info.bufferWidth, info.bufferHeight);
+        _modelChannelMap[parentName] = std::move(info);
+    }
+
     printf("[CHANNEL_MAP] buildModelChannelMap: mapped %zu models out of %zu total (%zu skipped)\n",
            _modelChannelMap.size(), modelNames.size(), skippedCount);
     for (const auto& [name, chInfo] : _modelChannelMap) {
@@ -597,6 +724,15 @@ void RenderEngine::buildModelChannelMap()
 
 void RenderEngine::renderFrame(int timeMS)
 {
+    // Log which rendering path is taken (once per path)
+    static bool sPathLogged = false;
+    if (!sPathLogged) {
+        printf("[SUBDBG] renderFrame(%dms): fseqLoaded=%d renderedData=%d modelChannelMap=%zu effectProvider=%d modelProvider=%d\n",
+               timeMS, (int)_fseqLoaded, (_renderedData != nullptr), _modelChannelMap.size(),
+               (_effectProvider != nullptr), (_modelProvider != nullptr));
+        sPathLogged = true;
+    }
+
     if (_fseqLoaded && _fseqFile) {
         // FSEQ playback path: read pre-rendered channel data
         int stepTime = _fseqFile->getStepTime();
@@ -673,11 +809,26 @@ void RenderEngine::renderFrame(int timeMS)
             _bufferCache[modelName] = std::move(fb);
         }
 
+        // Synthesize submodel FrameBuffers for any submodel refs in getModelNames()
+        // that aren't directly in _modelChannelMap but whose parent model IS.
+        if (_modelProvider) {
+            auto allNames = _modelProvider->getModelNames();
+            for (const auto& name : allNames) {
+                size_t slash = name.find('/');
+                if (slash == std::string::npos) continue;
+                if (_bufferCache.count(name)) continue; // already have it
+                std::string parentName = name.substr(0, slash);
+                auto parentIt = _modelChannelMap.find(parentName);
+                if (parentIt == _modelChannelMap.end()) continue;
+                synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
+            }
+        }
+
         // Log stats on first few FSEQ frames
         static int fseqFrameLogCount = 0;
         if (fseqFrameLogCount < 5) {
-            printf("[CHANNEL_MAP] renderFrame(FSEQ): frame %d — %d/%zu models have non-black pixels\n",
-                   frameIndex, modelsWithPixels, _modelChannelMap.size());
+            printf("[CHANNEL_MAP] renderFrame(FSEQ): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu\n",
+                   frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size());
             fseqFrameLogCount++;
         }
 
@@ -685,6 +836,12 @@ void RenderEngine::renderFrame(int timeMS)
     } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
         // Pre-rendered data path: read from in-memory rendered data (from renderAll)
         // This is the same as the FSEQ path but reads from NativeSequenceData in memory.
+        static bool sPrerenderedPathLogged = false;
+        if (!sPrerenderedPathLogged) {
+            printf("[SUBDBG] renderFrame(%dms): PRERENDERED DATA PATH, channels=%u frames=%u models=%zu\n",
+                   timeMS, _renderedData->getNumChannels(), _renderedData->getNumFrames(), _modelChannelMap.size());
+            sPrerenderedPathLogged = true;
+        }
         int stepTime = static_cast<int>(_renderedData->getFrameTimeMS());
         if (stepTime <= 0) stepTime = 50;
 
@@ -756,11 +913,25 @@ void RenderEngine::renderFrame(int timeMS)
             _bufferCache[modelName] = std::move(fb);
         }
 
+        // Synthesize submodel FrameBuffers for submodel refs (same as FSEQ path)
+        if (_modelProvider) {
+            auto allNames = _modelProvider->getModelNames();
+            for (const auto& name : allNames) {
+                size_t slash = name.find('/');
+                if (slash == std::string::npos) continue;
+                if (_bufferCache.count(name)) continue;
+                std::string parentName = name.substr(0, slash);
+                auto parentIt = _modelChannelMap.find(parentName);
+                if (parentIt == _modelChannelMap.end()) continue;
+                synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
+            }
+        }
+
         // Log stats on first few frames
         static int prerenderedFrameLogCount = 0;
         if (prerenderedFrameLogCount < 5) {
-            printf("[CHANNEL_MAP] renderFrame(prerendered): frame %d — %d/%zu models have non-black pixels\n",
-                   frameIndex, modelsWithPixels, _modelChannelMap.size());
+            printf("[CHANNEL_MAP] renderFrame(prerendered): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu\n",
+                   frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size());
             prerenderedFrameLogCount++;
         }
 
@@ -803,6 +974,14 @@ void RenderEngine::renderFrame(int timeMS)
         }
         _lastLiveRenderTimeMS = timeMS;
         _bufferCache.clear();
+
+        // Log which rendering path we're on (once)
+        static bool sLivePathLogged = false;
+        if (!sLivePathLogged) {
+            printf("[SUBDBG] renderFrame(%dms): LIVE EFFECT PATH, %zu models from provider\n",
+                   timeMS, modelNames.size());
+            sLivePathLogged = true;
+        }
 
         for (const auto& name : modelNames) {
             auto modelStart = std::chrono::steady_clock::now();
@@ -908,7 +1087,15 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 
 void RenderEngine::synthesizeSubmodelBuffer(const std::string& subRefName, int timeMS)
 {
-    if (!_modelProvider || _currentFrameData.empty()) return;
+    // Copy _currentFrameData under lock to avoid race with renderFrame()
+    // which runs on a different thread and modifies it.
+    std::vector<uint8_t> localFrameData;
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        if (_currentFrameData.empty()) return;
+        localFrameData = _currentFrameData;
+    }
+    if (!_modelProvider) return;
 
     // Parse "Parent/Sub" into parent and submodel names
     size_t slash = subRefName.find('/');
@@ -1017,12 +1204,12 @@ void RenderEngine::synthesizeSubmodelBuffer(const std::string& subRefName, int t
         int parentIdx = parentNodeIndices[i];
         uint32_t nodeChannel = parentChInfo.absStartChannel +
                                (static_cast<uint32_t>(parentIdx) * parentChInfo.chansPerNode);
-        if (nodeChannel + parentChInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size()))
+        if (nodeChannel + parentChInfo.chansPerNode > static_cast<uint32_t>(localFrameData.size()))
             continue;
 
-        uint8_t r = _currentFrameData[nodeChannel + parentChInfo.rOffset];
-        uint8_t g = _currentFrameData[nodeChannel + parentChInfo.gOffset];
-        uint8_t b = _currentFrameData[nodeChannel + parentChInfo.bOffset];
+        uint8_t r = localFrameData[nodeChannel + parentChInfo.rOffset];
+        uint8_t g = localFrameData[nodeChannel + parentChInfo.gOffset];
+        uint8_t b = localFrameData[nodeChannel + parentChInfo.bOffset];
 
         if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
 
@@ -1047,6 +1234,126 @@ void RenderEngine::synthesizeSubmodelBuffer(const std::string& subRefName, int t
     _sidebarCache[subRefName] = std::move(fb);
 }
 
+void RenderEngine::synthesizeSubmodelFrameBuffer(
+    const std::string& subRefName, const ModelChannelInfo& parentChInfo, int timeMS)
+{
+    // Caller must hold _bufferCacheMutex.
+    if (!_modelProvider || _currentFrameData.empty()) return;
+
+    size_t slash = subRefName.find('/');
+    if (slash == std::string::npos) return;
+    std::string parentName = subRefName.substr(0, slash);
+    std::string subName = subRefName.substr(slash + 1);
+
+    auto parentAttrs = _modelProvider->getModelAttributes(parentName);
+    if (parentAttrs.empty()) return;
+
+    auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+    if (allParentNodes.empty()) return;
+
+    auto subAttrs = _modelProvider->getSubmodelAttributes(parentName, subName);
+    if (subAttrs.empty()) return;
+
+    auto subNodes = filterNodesToSubmodel(allParentNodes, subAttrs);
+    if (subNodes.empty()) return;
+
+    // Get parent node indices for channel data lookup
+    std::vector<int> parentNodeIndices;
+    {
+        auto typeIt = subAttrs.find("type");
+        bool isSubBuffer = (typeIt != subAttrs.end() && typeIt->second == "subbuffer");
+        if (isSubBuffer) {
+            for (int i = 0; i < static_cast<int>(allParentNodes.size()); i++)
+                parentNodeIndices.push_back(i);
+        } else {
+            for (int lineIdx = 0; lineIdx < 100; ++lineIdx) {
+                std::string key = "line" + std::to_string(lineIdx);
+                auto it = subAttrs.find(key);
+                if (it == subAttrs.end() || it->second.empty()) {
+                    if (lineIdx > 0) break;
+                    continue;
+                }
+                std::istringstream stream(it->second);
+                std::string token;
+                while (std::getline(stream, token, ',')) {
+                    size_t start = token.find_first_not_of(" \t");
+                    size_t end = token.find_last_not_of(" \t");
+                    if (start == std::string::npos) continue;
+                    token = token.substr(start, end - start + 1);
+                    if (token.empty()) continue;
+                    size_t dashPos = token.find('-');
+                    int rangeStart, rangeEnd;
+                    if (dashPos != std::string::npos) {
+                        rangeStart = std::atoi(token.substr(0, dashPos).c_str()) - 1;
+                        rangeEnd = std::atoi(token.substr(dashPos + 1).c_str()) - 1;
+                        if (rangeStart < 0) rangeStart = 0;
+                        if (rangeEnd < rangeStart) std::swap(rangeStart, rangeEnd);
+                    } else {
+                        rangeStart = rangeEnd = std::atoi(token.c_str()) - 1;
+                        if (rangeStart < 0) continue;
+                    }
+                    for (int idx = rangeStart; idx <= rangeEnd; idx++) {
+                        if (idx >= 0 && idx < static_cast<int>(allParentNodes.size()))
+                            parentNodeIndices.push_back(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Determine submodel buffer dimensions
+    int maxBufX = 0, maxBufY = 0;
+    for (const auto& nc : subNodes) {
+        if (nc.bufX > maxBufX) maxBufX = nc.bufX;
+        if (nc.bufY > maxBufY) maxBufY = nc.bufY;
+    }
+    int subBufW = maxBufX + 1;
+    int subBufH = maxBufY + 1;
+
+    FrameBuffer fb;
+    fb.modelName = subRefName;
+    fb.width = subBufW;
+    fb.height = subBufH;
+    fb.timeMS = timeMS;
+    fb.pixels.resize(static_cast<size_t>(subBufW) * subBufH * 4, 0);
+
+    size_t subNodeCount = std::min(subNodes.size(), parentNodeIndices.size());
+    uint32_t dataSize = static_cast<uint32_t>(_currentFrameData.size());
+    int nonBlackPixels = 0;
+    for (size_t i = 0; i < subNodeCount; i++) {
+        int parentIdx = parentNodeIndices[i];
+        if (parentIdx < 0 || parentIdx >= static_cast<int>(parentChInfo.nodeCount)) continue;
+        uint32_t nodeChannel = parentChInfo.absStartChannel +
+                               (static_cast<uint32_t>(parentIdx) * parentChInfo.chansPerNode);
+        if (nodeChannel + parentChInfo.chansPerNode > dataSize) continue;
+
+        uint8_t r = _currentFrameData[nodeChannel + parentChInfo.rOffset];
+        uint8_t g = _currentFrameData[nodeChannel + parentChInfo.gOffset];
+        uint8_t b = _currentFrameData[nodeChannel + parentChInfo.bOffset];
+
+        if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
+
+        int bx = subNodes[i].bufX;
+        int by = subNodes[i].bufY;
+        if (bx < 0 || bx >= subBufW || by < 0 || by >= subBufH) continue;
+
+        size_t pIdx = (static_cast<size_t>(by) * subBufW + bx) * 4;
+        fb.pixels[pIdx]     = r;
+        fb.pixels[pIdx + 1] = g;
+        fb.pixels[pIdx + 2] = b;
+        fb.pixels[pIdx + 3] = 255;
+    }
+
+    static std::set<std::string> sLogged;
+    if (sLogged.insert(subRefName).second) {
+        printf("[SUBDBG] synthesizeSubmodelFrameBuffer('%s'): %zu subNodes, buffer=%dx%d, %d non-black, parentStart=%u parentNodes=%u\n",
+               subRefName.c_str(), subNodeCount, subBufW, subBufH, nonBlackPixels,
+               parentChInfo.absStartChannel, parentChInfo.nodeCount);
+    }
+
+    _bufferCache[subRefName] = std::move(fb);
+}
+
 void RenderEngine::renderAll(RenderCompleteCallback callback)
 {
     if (!_effectProvider || !_modelProvider) {
@@ -1067,6 +1374,17 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         if (callback) callback(false);
         notifyRenderComplete(false);
         return;
+    }
+
+    // Ensure the output buffer is large enough for all models.
+    // getTotalChannels() sums active controller channel counts, but models may
+    // reference channels beyond that (e.g. via chained >Model:offset references
+    // or models on controllers not yet configured).
+    int32_t requiredChannels = computeRequiredChannels();
+    if (requiredChannels > totalChannels) {
+        printf("RenderEngine::renderAll — expanding buffer from %d to %d channels (models need more)\n",
+               totalChannels, requiredChannels);
+        totalChannels = requiredChannels;
     }
 
     double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
@@ -1185,6 +1503,10 @@ void RenderEngine::renderRange(int startMS, int endMS, bool clear,
         if (callback) callback(false);
         return;
     }
+
+    // Ensure buffer is large enough for all models
+    int32_t requiredChannels = computeRequiredChannels();
+    if (requiredChannels > totalChannels) totalChannels = requiredChannels;
 
     double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
     auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
@@ -1396,6 +1718,7 @@ void RenderEngine::invalidateAllCaches()
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.clear();
         _currentFrameIndex = -1;
+        _currentFrameData.clear();
         // Discard pre-rendered data so the live effect path is used until
         // the user clicks Render All again.
         _renderedData.reset();

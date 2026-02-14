@@ -13,6 +13,7 @@
 #import "layout/XLMetalPreviewView.h"
 #import "sequencer/XLAudioPlayer.h"
 #import "xLights_Native-Swift.h"
+#import <stdatomic.h>
 
 @interface XLPlaybackController () <XLAudioPlayerDelegate> {
     CFAbsoluteTime _lastFrameTime;
@@ -21,6 +22,12 @@
     NSInteger _playOriginMS;  // Position where play was pressed; stop returns here
     BOOL _useNativeAudio;
     dispatch_source_t _fallbackTimer;
+    atomic_bool _renderInProgress;  // Atomic: written on render queue, read on main queue
+
+    // Render loop: runs on _renderQueue, decoupled from main queue
+    dispatch_source_t _renderLoopTimer;
+    atomic_bool _renderLoopActive;
+    NSInteger _lastRenderedFrameMS;
 }
 
 @property (nonatomic, assign, readwrite) BOOL isPlaying;
@@ -28,7 +35,6 @@
 @property (nonatomic, assign, readwrite) NSInteger positionMS;
 @property (nonatomic, assign, readwrite) NSInteger durationMS;
 @property (nonatomic, assign, readwrite) NSInteger frameTimeMS;
-@property (nonatomic, assign, readwrite) BOOL renderInProgress;
 
 @property (nonatomic, strong) dispatch_queue_t playbackQueue;
 @property (nonatomic, strong) dispatch_queue_t renderQueue;
@@ -38,9 +44,14 @@
 @implementation XLPlaybackController
 
 @dynamic sidebarPreviewView;
+@dynamic renderInProgress;
 
 - (XLMetalPreviewView *)sidebarPreviewView {
     return [XLSwiftUIWindowHelper shared].sidebarPreviewView;
+}
+
+- (BOOL)renderInProgress {
+    return atomic_load(&_renderInProgress);
 }
 
 #pragma mark - Initialization
@@ -61,10 +72,12 @@
         _playOriginMS = 0;
         _loopRegionStartMS = -1;
         _loopRegionEndMS = -1;
+        _lastRenderedFrameMS = -1;
 
         _playbackQueue = dispatch_queue_create("com.xlights.playback", DISPATCH_QUEUE_SERIAL);
         _renderQueue = dispatch_queue_create("com.xlights.render", DISPATCH_QUEUE_SERIAL);
-        _renderInProgress = NO;
+        atomic_init(&_renderInProgress, false);
+        atomic_init(&_renderLoopActive, false);
 
         // Create native audio player
         _audioPlayer = [[XLAudioPlayer alloc] init];
@@ -75,15 +88,167 @@
 
 - (void)dealloc {
     [self stopPlaybackTimer];
+    [self stopRenderLoop];
 }
 
-#pragma mark - Playback Timer
+#pragma mark - Render Loop (runs on render queue, independent of main queue)
+
+/// Start a timer on the render queue that pulls audio position directly
+/// and renders frames without going through the main queue. This makes
+/// playback immune to main-queue stalls (system volume HUD, UI events, etc.).
+- (void)startRenderLoop {
+    [self stopRenderLoop];
+
+    _lastRenderedFrameMS = -1;
+    atomic_store(&_renderLoopActive, true);
+
+    // Poll every 8ms on the render queue — frequent enough for 40fps (25ms/frame),
+    // low overhead when no new frame is available (just reads audio position).
+    _renderLoopTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _renderQueue);
+    dispatch_source_set_timer(_renderLoopTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 0),
+                              8 * NSEC_PER_MSEC,
+                              1 * NSEC_PER_MSEC);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_renderLoopTimer, ^{
+        [weakSelf renderLoopTick];
+    });
+
+    dispatch_resume(_renderLoopTimer);
+    NSLog(@"XLPlaybackController: Render loop started on render queue (8ms poll)");
+}
+
+- (void)stopRenderLoop {
+    atomic_store(&_renderLoopActive, false);
+    if (_renderLoopTimer) {
+        dispatch_source_cancel(_renderLoopTimer);
+        _renderLoopTimer = nil;
+        NSLog(@"XLPlaybackController: Render loop stopped");
+    }
+}
+
+/// Called every 8ms on _renderQueue. Reads audio position directly (no main queue),
+/// snaps to frame boundary, and renders if we've crossed a new frame.
+- (void)renderLoopTick {
+    if (!atomic_load(&_renderLoopActive)) return;
+
+    XLEngineBridge *bridge = _engineBridge;
+    if (!bridge) return;
+
+    // Read position directly from audio player — thread-safe, no main queue needed.
+    // AVAudioPlayerNode.lastRenderTime and playerTimeForNodeTime: are thread-safe.
+    CGFloat rawPositionMS;
+    if (_useNativeAudio && _audioPlayer.isLoaded) {
+        rawPositionMS = _audioPlayer.currentPositionMS;
+    } else {
+        // Fallback: wall-clock estimation
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        CFAbsoluteTime elapsed = now - _playbackStartTime;
+        rawPositionMS = _playbackStartPositionMS + (CGFloat)(elapsed * 1000.0 * _playbackRate);
+    }
+
+    NSInteger positionMS = (NSInteger)rawPositionMS;
+
+    // Clamp
+    if (positionMS < 0) positionMS = 0;
+    if (_durationMS > 0 && positionMS >= _durationMS) {
+        // End of sequence — let the audio player's completion handler deal with looping/stopping
+        return;
+    }
+
+    // Handle loop region
+    if (self.hasLoopRegion && positionMS >= _loopRegionEndMS) {
+        // The audio player delegate handles the actual seek-back on the main queue;
+        // we just clamp our render position here to avoid rendering past the boundary.
+        positionMS = _loopRegionStartMS;
+    }
+
+    // Snap to frame boundary
+    NSInteger snappedMS = positionMS;
+    if (_frameTimeMS > 0) {
+        snappedMS = (positionMS / _frameTimeMS) * _frameTimeMS;
+    }
+
+    // Only render if we've crossed a new frame boundary
+    if (snappedMS == _lastRenderedFrameMS) return;
+    _lastRenderedFrameMS = snappedMS;
+
+    // Render directly on this queue (we're already on _renderQueue)
+    @try {
+        CFAbsoluteTime renderStart = CFAbsoluteTimeGetCurrent();
+
+        [bridge renderFrame:snappedMS];
+
+        CFAbsoluteTime afterRender = CFAbsoluteTimeGetCurrent();
+
+        // Collect all rendered frame buffers — immutable copies, safe to hand off
+        NSArray<NSDictionary *> *frameUpdates = [bridge getAllFrameBuffers];
+
+        CFAbsoluteTime afterCollect = CFAbsoluteTimeGetCurrent();
+        double renderMS = (afterRender - renderStart) * 1000.0;
+        double collectMS = (afterCollect - afterRender) * 1000.0;
+        double totalMS = renderMS + collectMS;
+
+        if (totalMS > 40.0) {
+            NSLog(@"[PlaybackTrace] RenderLoop @%ldms: render=%.1fms collect=%.1fms total=%.1fms models=%lu",
+                  (long)snappedMS, renderMS, collectMS, totalMS,
+                  (unsigned long)frameUpdates.count);
+        }
+
+        // Deliver pixel data to main queue for preview update.
+        // This is fire-and-forget — if the main queue is stalled, pixel updates
+        // queue up and get applied when it unblocks. The render loop continues
+        // independently regardless.
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+
+            XLMetalPreviewView *preview = strongSelf.previewView;
+            XLMetalPreviewView *sidebarPreview = strongSelf.sidebarPreviewView;
+
+            if (frameUpdates.count > 0 && (preview || sidebarPreview)) {
+                for (NSDictionary *fb in frameUpdates) {
+                    NSData *pixels = fb[@"pixels"];
+                    NSUInteger width = [fb[@"width"] unsignedIntegerValue];
+                    NSUInteger height = [fb[@"height"] unsignedIntegerValue];
+                    NSString *name = fb[@"modelName"];
+
+                    if (pixels && pixels.length > 0 && width > 0 && height > 0) {
+                        [preview setRenderedPixels:pixels
+                                          forModel:name
+                                             width:width
+                                            height:height];
+                        [sidebarPreview setRenderedPixels:pixels
+                                                 forModel:name
+                                                    width:width
+                                                   height:height];
+                    }
+                }
+
+                [preview updatePreviewForTime:snappedMS];
+                [sidebarPreview updatePreviewForTime:snappedMS];
+            }
+
+            // Notify delegate
+            if ([strongSelf.delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {
+                [strongSelf.delegate playbackController:strongSelf didRenderFrameAtMS:snappedMS];
+            }
+        });
+    } @catch (NSException *exception) {
+        NSLog(@"XLPlaybackController: Exception in render loop at %ldms: %@ - %@",
+              (long)snappedMS, exception.name, exception.reason);
+    }
+}
+
+#pragma mark - UI Position Timer (main queue — cosmetic only, not render-critical)
 
 - (void)startPlaybackTimer {
-    // When using native audio, the audio player's timer drives updates
-    // Only start the fallback timer for sequences without audio
+    // When using native audio, the audio player's timer drives UI position updates.
+    // Only start the fallback timer for sequences without audio.
     if (_useNativeAudio && _audioPlayer.isLoaded) {
-        NSLog(@"XLPlaybackController: Using audio player timer for position updates");
+        NSLog(@"XLPlaybackController: Using audio player timer for UI position updates");
         return;
     }
 
@@ -118,15 +283,14 @@
     if (_fallbackTimer) {
         dispatch_source_cancel(_fallbackTimer);
         _fallbackTimer = nil;
-        NSLog(@"XLPlaybackController: Fallback timer stopped");
     }
 }
 
 - (void)playbackTimerFired {
-    // When using native audio, the audio player's timer drives updates
+    // When using native audio, the audio player's timer drives UI updates
     // This method is only used for sequences without audio or when using engine audio
     if (_useNativeAudio && _audioPlayer.isLoaded) {
-        return;  // Audio player callback handles updates
+        return;  // Audio player callback handles UI updates
     }
 
     if (!_isPlaying || _isPaused) return;
@@ -159,22 +323,18 @@
         }
     }
 
-    // Notify delegate with precise position for smooth UI updates
+    // Notify delegate with precise position for smooth UI updates (playhead, transport bar)
     if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
         [_delegate playbackController:self didUpdatePositionMS:precisePositionMS];
     }
 
-    // Snap to frame boundaries for rendering (we only render at sequence frame rate)
+    // Update _positionMS for consistency
     NSInteger snappedPositionMS = precisePositionMS;
     if (_frameTimeMS > 0) {
         snappedPositionMS = (precisePositionMS / _frameTimeMS) * _frameTimeMS;
     }
-
-    // Render the current frame and send pixel data to the preview view
-    if (snappedPositionMS != _positionMS) {
-        _positionMS = snappedPositionMS;
-        [self renderFrameAtTime:snappedPositionMS];
-    }
+    _positionMS = snappedPositionMS;
+    // Note: actual rendering is handled by the render loop on the render queue
 }
 
 #pragma mark - Engine Bridge Updates
@@ -299,8 +459,13 @@
         _previewView.frameTimeMS = _frameTimeMS;
     }
 
-    // Start the playback loop (for frame timing and preview rendering)
+    // Start the UI position timer (for playhead, transport bar — cosmetic only)
     [self startPlaybackTimer];
+
+    // Start the render loop on the render queue (decoupled from main queue).
+    // This pulls audio position directly and renders independently,
+    // so main-queue stalls (system volume HUD, UI events) don't cause frame drops.
+    [self startRenderLoop];
 
     // Render the initial frame immediately (don't wait for first timer fire)
     [self renderFrameAtTime:_positionMS];
@@ -343,6 +508,7 @@
 
     _isPaused = YES;
     [self stopPlaybackTimer];
+    [self stopRenderLoop];
 
     // Pause both audio systems to ensure both are paused
     [_audioPlayer pause];
@@ -364,6 +530,7 @@
     _isPaused = NO;
 
     [self stopPlaybackTimer];
+    [self stopRenderLoop];
 
     // Return to where play was originally pressed
     NSInteger returnPosition = wasPlaying ? _playOriginMS : 0;
@@ -433,9 +600,11 @@
     if (_isPlaying && !_isPaused) {
         _playbackStartTime = CFAbsoluteTimeGetCurrent();
         _playbackStartPositionMS = positionMS;
+        // Reset render loop's frame tracking so next tick renders immediately
+        _lastRenderedFrameMS = -1;
     }
 
-    // Render the frame at the snapped position
+    // Render the frame at the snapped position (one-shot, for immediate feedback)
     [self renderFrameAtTime:renderPositionMS];
 
     // Update preview position
@@ -465,27 +634,17 @@
     [self seekToPositionMS:newPosition];
 }
 
-#pragma mark - Preview Rendering
+#pragma mark - One-Shot Preview Rendering (for seek, step, initial frame)
 
 - (void)renderCurrentFrame {
     [self renderFrameAtTime:_positionMS];
 }
 
 - (void)renderFrameAtTime:(NSInteger)timeMS {
-    static NSInteger _droppedFrames = 0;
-    static NSInteger _totalFrameRequests = 0;
-    _totalFrameRequests++;
-
     if (!_engineBridge) return;
 
     // Drop frame if a background render is already in progress
-    if (_renderInProgress) {
-        _droppedFrames++;
-        if (_droppedFrames % 10 == 0) {
-            NSLog(@"[FrameDrop] Dropped %ld of %ld frames (%.0f%%)",
-                  (long)_droppedFrames, (long)_totalFrameRequests,
-                  _droppedFrames * 100.0 / _totalFrameRequests);
-        }
+    if (atomic_load(&_renderInProgress)) {
         return;
     }
 
@@ -493,37 +652,18 @@
     if (timeMS < 0) timeMS = 0;
     if (_durationMS > 0 && timeMS > _durationMS) timeMS = _durationMS;
 
-    _renderInProgress = YES;
+    atomic_store(&_renderInProgress, true);
 
     XLEngineBridge *bridge = _engineBridge;
     __weak typeof(self) weakSelf = self;
 
     dispatch_async(_renderQueue, ^{
         @try {
-            CFAbsoluteTime renderStart = CFAbsoluteTimeGetCurrent();
-
-            // FSEQ read + buffer building happens off the main thread
             [bridge renderFrame:timeMS];
-
-            CFAbsoluteTime afterRender = CFAbsoluteTimeGetCurrent();
-
-            // Collect all rendered frame buffers in a single bulk call.
-            // Only returns models with valid pixel data (typically 4 of 200),
-            // avoiding 200 individual mutex lock/unlock + map lookup cycles.
             NSArray<NSDictionary *> *frameUpdates = [bridge getAllFrameBuffers];
 
-            CFAbsoluteTime afterCollect = CFAbsoluteTimeGetCurrent();
-            double renderMS = (afterRender - renderStart) * 1000.0;
-            double collectMS = (afterCollect - afterRender) * 1000.0;
-            double totalMS = renderMS + collectMS;
+            atomic_store(&_renderInProgress, false);
 
-            if (totalMS > 40.0) { // Log frames taking > 40ms (near frame budget)
-                NSLog(@"[RenderPipeline] @%ldms: render=%.1fms collect=%.1fms total=%.1fms models=%lu",
-                      (long)timeMS, renderMS, collectMS, totalMS,
-                      (unsigned long)frameUpdates.count);
-            }
-
-            // Switch to main thread only for the lightweight UI update
             dispatch_async(dispatch_get_main_queue(), ^{
                 __strong typeof(weakSelf) strongSelf = weakSelf;
                 if (!strongSelf) return;
@@ -554,9 +694,6 @@
                     [sidebarPreview updatePreviewForTime:timeMS];
                 }
 
-                strongSelf.renderInProgress = NO;
-
-                // Notify delegate
                 if ([strongSelf.delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {
                     [strongSelf.delegate playbackController:strongSelf didRenderFrameAtMS:timeMS];
                 }
@@ -564,10 +701,7 @@
         } @catch (NSException *exception) {
             NSLog(@"XLPlaybackController: Exception rendering frame at %ldms: %@ - %@",
                   (long)timeMS, exception.name, exception.reason);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong typeof(weakSelf) strongSelf = weakSelf;
-                if (strongSelf) strongSelf.renderInProgress = NO;
-            });
+            atomic_store(&_renderInProgress, false);
         }
     });
 }
@@ -576,12 +710,13 @@
 
 - (void)audioPlayer:(XLAudioPlayer *)player didChangeState:(XLAudioPlaybackState)state {
     // Audio state changes are handled internally
-    // The display link callback still controls frame timing
 }
 
 - (void)audioPlayer:(XLAudioPlayer *)player didUpdatePosition:(CGFloat)positionMS {
-    // When using native audio, the audio player's timer drives our updates
-    // This ensures visual elements stay perfectly in sync with audio
+    // UI position updates only — rendering is handled by the render loop on the render queue.
+    // This callback comes from the audio player's timer via the main queue. If the main queue
+    // is stalled (system volume HUD, etc.), these updates are delayed, but that only affects
+    // cosmetic UI (playhead position) — not frame rendering.
     if (_useNativeAudio && _isPlaying && !_isPaused) {
         NSInteger audioPositionMS = (NSInteger)positionMS;
 
@@ -594,21 +729,17 @@
             audioPositionMS = _loopRegionStartMS;
         }
 
-        // Notify delegate with the audio-driven position for smooth UI updates
+        // Update UI position (playhead, transport bar, waveform cursor, etc.)
         if ([_delegate respondsToSelector:@selector(playbackController:didUpdatePositionMS:)]) {
             [_delegate playbackController:self didUpdatePositionMS:audioPositionMS];
         }
 
-        // Snap to frame boundaries for position tracking
+        // Track position for consistency
         NSInteger snappedPositionMS = audioPositionMS;
         if (_frameTimeMS > 0) {
             snappedPositionMS = (audioPositionMS / _frameTimeMS) * _frameTimeMS;
         }
-
-        if (snappedPositionMS != _positionMS) {
-            _positionMS = snappedPositionMS;
-            [self renderFrameAtTime:snappedPositionMS];
-        }
+        _positionMS = snappedPositionMS;
     }
 }
 
