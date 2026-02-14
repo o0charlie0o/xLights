@@ -153,6 +153,150 @@ static void collectSubmodelRefsRecursive(
 }
 
 // =========================================================================
+// Layer settings parsing — extract B_ prefix keys from effect settings
+// and populate NativeLayerInfo. Mirrors legacy SetLayerSettings().
+// =========================================================================
+
+static int getSettingsInt(const std::map<std::string, std::string>& settings,
+                          const std::string& key, int defaultVal) {
+    auto it = settings.find(key);
+    if (it == settings.end() || it->second.empty()) return defaultVal;
+    try { return std::stoi(it->second); }
+    catch (...) { return defaultVal; }
+}
+
+static double getSettingsDouble(const std::map<std::string, std::string>& settings,
+                                const std::string& key, double defaultVal) {
+    auto it = settings.find(key);
+    if (it == settings.end() || it->second.empty()) return defaultVal;
+    try { return std::stod(it->second); }
+    catch (...) { return defaultVal; }
+}
+
+static bool getSettingsBool(const std::map<std::string, std::string>& settings,
+                            const std::string& key, bool defaultVal = false) {
+    auto it = settings.find(key);
+    if (it == settings.end()) return defaultVal;
+    return it->second == "1" || it->second == "true" || it->second == "TRUE";
+}
+
+static std::string getSettingsStr(const std::map<std::string, std::string>& settings,
+                                  const std::string& key, const std::string& defaultVal = "") {
+    auto it = settings.find(key);
+    if (it == settings.end()) return defaultVal;
+    return it->second;
+}
+
+static NativeMixType parseMixType(const std::string& name) {
+    // Map from display names (stored in B_CHOICE_LayerMethod) to NativeMixType.
+    // Matches the MixTypesMap in legacy PixelBuffer.cpp.
+    static const std::map<std::string, NativeMixType> map = {
+        {"Normal",            NativeMixType::Mix_Normal},
+        {"Effect 1",          NativeMixType::Mix_Effect1},
+        {"Effect 2",          NativeMixType::Mix_Effect2},
+        {"1 is Mask",         NativeMixType::Mix_Mask1},
+        {"2 is Mask",         NativeMixType::Mix_Mask2},
+        {"1 is Unmask",       NativeMixType::Mix_Unmask1},
+        {"2 is Unmask",       NativeMixType::Mix_Unmask2},
+        {"1 is True Unmask",  NativeMixType::Mix_TrueUnmask1},
+        {"2 is True Unmask",  NativeMixType::Mix_TrueUnmask2},
+        {"1 reveals 2",       NativeMixType::Mix_1_reveals_2},
+        {"2 reveals 1",       NativeMixType::Mix_2_reveals_1},
+        {"Shadow 1 on 2",     NativeMixType::Mix_Shadow_1on2},
+        {"Shadow 2 on 1",     NativeMixType::Mix_Shadow_2on1},
+        {"Layered",           NativeMixType::Mix_Layered},
+        {"Highlight",         NativeMixType::Mix_Highlight},
+        {"Highlight Vibrant", NativeMixType::Mix_Highlight_Vibrant},
+        {"Additive",          NativeMixType::Mix_Additive},
+        {"Subtractive",       NativeMixType::Mix_Subtractive},
+        {"Brightness",        NativeMixType::Mix_AsBrightness},
+        {"Average",           NativeMixType::Mix_Average},
+        {"Bottom-Top",        NativeMixType::Mix_BottomTop},
+        {"Left-Right",        NativeMixType::Mix_LeftRight},
+        {"Max",               NativeMixType::Mix_Max},
+        {"Min",               NativeMixType::Mix_Min},
+    };
+    auto it = map.find(name);
+    return (it != map.end()) ? it->second : NativeMixType::Mix_Normal;
+}
+
+// Parse layer settings from the effect's settings map (B_ prefixed keys)
+// and populate a NativeLayerInfo struct. Matches legacy SetLayerSettings().
+static NativeLayerInfo parseLayerSettings(
+    const std::map<std::string, std::string>& settings, int frameTimeMS)
+{
+    NativeLayerInfo info;
+
+    // Persistent (overlay background)
+    info.persistent = getSettingsBool(settings, "B_CHECKBOX_OverlayBkg");
+
+    // Fade in/out (seconds → frames)
+    double fadeInSec = getSettingsDouble(settings, "B_TEXTCTRL_Fadein", 0.0);
+    double fadeOutSec = getSettingsDouble(settings, "B_TEXTCTRL_Fadeout", 0.0);
+    info.fadeInSteps = (frameTimeMS > 0)
+        ? static_cast<float>((int)(fadeInSec * 1000) / frameTimeMS) : 0.0f;
+    info.fadeOutSteps = (frameTimeMS > 0)
+        ? static_cast<float>((int)(fadeOutSec * 1000) / frameTimeMS) : 0.0f;
+
+    // Blur
+    info.blur = getSettingsInt(settings, "B_SLIDER_Blur", 1);
+
+    // Sparkle
+    info.sparkle_count = getSettingsInt(settings, "B_SLIDER_SparkleFrequency", 0);
+    info.use_music_sparkle_count = getSettingsBool(settings, "B_CHECKBOX_MusicSparkles");
+
+    // Sparkle color
+    std::string sparkColStr = getSettingsStr(settings, "B_COLOURPICKERCTRL_SparklesColour", "#FFFFFF");
+    if (!sparkColStr.empty()) {
+        info.sparklesColour.SetFromString(sparkColStr);
+    }
+
+    // Brightness / contrast
+    info.brightness = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Brightness", 100));
+    info.contrast = getSettingsInt(settings, "B_SLIDER_Contrast", 0);
+
+    // HSV adjustments
+    info.hueAdjust = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Color_HueAdjust", 0));
+    info.saturationAdjust = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Color_SaturationAdjust", 0));
+    info.valueAdjust = static_cast<float>(getSettingsInt(settings, "B_SLIDER_Color_ValueAdjust", 0));
+
+    // Mix type
+    std::string mixName = getSettingsStr(settings, "B_CHOICE_LayerMethod", "Normal");
+    info.mixType = parseMixType(mixName);
+
+    // Mix threshold and morph
+    info.mixThreshold = static_cast<float>(
+        getSettingsInt(settings, "B_SLIDER_EffectLayerMix", 0)) / 100.0f;
+    info.effectMixVary = getSettingsBool(settings, "B_CHECKBOX_LayerMorph");
+
+    // Canvas mode
+    info.canvas = getSettingsBool(settings, "B_CHECKBOX_Canvas");
+
+    // Chroma key
+    info.isChromaKey = getSettingsBool(settings, "B_CHECKBOX_Chroma");
+    info.chromaSensitivity = getSettingsInt(settings, "B_SLIDER_ChromaSensitivity", 1);
+    std::string chromaColStr = getSettingsStr(settings, "B_COLOURPICKERCTRL_ChromaColour", "");
+    if (!chromaColStr.empty()) {
+        info.chromaKeyColour.SetFromString(chromaColStr);
+    }
+
+    // Transition types
+    std::string inTransStr = getSettingsStr(settings, "B_CHOICE_In_Transition_Type", "Fade");
+    std::string outTransStr = getSettingsStr(settings, "B_CHOICE_Out_Transition_Type", "Fade");
+    // Store as simple integer codes: 0=Fade (only Fade is fully supported for now)
+    info.inTransitionType = (inTransStr == "Fade") ? 0 : 1;
+    info.outTransitionType = (outTransStr == "Fade") ? 0 : 1;
+    info.inTransitionAdjust = static_cast<float>(
+        getSettingsInt(settings, "B_SLIDER_In_Transition_Adjust", 0));
+    info.outTransitionAdjust = static_cast<float>(
+        getSettingsInt(settings, "B_SLIDER_Out_Transition_Adjust", 0));
+    info.inTransitionReverse = getSettingsBool(settings, "B_CHECKBOX_In_Transition_Reverse");
+    info.outTransitionReverse = getSettingsBool(settings, "B_CHECKBOX_Out_Transition_Reverse");
+
+    return info;
+}
+
+// =========================================================================
 // Construction / destruction
 // =========================================================================
 
@@ -934,14 +1078,15 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
     if (frameTimeMS <= 0) frameTimeMS = 50;
     int period = timeMS / frameTimeMS;
 
-    job.pixelBuffer->clear();
+    // Don't call pixelBuffer->clear() unconditionally — persistent layers
+    // need their previous frame data to survive. We'll clear each layer
+    // individually below based on its settings.
 
     std::vector<bool> validLayers(job.layerCount, false);
 
     for (size_t layer = 0; layer < job.layerCount; ++layer) {
         NativeRenderBuffer& buf = job.pixelBuffer->getLayerBuffer(
             static_cast<int>(layer));
-        buf.Clear();
 
         // Determine which element and layer index to query.
         // Group layers come first (0..groupLayerCount-1), then model's own layers.
@@ -960,7 +1105,23 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS) {
         EffectInstanceInfo effectInfo;
         if (!_effectProvider->getEffectAtTime(
                 srcElementIdx, srcLayerIdx, timeMS, effectInfo)) {
+            // No effect on this layer at this time — clear it unless persistent.
+            // (We can't know persistent without the effect, so default to clearing.)
+            buf.Clear();
             continue;
+        }
+
+        // Parse and apply layer settings (B_ prefix keys) from the effect.
+        // This populates mix type, brightness, contrast, sparkle, HSV adjust,
+        // fade, blur, persistent, canvas, chroma key — matching legacy
+        // SetLayerSettings() behavior.
+        NativeLayerInfo layerInfo = parseLayerSettings(effectInfo.settings, frameTimeMS);
+        job.pixelBuffer->setLayerSettings(static_cast<int>(layer), layerInfo);
+
+        // Clear the layer buffer unless persistent (overlay background).
+        // Persistent layers keep previous frame data so effects accumulate.
+        if (!layerInfo.persistent) {
+            buf.Clear();
         }
 
         // Configure render buffer timing state
