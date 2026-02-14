@@ -18,6 +18,32 @@
 @class XLManipulationHandlesRenderer;
 @class XLEngineBridge;
 
+#pragma mark - Pre-flattened Node Data Structures
+
+/// Pre-extracted node data for the hot render path.
+/// Position and buffer coordinates are immutable between model reloads,
+/// eliminating per-frame NSDictionary/NSNumber unboxing (~50K Obj-C
+/// message sends for 10K nodes).
+typedef struct {
+    simd_float3 position;    // 12 bytes - world-space x,y,z
+    int16_t bufX, bufY;      //  4 bytes - render buffer coordinates
+    uint16_t modelIndex;     //  2 bytes - index into model lookup array
+    uint16_t _pad;           //  2 bytes - alignment padding
+} XLFlatNode;                // 20 bytes total, well-aligned
+
+/// Per-model metadata for quick lookup during vertex building.
+/// Stored alongside the flat node array so we can iterate models
+/// without touching NSDictionary at all.
+typedef struct {
+    NSUInteger nodeStart;    // Start index into the XLFlatNode array
+    NSUInteger nodeCount;    // Number of nodes for this model
+    uint16_t pixelWidth;     // Render buffer width
+    uint16_t pixelHeight;    // Render buffer height
+    BOOL hasBounds;          // Whether bounds data is valid
+    float boundsMinX, boundsMinY, boundsMinZ;
+    float boundsMaxX, boundsMaxY, boundsMaxZ;
+} XLModelLookup;
+
 /// Delegate protocol for the Metal preview view.
 ///
 /// Informs the layout controller about user interactions:

@@ -159,6 +159,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     // Triple-buffered vertex buffers (C arrays can't be @property)
     id<MTLBuffer> _vertexBufferRing[3];
     NSUInteger _vertexBufferRingCapacity[3]; // in vertices
+
+    // Pre-flattened node data: built once on model reload, read every frame.
+    // Eliminates NSDictionary/NSNumber unboxing in the hot render path.
+    XLFlatNode *_flatNodes;
+    NSUInteger _flatNodeCount;
+    XLModelLookup *_flatModelLookups;
+    NSUInteger _flatModelCount;
+    NSArray<NSString *> *_flatModelNames;         // model name per lookup entry
+    NSArray<NSString *> *_flatModelShadowSources;  // ShadowModelFor per lookup (nil if none)
+    BOOL _flatNodesDirty;                          // rebuilt on next vertex build if YES
 }
 
 #pragma mark - Initialization
@@ -234,6 +244,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     _lastPixelDataGeneration = 0;
     _currentRingIndex = 0;
 
+    // Pre-flattened node arrays (built on model reload)
+    _flatNodes = NULL;
+    _flatNodeCount = 0;
+    _flatModelLookups = NULL;
+    _flatModelCount = 0;
+    _flatModelNames = nil;
+    _flatModelShadowSources = nil;
+    _flatNodesDirty = YES;
+
     // Background image defaults
     _backgroundBrightness = 1.0f;
     _backgroundAlpha = 1.0f;
@@ -273,6 +292,8 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)dealloc {
     [_scrollbarFadeTimer invalidate];
     [self stopRenderLoop];
+    free(_flatNodes);
+    free(_flatModelLookups);
 }
 
 #pragma mark - Layer Setup
@@ -1083,24 +1104,17 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     simd_float3 bbMax = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
 
     BOOL hasModels = NO;
-    for (NSDictionary *modelData in _modelDataCache) {
-        NSDictionary *bounds = modelData[@"bounds"];
-        if (!bounds || bounds.count == 0) continue;
+    for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+        XLModelLookup *lookup = &_flatModelLookups[mi];
+        if (!lookup->hasBounds) continue;
 
         hasModels = YES;
-        float minX = [bounds[@"minX"] floatValue];
-        float maxX = [bounds[@"maxX"] floatValue];
-        float minY = [bounds[@"minY"] floatValue];
-        float maxY = [bounds[@"maxY"] floatValue];
-        float minZ = [bounds[@"minZ"] floatValue];
-        float maxZ = [bounds[@"maxZ"] floatValue];
-
-        bbMin.x = fminf(bbMin.x, minX);
-        bbMin.y = fminf(bbMin.y, minY);
-        bbMin.z = fminf(bbMin.z, minZ);
-        bbMax.x = fmaxf(bbMax.x, maxX);
-        bbMax.y = fmaxf(bbMax.y, maxY);
-        bbMax.z = fmaxf(bbMax.z, maxZ);
+        bbMin.x = fminf(bbMin.x, lookup->boundsMinX);
+        bbMin.y = fminf(bbMin.y, lookup->boundsMinY);
+        bbMin.z = fminf(bbMin.z, lookup->boundsMinZ);
+        bbMax.x = fmaxf(bbMax.x, lookup->boundsMaxX);
+        bbMax.y = fmaxf(bbMax.y, lookup->boundsMaxY);
+        bbMax.z = fmaxf(bbMax.z, lookup->boundsMaxZ);
     }
 
     if (!hasModels) {
@@ -1131,6 +1145,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 - (void)reloadModels {
     if (!_engineBridge) {
         _modelDataCache = @[];
+        _flatNodesDirty = YES;
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
         for (int i = 0; i < 3; i++) {
@@ -1172,6 +1187,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     _modelDataCache = [modelData copy];
+    _flatNodesDirty = YES;
     [self buildModelVertices];
     _contentDirty = YES;
     _scrollbarsDirty = YES;
@@ -1185,6 +1201,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
 - (void)loadModelData:(NSArray<NSDictionary *> *)modelData {
     _modelDataCache = [modelData copy];
+    _flatNodesDirty = YES;
     [self buildModelVertices];
     _contentDirty = YES;
     _scrollbarsDirty = YES;
@@ -1223,11 +1240,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 /// Returns nil if the model is not found or has no bounds.
 - (NSDictionary *)cachedBoundsForModel:(NSString *)modelName {
     if (!modelName) return nil;
-    for (NSDictionary *modelData in _modelDataCache) {
-        if ([modelData[@"name"] isEqualToString:modelName]) {
-            NSDictionary *bounds = modelData[@"bounds"];
-            if (bounds && bounds.count > 0) return bounds;
-            break;
+    for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+        if ([_flatModelNames[mi] isEqualToString:modelName]) {
+            XLModelLookup *lookup = &_flatModelLookups[mi];
+            if (!lookup->hasBounds) break;
+            return @{
+                @"minX": @(lookup->boundsMinX), @"maxX": @(lookup->boundsMaxX),
+                @"minY": @(lookup->boundsMinY), @"maxY": @(lookup->boundsMaxY),
+                @"minZ": @(lookup->boundsMinZ), @"maxZ": @(lookup->boundsMaxZ),
+            };
         }
     }
     return nil;
@@ -1364,25 +1385,126 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     [self buildModelVerticesWithEffectColors:_showEffectColors];
 }
 
-- (void)buildModelVerticesWithEffectColors:(BOOL)useEffectColors {
-    if (_modelDataCache.count == 0) {
-        _modelVertexBuffer = nil;
-        _modelVertexCount = 0;
-        return;
-    }
+/// Build pre-flattened C arrays from the NSDictionary model data cache.
+/// Called once per model reload — extracts position, buffer coords, bounds,
+/// and shadow source info so the per-frame vertex builder never touches
+/// NSDictionary or NSNumber.
+- (void)rebuildFlatNodeArrays {
+    // Free previous allocations
+    free(_flatNodes);
+    _flatNodes = NULL;
+    free(_flatModelLookups);
+    _flatModelLookups = NULL;
+    _flatNodeCount = 0;
+    _flatModelCount = 0;
+    _flatModelNames = nil;
+    _flatModelShadowSources = nil;
+    _flatNodesDirty = NO;
 
-    // Count total vertices needed (one per node)
+    NSUInteger modelCount = _modelDataCache.count;
+    if (modelCount == 0) return;
+
+    // First pass: count total nodes
     NSUInteger totalNodes = 0;
     for (NSDictionary *modelData in _modelDataCache) {
         NSArray *nodes = modelData[@"nodes"];
         totalNodes += nodes.count;
     }
 
-    if (totalNodes == 0) {
+    if (totalNodes == 0 && modelCount == 0) return;
+
+    // Allocate flat arrays
+    _flatNodes = (XLFlatNode *)malloc(totalNodes * sizeof(XLFlatNode));
+    _flatModelLookups = (XLModelLookup *)calloc(modelCount, sizeof(XLModelLookup));
+    if (!_flatNodes || !_flatModelLookups) {
+        free(_flatNodes);
+        free(_flatModelLookups);
+        _flatNodes = NULL;
+        _flatModelLookups = NULL;
+        return;
+    }
+
+    NSMutableArray<NSString *> *names = [[NSMutableArray alloc] initWithCapacity:modelCount];
+    NSMutableArray<NSString *> *shadowSources = [[NSMutableArray alloc] initWithCapacity:modelCount];
+
+    NSUInteger nodeWriteIdx = 0;
+    NSUInteger modelIdx = 0;
+
+    for (NSDictionary *modelData in _modelDataCache) {
+        NSArray<NSDictionary *> *nodes = modelData[@"nodes"];
+        NSString *modelName = modelData[@"name"] ?: @"";
+        [names addObject:modelName];
+
+        // Extract ShadowModelFor from model info (used during playback)
+        NSDictionary *mInfo = modelData[@"info"];
+        NSString *shadowFor = nil;
+        if (mInfo != nil) {
+            id shadowVal = mInfo[@"ShadowModelFor"];
+            if ([shadowVal isKindOfClass:[NSString class]] && [shadowVal length] > 0) {
+                shadowFor = shadowVal;
+            }
+        }
+        [shadowSources addObject:shadowFor ?: (id)[NSNull null]];
+
+        // Fill model lookup
+        XLModelLookup *lookup = &_flatModelLookups[modelIdx];
+        lookup->nodeStart = nodeWriteIdx;
+        lookup->nodeCount = nodes.count;
+        lookup->pixelWidth = 0;
+        lookup->pixelHeight = 0;
+
+        // Extract bounds
+        NSDictionary *bounds = modelData[@"bounds"];
+        if (bounds && bounds.count > 0) {
+            lookup->hasBounds = YES;
+            lookup->boundsMinX = [bounds[@"minX"] floatValue];
+            lookup->boundsMinY = [bounds[@"minY"] floatValue];
+            lookup->boundsMinZ = [bounds[@"minZ"] floatValue];
+            lookup->boundsMaxX = [bounds[@"maxX"] floatValue];
+            lookup->boundsMaxY = [bounds[@"maxY"] floatValue];
+            lookup->boundsMaxZ = [bounds[@"maxZ"] floatValue];
+        } else {
+            lookup->hasBounds = NO;
+        }
+
+        // Extract each node's position and buffer coordinates (the expensive part)
+        uint16_t mIdx16 = (uint16_t)(modelIdx & 0xFFFF);
+        for (NSDictionary *node in nodes) {
+            XLFlatNode *fn = &_flatNodes[nodeWriteIdx];
+            fn->position = (simd_float3){
+                [node[@"x"] floatValue],
+                [node[@"y"] floatValue],
+                [node[@"z"] floatValue],
+            };
+            fn->bufX = (int16_t)[node[@"bufX"] integerValue];
+            fn->bufY = (int16_t)[node[@"bufY"] integerValue];
+            fn->modelIndex = mIdx16;
+            fn->_pad = 0;
+            nodeWriteIdx++;
+        }
+
+        modelIdx++;
+    }
+
+    _flatNodeCount = nodeWriteIdx;
+    _flatModelCount = modelIdx;
+    _flatModelNames = [names copy];
+    _flatModelShadowSources = [shadowSources copy];
+}
+
+- (void)buildModelVerticesWithEffectColors:(BOOL)useEffectColors {
+    // Rebuild flat arrays if they are stale (model data changed)
+    if (_flatNodesDirty || _flatNodes == NULL) {
+        [self rebuildFlatNodeArrays];
+    }
+
+    if (_flatNodeCount == 0) {
         _modelVertexBuffer = nil;
         _modelVertexCount = 0;
         return;
     }
+
+    NSUInteger totalNodes = _flatNodeCount;
 
     // Triple-buffering: pick the next ring slot so the GPU can still be
     // reading from previous slots while we write to this one.
@@ -1399,19 +1521,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     }
 
     XLGridVertex *vertices = (XLGridVertex *)_vertexBufferRing[ringIdx].contents;
-    NSUInteger vertexWriteIndex = 0;
 
     // Single lock around entire model loop to avoid per-model lock/unlock cycles.
-    // The lock is held while we read pixel data pointers; actual vertex math runs
-    // with the lock held but the critical section is just dictionary lookups so it's fast.
     if (useEffectColors) {
         [_pixelDataLock lock];
     }
 
-    NSUInteger modelIndex = 0;
-    for (NSDictionary *modelData in _modelDataCache) {
-        NSArray<NSDictionary *> *nodes = modelData[@"nodes"];
-        NSString *modelName = modelData[@"name"];
+    for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+        XLModelLookup *lookup = &_flatModelLookups[mi];
+        NSString *modelName = _flatModelNames[mi];
 
         // Look up rendered pixel data for this model
         NSData *pixelData = nil;
@@ -1425,19 +1543,18 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
             // Shadow models mirror their source model's pixel data during playback
             if (pixelData == nil) {
-                NSDictionary *mInfo = modelData[@"info"];
-                if (mInfo != nil) {
-                    NSString *shadowFor = mInfo[@"ShadowModelFor"];
-                    if (shadowFor != nil && [shadowFor isKindOfClass:[NSString class]] && shadowFor.length > 0) {
-                        pixelData = _renderedPixelData[shadowFor];
-                        pixelWidth = [_renderedPixelWidths[shadowFor] unsignedIntegerValue];
-                        pixelHeight = [_renderedPixelHeights[shadowFor] unsignedIntegerValue];
-                    }
+                id shadowVal = _flatModelShadowSources[mi];
+                if (shadowVal != (id)[NSNull null]) {
+                    NSString *shadowFor = (NSString *)shadowVal;
+                    pixelData = _renderedPixelData[shadowFor];
+                    pixelWidth = [_renderedPixelWidths[shadowFor] unsignedIntegerValue];
+                    pixelHeight = [_renderedPixelHeights[shadowFor] unsignedIntegerValue];
                 }
             }
         }
 
         const uint8_t *pixels = (const uint8_t *)pixelData.bytes;
+        NSUInteger pixelDataLength = pixelData.length;
 
         // Determine color - highlighted and selected models get brighter colors
         BOOL isHighlighted = [modelName isEqualToString:_highlightedModelName];
@@ -1458,27 +1575,27 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
         }
 
         // Use hue based on model index for visual distinction (fallback color)
-        float hue = fmod((float)modelIndex * 0.15f, 1.0f);
+        float hue = fmod((float)mi * 0.15f, 1.0f);
         float defaultR, defaultG, defaultB;
         [self hueToRGB:hue r:&defaultR g:&defaultG b:&defaultB];
 
-        NSUInteger nodeIndex = 0;
-        for (NSDictionary *node in nodes) {
-            XLGridVertex *v = &vertices[vertexWriteIndex];
-            v->position = (simd_float3){
-                [node[@"x"] floatValue],
-                [node[@"y"] floatValue],
-                [node[@"z"] floatValue],
-            };
+        // Iterate pre-flattened nodes — no NSDictionary/NSNumber unboxing
+        NSUInteger nodeStart = lookup->nodeStart;
+        NSUInteger nodeEnd = nodeStart + lookup->nodeCount;
+        for (NSUInteger ni = nodeStart; ni < nodeEnd; ni++) {
+            XLFlatNode *fn = &_flatNodes[ni];
+            XLGridVertex *v = &vertices[ni];
 
-            // Get buffer position from node for pixel lookup
-            NSInteger bufX = [node[@"bufX"] integerValue];
-            NSInteger bufY = [node[@"bufY"] integerValue];
+            v->position = fn->position;
+
+            int16_t bufX = fn->bufX;
+            int16_t bufY = fn->bufY;
 
             // Determine if this node should render pure white
+            NSUInteger nodeLocalIdx = ni - nodeStart;
             BOOL nodeIsWhite = NO;
             if (hasSubmodelSelection) {
-                nodeIsWhite = [submodelIndices containsIndex:nodeIndex];
+                nodeIsWhite = [submodelIndices containsIndex:nodeLocalIdx];
             } else if (isSelected || isMultiSelected) {
                 nodeIsWhite = YES;
             }
@@ -1488,10 +1605,10 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             } else {
                 BOOL gotPixelColor = NO;
                 if (pixels && pixelWidth > 0 && pixelHeight > 0) {
-                    if (bufX >= 0 && bufX < (NSInteger)pixelWidth &&
-                        bufY >= 0 && bufY < (NSInteger)pixelHeight) {
+                    if (bufX >= 0 && bufX < (int16_t)pixelWidth &&
+                        bufY >= 0 && bufY < (int16_t)pixelHeight) {
                         NSUInteger pixelIdx = ((NSUInteger)bufY * pixelWidth + (NSUInteger)bufX) * 4;
-                        if (pixelIdx + 3 < pixelData.length) {
+                        if (pixelIdx + 3 < pixelDataLength) {
                             float r = pixels[pixelIdx + 0] / 255.0f;
                             float g = pixels[pixelIdx + 1] / 255.0f;
                             float b = pixels[pixelIdx + 2] / 255.0f;
@@ -1514,12 +1631,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                     }
                 }
             }
-
-            vertexWriteIndex++;
-            nodeIndex++;
         }
-
-        modelIndex++;
     }
 
     if (useEffectColors) {
@@ -2356,21 +2468,22 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     for (NSString *modelName in _selectedModelNamesSet) {
         if ([modelName isEqualToString:_selectedModelName]) continue;
 
-        NSDictionary *boundsDict = nil;
-        for (NSDictionary *modelData in _modelDataCache) {
-            if ([modelData[@"name"] isEqualToString:modelName]) {
-                boundsDict = modelData[@"bounds"];
+        // Find this model's bounds in the flat lookup array
+        XLModelLookup *foundLookup = NULL;
+        for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+            if ([_flatModelNames[mi] isEqualToString:modelName]) {
+                foundLookup = &_flatModelLookups[mi];
                 break;
             }
         }
-        if (!boundsDict || boundsDict.count == 0) continue;
+        if (!foundLookup || !foundLookup->hasBounds) continue;
 
-        float minX = [boundsDict[@"minX"] floatValue];
-        float maxX = [boundsDict[@"maxX"] floatValue];
-        float minY = [boundsDict[@"minY"] floatValue];
-        float maxY = [boundsDict[@"maxY"] floatValue];
-        float minZ = [boundsDict[@"minZ"] floatValue];
-        float maxZ = [boundsDict[@"maxZ"] floatValue];
+        float minX = foundLookup->boundsMinX;
+        float maxX = foundLookup->boundsMaxX;
+        float minY = foundLookup->boundsMinY;
+        float maxY = foundLookup->boundsMaxY;
+        float minZ = foundLookup->boundsMinZ;
+        float maxZ = foundLookup->boundsMaxZ;
 
         float pad = 3.0f;
         minX -= pad; maxX += pad;
@@ -2450,17 +2563,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
     NSMutableArray<NSString *> *modelsInRect = [[NSMutableArray alloc] init];
 
-    for (NSDictionary *modelData in _modelDataCache) {
-        NSDictionary *bounds = modelData[@"bounds"];
-        if (!bounds || bounds.count == 0) continue;
+    for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+        XLModelLookup *lookup = &_flatModelLookups[mi];
+        if (!lookup->hasBounds) continue;
 
-        // Get the model's world-space AABB center and project it to screen
-        float bMinX = [bounds[@"minX"] floatValue];
-        float bMaxX = [bounds[@"maxX"] floatValue];
-        float bMinY = [bounds[@"minY"] floatValue];
-        float bMaxY = [bounds[@"maxY"] floatValue];
-        float bMinZ = [bounds[@"minZ"] floatValue];
-        float bMaxZ = [bounds[@"maxZ"] floatValue];
+        float bMinX = lookup->boundsMinX;
+        float bMaxX = lookup->boundsMaxX;
+        float bMinY = lookup->boundsMinY;
+        float bMaxY = lookup->boundsMaxY;
+        float bMinZ = lookup->boundsMinZ;
+        float bMaxZ = lookup->boundsMaxZ;
 
         // Project all 8 corners of the AABB to screen and find 2D bounding rect
         float corners[8][3] = {
@@ -2487,8 +2599,6 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
             float sx = (ndcX * 0.5f + 0.5f) * viewWidth;
             float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * viewHeight;
 
-            // NSView coordinates have Y up, but our screen coords from convertPoint also have Y up
-            // Actually in NSView, Y=0 is bottom. Our minY/maxY are already in NSView coords.
             sy = viewHeight - sy; // convert from top-down to NSView bottom-up
 
             screenMinX = fminf(screenMinX, sx);
@@ -2504,7 +2614,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
                            screenMaxY < (float)minY || screenMinY > (float)maxY);
 
         if (intersects) {
-            NSString *name = modelData[@"name"];
+            NSString *name = _flatModelNames[mi];
             if (name) {
                 [modelsInRect addObject:name];
             }
@@ -2607,16 +2717,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
     NSString *closestModel = nil;
     float closestDist = FLT_MAX;
 
-    for (NSDictionary *modelData in _modelDataCache) {
-        NSDictionary *bounds = modelData[@"bounds"];
-        if (!bounds || bounds.count == 0) continue;
+    for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+        XLModelLookup *lookup = &_flatModelLookups[mi];
+        if (!lookup->hasBounds) continue;
 
-        float minX = [bounds[@"minX"] floatValue];
-        float maxX = [bounds[@"maxX"] floatValue];
-        float minY = [bounds[@"minY"] floatValue];
-        float maxY = [bounds[@"maxY"] floatValue];
-        float minZ = [bounds[@"minZ"] floatValue];
-        float maxZ = [bounds[@"maxZ"] floatValue];
+        float minX = lookup->boundsMinX;
+        float maxX = lookup->boundsMaxX;
+        float minY = lookup->boundsMinY;
+        float maxY = lookup->boundsMaxY;
+        float minZ = lookup->boundsMinZ;
+        float maxZ = lookup->boundsMaxZ;
 
         // Expand bounding box slightly for easier clicking
         float pad = fmaxf(fmaxf(maxX - minX, maxY - minY), maxZ - minZ) * 0.05f;
@@ -2652,7 +2762,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink,
 
         if (tmin < FLT_MAX && tmin < closestDist && tmax >= 0.0f) {
             closestDist = tmin;
-            closestModel = modelData[@"name"];
+            closestModel = _flatModelNames[mi];
         }
     }
 
@@ -3927,14 +4037,14 @@ static const CGFloat kScrollerMargin = 2.0;
     CGRect bb = CGRectZero;
     BOOL hasModels = NO;
 
-    for (NSDictionary *modelData in _modelDataCache) {
-        NSDictionary *bounds = modelData[@"bounds"];
-        if (!bounds || bounds.count == 0) continue;
+    for (NSUInteger mi = 0; mi < _flatModelCount; mi++) {
+        XLModelLookup *lookup = &_flatModelLookups[mi];
+        if (!lookup->hasBounds) continue;
 
-        float minX = [bounds[@"minX"] floatValue];
-        float maxX = [bounds[@"maxX"] floatValue];
-        float minY = [bounds[@"minY"] floatValue];
-        float maxY = [bounds[@"maxY"] floatValue];
+        float minX = lookup->boundsMinX;
+        float maxX = lookup->boundsMaxX;
+        float minY = lookup->boundsMinY;
+        float maxY = lookup->boundsMaxY;
 
         if (!hasModels) {
             bb = CGRectMake(minX, minY, maxX - minX, maxY - minY);
