@@ -1328,8 +1328,12 @@ bool NativePixelBuffer::calcOutputGPU(const std::vector<bool>& validLayers) {
     int numLayers = static_cast<int>(_layers.size());
     int totalPixels = _bufferWi * _bufferHt;
 
-    // Skip GPU path for very small buffers (overhead not worth it)
-    if (totalPixels < 64) return false;
+    // Skip GPU path for small/medium buffers. The synchronous GPU dispatch
+    // overhead (command buffer create + encode + commit + waitUntilCompleted +
+    // readback) far exceeds the CPU cost for buffers under ~10K pixels.
+    // For live preview with hundreds of small models, this is catastrophic.
+    // Only use GPU for large matrices/groups in batch rendering.
+    if (totalPixels < 10000) return false;
 
     // Build GPU blend params
     GPUBlendParams params;

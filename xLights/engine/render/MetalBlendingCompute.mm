@@ -85,7 +85,11 @@ struct MetalBlendingComputeImpl {
             paramsBuffer = [device newBufferWithLength:sizeof(GPUBlendParams)
                                               options:MTLResourceStorageModeShared];
 
-            NSLog(@"MetalBlendingCompute: Initialized successfully on %@", [device name]);
+            static bool sLogged = false;
+            if (!sLogged) {
+                sLogged = true;
+                NSLog(@"MetalBlendingCompute: Initialized successfully on %@", [device name]);
+            }
             available = true;
             return true;
         }

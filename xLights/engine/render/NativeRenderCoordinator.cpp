@@ -1686,15 +1686,11 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
     auto resolvedIt = _resolvedStartChannels.find(channelLookupName);
     if (resolvedIt != _resolvedStartChannels.end()) {
         geom.startChannel = resolvedIt->second;
-        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → resolved=%u (from pre-resolved map, lookup='%s')\n",
-               modelName.c_str(), scAttrStr.c_str(), geom.startChannel, channelLookupName.c_str());
     } else {
         if (scAttrIt != attrs.end() && !scAttrIt->second.empty()) {
             int sc = std::atoi(scAttrIt->second.c_str());
             if (sc > 0) geom.startChannel = static_cast<uint32_t>(sc - 1);
         }
-        printf("[CHANNEL_MAP] extractGeometry('%s'): startCh='%s' → atoi=%u (NO pre-resolved entry for '%s')\n",
-               modelName.c_str(), scAttrStr.c_str(), geom.startChannel, channelLookupName.c_str());
     }
 
     // Determine channels per node and color order from StringType attribute.
