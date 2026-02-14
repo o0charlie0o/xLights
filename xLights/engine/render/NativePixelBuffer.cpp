@@ -567,6 +567,20 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
 }
 
 // =========================================================================
+// Submodel mask
+// =========================================================================
+
+void NativePixelBuffer::setSubmodelMask(const std::set<std::pair<int,int>>& mask) {
+    _submodelMask = mask;
+    _hasSubmodelMask = !mask.empty();
+}
+
+void NativePixelBuffer::clearSubmodelMask() {
+    _submodelMask.clear();
+    _hasSubmodelMask = false;
+}
+
+// =========================================================================
 // getColors — extract blended data to output channels
 // =========================================================================
 
@@ -574,6 +588,20 @@ void NativePixelBuffer::getColors(uint8_t* outputBuffer, uint32_t bufferSize) co
     for (const auto& node : _nodes) {
         if (node.bufX < 0 || node.bufX >= _bufferWi ||
             node.bufY < 0 || node.bufY >= _bufferHt) {
+            continue;
+        }
+
+        // When a submodel mask is active, nodes outside the mask write zero channels.
+        // This ensures batch rendering (renderAll/renderRange) only writes channel data
+        // for the submodel's nodes when effects come from a group with submodel refs.
+        if (_hasSubmodelMask &&
+            _submodelMask.find({node.bufX, node.bufY}) == _submodelMask.end()) {
+            for (int ch = 0; ch < node.channelsPerNode; ++ch) {
+                uint32_t destOffset = node.actChannel + ch;
+                if (destOffset < bufferSize) {
+                    outputBuffer[destOffset] = 0;
+                }
+            }
             continue;
         }
 

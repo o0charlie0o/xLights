@@ -28,9 +28,11 @@
 // Multiple instances can safely run in parallel on different threads.
 
 #include <vector>
+#include <set>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <utility>
 
 #include "NativeRenderBuffer.h"
 #include "NativeColorBlending.h"
@@ -183,6 +185,14 @@ public:
     // @param bufferSize    Size of outputBuffer in bytes (for bounds checking)
     void getColors(uint8_t* outputBuffer, uint32_t bufferSize) const;
 
+    // Set a submodel mask. When set, getColors() will only write channel data
+    // for nodes whose (bufX, bufY) coordinates are in the mask set. Nodes outside
+    // the mask will have their channels written as zero. An empty mask means no masking.
+    void setSubmodelMask(const std::set<std::pair<int,int>>& mask);
+
+    // Clear the submodel mask (disable masking).
+    void clearSubmodelMask();
+
     // Get the blended color for a specific pixel coordinate.
     xlColor getBlendedPixel(int x, int y) const;
 
@@ -234,6 +244,11 @@ private:
     std::vector<LayerState> _layers;
     std::vector<NativeNodeInfo> _nodes;
     std::vector<xlColor> _outputPixels; // Final blended result (bufferWi * bufferHt)
+
+    // Submodel mask: when non-empty, only nodes at these (bufX, bufY) positions
+    // will have their channel data written by getColors(). All other nodes write zero.
+    std::set<std::pair<int,int>> _submodelMask;
+    bool _hasSubmodelMask = false;
 
     // Sparkle state: per-node random counters
     std::vector<uint16_t> _sparkleState;

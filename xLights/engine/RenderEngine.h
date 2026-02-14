@@ -423,6 +423,10 @@ private:
     void buildControllerChannelMap();
     void buildModelTotalChannelsMap();
     uint32_t resolveStartChannel(const std::string& startChannelStr);
+
+    // Synthesize a submodel-specific FrameBuffer from the parent model's channel
+    // data (FSEQ or pre-rendered). Stores result in _sidebarCache.
+    void synthesizeSubmodelBuffer(const std::string& subRefName, int timeMS);
 #else
     // Owned adapter when constructed with xLightsFrame* (legacy mode)
     std::unique_ptr<class RenderContextAdapter> _ownedAdapter;

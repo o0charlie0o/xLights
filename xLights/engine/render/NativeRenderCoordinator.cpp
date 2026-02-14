@@ -109,6 +109,49 @@ static std::set<int> getSubmodelNodeIndices(
     return indices;
 }
 
+// Recursively collect submodel refs matching a given parent model name
+// from a group's member list, including nested groups.
+// e.g. If group has members "A/Sub1, NestedGroup" and NestedGroup has "A/Sub2",
+// this collects both "A/Sub1" and "A/Sub2" for parentModelName="A".
+static void collectSubmodelRefsRecursive(
+    const std::string& parentModelName,
+    const std::string& membersStr,
+    IModelProvider* modelProvider,
+    std::vector<std::string>& subRefs,
+    bool& directMatch,
+    std::set<std::string>& visited)
+{
+    if (directMatch) return; // short-circuit if parent is already a direct member
+
+    auto memberList = parseMemberList(membersStr);
+    for (const auto& member : memberList) {
+        if (directMatch) return;
+
+        // Direct match: the parent model itself is a member
+        if (member == parentModelName) {
+            directMatch = true;
+            return;
+        }
+
+        // Submodel ref match: "ParentModel/SubName"
+        size_t sl = member.find('/');
+        if (sl != std::string::npos && member.substr(0, sl) == parentModelName) {
+            subRefs.push_back(member);
+            continue;
+        }
+
+        // Recurse into nested groups (with cycle protection)
+        if (visited.count(member)) continue;
+        auto memberAttrs = modelProvider->getModelAttributes(member);
+        auto modelsIt = memberAttrs.find("models");
+        if (modelsIt != memberAttrs.end() && !modelsIt->second.empty()) {
+            visited.insert(member);
+            collectSubmodelRefsRecursive(parentModelName, modelsIt->second,
+                                         modelProvider, subRefs, directMatch, visited);
+        }
+    }
+}
+
 // =========================================================================
 // Construction / destruction
 // =========================================================================
@@ -360,20 +403,18 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
         // Compute submodel mask for physical models matched through submodel refs.
         // When a group contains "ParentModel/Sub" (not "ParentModel" directly),
         // only the submodel's nodes should be lit in the house preview.
+        // Recurses into nested groups to find all submodel refs for this parent.
         if (!matchedGroupName.empty() && modelName.find('/') == std::string::npos) {
             auto groupAttrs = _modelProvider->getModelAttributes(matchedGroupName);
             auto membersIt = groupAttrs.find("models");
             if (membersIt != groupAttrs.end()) {
-                auto members = parseMemberList(membersIt->second);
                 bool directMatch = false;
                 std::vector<std::string> subRefs;
-                for (const auto& m : members) {
-                    if (m == modelName) { directMatch = true; break; }
-                    size_t sl = m.find('/');
-                    if (sl != std::string::npos && m.substr(0, sl) == modelName) {
-                        subRefs.push_back(m);
-                    }
-                }
+                std::set<std::string> visited;
+                visited.insert(matchedGroupName);
+                collectSubmodelRefsRecursive(modelName, membersIt->second,
+                                             _modelProvider, subRefs, directMatch, visited);
+
                 if (!directMatch && !subRefs.empty()) {
                     auto parentAttrs = _modelProvider->getModelAttributes(modelName);
                     auto allParentNodes = generateNodesFromAttributes(parentAttrs);
@@ -393,7 +434,8 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
                     }
                     if (!validPos.empty()) {
                         job.hasSubmodelMask = true;
-                        job.submodelMaskPositions = std::move(validPos);
+                        job.submodelMaskPositions = validPos;
+                        job.pixelBuffer->setSubmodelMask(validPos);
                         printf("[GRP] Submodel mask for '%s': %zu valid pixel positions from %zu refs\n",
                                modelName.c_str(), job.submodelMaskPositions.size(), subRefs.size());
                     }
@@ -524,21 +566,19 @@ NativeRenderCoordinator::buildModelJobs()
             _context, geom.bufferWi, geom.bufferHt,
             static_cast<int>(layerCount), geom.nodes);
 
-        // Compute submodel mask (same logic as renderModelFrameStateful)
+        // Compute submodel mask (same logic as renderModelFrameStateful).
+        // Recurses into nested groups to find all submodel refs for this parent.
         if (!matchedGroupName.empty() && info.name.find('/') == std::string::npos) {
             auto groupAttrs = _modelProvider->getModelAttributes(matchedGroupName);
             auto membersIt = groupAttrs.find("models");
             if (membersIt != groupAttrs.end()) {
-                auto members = parseMemberList(membersIt->second);
                 bool directMatch = false;
                 std::vector<std::string> subRefs;
-                for (const auto& m : members) {
-                    if (m == info.name) { directMatch = true; break; }
-                    size_t sl = m.find('/');
-                    if (sl != std::string::npos && m.substr(0, sl) == info.name) {
-                        subRefs.push_back(m);
-                    }
-                }
+                std::set<std::string> visited;
+                visited.insert(matchedGroupName);
+                collectSubmodelRefsRecursive(info.name, membersIt->second,
+                                             _modelProvider, subRefs, directMatch, visited);
+
                 if (!directMatch && !subRefs.empty()) {
                     auto parentAttrs = _modelProvider->getModelAttributes(info.name);
                     auto allParentNodes = generateNodesFromAttributes(parentAttrs);
@@ -558,7 +598,8 @@ NativeRenderCoordinator::buildModelJobs()
                     }
                     if (!validPos.empty()) {
                         job.hasSubmodelMask = true;
-                        job.submodelMaskPositions = std::move(validPos);
+                        job.submodelMaskPositions = validPos;
+                        job.pixelBuffer->setSubmodelMask(validPos);
                     }
                 }
             }

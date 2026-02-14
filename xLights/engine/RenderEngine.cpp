@@ -34,6 +34,7 @@
 #include <cstring>
 #include <chrono>
 #include <set>
+#include <sstream>
 #include <unordered_map>
 
 namespace xlEngine {
@@ -161,9 +162,15 @@ void RenderEngine::closeFSEQ()
     _currentFrameData.clear();
     _controllerStartChannels.clear();
 
-    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-    _modelChannelMap.clear();
-    _bufferCache.clear();
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _modelChannelMap.clear();
+        _bufferCache.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        _sidebarCache.clear();
+    }
 }
 
 bool RenderEngine::isFSEQLoaded() const
@@ -835,19 +842,17 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
     bool isSubRef = (modelName.find('/') != std::string::npos);
 
     if (_fseqLoaded && _fseqFile) {
-        if (isSubRef) {
-            static std::set<std::string> sLogged;
-            if (sLogged.insert(modelName).second)
-                printf("[GRP] renderModelFrame('%s'): PATH=FSEQ (submodel in FSEQ path!)\n", modelName.c_str());
-        }
         renderFrame(timeMS);
+        // Synthesize submodel FrameBuffer from parent's channel data
+        if (isSubRef) {
+            synthesizeSubmodelBuffer(modelName, timeMS);
+        }
     } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
-        if (isSubRef) {
-            static std::set<std::string> sLogged;
-            if (sLogged.insert(modelName).second)
-                printf("[GRP] renderModelFrame('%s'): PATH=prerendered (submodel in prerendered path!)\n", modelName.c_str());
-        }
         renderFrame(timeMS);
+        // Synthesize submodel FrameBuffer from parent's channel data
+        if (isSubRef) {
+            synthesizeSubmodelBuffer(modelName, timeMS);
+        }
     } else if (_effectProvider && _modelProvider) {
         if (isSubRef) {
             static std::set<std::string> sLogged;
@@ -899,6 +904,147 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
                 printf("[GRP] renderModelFrame('%s'): INVALID result\n", modelName.c_str());
         }
     }
+}
+
+void RenderEngine::synthesizeSubmodelBuffer(const std::string& subRefName, int timeMS)
+{
+    if (!_modelProvider || _currentFrameData.empty()) return;
+
+    // Parse "Parent/Sub" into parent and submodel names
+    size_t slash = subRefName.find('/');
+    if (slash == std::string::npos) return;
+    std::string parentName = subRefName.substr(0, slash);
+    std::string subName = subRefName.substr(slash + 1);
+
+    // Look up parent's channel info from _modelChannelMap
+    auto parentIt = _modelChannelMap.find(parentName);
+    if (parentIt == _modelChannelMap.end()) return;
+    const ModelChannelInfo& parentChInfo = parentIt->second;
+
+    // Get parent model's full node coordinates
+    auto parentAttrs = _modelProvider->getModelAttributes(parentName);
+    if (parentAttrs.empty()) return;
+
+    auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+    if (allParentNodes.empty()) return;
+
+    // Get submodel attributes and filter to submodel nodes
+    auto subAttrs = _modelProvider->getSubmodelAttributes(parentName, subName);
+    if (subAttrs.empty()) return;
+
+    auto subNodes = filterNodesToSubmodel(allParentNodes, subAttrs);
+    if (subNodes.empty()) return;
+
+    // Determine submodel buffer dimensions from filtered node coordinates
+    int maxBufX = 0, maxBufY = 0;
+    for (const auto& nc : subNodes) {
+        if (nc.bufX > maxBufX) maxBufX = nc.bufX;
+        if (nc.bufY > maxBufY) maxBufY = nc.bufY;
+    }
+    int subBufW = maxBufX + 1;
+    int subBufH = maxBufY + 1;
+
+    // Build a FrameBuffer for the submodel
+    FrameBuffer fb;
+    fb.modelName = subRefName;
+    fb.width = subBufW;
+    fb.height = subBufH;
+    fb.timeMS = timeMS;
+    fb.pixels.resize(static_cast<size_t>(subBufW) * subBufH * 4, 0);
+
+    // filterNodesToSubmodel preserves the original node ordering within the
+    // parent model, but reassigns bufX/bufY for compact layout. We need to
+    // map each submodel node back to its parent node index to read channel data.
+    //
+    // Strategy: filterNodesToSubmodel uses getSubmodelNodeIndices internally.
+    // We replicate that to get the parent node indices.
+
+    // Parse the submodel's strand ranges to get parent node indices (same as
+    // getSubmodelNodeIndices in NativeRenderCoordinator.cpp)
+    std::vector<int> parentNodeIndices;
+    {
+        auto typeIt = subAttrs.find("type");
+        bool isSubBuffer = (typeIt != subAttrs.end() && typeIt->second == "subbuffer");
+
+        if (isSubBuffer) {
+            // Subbuffer type: all parent nodes map through
+            for (int i = 0; i < static_cast<int>(allParentNodes.size()); i++) {
+                parentNodeIndices.push_back(i);
+            }
+        } else {
+            for (int lineIdx = 0; lineIdx < 100; ++lineIdx) {
+                std::string key = "line" + std::to_string(lineIdx);
+                auto it = subAttrs.find(key);
+                if (it == subAttrs.end() || it->second.empty()) {
+                    if (lineIdx > 0) break;
+                    continue;
+                }
+                std::istringstream stream(it->second);
+                std::string token;
+                while (std::getline(stream, token, ',')) {
+                    size_t start = token.find_first_not_of(" \t");
+                    size_t end = token.find_last_not_of(" \t");
+                    if (start == std::string::npos) continue;
+                    token = token.substr(start, end - start + 1);
+                    if (token.empty()) continue;
+
+                    size_t dashPos = token.find('-');
+                    int rangeStart, rangeEnd;
+                    if (dashPos != std::string::npos) {
+                        rangeStart = std::atoi(token.substr(0, dashPos).c_str()) - 1;
+                        rangeEnd = std::atoi(token.substr(dashPos + 1).c_str()) - 1;
+                        if (rangeStart < 0) rangeStart = 0;
+                        if (rangeEnd < rangeStart) std::swap(rangeStart, rangeEnd);
+                    } else {
+                        rangeStart = rangeEnd = std::atoi(token.c_str()) - 1;
+                        if (rangeStart < 0) continue;
+                    }
+                    for (int idx = rangeStart; idx <= rangeEnd; idx++) {
+                        if (idx >= 0 && idx < static_cast<int>(allParentNodes.size())) {
+                            parentNodeIndices.push_back(idx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Map each submodel node to its pixel data from parent's channel data.
+    // subNodes[i] corresponds to parentNodeIndices[i].
+    size_t subNodeCount = std::min(subNodes.size(), parentNodeIndices.size());
+    int nonBlackPixels = 0;
+    for (size_t i = 0; i < subNodeCount; i++) {
+        int parentIdx = parentNodeIndices[i];
+        uint32_t nodeChannel = parentChInfo.absStartChannel +
+                               (static_cast<uint32_t>(parentIdx) * parentChInfo.chansPerNode);
+        if (nodeChannel + parentChInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size()))
+            continue;
+
+        uint8_t r = _currentFrameData[nodeChannel + parentChInfo.rOffset];
+        uint8_t g = _currentFrameData[nodeChannel + parentChInfo.gOffset];
+        uint8_t b = _currentFrameData[nodeChannel + parentChInfo.bOffset];
+
+        if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
+
+        int bx = subNodes[i].bufX;
+        int by = subNodes[i].bufY;
+        if (bx < 0 || bx >= subBufW || by < 0 || by >= subBufH) continue;
+
+        size_t pIdx = (static_cast<size_t>(by) * subBufW + bx) * 4;
+        fb.pixels[pIdx]     = r;
+        fb.pixels[pIdx + 1] = g;
+        fb.pixels[pIdx + 2] = b;
+        fb.pixels[pIdx + 3] = 255;
+    }
+
+    static std::set<std::string> sLogged;
+    if (sLogged.insert(subRefName).second) {
+        printf("[GRP] synthesizeSubmodelBuffer('%s'): %zu subNodes, buffer=%dx%d, %d non-black pixels\n",
+               subRefName.c_str(), subNodeCount, subBufW, subBufH, nonBlackPixels);
+    }
+
+    std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+    _sidebarCache[subRefName] = std::move(fb);
 }
 
 void RenderEngine::renderAll(RenderCompleteCallback callback)
@@ -998,6 +1144,13 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     bool wasCancelled = !completed;
     notifyRenderComplete(wasCancelled);
     if (callback) callback(wasCancelled);
+
+    // Clear stale sidebar cache from live rendering — prevents submodel entries
+    // from the live preview persisting into prerender/FSEQ playback mode.
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        _sidebarCache.clear();
+    }
 
     // After successful render, build the model channel map so renderFrame()
     // can read from _renderedData instead of re-rendering effects live.
