@@ -18,12 +18,14 @@
 // and has zero wxWidgets dependencies.
 
 #include "NativePixelBuffer.h"
+#include "../../DissolveTransitionPattern.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
 #include <numeric>
+#include <random>
 
 namespace xlEngine {
 
@@ -397,6 +399,390 @@ void NativePixelBuffer::applySparkle(xlColor& color, int nodeIndex, int sparkleC
 }
 
 // =========================================================================
+// Transition mask generation (ported from PixelBuffer.cpp)
+// =========================================================================
+
+static bool isLeftOf(int ax, int ay, int bx, int by, int tx, int ty) {
+    return ((bx - ax) * (ty - ay) - (by - ay) * (tx - ax)) > 0;
+}
+
+static bool isMaskBasedTransition(NativeTransitionType t) {
+    switch (t) {
+    case NativeTransitionType::Wipe:
+    case NativeTransitionType::Clock:
+    case NativeTransitionType::FromMiddle:
+    case NativeTransitionType::SquareExplode:
+    case NativeTransitionType::CircleExplode:
+    case NativeTransitionType::Blinds:
+    case NativeTransitionType::Blend:
+    case NativeTransitionType::SlideChecks:
+    case NativeTransitionType::SlideBars:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void NativePixelBuffer::applyTransitions(LayerState& layer) {
+    const NativeLayerInfo& s = layer.settings;
+
+    bool hasInNonFade = (s.inMaskFactor < 1.0f &&
+                         s.inTransitionType != NativeTransitionType::Fade);
+    bool hasOutNonFade = (s.outMaskFactor < 1.0f &&
+                          s.outTransitionType != NativeTransitionType::Fade);
+
+    if (!hasInNonFade && !hasOutNonFade) {
+        layer.maskSize = 0;
+        return;
+    }
+
+    int bufW = _bufferWi;
+    int bufH = _bufferHt;
+
+    // Dissolve: modify buffer pixels directly using the dissolve pattern texture
+    if (hasInNonFade && s.inTransitionType == NativeTransitionType::Dissolve) {
+        float progress = s.inMaskFactor;
+        auto byteProgress = static_cast<uint8_t>(255.0f * progress);
+        for (int y = 0; y < bufH; ++y) {
+            float t = (bufH > 1) ? static_cast<float>(y) / (bufH - 1) : 0.0f;
+            for (int x = 0; x < bufW; ++x) {
+                float sv = (bufW > 1) ? static_cast<float>(x) / (bufW - 1) : 0.0f;
+                int px = static_cast<int>(sv * (DissolvePatternWidth - 1));
+                int py = static_cast<int>(t * (DissolvePatternHeight - 1));
+                uint8_t dv = DissolveTransitonPattern[py * DissolvePatternWidth + px];
+                if (dv > byteProgress) {
+                    layer.buffer.SetPixel(x, y, xlBLACK);
+                }
+            }
+        }
+    }
+    if (hasOutNonFade && s.outTransitionType == NativeTransitionType::Dissolve) {
+        float progress = 1.0f - s.outMaskFactor;
+        auto byteProgress = static_cast<uint8_t>(255.0f * progress);
+        for (int y = 0; y < bufH; ++y) {
+            float t = (bufH > 1) ? static_cast<float>(y) / (bufH - 1) : 0.0f;
+            for (int x = 0; x < bufW; ++x) {
+                float sv = (bufW > 1) ? static_cast<float>(x) / (bufW - 1) : 0.0f;
+                int px = static_cast<int>(sv * (DissolvePatternWidth - 1));
+                int py = static_cast<int>(t * (DissolvePatternHeight - 1));
+                uint8_t dv = DissolveTransitonPattern[py * DissolvePatternWidth + px];
+                if (dv > byteProgress) {
+                    layer.buffer.SetPixel(x, y, xlBLACK);
+                }
+            }
+        }
+    }
+
+    // Mask-based transitions
+    bool needInMask = hasInNonFade && isMaskBasedTransition(s.inTransitionType);
+    bool needOutMask = hasOutNonFade && isMaskBasedTransition(s.outTransitionType);
+
+    if (!needInMask && !needOutMask) {
+        layer.maskSize = 0;
+        return;
+    }
+
+    int maskRequired = bufW * bufH;
+    if (static_cast<int>(layer.transitionMask.size()) < maskRequired) {
+        layer.transitionMask.resize(maskRequired);
+    }
+    layer.maskSize = maskRequired;
+    std::memset(layer.transitionMask.data(), 0, maskRequired);
+
+    auto buildMask = [&](bool out) {
+        NativeTransitionType type = out ? s.outTransitionType : s.inTransitionType;
+        float factor = out ? s.outMaskFactor : s.inMaskFactor;
+        int adjust = static_cast<int>(out ? s.outTransitionAdjust : s.inTransitionAdjust);
+        bool reverse = out ? s.outTransitionReverse : s.inTransitionReverse;
+
+        if (!isMaskBasedTransition(type)) return;
+
+        uint8_t* mask = layer.transitionMask.data();
+
+        switch (type) {
+        case NativeTransitionType::Wipe: {
+            if (reverse) {
+                adjust += 50;
+                if (adjust >= 100) adjust -= 100;
+            }
+            float angle = 2.0f * static_cast<float>(M_PI) * adjust / 100.0f;
+            float slope = std::tan(angle);
+            uint8_t m1 = 255, m2 = 0;
+            float curx = std::round(factor * (static_cast<float>(bufW) - 1.0f));
+            float cury = std::round(factor * (static_cast<float>(bufH) - 1.0f));
+            if (angle >= 0 && angle < static_cast<float>(M_PI_2)) {
+                curx = bufW - curx - 1; std::swap(m1, m2);
+            } else if (angle >= static_cast<float>(M_PI_2) && angle < static_cast<float>(M_PI)) {
+                curx = bufW - curx - 1; cury = bufH - cury - 1;
+            } else if (angle >= static_cast<float>(M_PI) && angle < static_cast<float>(M_PI + M_PI_2)) {
+                cury = bufH - cury - 1;
+            } else {
+                std::swap(m1, m2);
+            }
+            float endx = (curx == -1) ? -5.0f : -1.0f;
+            float endy = slope * (endx - curx) + cury;
+            if (slope > 999.0f) { endx = curx; endy = cury - 10; }
+            else if (slope < -999.0f) { endx = curx; endy = cury + 10; }
+            int sx = static_cast<int>(curx), sy = static_cast<int>(cury);
+            int ex = static_cast<int>(endx), ey = static_cast<int>(endy);
+            for (int x = 0; x < bufW; ++x)
+                for (int y = 0; y < bufH; ++y)
+                    mask[x * bufH + y] = std::max(mask[x * bufH + y],
+                        isLeftOf(sx, sy, ex, ey, x, y) ? m1 : m2);
+            break;
+        }
+        case NativeTransitionType::Clock: {
+            float sr = 2.0f * static_cast<float>(M_PI) * adjust / 100.0f;
+            float cr = 2.0f * static_cast<float>(M_PI) * factor;
+            if (reverse) {
+                float tmp = sr; sr = sr - cr; cr = tmp;
+                if (sr < 0) { sr += 2.0f * static_cast<float>(M_PI); cr += 2.0f * static_cast<float>(M_PI); }
+            } else { cr = sr + cr; }
+            for (int x = 0; x < bufW; ++x) {
+                for (int y = 0; y < bufH; ++y) {
+                    float rpx = (x - bufW/2 == 0 && y - bufH/2 == 0) ? 0.0f
+                        : std::atan2(static_cast<float>(x - bufW/2), static_cast<float>(y - bufH/2));
+                    if (rpx < 0) rpx += 2.0f * static_cast<float>(M_PI);
+                    if (cr > 2.0f * static_cast<float>(M_PI) && rpx < sr) rpx += 2.0f * static_cast<float>(M_PI);
+                    uint8_t val = (rpx > sr && rpx < cr) ? uint8_t(0) : uint8_t(255);
+                    mask[x * bufH + y] = std::max(mask[x * bufH + y], val);
+                }
+            }
+            break;
+        }
+        case NativeTransitionType::FromMiddle: {
+            uint8_t m1 = 255, m2 = 0; float f = factor;
+            if (reverse) { f = 1.0f - f; m1 = 0; m2 = 255; }
+            double w2 = 0.5 * bufW, h2 = 0.5 * bufH;
+            double a2 = (0.01 * adjust) * M_PI - M_PI_2;
+            double cosA = std::cos(a2), sinA = std::sin(a2);
+            double p1x = w2 + (-h2)*sinA, p1y = h2 + h2*cosA;
+            double p2x = w2 + (500.0-h2)*sinA, p2y = h2 + (h2-500.0)*cosA;
+            double plen = std::sqrt((p2x-p1x)*(p2x-p1x) + (p2y-p1y)*(p2y-p1y));
+            if (plen < 0.001) plen = 0.001;
+            double dy = p2y-p1y, dx = p2x-p1x, off = p2x*p1y - p2y*p1x;
+            double dBR = std::abs(dy*(bufW-1)+off)/plen;
+            double dUR = std::abs(dy*(bufW-1)-dx*(bufH-1)+off)/plen;
+            double dBL = std::abs(off)/plen;
+            double dUL = std::abs(-dx*(bufH-1)+off)/plen;
+            double len = std::max({dBR,dUR,dBL,dUL}), step = len*f;
+            for (int x = 0; x < bufW; ++x)
+                for (int y = 0; y < bufH; ++y) {
+                    double d = std::abs(dy*x - dx*y + off)/plen;
+                    mask[x*bufH+y] = std::max(mask[x*bufH+y], uint8_t((d > step) ? m1 : m2));
+                }
+            break;
+        }
+        case NativeTransitionType::SquareExplode: {
+            uint8_t m1 = 255, m2 = 0; float f = factor;
+            bool dr = out ? !reverse : reverse;
+            if (dr) { f = 1.0f - factor; m1 = 0; m2 = 255; }
+            float xs = (bufW/2.0f)*f, ys = (bufH/2.0f)*f;
+            int x1 = int(bufW/2-xs), x2 = int(bufW/2+xs), y1 = int(bufH/2-ys), y2 = int(bufH/2+ys);
+            for (int x = 0; x < bufW; ++x)
+                for (int y = 0; y < bufH; ++y)
+                    mask[x*bufH+y] = std::max(mask[x*bufH+y],
+                        uint8_t((x<x1||x>x2||y<y1||y>y2) ? m1 : m2));
+            break;
+        }
+        case NativeTransitionType::CircleExplode: {
+            float mr = std::sqrt(float((bufW/2)*(bufW/2)+(bufH/2)*(bufH/2)));
+            uint8_t m1 = 255, m2 = 0; float f = factor;
+            bool dr = out ? !reverse : reverse;
+            if (dr) { f = 1.0f - factor; m1 = 0; m2 = 255; }
+            float rad = mr * f;
+            for (int x = 0; x < bufW; ++x)
+                for (int y = 0; y < bufH; ++y) {
+                    float r = std::sqrt(float((x-bufW/2)*(x-bufW/2)+(y-bufH/2)*(y-bufH/2)));
+                    mask[x*bufH+y] = std::max(mask[x*bufH+y], uint8_t((r<rad)?m2:m1));
+                }
+            break;
+        }
+        case NativeTransitionType::Blinds: {
+            int adj = adjust; if (adj == 0) adj = 1;
+            adj = (bufW/2)*adj/100; if (adj == 0) adj = 1;
+            int per = bufW/adj; if (per < 1) per = 1;
+            float st = float(bufH)*factor;
+            for (int x = 0; x < bufW; ++x) {
+                int bl = x/per;
+                for (int y = 0; y < bufH; ++y) {
+                    int yp = ((bl%2==1)==out) ? bufH-y-1 : y;
+                    uint8_t c = (y <= int(st)) ? uint8_t(0) : uint8_t(255);
+                    mask[x*bufH+yp] = std::max(mask[x*bufH+yp], c);
+                }
+            }
+            break;
+        }
+        case NativeTransitionType::Blend: {
+            std::minstd_rand rng(1234);
+            int pix = bufW*bufH, adj2 = 10*adjust/100;
+            if (adj2 == 0) adj2 = 1;
+            int ap = pix/(adj2*adj2); if (ap == 0) ap = 1;
+            float st = (float(pix)/(adj2*adj2))*factor;
+            int xp = bufW/adj2; while(xp*adj2<bufW) xp++;
+            int yp = bufH/adj2; while(yp*adj2<bufH) yp++;
+            for (int x = 0; x < bufW; ++x)
+                for (int y = 0; y < bufH; ++y)
+                    mask[x*bufH+y] = std::max(mask[x*bufH+y], uint8_t(255));
+            for (int i = 0; i < int(st); ++i) {
+                int jy = rng()%ap, jx = rng()%ap;
+                int bx = (jx%xp)*adj2, by = (jy%yp)*adj2;
+                for (int xx=bx; xx<bx+adj2 && xx<bufW; ++xx)
+                    for (int yy=by; yy<by+adj2 && yy<bufH; ++yy)
+                        mask[xx*bufH+yy] = 0;
+            }
+            break;
+        }
+        case NativeTransitionType::SlideChecks:
+        case NativeTransitionType::SlideBars: {
+            int adj2 = adjust; if (adj2 == 0) adj2 = 1;
+            adj2 = (bufH/2)*adj2/100; if (adj2 == 0) adj2 = 1;
+            int per = bufH/adj2; if (per < 1) per = 1;
+            float st = float(bufW)*factor;
+            for (int y = 0; y < bufH; ++y) {
+                int bl = y/per;
+                for (int x = 0; x < bufW; ++x) {
+                    int xp = ((bl%2==1)==out) ? bufW-x-1 : x;
+                    uint8_t c = (x <= int(st)) ? uint8_t(0) : uint8_t(255);
+                    mask[xp*bufH+y] = std::max(mask[xp*bufH+y], c);
+                }
+            }
+            break;
+        }
+        default: break;
+        }
+    };
+
+    if (needInMask) buildMask(false);
+    if (needOutMask) buildMask(true);
+}
+
+// =========================================================================
+// RotoZoom — 2D/3D rotation and zoom (ported from PixelBuffer.cpp)
+// =========================================================================
+
+void NativePixelBuffer::applyRotoZoom(LayerState& layer, float /*offset*/) {
+    const NativeLayerInfo& s = layer.settings;
+
+    // All RotoZoom parameters are already resolved (including value curves)
+    // by parseLayerSettings() in NativeRenderCoordinator.cpp before calcOutput().
+    // rotation slider is 0-100, maps to 0.0-1.0 turns for Z rotation.
+    float zRotation = static_cast<float>(s.rotation) / 100.0f;
+
+    float xRotation = static_cast<float>(s.xRotation);
+    float yRotation = static_cast<float>(s.yRotation);
+    float zoom = s.zoom;
+    int zoomQuality = s.zoomQuality;
+    if (zoomQuality < 1) zoomQuality = 1;
+    int pivotX = s.pivotPointX;
+    int pivotY = s.pivotPointY;
+    int xPivot = s.xPivot;
+    int yPivot = s.yPivot;
+
+    bool willDoRZ = (xRotation != 0.0f && xRotation != 360.0f);
+    willDoRZ |= (yRotation != 0.0f && yRotation != 360.0f);
+    willDoRZ |= (zRotation != 0.0f || zoom != 1.0f);
+
+    if (!willDoRZ) return;
+
+    int bufW = layer.buffer.BufferWi;
+    int bufH = layer.buffer.BufferHt;
+    if (bufW <= 0 || bufH <= 0) return;
+
+    // Process rotation axes in the specified order (legacy rotationorder)
+    for (char ch : s.rotationOrder) {
+        if (ch == '-' || ch == ' ') continue;
+
+        if (ch == 'X' && xRotation != 0.0f && xRotation != 360.0f) {
+            // 3D X-axis rotation: compress columns around pivot
+            NativeRenderBuffer orig(layer.buffer);
+            layer.buffer.Clear();
+
+            float sine = std::sin((xRotation + 90.0f) * static_cast<float>(M_PI) / 180.0f);
+            float pivot = static_cast<float>(xPivot) * bufW / 100.0f;
+
+            for (int x = static_cast<int>(pivot); x < bufW; ++x) {
+                float tox = sine * (x - pivot) + pivot;
+                for (int y = 0; y < bufH; ++y) {
+                    xlColor px;
+                    orig.GetPixel(x, y, px);
+                    layer.buffer.SetPixel(static_cast<int>(tox), y, px);
+                }
+            }
+            for (int x = static_cast<int>(pivot) - 1; x >= 0; --x) {
+                float tox = -1.0f * sine * (pivot - x) + pivot;
+                for (int y = 0; y < bufH; ++y) {
+                    xlColor px;
+                    orig.GetPixel(x, y, px);
+                    layer.buffer.SetPixel(static_cast<int>(tox), y, px);
+                }
+            }
+        }
+
+        if (ch == 'Y' && yRotation != 0.0f && yRotation != 360.0f) {
+            // 3D Y-axis rotation: compress rows around pivot
+            NativeRenderBuffer orig(layer.buffer);
+            layer.buffer.Clear();
+
+            float sine = std::sin((yRotation + 90.0f) * static_cast<float>(M_PI) / 180.0f);
+            float pivot = static_cast<float>(yPivot) * bufH / 100.0f;
+
+            for (int y = static_cast<int>(pivot); y < bufH; ++y) {
+                float toy = sine * (y - pivot) + pivot;
+                for (int x = 0; x < bufW; ++x) {
+                    xlColor px;
+                    orig.GetPixel(x, y, px);
+                    layer.buffer.SetPixel(x, static_cast<int>(toy), px);
+                }
+            }
+            for (int y = static_cast<int>(pivot) - 1; y >= 0; --y) {
+                float toy = -1.0f * sine * (pivot - y) + pivot;
+                for (int x = 0; x < bufW; ++x) {
+                    xlColor px;
+                    orig.GetPixel(x, y, px);
+                    layer.buffer.SetPixel(x, static_cast<int>(toy), px);
+                }
+            }
+        }
+
+        if (ch == 'Z' && (zRotation != 0.0f || zoom != 1.0f)) {
+            // 2D Z-axis rotation and zoom
+            static const float PI_2 = 6.283185307f;
+            NativeRenderBuffer orig(layer.buffer);
+            int q = zoomQuality;
+            float inc = 1.0f / static_cast<float>(q);
+
+            float angle = PI_2 * -zRotation;
+            float xoff = (pivotX * bufW) / 100.0f;
+            float yoff = (pivotY * bufH) / 100.0f;
+            float anglecos = std::cos(-angle);
+            float anglesin = std::sin(-angle);
+
+            layer.buffer.Clear();
+            for (int x = 0; x < bufW; ++x) {
+                for (int i = 0; i < q; ++i) {
+                    for (int y = 0; y < bufH; ++y) {
+                        xlColor px;
+                        orig.GetPixel(x, y, px);
+                        for (int j = 0; j < q; ++j) {
+                            float xx = static_cast<float>(x) + (static_cast<float>(i) * inc) - xoff;
+                            float yy = static_cast<float>(y) + (static_cast<float>(j) * inc) - yoff;
+                            float u = xoff + anglecos * xx * zoom + anglesin * yy * zoom;
+                            if (u >= 0 && u < bufW) {
+                                float v = yoff + -anglesin * xx * zoom + anglecos * yy * zoom;
+                                if (v >= 0 && v < bufH) {
+                                    layer.buffer.SetPixel(static_cast<int>(u), static_cast<int>(v), px);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =========================================================================
 // calcOutput — blend all layers
 // =========================================================================
 
@@ -453,6 +839,20 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
         }
     }
 
+    // Apply per-layer RotoZoom (2D/3D rotation, zoom) after blur.
+    // Matches legacy order: blur -> RotoZoom -> transitions -> blend.
+    for (int i = 0; i < numLayers; ++i) {
+        if (!validLayers[i]) continue;
+        applyRotoZoom(_layers[i], 0.0f);
+    }
+
+    // Apply per-layer transitions (masks and/or buffer modifications).
+    // Must happen after blur but before the per-pixel blend loop.
+    for (int i = 0; i < numLayers; ++i) {
+        if (!validLayers[i]) continue;
+        applyTransitions(_layers[i]);
+    }
+
     // Advance sparkle state each frame
     if (hasSparkles) {
         for (size_t i = 0; i < _sparkleState.size(); ++i) {
@@ -460,7 +860,14 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
         }
     }
 
-    // Blend all layers per pixel
+    // Try GPU-accelerated blending first. Falls back to CPU if unavailable.
+    if (calcOutputGPU(validLayers)) {
+        // GPU path succeeded — sparkle is applied as CPU post-pass below
+        goto sparkle_pass;
+    }
+
+    // CPU fallback: Blend all layers per pixel
+    {
     int totalPixels = _bufferWi * _bufferHt;
 
     for (int pixIdx = 0; pixIdx < totalPixels; ++pixIdx) {
@@ -477,9 +884,20 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
 
             auto& ls = _layers[layer];
 
-            // Read pixel from this layer's buffer
+            // Read pixel from this layer's buffer.
+            // If a transition mask is active and this pixel is masked,
+            // treat it as transparent (matching legacy isMasked() behavior).
             xlColor color;
-            ls.buffer.GetPixel(px, py, color);
+            if (ls.maskSize > 0) {
+                int maskIdx = px * _bufferHt + py;
+                if (maskIdx < ls.maskSize && ls.transitionMask[maskIdx] > 0) {
+                    color.Set(0, 0, 0, 0);
+                } else {
+                    ls.buffer.GetPixel(px, py, color);
+                }
+            } else {
+                ls.buffer.GetPixel(px, py, color);
+            }
 
             // Apply HSV adjustments
             float ha = ls.outputHueAdjust;
@@ -531,7 +949,9 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
 
         _outputPixels[pixIdx] = result;
     }
+    } // end CPU fallback block
 
+sparkle_pass:
     // Apply per-node sparkle as a post-pass on the output pixels.
     // This matches the legacy behavior where sparkle is applied to the
     // blended result at each node's buffer position.
@@ -649,6 +1069,85 @@ void NativePixelBuffer::getColors(uint8_t* outputBuffer, uint32_t bufferSize) co
 }
 
 // =========================================================================
+// loadChannelData — reverse of getColors()
+// =========================================================================
+
+void NativePixelBuffer::loadChannelData(int layer, const uint8_t* outputBuffer, uint32_t bufferSize) {
+    assert(layer >= 0 && layer < static_cast<int>(_layers.size()));
+    if (!outputBuffer || bufferSize == 0) return;
+
+    NativeRenderBuffer& buf = _layers[layer].buffer;
+    buf.Clear();
+
+    // Build reverse color order mapping: for each source component (R=0, G=1, B=2, W=3),
+    // find which output channel index it maps to. This reverses the getColors() mapping.
+    // In getColors(): outputBuffer[actChannel + ch] = channels[colorOrder[ch]]
+    // So to reverse: source[colorOrder[ch]] was written to outputBuffer[actChannel + ch]
+    // We need: source[component] = outputBuffer[actChannel + reverseOrder[component]]
+
+    for (const auto& node : _nodes) {
+        if (node.bufX < 0 || node.bufX >= _bufferWi ||
+            node.bufY < 0 || node.bufY >= _bufferHt) {
+            continue;
+        }
+
+        // Build reverse mapping: for source component i, which channel offset has it?
+        int reverseOrder[4] = {0, 1, 2, 3};
+        for (int ch = 0; ch < node.channelsPerNode; ++ch) {
+            int srcIdx = node.colorOrder[ch];
+            if (srcIdx >= 0 && srcIdx < 4) {
+                reverseOrder[srcIdx] = ch;
+            }
+        }
+
+        // Read RGB channels from output buffer using reverse color order
+        uint8_t r = 0, g = 0, b = 0;
+        if (node.channelsPerNode == 1) {
+            // Single channel: read the one channel as grayscale
+            uint32_t offset = node.actChannel;
+            if (offset < bufferSize) {
+                r = g = b = outputBuffer[offset];
+            }
+        } else {
+            // RGB or RGBW: read each component from its mapped channel position
+            uint32_t rOffset = node.actChannel + reverseOrder[0];
+            uint32_t gOffset = node.actChannel + reverseOrder[1];
+            uint32_t bOffset = node.actChannel + reverseOrder[2];
+            if (rOffset < bufferSize) r = outputBuffer[rOffset];
+            if (gOffset < bufferSize) g = outputBuffer[gOffset];
+            if (bOffset < bufferSize) b = outputBuffer[bOffset];
+        }
+
+        // Reverse dimming curve to get back to linear render space.
+        // The output buffer has dimmed values; we need un-dimmed values for rendering.
+        if (_dimmingCurve.active) {
+            // Build reverse LUT by finding the closest input value for each output
+            // This is an approximation but sufficient for blending purposes.
+            // For monotonic gamma curves, we can do a simple reverse lookup.
+            auto reverseLUT = [](const std::array<uint8_t, 256>& lut, uint8_t val) -> uint8_t {
+                // Find the input value whose LUT output is closest to val
+                uint8_t best = val;
+                int bestDist = 256;
+                for (int i = 0; i < 256; ++i) {
+                    int dist = std::abs(static_cast<int>(lut[i]) - static_cast<int>(val));
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        best = static_cast<uint8_t>(i);
+                        if (dist == 0) break;
+                    }
+                }
+                return best;
+            };
+            r = reverseLUT(_dimmingCurve.red, r);
+            g = reverseLUT(_dimmingCurve.green, g);
+            b = reverseLUT(_dimmingCurve.blue, b);
+        }
+
+        buf.SetPixel(node.bufX, node.bufY, xlColor(r, g, b));
+    }
+}
+
+// =========================================================================
 // getBlendedPixel
 // =========================================================================
 
@@ -682,6 +1181,213 @@ void NativePixelBuffer::clear() {
 void NativePixelBuffer::clearLayer(int layer) {
     assert(layer >= 0 && layer < static_cast<int>(_layers.size()));
     _layers[layer].buffer.Clear();
+}
+
+// =========================================================================
+// Sub-buffer support
+// =========================================================================
+
+void NativePixelBuffer::prepareSubBuffer(int layer) {
+    assert(layer >= 0 && layer < static_cast<int>(_layers.size()));
+    auto& ls = _layers[layer];
+    if (!ls.settings.hasSubBuffer) { ls.subBufferActive = false; return; }
+
+    int subW = ls.settings.subBufX2 - ls.settings.subBufX1;
+    int subH = ls.settings.subBufY2 - ls.settings.subBufY1;
+    if (subW < 1) subW = 1;
+    if (subH < 1) subH = 1;
+
+    ls.subBufOrigW = _bufferWi;
+    ls.subBufOrigH = _bufferHt;
+    ls.subBufferActive = true;
+    ls.buffer.InitBuffer(subH, subW, "None");
+}
+
+void NativePixelBuffer::expandSubBuffer(int layer) {
+    assert(layer >= 0 && layer < static_cast<int>(_layers.size()));
+    auto& ls = _layers[layer];
+    if (!ls.subBufferActive) return;
+
+    int x1 = ls.settings.subBufX1;
+    int y1 = ls.settings.subBufY1;
+    int subW = ls.buffer.BufferWi;
+    int subH = ls.buffer.BufferHt;
+    int fullW = ls.subBufOrigW;
+    int fullH = ls.subBufOrigH;
+
+    std::vector<xlColor> subPixels(static_cast<size_t>(subW) * subH);
+    for (int y = 0; y < subH; ++y)
+        for (int x = 0; x < subW; ++x)
+            ls.buffer.GetPixel(x, y, subPixels[y * subW + x]);
+
+    ls.buffer.InitBuffer(fullH, fullW, "None");
+    for (int y = 0; y < subH; ++y) {
+        int destY = y + y1;
+        if (destY < 0 || destY >= fullH) continue;
+        for (int x = 0; x < subW; ++x) {
+            int destX = x + x1;
+            if (destX < 0 || destX >= fullW) continue;
+            ls.buffer.SetPixel(destX, destY, subPixels[y * subW + x]);
+        }
+    }
+    ls.subBufferActive = false;
+}
+
+// =========================================================================
+// Buffer style support
+// =========================================================================
+
+void NativePixelBuffer::prepareBufferStyle(int layer) {
+    assert(layer >= 0 && layer < static_cast<int>(_layers.size()));
+    auto& ls = _layers[layer];
+    const std::string& style = ls.settings.bufferStyle;
+    if (style == "Default" || style.empty()) { ls.bufferStyleActive = false; return; }
+
+    int nodeCount = std::max(1, static_cast<int>(_nodes.size()));
+    ls.styleOrigW = _bufferWi;
+    ls.styleOrigH = _bufferHt;
+
+    if (style == "Single Line" || style == "As Pixel") {
+        ls.bufferStyleActive = true;
+        ls.buffer.InitBuffer(1, nodeCount, "None");
+    } else {
+        ls.bufferStyleActive = false;
+    }
+}
+
+void NativePixelBuffer::expandBufferStyle(int layer) {
+    assert(layer >= 0 && layer < static_cast<int>(_layers.size()));
+    auto& ls = _layers[layer];
+    if (!ls.bufferStyleActive) return;
+
+    int styleW = ls.buffer.BufferWi;
+    int fullW = ls.styleOrigW;
+    int fullH = ls.styleOrigH;
+    int nodeCount = static_cast<int>(_nodes.size());
+
+    std::vector<xlColor> stylePixels(static_cast<size_t>(styleW));
+    for (int x = 0; x < styleW; ++x)
+        ls.buffer.GetPixel(x, 0, stylePixels[x]);
+
+    ls.buffer.InitBuffer(fullH, fullW, "None");
+    for (int i = 0; i < nodeCount && i < styleW; ++i) {
+        const xlColor& c = stylePixels[i];
+        if (c == xlBLACK) continue;
+        const auto& node = _nodes[i];
+        if (node.bufX >= 0 && node.bufX < fullW && node.bufY >= 0 && node.bufY < fullH)
+            ls.buffer.SetPixel(node.bufX, node.bufY, c);
+    }
+    ls.bufferStyleActive = false;
+}
+
+// =========================================================================
+// GPU-accelerated blending via Metal compute
+// =========================================================================
+
+bool NativePixelBuffer::calcOutputGPU(const std::vector<bool>& validLayers) {
+#ifdef __APPLE__
+    // Lazy-initialize Metal compute on first use
+    if (!_metalComputeInitialized) {
+        _metalComputeInitialized = true;
+        _metalCompute = std::make_unique<MetalBlendingCompute>();
+        if (!_metalCompute->isAvailable()) {
+            _metalCompute.reset();
+        }
+    }
+
+    if (!_metalCompute) return false;
+
+    int numLayers = static_cast<int>(_layers.size());
+    int totalPixels = _bufferWi * _bufferHt;
+
+    // Skip GPU path for very small buffers (overhead not worth it)
+    if (totalPixels < 64) return false;
+
+    // Build GPU blend params
+    GPUBlendParams params;
+    params.bufferWi = _bufferWi;
+    params.bufferHt = _bufferHt;
+    params.numLayers = numLayers;
+    params.totalPixels = totalPixels;
+
+    // Build per-layer GPU settings and collect mask data
+    std::vector<GPULayerSettings> gpuSettings(numLayers);
+    std::vector<uint8_t> maskData;
+    size_t pixelsPerLayer = static_cast<size_t>(totalPixels);
+
+    for (int i = 0; i < numLayers; ++i) {
+        auto& gs = gpuSettings[i];
+        auto& ls = _layers[i];
+
+        gs.isValid = validLayers[i] ? 1 : 0;
+        if (!validLayers[i]) {
+            gs.maskOffset = -1;
+            gs.maskSize = 0;
+            continue;
+        }
+
+        gs.mixType = static_cast<int32_t>(ls.settings.mixType);
+        gs.effectMixThreshold = ls.outputEffectMixThreshold;
+        gs.effectMixVary = ls.settings.effectMixVary ? 1 : 0;
+        gs.fadeFactor = ls.settings.fadeFactor;
+        gs.allowAlpha = ls.buffer.allowAlpha ? 1 : 0;
+        gs.hueAdjust = ls.outputHueAdjust;
+        gs.saturationAdjust = ls.outputSaturationAdjust;
+        gs.valueAdjust = ls.outputValueAdjust;
+        gs.brightness = ls.outputBrightness;
+        gs.contrast = ls.settings.contrast;
+        gs.isChromaKey = ls.settings.isChromaKey ? 1 : 0;
+        gs.chromaSensitivity = ls.settings.chromaSensitivity;
+        gs.chromaKeyColour[0] = ls.settings.chromaKeyColour.red;
+        gs.chromaKeyColour[1] = ls.settings.chromaKeyColour.green;
+        gs.chromaKeyColour[2] = ls.settings.chromaKeyColour.blue;
+        gs.chromaKeyColour[3] = ls.settings.chromaKeyColour.alpha;
+        gs._padding0 = 0;
+
+        // Copy transition mask data
+        if (ls.maskSize > 0 && !ls.transitionMask.empty()) {
+            gs.maskOffset = static_cast<int32_t>(maskData.size());
+            gs.maskSize = ls.maskSize;
+            maskData.insert(maskData.end(),
+                            ls.transitionMask.begin(),
+                            ls.transitionMask.begin() + ls.maskSize);
+        } else {
+            gs.maskOffset = -1;
+            gs.maskSize = 0;
+        }
+    }
+
+    // Build flattened layer pixel data: all layers concatenated as RGBA bytes.
+    // xlColor is [red, green, blue, alpha] which is 4 bytes, same layout as uchar4.
+    size_t layerDataSize = static_cast<size_t>(numLayers) * pixelsPerLayer * 4;
+    std::vector<uint8_t> layerPixelData(layerDataSize);
+
+    for (int i = 0; i < numLayers; ++i) {
+        if (!validLayers[i]) {
+            // Zero out invalid layers
+            std::memset(layerPixelData.data() + i * pixelsPerLayer * 4, 0, pixelsPerLayer * 4);
+            continue;
+        }
+        const xlColor* pixels = _layers[i].buffer.GetPixels();
+        std::memcpy(layerPixelData.data() + i * pixelsPerLayer * 4,
+                     pixels, pixelsPerLayer * 4);
+    }
+
+    // Dispatch to GPU
+    bool success = _metalCompute->blendLayers(
+        params,
+        gpuSettings,
+        layerPixelData.data(),
+        layerDataSize,
+        maskData.empty() ? nullptr : maskData.data(),
+        maskData.size(),
+        _outputPixels.data());
+
+    return success;
+#else
+    (void)validLayers;
+    return false;
+#endif
 }
 
 } // namespace xlEngine

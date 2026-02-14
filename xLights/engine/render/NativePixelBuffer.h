@@ -28,6 +28,7 @@
 // Multiple instances can safely run in parallel on different threads.
 
 #include <array>
+#include <memory>
 #include <vector>
 #include <set>
 #include <cstdint>
@@ -37,6 +38,7 @@
 
 #include "NativeRenderBuffer.h"
 #include "NativeColorBlending.h"
+#include "MetalBlendingCompute.h"
 #include "IRenderContext.h"
 #include "../../Color.h"
 
@@ -74,6 +76,34 @@ struct NativeDimmingCurve {
     }
 };
 
+// Transition type enum matching legacy PixelBuffer.cpp DecodeType() and
+// the non-mask transitions in renderTransitions(). Mask-based transitions
+// use a per-pixel uint8_t mask; non-mask transitions modify pixels directly.
+enum class NativeTransitionType {
+    Fade = 0,        // Simple linear alpha fade (no mask needed)
+    Wipe,            // Mask: sweeps across based on angle
+    Clock,           // Mask: radial clock sweep
+    FromMiddle,      // Mask: expands/contracts from center line
+    SquareExplode,   // Mask: rectangular expansion from center
+    CircleExplode,   // Mask: circular expansion from center
+    Blinds,          // Mask: venetian blind slats
+    Blend,           // Mask: random block pattern
+    SlideChecks,     // Mask: checkerboard slide
+    SlideBars,       // Mask: sliding bars
+    Fold,            // Non-mask: fold effect (pixel rewrite)
+    Dissolve,        // Non-mask: random pixel dissolve using pattern texture
+    CircularSwirl,   // Non-mask: spiral sweep
+    BowTie,          // Non-mask: bow-tie reveal
+    Zoom,            // Non-mask: zoom in/out
+    Doorway,         // Non-mask: center-opening door
+    Blobs,           // Non-mask: random blob pattern
+    Pinwheel,        // Non-mask: pinwheel sweep
+    Star,            // Non-mask: star-shaped reveal
+    Swap,            // Non-mask: swap transition
+    Shatter,         // Non-mask: shatter effect
+    Circles          // Non-mask: expanding circles
+};
+
 // Per-layer settings controlling how a layer blends into the final output.
 // Mirrors the settings from legacy PixelBufferClass::LayerInfo, but in a
 // clean struct with no wx dependencies.
@@ -97,10 +127,16 @@ struct NativeLayerInfo {
     float outTransitionAdjust = 0.0f;
     bool inTransitionReverse = false;
     bool outTransitionReverse = false;
-    int inTransitionType = 0;
-    int outTransitionType = 0;
+    NativeTransitionType inTransitionType = NativeTransitionType::Fade;
+    NativeTransitionType outTransitionType = NativeTransitionType::Fade;
     float fadeInSteps = 0.0f;
     float fadeOutSteps = 0.0f;
+
+    // Computed transition state (set by the render coordinator before calcOutput).
+    // inMaskFactor/outMaskFactor are 0..1 progress values for non-Fade transitions.
+    // For Fade transitions, fadeFactor is used directly instead.
+    float inMaskFactor = 1.0f;
+    float outMaskFactor = 1.0f;
 
     // Blur
     int blur = 1;
@@ -112,6 +148,20 @@ struct NativeLayerInfo {
 
     // Sparkle color
     xlColor sparklesColour = xlWHITE;
+
+    // RotoZoom: 2D rotation, 3D X/Y rotation, zoom with pivot points.
+    // Applied per-layer after blur, before blending. Mirrors legacy RotoZoom().
+    int rotation = 0;          // 2D rotation (0-100 slider, /100 = turns)
+    int xRotation = 0;         // 3D X-axis rotation (0-360 degrees)
+    int yRotation = 0;         // 3D Y-axis rotation (0-360 degrees)
+    float rotations = 0.0f;    // Number of full rotations per effect duration
+    float zoom = 1.0f;         // Zoom factor (1.0 = no zoom)
+    int zoomQuality = 1;       // Interpolation quality (1-10)
+    int pivotPointX = 50;      // Pivot X for 2D rotation/zoom (0-100%)
+    int pivotPointY = 50;      // Pivot Y for 2D rotation/zoom (0-100%)
+    int xPivot = 50;           // Pivot X for 3D X-axis rotation (0-100%)
+    int yPivot = 50;           // Pivot Y for 3D Y-axis rotation (0-100%)
+    std::string rotationOrder = "X-Y-Z"; // Order of 3D rotation axes
 
     // Freeze: stop rendering after this many frames into the effect.
     // Default 999999 means never freeze. When effectFrame >= freezeAfterFrame,
@@ -297,6 +347,11 @@ private:
         float outputEffectMixThreshold = 0.0f;
         int outputSparkleCount = 0;
 
+        // Transition mask: per-pixel uint8_t array (bufferWi * bufferHt).
+        // 0 = visible, >0 = masked (hidden). Layout: mask[x * bufferHt + y].
+        std::vector<uint8_t> transitionMask;
+        int maskSize = 0;
+
         // Sub-buffer/buffer-style tracking
         bool subBufferActive = false;
         int subBufOrigW = 0, subBufOrigH = 0;
@@ -309,6 +364,14 @@ private:
 
     // Apply Gaussian blur to a layer's buffer.
     void applyBlur(LayerState& layer);
+
+    // Apply RotoZoom transforms (2D rotation, 3D X/Y rotation, zoom) to a
+    // layer's buffer. Mirrors legacy PixelBufferClass::RotoZoom().
+    // @param offset  Effect time position (0.0 to 1.0)
+    void applyRotoZoom(LayerState& layer, float offset);
+
+    // Compute and apply transition masks for a layer.
+    void applyTransitions(LayerState& layer);
 
     // Apply sparkle effect to a pixel color.
     void applySparkle(xlColor& color, int nodeIndex, int sparkleCount,
@@ -331,6 +394,15 @@ private:
 
     // Dimming curve (gamma/brightness LUT) for this model
     NativeDimmingCurve _dimmingCurve;
+
+    // GPU-accelerated blending via Metal compute shaders.
+    // Lazily initialized on first use if Metal is available.
+    std::unique_ptr<MetalBlendingCompute> _metalCompute;
+    bool _metalComputeInitialized = false;
+
+    // Attempt GPU-accelerated blending. Returns true if GPU path was used.
+    // Falls back to CPU if Metal is unavailable or the dispatch fails.
+    bool calcOutputGPU(const std::vector<bool>& validLayers);
 };
 
 } // namespace xlEngine

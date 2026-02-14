@@ -173,6 +173,50 @@ static std::set<int> getSubmodelNodeIndices(
     return indices;
 }
 
+// Filter parent model nodes to only the nodes belonging to a specific strand.
+// Strands partition the parent's nodes sequentially: strand N gets nodes
+// [N * strandLength, (N+1) * strandLength) where strandLength = totalNodes / numStrands.
+// The number of strands comes from the parent model's "parm1" attribute.
+// Returns filtered nodes with reassigned bufX/bufY and parentNodeIndex preserved.
+static std::vector<xlEngine::NodeCoord> filterNodesToStrand(
+    const std::vector<xlEngine::NodeCoord>& allParentNodes,
+    int strandIndex,
+    const std::map<std::string, std::string>& parentAttrs)
+{
+    std::vector<xlEngine::NodeCoord> result;
+    if (allParentNodes.empty() || strandIndex < 0) return result;
+
+    // Get number of strands from parm1 (number of strings/strands)
+    int numStrands = 1;
+    auto p1It = parentAttrs.find("parm1");
+    if (p1It != parentAttrs.end() && !p1It->second.empty()) {
+        numStrands = std::max(1, std::atoi(p1It->second.c_str()));
+    }
+
+    int totalNodes = static_cast<int>(allParentNodes.size());
+    int strandLength = totalNodes / numStrands;
+    if (strandLength <= 0) strandLength = 1;
+
+    int startNode = strandIndex * strandLength;
+    int endNode = (strandIndex == numStrands - 1) ? totalNodes : startNode + strandLength;
+
+    if (startNode >= totalNodes) return result;
+    if (endNode > totalNodes) endNode = totalNodes;
+
+    for (int idx = startNode; idx < endNode; ++idx) {
+        xlEngine::NodeCoord nc = allParentNodes[idx];
+        nc.parentNodeIndex = idx;  // preserve original index for channel mapping
+        nc.bufX = idx - startNode; // sequential 1D layout for strand
+        nc.bufY = 0;
+        result.push_back(nc);
+    }
+
+    printf("[STRAND_FILTER] strandIndex=%d numStrands=%d totalNodes=%d range=[%d,%d) → %zu nodes\n",
+           strandIndex, numStrands, totalNodes, startNode, endNode, result.size());
+
+    return result;
+}
+
 // Recursively collect submodel refs matching a given parent model name
 // from a group's member list, including nested groups.
 // e.g. If group has members "A/Sub1, NestedGroup" and NestedGroup has "A/Sub2",
@@ -347,7 +391,8 @@ static int getLayerInt(const std::map<std::string, std::string>& map,
 static NativeLayerInfo parseLayerSettings(
     const std::map<std::string, std::string>& settings,
     const std::map<std::string, std::string>& palette,
-    int frameTimeMS, int timeMS, int startTimeMS, int endTimeMS)
+    int frameTimeMS, int timeMS, int startTimeMS, int endTimeMS,
+    int bufferWi = 1, int bufferHt = 1)
 {
     NativeLayerInfo info;
 
@@ -469,6 +514,103 @@ static NativeLayerInfo parseLayerSettings(
 
     // Suppress until frame
     info.suppressUntil = getSettingsInt(settings, "B_SPINCTRL_SuppressEffectUntil", 0);
+
+    // Buffer style ("Default", "Single Line", "As Pixel")
+    info.bufferStyle = getSettingsStr(settings, "B_CHOICE_BufferStyle", "Default");
+
+    // Sub-buffer viewport (B_CUSTOM_SubBuffer)
+    // Format: "x1xY1xX2xY2" or "x1xY1xX2xY2xXCxYC" where lowercase 'x' is
+    // separator and values are percentage coordinates. Each value can also be
+    // a serialized ValueCurve string (containing "Active=TRUE").
+    // Legacy quirk: "Max" appears in some value curve strings, so we replace
+    // it with "yyz" before splitting on 'x' to avoid false splits.
+    {
+        std::string subBufStr = getSettingsStr(settings, "B_CUSTOM_SubBuffer", "");
+        if (!subBufStr.empty() && bufferWi > 0 && bufferHt > 0) {
+            // Compute time offset within effect duration (0.0 to 1.0)
+            float offset = 0.0f;
+            if (endTimeMS > startTimeMS) {
+                offset = static_cast<float>(timeMS - startTimeMS) /
+                         static_cast<float>(endTimeMS - startTimeMS);
+                offset = std::max(0.0f, std::min(1.0f, offset));
+            }
+
+            // Replace "Max" with placeholder to avoid splitting inside VC strings
+            std::string safe = subBufStr;
+            size_t pos = 0;
+            while ((pos = safe.find("Max", pos)) != std::string::npos) {
+                safe.replace(pos, 3, "yyz");
+                pos += 3;
+            }
+
+            // Split on 'x' separator
+            std::vector<std::string> parts;
+            {
+                std::string tok;
+                for (char ch : safe) {
+                    if (ch == 'x') {
+                        parts.push_back(tok);
+                        tok.clear();
+                    } else {
+                        tok += ch;
+                    }
+                }
+                if (!tok.empty()) parts.push_back(tok);
+            }
+
+            // Restore "Max" in each part
+            for (auto& p : parts) {
+                size_t rp = 0;
+                while ((rp = p.find("yyz", rp)) != std::string::npos) {
+                    p.replace(rp, 3, "Max");
+                    rp += 3;
+                }
+            }
+
+            if (parts.size() >= 4) {
+                // Parse each coordinate (may be float literal or value curve)
+                auto parseSubBufCoord = [&](const std::string& s, float def) -> float {
+                    if (s.find("Active=TRUE") != std::string::npos) {
+                        ValueCurve vc;
+                        vc.SetLimits(-200, 200);
+                        vc.Deserialise(s);
+                        if (vc.IsActive()) {
+                            return static_cast<float>(vc.GetOutputValueAt(offset, startTimeMS, endTimeMS));
+                        }
+                    }
+                    try { return std::stof(s); }
+                    catch (...) { return def; }
+                };
+
+                float x1pct = parseSubBufCoord(parts[0], 0.0f);
+                float y1pct = parseSubBufCoord(parts[1], 0.0f);
+                float x2pct = parseSubBufCoord(parts[2], 100.0f);
+                float y2pct = parseSubBufCoord(parts[3], 100.0f);
+
+                // Apply centre offsets if present (parts[4] = xc, parts[5] = yc)
+                if (parts.size() >= 6) {
+                    float xc = parseSubBufCoord(parts[4], 0.0f);
+                    float yc = parseSubBufCoord(parts[5], 0.0f);
+                    x1pct += xc;
+                    y1pct += yc;
+                    x2pct += xc;
+                    y2pct += yc;
+                }
+
+                // Convert percentages to pixel coordinates
+                info.subBufX1 = static_cast<int>(std::round(x1pct * bufferWi / 100.0f));
+                info.subBufY1 = static_cast<int>(std::round(y1pct * bufferHt / 100.0f));
+                info.subBufX2 = static_cast<int>(std::round(x2pct * bufferWi / 100.0f));
+                info.subBufY2 = static_cast<int>(std::round(y2pct * bufferHt / 100.0f));
+
+                // Only enable sub-buffer if it differs from the full buffer
+                if (info.subBufX1 != 0 || info.subBufY1 != 0 ||
+                    info.subBufX2 != bufferWi || info.subBufY2 != bufferHt) {
+                    info.hasSubBuffer = true;
+                }
+            }
+        }
+    }
 
     return info;
 }
@@ -829,6 +971,101 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
 
     renderModelAtTime(job, timeMS);
 
+    // Render submodel/strand effects and composite onto parent pixel buffer.
+    if (modelName.find('/') == std::string::npos) {
+        size_t elCnt = _effectProvider->getElementCount();
+        for (size_t ei = 0; ei < elCnt; ++ei) {
+            ElementInfo subInfo;
+            if (!_effectProvider->getElement(ei, subInfo)) continue;
+            if (subInfo.type != SequenceElementType::Submodel &&
+                subInfo.type != SequenceElementType::Strand) continue;
+            if (subInfo.renderDisabled || subInfo.effectCount == 0) continue;
+            if (subInfo.parentElementName != modelName) continue;
+
+            auto subIt = _persistentJobs.find(subInfo.name);
+            if (subIt == _persistentJobs.end()) {
+                size_t slash = subInfo.name.find('/');
+                if (slash == std::string::npos) continue;
+                std::string pName = subInfo.name.substr(0, slash);
+                ModelGeometry subGeom;
+                if (subInfo.type == SequenceElementType::Strand && subInfo.strandIndex >= 0) {
+                    auto pAttrs = _modelProvider->getModelAttributes(pName);
+                    auto pNodes = generateNodesFromAttributes(pAttrs);
+                    auto sNodes = filterNodesToStrand(pNodes, subInfo.strandIndex, pAttrs);
+                    if (sNodes.empty()) continue;
+                    subGeom.name = subInfo.name;
+                    int mBX = 0, mBY = 0;
+                    for (const auto& nc : sNodes) { if (nc.bufX > mBX) mBX = nc.bufX; if (nc.bufY > mBY) mBY = nc.bufY; }
+                    subGeom.bufferWi = mBX + 1;
+                    subGeom.bufferHt = mBY + 1;
+                    subGeom.startChannel = job.geometry.startChannel;
+                    int cpn = 3;
+                    auto stIt = pAttrs.find("StringType");
+                    if (stIt != pAttrs.end()) {
+                        const std::string& st = stIt->second;
+                        if (st.find("RGBW") != std::string::npos || st.find("WRGB") != std::string::npos || st.find("4 Channel") != std::string::npos) cpn = 4;
+                        else if (st.find("Single Color") != std::string::npos) cpn = 1;
+                    }
+                    for (const auto& nc : sNodes) {
+                        NativeNodeInfo nd; nd.bufX = nc.bufX; nd.bufY = nc.bufY;
+                        int ci = (nc.parentNodeIndex >= 0) ? nc.parentNodeIndex : static_cast<int>(&nc - &sNodes[0]);
+                        nd.actChannel = subGeom.startChannel + ci * cpn; nd.channelsPerNode = cpn;
+                        subGeom.nodes.push_back(nd);
+                    }
+                    subGeom.nodeCount = static_cast<uint32_t>(subGeom.nodes.size());
+                    subGeom.channelCount = subGeom.nodeCount * cpn;
+                } else {
+                    subGeom = extractGeometry(subInfo.name);
+                }
+                if (subGeom.bufferWi <= 0 || subGeom.bufferHt <= 0) continue;
+                size_t sLC = subInfo.effectLayerCount; if (sLC == 0) sLC = 1;
+                ModelJob sj;
+                sj.elementIndex = ei; sj.layerCount = sLC; sj.isSubmodelJob = true;
+                sj.parentModelName = pName; sj.strandIndex = subInfo.strandIndex;
+                sj.pixelBuffer = std::make_unique<NativePixelBuffer>(
+                    _context, subGeom.bufferWi, subGeom.bufferHt, static_cast<int>(sLC), subGeom.nodes);
+                sj.pixelBuffer->setDimmingCurve(buildDimmingCurve(_modelProvider->getDimmingInfo(pName)));
+                sj.geometry = std::move(subGeom);
+                printf("[SUBMODEL_LIVE] Created persistent job for '%s' (parent='%s', strand=%d)\n",
+                       subInfo.name.c_str(), pName.c_str(), subInfo.strandIndex);
+                auto [ins, _2] = _persistentJobs.emplace(subInfo.name, std::move(sj));
+                subIt = ins;
+            }
+            ModelJob& subJob = subIt->second;
+            renderModelAtTime(subJob, timeMS);
+            const auto& parentNds = job.geometry.nodes;
+            const auto& subNds = subJob.geometry.nodes;
+            const uint8_t* subPx = subJob.pixelBuffer->getBlendedPixelData();
+            size_t subSz = subJob.pixelBuffer->getBlendedPixelDataSize();
+            if (!subPx || subSz == 0) continue;
+            uint8_t* parPx = const_cast<uint8_t*>(job.pixelBuffer->getBlendedPixelData());
+            size_t parSz = job.pixelBuffer->getBlendedPixelDataSize();
+            if (!parPx || parSz == 0) continue;
+            int subW2 = subJob.geometry.bufferWi;
+            std::unordered_map<uint32_t, std::pair<int,int>> chToPos;
+            for (const auto& pn : parentNds) chToPos[pn.actChannel] = {pn.bufX, pn.bufY};
+            int oCnt = 0;
+            for (size_t ni = 0; ni < subNds.size(); ++ni) {
+                auto pit = chToPos.find(subNds[ni].actChannel);
+                if (pit == chToPos.end()) continue;
+                size_t si = (static_cast<size_t>(subNds[ni].bufY) * subW2 + subNds[ni].bufX) * 4;
+                if (si + 3 >= subSz) continue;
+                if (!subPx[si] && !subPx[si+1] && !subPx[si+2]) continue;
+                size_t pi2 = (static_cast<size_t>(pit->second.second) * w + pit->second.first) * 4;
+                if (pi2 + 3 >= parSz) continue;
+                parPx[pi2] = subPx[si]; parPx[pi2+1] = subPx[si+1];
+                parPx[pi2+2] = subPx[si+2]; parPx[pi2+3] = subPx[si+3];
+                oCnt++;
+            }
+            if (oCnt > 0) {
+                static std::set<std::string> sOvDbg;
+                if (sOvDbg.insert(subInfo.name).second)
+                    printf("[SUBMODEL_LIVE] Overlaid %d px from '%s' onto '%s'\n",
+                           oCnt, subInfo.name.c_str(), modelName.c_str());
+            }
+        }
+    }
+
     // Bulk copy RGBA pixel data from the blended output buffer.
     // xlColor is {red, green, blue, alpha} = 4 bytes in RGBA order,
     // matching the result pixel format exactly. memcpy is significantly
@@ -1075,7 +1312,69 @@ NativeRenderCoordinator::buildModelJobs()
         if (slash == std::string::npos) continue;
         std::string parentName = info.name.substr(0, slash);
 
-        ModelGeometry geom = extractGeometry(info.name);
+        ModelGeometry geom;
+        if (info.type == SequenceElementType::Strand && info.strandIndex >= 0) {
+            // Strands need special geometry: filter parent nodes to just this strand's range.
+            // extractGeometry won't find submodel attributes for strand names, so we build
+            // the geometry manually from the parent model's nodes.
+            auto parentAttrs = _modelProvider->getModelAttributes(parentName);
+            auto parentNodes = generateNodesFromAttributes(parentAttrs);
+            auto strandNodes = filterNodesToStrand(parentNodes, info.strandIndex, parentAttrs);
+
+            if (strandNodes.empty()) continue;
+
+            geom.name = info.name;
+            int maxBufX = 0, maxBufY = 0;
+            for (const auto& nc : strandNodes) {
+                if (nc.bufX > maxBufX) maxBufX = nc.bufX;
+                if (nc.bufY > maxBufY) maxBufY = nc.bufY;
+            }
+            geom.bufferWi = maxBufX + 1;
+            geom.bufferHt = maxBufY + 1;
+
+            // Channel mapping: use parent model's resolved start channel
+            auto resolvedIt = _resolvedStartChannels.find(parentName);
+            if (resolvedIt != _resolvedStartChannels.end()) {
+                geom.startChannel = resolvedIt->second;
+            } else {
+                auto scIt = parentAttrs.find("StartChannel");
+                if (scIt != parentAttrs.end() && !scIt->second.empty()) {
+                    int sc = std::atoi(scIt->second.c_str());
+                    if (sc > 0) geom.startChannel = static_cast<uint32_t>(sc - 1);
+                }
+            }
+
+            // Determine channels per node from parent's StringType
+            int chansPerNode = 3;
+            auto stIt = parentAttrs.find("StringType");
+            if (stIt != parentAttrs.end()) {
+                const std::string& st = stIt->second;
+                if (st.find("4 Channel") != std::string::npos ||
+                    st.find("RGBW") != std::string::npos ||
+                    st.find("WRGB") != std::string::npos) {
+                    chansPerNode = 4;
+                } else if (st.find("Single Color") != std::string::npos) {
+                    chansPerNode = 1;
+                }
+            }
+
+            // Build NativeNodeInfo array with correct channel offsets
+            for (const auto& nc : strandNodes) {
+                NativeNodeInfo node;
+                node.bufX = nc.bufX;
+                node.bufY = nc.bufY;
+                int channelIdx = (nc.parentNodeIndex >= 0) ? nc.parentNodeIndex : static_cast<int>(&nc - &strandNodes[0]);
+                node.actChannel = geom.startChannel + channelIdx * chansPerNode;
+                node.channelsPerNode = chansPerNode;
+                geom.nodes.push_back(node);
+            }
+            geom.nodeCount = static_cast<uint32_t>(geom.nodes.size());
+            geom.channelCount = geom.nodeCount * chansPerNode;
+        } else {
+            // Submodel: extractGeometry handles "Parent/SubmodelName" via submodel attributes
+            geom = extractGeometry(info.name);
+        }
+
         if (geom.bufferWi <= 0 || geom.bufferHt <= 0) continue;
 
         size_t layerCount = info.effectLayerCount;
@@ -1086,14 +1385,15 @@ NativeRenderCoordinator::buildModelJobs()
         job.layerCount = layerCount;
         job.isSubmodelJob = true;
         job.parentModelName = parentName;
+        job.strandIndex = info.strandIndex;
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, geom.bufferWi, geom.bufferHt,
             static_cast<int>(layerCount), geom.nodes);
         job.pixelBuffer->setDimmingCurve(
             buildDimmingCurve(_modelProvider->getDimmingInfo(parentName)));
 
-        printf("[SUBMODEL_JOB] Created job for '%s' (parent='%s', %dx%d, %zu layers, %zu effects)\n",
-               info.name.c_str(), parentName.c_str(),
+        printf("[SUBMODEL_JOB] Created job for '%s' (parent='%s', strand=%d, %dx%d, %zu layers, %zu effects)\n",
+               info.name.c_str(), parentName.c_str(), info.strandIndex,
                geom.bufferWi, geom.bufferHt, layerCount, info.effectCount);
 
         job.geometry = std::move(geom);
@@ -1623,7 +1923,18 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
 
     std::vector<bool> validLayers(job.layerCount, false);
 
-    for (size_t layer = 0; layer < job.layerCount; ++layer) {
+    // Load blend layer from existing channel data (group render output).
+    // The blend layer is the last layer and must be populated before effect
+    // rendering so that model effects composite on top of group output.
+    if (job.hasBlendLayer && output && frameIndex >= 0) {
+        loadBlendLayer(job, *output, frameIndex);
+        validLayers[job.layerCount - 1] = true;
+    }
+
+    // Only iterate over effect layers (exclude blend layer if present).
+    size_t effectLayerCount = job.hasBlendLayer ? job.layerCount - 1 : job.layerCount;
+
+    for (size_t layer = 0; layer < effectLayerCount; ++layer) {
         NativeRenderBuffer& buf = job.pixelBuffer->getLayerBuffer(
             static_cast<int>(layer));
 
@@ -1655,7 +1966,8 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         // B_ keys from settings, C_ keys from palette, with value curve evaluation.
         NativeLayerInfo layerInfo = parseLayerSettings(
             effectInfo.settings, effectInfo.palette,
-            frameTimeMS, timeMS, effectInfo.startTimeMS, effectInfo.endTimeMS);
+            frameTimeMS, timeMS, effectInfo.startTimeMS, effectInfo.endTimeMS,
+            job.pixelBuffer->getBufferWi(), job.pixelBuffer->getBufferHt());
         job.pixelBuffer->setLayerSettings(static_cast<int>(layer), layerInfo);
 
         // Compute how many frames into the effect we are (0-based).
@@ -1668,6 +1980,14 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         bool freeze = (layerInfo.freezeAfterFrame != 999999 &&
                        layerInfo.freezeAfterFrame <= effectFrame);
 
+        // Prepare buffer style and sub-buffer before clearing/rendering.
+        // Buffer style changes the overall buffer geometry (e.g. Single Line
+        // reshapes to Nx1), sub-buffer further narrows to a viewport region.
+        // Both resize the layer's NativeRenderBuffer so the effect renders
+        // into the smaller buffer, then expand back to full size afterward.
+        job.pixelBuffer->prepareBufferStyle(static_cast<int>(layer));
+        job.pixelBuffer->prepareSubBuffer(static_cast<int>(layer));
+
         // Clear the layer buffer unless persistent or frozen.
         // Persistent layers keep previous frame data so effects accumulate.
         // Frozen layers preserve whatever was rendered on the freeze frame.
@@ -1678,6 +1998,9 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         // If frozen, skip rendering — buffer is preserved from last rendered frame.
         // Mark the layer as valid so calcOutput() includes it in blending.
         if (freeze) {
+            // Expand back to full size even when frozen, since we prepared above.
+            job.pixelBuffer->expandSubBuffer(static_cast<int>(layer));
+            job.pixelBuffer->expandBufferStyle(static_cast<int>(layer));
             validLayers[layer] = true;
             continue;
         }
@@ -1769,6 +2092,12 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             }
         }
 
+        // Expand sub-buffer and buffer style back to full model buffer size.
+        // Sub-buffer pixels are placed at the (x1,y1) offset within the full buffer.
+        // Buffer style maps from linearized Nx1 back to node (bufX,bufY) positions.
+        job.pixelBuffer->expandSubBuffer(static_cast<int>(layer));
+        job.pixelBuffer->expandBufferStyle(static_cast<int>(layer));
+
         // Compute transition fade/mask factors (mirrors legacy HandleLayerTransitions).
         // fadeInFactor and fadeOutFactor represent how far through the
         // fade-in and fade-out we are (1.0 = fully visible).
@@ -1836,6 +2165,31 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
     }
 
     job.pixelBuffer->calcOutput(period, validLayers);
+}
+
+// =========================================================================
+// Blend layer loading
+// =========================================================================
+
+void NativeRenderCoordinator::loadBlendLayer(
+    ModelJob& job, NativeSequenceData& output, int frameIndex)
+{
+    if (!job.hasBlendLayer || job.layerCount < 2) return;
+
+    const uint8_t* frameData = output.getFrame(static_cast<uint32_t>(frameIndex));
+    if (!frameData) return;
+
+    // The blend layer is the LAST layer in the pixel buffer.
+    // Load existing channel data (e.g., from a group job that rendered earlier)
+    // into this layer so that model effects can composite on top.
+    int blendLayerIdx = static_cast<int>(job.layerCount - 1);
+    job.pixelBuffer->loadChannelData(blendLayerIdx, frameData, output.getNumChannels());
+
+    // Set Normal mix for the blend layer so it acts as a base.
+    NativeLayerInfo blendSettings;
+    blendSettings.mixType = NativeMixType::Mix_Normal;
+    blendSettings.brightness = 100.0f;
+    job.pixelBuffer->setLayerSettings(blendLayerIdx, blendSettings);
 }
 
 // =========================================================================
