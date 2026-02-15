@@ -26,6 +26,8 @@
 #include "ModelEngine.h"
 #include "render/NativeRenderCoordinator.h"
 #include "render/NativeSequenceData.h"
+#include "render/BackgroundRenderQueue.h"
+#include "render/DiskRenderCache.h"
 #include "render/IRenderContext.h"
 #include "interfaces/IEffectProvider.h"
 #endif
@@ -58,6 +60,12 @@ RenderEngine::RenderEngine(IRenderProvider* provider)
 
 RenderEngine::~RenderEngine()
 {
+    // Cancel background rendering before tearing down coordinators
+    _bgRenderQueue.reset();
+    _bgCoordinator.reset();
+    _bgContext.reset();
+
+    disconnectEffectEngine();
     closeFSEQ();
     std::lock_guard<std::mutex> lock(_listenerMutex);
     _listeners.clear();
@@ -1369,6 +1377,19 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         return;
     }
 
+    // --- Fast path: nothing dirty, rendered data still valid ---
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        if (!_allDirty.load() && _dirtyModels.empty() && _renderedData && _renderedData->isValid()) {
+            printf("RenderEngine::renderAll — nothing dirty, instant return (0ms)\n");
+            // Reset frame cache so renderFrame picks up the existing data
+            _currentFrameIndex = -1;
+            notifyRenderComplete(false);
+            if (callback) callback(false);
+            return;
+        }
+    }
+
     // Determine sequence parameters
     int frameTimeMS = getFrameTimeMS();
     int numFrames = getNumFrames();
@@ -1383,9 +1404,6 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     }
 
     // Ensure the output buffer is large enough for all models.
-    // getTotalChannels() sums active controller channel counts, but models may
-    // reference channels beyond that (e.g. via chained >Model:offset references
-    // or models on controllers not yet configured).
     int32_t requiredChannels = computeRequiredChannels();
     if (requiredChannels > totalChannels) {
         printf("RenderEngine::renderAll — expanding buffer from %d to %d channels (models need more)\n",
@@ -1393,8 +1411,135 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         totalChannels = requiredChannels;
     }
 
+    // --- Incremental path: re-render only dirty models ---
+    std::set<std::string> dirtyModels;
+    bool fullRender = _allDirty.load();
+    if (!fullRender) {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        dirtyModels = _dirtyModels;
+    }
+
+    if (!fullRender && _renderedData && _renderedData->isValid()
+        && _renderedData->getNumChannels() == static_cast<uint32_t>(totalChannels)
+        && _renderedData->getNumFrames() == static_cast<uint32_t>(numFrames)
+        && !dirtyModels.empty()) {
+
+        // Cancel background rendering — we're about to do a synchronous render.
+        if (_bgRenderQueue) {
+            _bgRenderQueue->cancelAll();
+        }
+
+        // Check which dirty models were already rendered in the background.
+        // Remove them from the dirty set — their data is already in _renderedData.
+        std::set<std::string> bgCompleted;
+        if (_bgRenderQueue) {
+            bgCompleted = _bgRenderQueue->getCompletedModels();
+            for (const auto& m : bgCompleted) {
+                dirtyModels.erase(m);
+                _bgRenderQueue->clearCompletedModel(m);
+            }
+        }
+
+        printf("RenderEngine::renderAll — INCREMENTAL: %zu dirty, %zu pre-rendered in bg\n",
+               dirtyModels.size(), bgCompleted.size());
+        for (const auto& m : dirtyModels) {
+            printf("  still dirty: %s\n", m.c_str());
+        }
+
+        // If all dirty models were pre-rendered in the background, instant return.
+        if (dirtyModels.empty()) {
+            std::lock_guard<std::mutex> lock(_dirtyMutex);
+            _dirtyModels.clear();
+            _currentFrameIndex = -1;
+
+            printf("RenderEngine::renderAll — all dirty models pre-rendered in background (0ms)\n");
+            notifyRenderComplete(false);
+            if (callback) callback(false);
+            return;
+        }
+
+        auto wallStart = std::chrono::steady_clock::now();
+
+        double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
+        auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
+
+        // Zero dirty model channel ranges before re-rendering
+        for (const auto& modelName : dirtyModels) {
+            auto rangeIt = _modelChannelRanges.find(modelName);
+            if (rangeIt != _modelChannelRanges.end()) {
+                uint32_t startCh = rangeIt->second.first;
+                uint32_t chCount = rangeIt->second.second;
+                for (uint32_t f = 0; f < static_cast<uint32_t>(numFrames); ++f) {
+                    uint8_t* frameData = _renderedData->getFrame(f);
+                    if (frameData && startCh + chCount <= _renderedData->getNumChannels()) {
+                        std::memset(frameData + startCh, 0, chCount);
+                    }
+                }
+            }
+        }
+
+        // Ensure start channels are resolved
+        if (_controllerStartChannels.empty()) {
+            buildControllerChannelMap();
+        }
+        if (_modelTotalChannels.empty()) {
+            buildModelTotalChannelsMap();
+        }
+
+        std::unordered_map<std::string, uint32_t> resolvedChannels;
+        {
+            auto modelNames = _modelProvider->getModelNames();
+            for (const auto& name : modelNames) {
+                auto attrs = _modelProvider->getModelAttributes(name);
+                auto displayAs = attrs.find("DisplayAs");
+                if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+                auto scIt = attrs.find("StartChannel");
+                if (scIt != attrs.end() && !scIt->second.empty()) {
+                    resolvedChannels[name] = resolveStartChannel(scIt->second);
+                }
+            }
+        }
+
+        // Create coordinator for incremental render
+        _coordinator = std::make_unique<NativeRenderCoordinator>(
+            _effectProvider, _modelProvider, context.get());
+        _coordinator->setResolvedStartChannels(resolvedChannels);
+
+        // Use renderModels for selective rendering
+        std::vector<std::string> dirtyModelVec(dirtyModels.begin(), dirtyModels.end());
+        bool completed = _coordinator->renderModels(dirtyModelVec, *_renderedData);
+
+        _coordinator.reset();
+
+        // Clear dirty state
+        {
+            std::lock_guard<std::mutex> lock(_dirtyMutex);
+            _dirtyModels.clear();
+        }
+
+        _currentFrameIndex = -1;
+
+        auto wallEnd = std::chrono::steady_clock::now();
+        auto wallMS = std::chrono::duration<double, std::milli>(wallEnd - wallStart).count();
+        printf("RenderEngine::renderAll — INCREMENTAL complete in %.1fms (%zu rendered, %zu from bg)\n",
+               wallMS, dirtyModels.size(), bgCompleted.size());
+
+        bool wasCancelled = !completed;
+        notifyRenderComplete(wasCancelled);
+        if (callback) callback(wasCancelled);
+        return;
+    }
+
+    // --- Full render path ---
+
+    // Cancel background queue before full render (it references _renderedData
+    // which will be replaced below).
+    _bgRenderQueue.reset();
+    _bgCoordinator.reset();
+    _bgContext.reset();
+
     double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
-    printf("RenderEngine::renderAll — rendering %d frames (%dms), %d channels, %.1fs\n",
+    printf("RenderEngine::renderAll — FULL render: %d frames (%dms), %d channels, %.1fs\n",
            numFrames, frameTimeMS, totalChannels, duration);
 
     // Create render context
@@ -1406,9 +1551,7 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         static_cast<uint32_t>(numFrames),
         static_cast<uint32_t>(frameTimeMS));
 
-    // Resolve start channels BEFORE rendering so the coordinator writes data
-    // at the correct absolute channel offsets. Without this, complex start channel
-    // formats (#IP:univ:ch, !Controller:ch, >Model:offset) resolve to 0 via atoi().
+    // Resolve start channels BEFORE rendering
     if (_controllerStartChannels.empty()) {
         buildControllerChannelMap();
     }
@@ -1445,8 +1588,8 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         void onRenderProgress(float pct, int done, int total) override {
             RenderStatus status;
             status.isRendering = true;
-            status.modelsComplete = done;
-            status.modelsTotal = total;
+            status.framesComplete = done;
+            status.framesTotal = total;
             status.progressPercent = pct;
             _engine->notifyRenderProgress(status);
         }
@@ -1459,6 +1602,17 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
 
     ListenerBridge bridge(this);
     _coordinator->setListener(&bridge);
+
+    // Configure disk cache for persistence across sessions.
+    if (!_showFolderPath.empty()) {
+        if (!_diskCache) {
+            _diskCache = std::make_unique<DiskRenderCache>();
+        }
+        // Build cache directory: ShowFolder/RenderCache/NATIVE_CACHE/
+        std::string cacheDir = _showFolderPath + "/RenderCache/NATIVE_CACHE";
+        _diskCache->setCacheDirectory(cacheDir);
+        _coordinator->setDiskCache(_diskCache.get());
+    }
 
     bool completed = _coordinator->renderAll(*_renderedData);
 
@@ -1486,8 +1640,30 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         }
         // Reset frame cache so next renderFrame reads from _renderedData
         _currentFrameIndex = -1;
-        printf("RenderEngine::renderAll — rendered data ready for preview (%u frames, %u channels)\n",
-               _renderedData->getNumFrames(), _renderedData->getNumChannels());
+
+        // Populate _modelChannelRanges for future incremental renders.
+        // Each model's channel range is (startChannel, channelCount) so we
+        // can zero just that range before re-rendering a dirty model.
+        {
+            std::lock_guard<std::mutex> lock(_dirtyMutex);
+            _modelChannelRanges.clear();
+            for (const auto& [name, chInfo] : _modelChannelMap) {
+                uint32_t chCount = chInfo.nodeCount * chInfo.chansPerNode;
+                if (chCount > 0) {
+                    _modelChannelRanges[name] = {chInfo.absStartChannel, chCount};
+                }
+            }
+        }
+
+        // Clear dirty state after successful full render
+        {
+            std::lock_guard<std::mutex> lock(_dirtyMutex);
+            _allDirty.store(false);
+            _dirtyModels.clear();
+        }
+
+        printf("RenderEngine::renderAll — rendered data ready for preview (%u frames, %u channels), %zu channel ranges cached\n",
+               _renderedData->getNumFrames(), _renderedData->getNumChannels(), _modelChannelRanges.size());
     }
 
     printf("RenderEngine::renderAll — %s\n", wasCancelled ? "cancelled" : "complete");
@@ -1764,6 +1940,280 @@ void RenderEngine::invalidateAllCaches()
         _sidebarCoordinator.reset();
         _sidebarContext.reset();
         _lastSidebarRenderTimeMS = -1;
+    }
+
+    // Cancel and destroy background render queue (it references _renderedData
+    // which was just destroyed above).
+    _bgRenderQueue.reset();
+    _bgCoordinator.reset();
+    _bgContext.reset();
+
+    // Clear disk cache (full invalidation means all cached data is stale).
+    if (_diskCache) {
+        _diskCache->clearAll();
+    }
+
+    // Mark everything dirty
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        _allDirty.store(true);
+        _dirtyModels.clear();
+        _modelChannelRanges.clear();
+    }
+}
+
+void RenderEngine::invalidateModel(const std::string& modelName)
+{
+    if (modelName.empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        _dirtyModels.insert(modelName);
+    }
+
+    // Clear the model's live preview cache entries
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _bufferCache.erase(modelName);
+        _currentFrameIndex = -1; // force re-read from _renderedData on next renderFrame
+
+        // Reset the model's persistent state in the live coordinator
+        if (_liveCoordinator) {
+            _liveCoordinator->resetPersistentState(modelName);
+            _liveCoordinator->invalidateCache(modelName);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        _sidebarCache.erase(modelName);
+        if (_sidebarCoordinator) {
+            _sidebarCoordinator->resetPersistentState(modelName);
+            _sidebarCoordinator->invalidateCache(modelName);
+        }
+    }
+
+    // Queue for background pre-rendering if _renderedData exists
+    // (i.e., a full Render All has been done before). This way the model
+    // will be re-rendered in the background before the user clicks Render All.
+    if (_renderedData && _renderedData->isValid()) {
+        ensureBackgroundRenderQueue();
+        if (_bgRenderQueue) {
+            _bgRenderQueue->queueModel(modelName);
+        }
+    }
+}
+
+void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
+{
+    if (modelName.empty()) return;
+
+    // Always dirty the model itself
+    invalidateModel(modelName);
+
+    if (!_modelProvider) return;
+
+    // Check if this model is a group — if so, dirty all members
+    auto attrs = _modelProvider->getModelAttributes(modelName);
+    auto displayAs = attrs.find("DisplayAs");
+    if (displayAs != attrs.end() && displayAs->second == "ModelGroup") {
+        auto membersIt = attrs.find("models");
+        if (membersIt != attrs.end()) {
+            // Parse comma-separated member list
+            const std::string& members = membersIt->second;
+            size_t pos = 0;
+            while (pos < members.size()) {
+                size_t comma = members.find(',', pos);
+                if (comma == std::string::npos) comma = members.size();
+                std::string member = members.substr(pos, comma - pos);
+                // Trim whitespace
+                size_t start = member.find_first_not_of(" \t");
+                size_t end = member.find_last_not_of(" \t");
+                if (start != std::string::npos) {
+                    member = member.substr(start, end - start + 1);
+                    // Strip submodel ref (e.g. "Tree/Outline" → "Tree")
+                    size_t slash = member.find('/');
+                    if (slash != std::string::npos) {
+                        member = member.substr(0, slash);
+                    }
+                    if (!member.empty()) {
+                        invalidateModel(member);
+                    }
+                }
+                pos = comma + 1;
+            }
+        }
+        return;
+    }
+
+    // Model is not a group — check if it belongs to any group with effects.
+    // Scan all model names for groups that contain this model.
+    auto allNames = _modelProvider->getModelNames();
+    for (const auto& name : allNames) {
+        auto gAttrs = _modelProvider->getModelAttributes(name);
+        auto gDisplay = gAttrs.find("DisplayAs");
+        if (gDisplay == gAttrs.end() || gDisplay->second != "ModelGroup") continue;
+        auto gMembers = gAttrs.find("models");
+        if (gMembers == gAttrs.end()) continue;
+
+        // Check if our model is in this group's member list
+        const std::string& memberList = gMembers->second;
+        if (memberList.find(modelName) != std::string::npos) {
+            // Dirty the group name so group effects re-render
+            invalidateModel(name);
+        }
+    }
+}
+
+bool RenderEngine::hasDirtyModels() const
+{
+    if (_allDirty.load()) return true;
+    std::lock_guard<std::mutex> lock(_dirtyMutex);
+    return !_dirtyModels.empty();
+}
+
+std::set<std::string> RenderEngine::getDirtyModels() const
+{
+    std::lock_guard<std::mutex> lock(_dirtyMutex);
+    return _dirtyModels;
+}
+
+void RenderEngine::connectEffectEngine(EffectEngine* engine)
+{
+    disconnectEffectEngine();
+    if (engine) {
+        _connectedEffectEngine = engine;
+        engine->addListener(this);
+    }
+}
+
+void RenderEngine::disconnectEffectEngine()
+{
+    if (_connectedEffectEngine) {
+        _connectedEffectEngine->removeListener(this);
+        _connectedEffectEngine = nullptr;
+    }
+}
+
+// --- Show folder ---
+
+void RenderEngine::setShowFolder(const std::string& path)
+{
+    _showFolderPath = path;
+    printf("RenderEngine: show folder set to '%s'\n", path.c_str());
+}
+
+// --- Background render queue ---
+
+void RenderEngine::ensureBackgroundRenderQueue()
+{
+    if (_bgRenderQueue) return;
+    if (!_renderedData || !_renderedData->isValid()) return;
+    if (!_effectProvider || !_modelProvider) return;
+
+    // Create a dedicated coordinator for background rendering.
+    int frameTimeMS = getFrameTimeMS();
+    int numFrames = getNumFrames();
+    double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
+
+    _bgContext = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
+    _bgCoordinator = std::make_unique<NativeRenderCoordinator>(
+        _effectProvider, _modelProvider, _bgContext.get());
+
+    // Resolve start channels for the background coordinator
+    if (_controllerStartChannels.empty()) {
+        buildControllerChannelMap();
+    }
+    if (_modelTotalChannels.empty()) {
+        buildModelTotalChannelsMap();
+    }
+    std::unordered_map<std::string, uint32_t> resolvedChannels;
+    {
+        auto modelNames = _modelProvider->getModelNames();
+        for (const auto& name : modelNames) {
+            auto attrs = _modelProvider->getModelAttributes(name);
+            auto displayAs = attrs.find("DisplayAs");
+            if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+            auto scIt = attrs.find("StartChannel");
+            if (scIt != attrs.end() && !scIt->second.empty()) {
+                resolvedChannels[name] = resolveStartChannel(scIt->second);
+            }
+        }
+    }
+    _bgCoordinator->setResolvedStartChannels(resolvedChannels);
+
+    _bgRenderQueue = std::make_unique<BackgroundRenderQueue>(
+        _bgCoordinator.get(), _renderedData.get());
+
+    printf("RenderEngine: Background render queue created\n");
+}
+
+// --- EffectEngineListener callbacks ---
+
+std::string RenderEngine::resolveModelNameFromEvent(const EffectEvent& event)
+{
+    // If the event has a model name, use it directly
+    if (!event.modelName.empty()) return event.modelName;
+
+    // Otherwise try to look up the element that contains this effect
+    if (_effectProvider && event.effectId >= 0) {
+        // Fast path: use getEffect() to look up by ID directly
+        EffectInstanceInfo effInfo;
+        if (_effectProvider->getEffect(static_cast<int64_t>(event.effectId), effInfo)) {
+            // Got the effect — now get its parent element name
+            ElementInfo elemInfo;
+            if (_effectProvider->getElement(effInfo.elementIndex, elemInfo)) {
+                return elemInfo.name;
+            }
+        }
+    }
+    return {};
+}
+
+void RenderEngine::onEffectCreated(const EffectEvent& event)
+{
+    std::string modelName = resolveModelNameFromEvent(event);
+    if (!modelName.empty()) {
+        invalidateModelAndGroup(modelName);
+    }
+}
+
+void RenderEngine::onEffectDeleted(const EffectEvent& event)
+{
+    std::string modelName = resolveModelNameFromEvent(event);
+    if (!modelName.empty()) {
+        invalidateModelAndGroup(modelName);
+    }
+}
+
+void RenderEngine::onEffectMoved(const EffectEvent& event)
+{
+    std::string modelName = resolveModelNameFromEvent(event);
+    if (!modelName.empty()) {
+        invalidateModelAndGroup(modelName);
+    }
+}
+
+void RenderEngine::onEffectSettingChanged(const EffectEvent& event)
+{
+    std::string modelName = resolveModelNameFromEvent(event);
+    if (!modelName.empty()) {
+        invalidateModelAndGroup(modelName);
+    }
+}
+
+void RenderEngine::onEffectPaletteChanged(const EffectEvent& event)
+{
+    std::string modelName = resolveModelNameFromEvent(event);
+    if (!modelName.empty()) {
+        invalidateModelAndGroup(modelName);
+    }
+}
+
+void RenderEngine::onEffectTypeChanged(const EffectEvent& event)
+{
+    std::string modelName = resolveModelNameFromEvent(event);
+    if (!modelName.empty()) {
+        invalidateModelAndGroup(modelName);
     }
 }
 

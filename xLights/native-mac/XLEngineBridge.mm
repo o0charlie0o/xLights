@@ -278,6 +278,14 @@ static XLEngineBridge *_sharedBridge = nil;
         _renderEngine->setModelProvider(_nativeModelProvider.get());
         _renderEngine->setOutputProvider(_nativeOutputProvider.get());
         _renderEngine->setEffectProvider(_nativeEffectProvider.get());
+        if (!_showFolderPath.empty()) {
+            _renderEngine->setShowFolder(_showFolderPath);
+        }
+
+        // Connect RenderEngine to EffectEngine for model-level dirty tracking.
+        // When effects change, the RenderEngine is notified and marks only
+        // the affected model(s) as dirty instead of destroying all caches.
+        _renderEngine->connectEffectEngine(_effectEngine.get());
 
         _standaloneMode = YES;
         _engineInitialized = YES;
@@ -4970,11 +4978,10 @@ static XLEngineBridge *_sharedBridge = nil;
 }
 
 - (void)scheduleAutoSave {
-    // Invalidate pre-rendered data immediately so the live preview path
-    // is used instead of stale renderAll output.
-    if (_renderEngine) {
-        _renderEngine->invalidateAllCaches();
-    }
+    // Note: Pre-rendered data invalidation is now handled by model-level dirty
+    // tracking via EffectEngineListener callbacks. Individual model caches are
+    // dirtied when effects change, avoiding the nuclear invalidateAllCaches()
+    // that previously destroyed ALL rendered data on every parameter edit.
 
     if (_autoSaveTimer) {
         dispatch_source_cancel(_autoSaveTimer);

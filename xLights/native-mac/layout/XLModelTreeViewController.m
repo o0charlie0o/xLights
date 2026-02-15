@@ -399,8 +399,6 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     }
 
     NSMutableArray<XLModelTreeNode *> *groupNodes = [[NSMutableArray alloc] init];
-    NSMutableArray<XLModelTreeNode *> *ungroupedNodes = [[NSMutableArray alloc] init];
-    NSMutableSet<NSString *> *modelsInGroups = [[NSMutableSet alloc] init];
 
     NSSortDescriptor *nameSort = [NSSortDescriptor sortDescriptorWithKey:@"name"
                                                               ascending:YES
@@ -421,8 +419,6 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         XLModelTreeNode *groupNode = [XLModelTreeNode groupNodeWithName:groupName];
 
         for (NSString *memberName in memberNames) {
-            [modelsInGroups addObject:memberName];
-
             if ([groupNameSet containsObject:memberName]) {
                 // Member is another group — show as a group node child
                 XLModelTreeNode *childGroup = [XLModelTreeNode groupNodeWithName:memberName];
@@ -468,12 +464,10 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
     // Sort groups alphabetically
     [groupNodes sortUsingDescriptors:@[nameSort]];
 
-    // Second pass: add models that are not in any group (excluding groups themselves)
+    // Second pass: add all models (including those in groups) sorted alphabetically
     NSArray<NSString *> *modelNames = [_engineBridge getModelNamesExcludingGroups];
+    NSMutableArray<XLModelTreeNode *> *modelNodes = [[NSMutableArray alloc] init];
     for (NSString *modelName in modelNames) {
-        // Skip models that are already children of a group
-        if ([modelsInGroups containsObject:modelName]) continue;
-
         NSDictionary *info = [_engineBridge getModelInfo:modelName];
         if (!info) continue;
 
@@ -484,16 +478,16 @@ typedef NS_ENUM(NSInteger, XLContextMenuTag) {
         [self populateShadowInfoForNode:node];
         [self loadSubmodelsForNode:node modelName:modelName];
 
-        [ungroupedNodes addObject:node];
+        [modelNodes addObject:node];
     }
 
-    // Sort ungrouped models alphabetically
-    [ungroupedNodes sortUsingDescriptors:@[nameSort]];
+    // Sort all models alphabetically
+    [modelNodes sortUsingDescriptors:@[nameSort]];
 
-    // Combine: groups first (sorted), then ungrouped models (sorted)
-    NSMutableArray<XLModelTreeNode *> *nodes = [[NSMutableArray alloc] initWithCapacity:groupNodes.count + ungroupedNodes.count];
+    // Combine: groups first (sorted), then all models (sorted)
+    NSMutableArray<XLModelTreeNode *> *nodes = [[NSMutableArray alloc] initWithCapacity:groupNodes.count + modelNodes.count];
     [nodes addObjectsFromArray:groupNodes];
-    [nodes addObjectsFromArray:ungroupedNodes];
+    [nodes addObjectsFromArray:modelNodes];
 
     _allNodes = [nodes copy];
 }

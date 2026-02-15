@@ -12,26 +12,19 @@
 
 // NativeRenderCoordinator: Parallel rendering orchestrator for the native macOS build.
 //
-// Dispatches per-model render jobs across multiple threads using a work-stealing
-// pattern. Each model gets its own NativePixelBuffer and renders all frames
-// independently. The output is written to a shared NativeSequenceData buffer.
-//
-// Render dependency ordering:
-//   Models sharing channels (groups + member models, overlapping channel ranges)
-//   are partitioned into tiers via buildRenderTiers(). Jobs within a tier have
-//   non-overlapping channels and run in parallel. Tiers execute sequentially,
-//   ensuring deterministic ordering that matches legacy element precedence.
-//   Independent models (no channel overlap) always run in the first tier.
+// Unified rendering: both live preview (renderAllModelsStateful) and batch
+// rendering (renderAll/renderRange) use the same per-frame-all-models approach.
+// For each frame, all physical models are rendered in parallel via GCD
+// dispatch_apply, then submodel/strand overlays are composited. Group effects
+// cascade to member models via prepended layers (groupElementIndex/groupLayerCount).
 //
 // Architecture:
 //   - IEffectProvider supplies sequence elements and effect data
 //   - IModelProvider supplies model geometry and channel mapping
 //   - IRenderContext supplies timing and audio info
-//   - Each model's render job:
-//       For each frame:
-//         For each layer: query effect, configure buffer, call Render()
-//         NativePixelBuffer::calcOutput() blends layers
-//         NativePixelBuffer::getColors() writes to NativeSequenceData
+//   - Persistent ModelJob objects are reused across frames (preparePersistentJobs)
+//   - Per frame: dispatch_apply across models → renderModelAtTime()
+//               → submodel compositing → writeModelOutput() to NativeSequenceData
 //
 // Thread safety: renderRange() and renderAll() block until complete.
 // Multiple threads render different models in parallel. abort() is safe
@@ -47,6 +40,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "NativePixelBuffer.h"
@@ -58,6 +52,7 @@ class NativeRenderBuffer;
 namespace xlEngine {
 
 struct EffectInstanceInfo;
+class DiskRenderCache;
 class IEffectProvider;
 class IModelProvider;
 
@@ -267,6 +262,13 @@ public:
     // Returns true if completed, false if aborted.
     bool renderRange(int startMS, int endMS, NativeSequenceData& output);
 
+    // Render only specific models for the full sequence duration.
+    // Used for incremental re-rendering when only some models are dirty.
+    // The caller must zero the dirty models' channel ranges in the output
+    // buffer before calling this method.
+    // Returns true if completed, false if aborted.
+    bool renderModels(const std::vector<std::string>& modelNames, NativeSequenceData& output);
+
     // Render a single model at a single time for preview.
     RenderedFrame renderModelFrame(const std::string& modelName, int timeMS);
 
@@ -365,27 +367,44 @@ private:
         bool perModelInfoCached = false;          // True after first extraction
     };
 
-    std::vector<ModelJob> buildModelJobs();
+    // Prepared model info for rendering — points into _persistentJobs.
+    struct PreparedModel {
+        size_t index;           // index into modelNames / results
+        ModelJob* job;          // pointer into _persistentJobs
+        bool hasSubmodels;      // needs submodel compositing after render
+    };
+
+    // Prepare persistent jobs for a set of model names. Creates or looks up
+    // ModelJob entries in _persistentJobs, handles group layer cascading and
+    // submodel mask computation. Must be called under _stateMutex.
+    // Populates physicalJobs (physical models to render) and submodelNames
+    // (submodel/strand elements that need overlay compositing).
+    void preparePersistentJobs(
+        const std::vector<std::string>& modelNames,
+        std::vector<PreparedModel>& physicalJobs,
+        std::vector<std::string>& submodelNames);
+
+    // Render all models for a time range using the unified per-frame approach.
+    // For each frame: renders all models in parallel, composites submodels,
+    // then writes channel data to output. Same approach as live preview.
+    bool renderAllFrames(int startMS, int endMS, NativeSequenceData& output);
+
+    // Write submodel/strand rendered pixels to NativeSequenceData channel output.
+    // Maps submodel nodes to parent nodes by actChannel, skips black pixels.
+    void writeSubmodelChannelOutput(
+        const ModelJob& subJob, const ModelJob& parentJob,
+        int frameIndex, NativeSequenceData& output);
+
     ModelGeometry extractGeometry(const std::string& modelName);
     ModelGeometry extractGroupGeometry(const std::string& groupName);
     size_t findParentGroupElement(const std::string& modelName);
 
-    // Render dependency ordering: partition jobs into tiers where all jobs
-    // within a tier have non-overlapping channel ranges and can run in parallel.
-    // Jobs in tier N+1 depend on at least one job in tier N (or earlier).
-    // Returns vector of tiers, each tier is a vector of indices into the jobs array.
-    std::vector<std::vector<size_t>> buildRenderTiers(const std::vector<ModelJob>& jobs);
-
-    void renderModel(ModelJob& job, int startMS, int endMS,
-                     NativeSequenceData& output);
     void renderModelAtTime(ModelJob& job, int timeMS,
                            NativeSequenceData* output = nullptr,
                            int frameIndex = -1);
     bool renderNativeEffect(const EffectInstanceInfo& effectInfo, NativeRenderBuffer& buf);
     void writeModelOutput(const ModelJob& job, int frameIndex,
                           NativeSequenceData& output);
-    void loadBlendLayer(ModelJob& job, NativeSequenceData& output,
-                        int frameIndex);
 
     // Populate per-model member info on a group job for "Per Model" rendering.
     // Extracts geometry for each group member and caches it on the job.
@@ -446,11 +465,42 @@ private:
     // with complex start channel formats (#IP:univ:ch, !Controller:ch, >Model:offset).
     std::unordered_map<std::string, uint32_t> _resolvedStartChannels;
 
+    // Cached model geometry to avoid re-extracting from provider on every preparePersistentJobs() call.
+    // Invalidated on model layout changes (resetPersistentState), NOT on effect changes.
+    std::unordered_map<std::string, ModelGeometry> _geometryCache;
+
+    // Pre-built map: model name -> group element index (from preparePersistentJobs).
+    // Built once per render pass to avoid repeated O(elements) scans in findParentGroupElement.
+    std::unordered_map<std::string, size_t> _modelToGroupIdx;
+    bool _groupMapBuilt = false;
+
+    // Build _modelToGroupIdx by scanning all group elements once.
+    void buildGroupMembershipMap();
+
+    // True during batch rendering (renderAllFrames). Disables LRU cache
+    // lookups/stores since each frame is rendered once sequentially and
+    // never revisited, making cache overhead pure waste.
+    bool _batchMode = false;
+
     // In-memory LRU cache for rendered effect layers. Avoids redundant
     // re-rendering when scrubbing or re-visiting frames with unchanged effects.
     // Protected by _renderCacheMutex for thread-safe access during parallel rendering.
+    // Disabled during batch rendering (_batchMode == true).
     RenderFrameCache _renderCache;
     mutable std::mutex _renderCacheMutex;
+
+    // Disk-backed render cache for persistence across sessions.
+    // Owned by RenderEngine, set via setDiskCache(). Null if not configured.
+    DiskRenderCache* _diskCache = nullptr;
+
+    // Hashes of effects for which beginWriteSession has been called during
+    // the current batch render. Used to avoid calling beginWriteSession twice
+    // for the same effect.
+    std::unordered_set<uint64_t> _diskWriteSessions;
+
+public:
+    // Set the disk cache instance (owned by RenderEngine). Pass nullptr to disable.
+    void setDiskCache(DiskRenderCache* cache) { _diskCache = cache; }
 };
 
 } // namespace xlEngine

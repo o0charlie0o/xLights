@@ -233,6 +233,16 @@ public:
     // Return node count.
     uint32_t getNodeCount() const { return static_cast<uint32_t>(_nodes.size()); }
 
+    // Enable batch mode: calcOutput() only blends at node pixel positions,
+    // skipping the full buffer. Dramatically faster for sparse models where
+    // nodeCount << bufferWi * bufferHt. Not suitable for live preview where
+    // the full pixel buffer is displayed as a texture.
+    void setBatchMode(bool batch) { _batchMode = batch; }
+    bool isBatchMode() const { return _batchMode; }
+
+    // Sorted unique pixel indices (bufY * bufferWi + bufX) for node positions.
+    const std::vector<int>& getNodePixelIndices() const { return _nodePixelIndices; }
+
     // =========================================================================
     // Layer settings
     // =========================================================================
@@ -388,6 +398,14 @@ private:
     // will have their channel data written by getColors(). All other nodes write zero.
     std::set<std::pair<int,int>> _submodelMask;
     bool _hasSubmodelMask = false;
+
+    // Batch mode: when true, calcOutput() only processes pixels at node
+    // positions instead of the full buffer. See setBatchMode().
+    bool _batchMode = false;
+
+    // Sorted unique pixel indices for node positions (bufY * bufferWi + bufX).
+    // Populated in constructor. Used by calcOutput() in batch mode.
+    std::vector<int> _nodePixelIndices;
 
     // Sparkle state: per-node random counters
     std::vector<uint16_t> _sparkleState;

@@ -267,6 +267,19 @@ NativePixelBuffer::NativePixelBuffer(IRenderContext* context, int bufferWi, int 
     }
 
     _outputPixels.resize(static_cast<size_t>(bufferWi) * bufferHt, xlBLACK);
+
+    // Build sorted unique pixel indices for node positions.
+    // Used by calcOutput() in batch mode to skip non-node pixels.
+    {
+        std::set<int> uniqueIndices;
+        for (const auto& node : _nodes) {
+            if (node.bufX >= 0 && node.bufX < bufferWi &&
+                node.bufY >= 0 && node.bufY < bufferHt) {
+                uniqueIndices.insert(node.bufY * bufferWi + node.bufX);
+            }
+        }
+        _nodePixelIndices.assign(uniqueIndices.begin(), uniqueIndices.end());
+    }
 }
 
 NativePixelBuffer::~NativePixelBuffer() = default;
@@ -860,17 +873,21 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
         }
     }
 
-    // Try GPU-accelerated blending first. Falls back to CPU if unavailable.
-    if (calcOutputGPU(validLayers)) {
+    // Try GPU-accelerated blending first (skip in batch mode — sparse CPU is faster).
+    if (!_batchMode && calcOutputGPU(validLayers)) {
         // GPU path succeeded — sparkle is applied as CPU post-pass below
         goto sparkle_pass;
     }
 
-    // CPU fallback: Blend all layers per pixel
+    // CPU blending: in batch mode, only blend at node pixel positions (sparse).
+    // In live mode (or GPU fallback), blend all pixels for full preview texture.
     {
-    int totalPixels = _bufferWi * _bufferHt;
+    const bool sparse = _batchMode && !_nodePixelIndices.empty();
+    const int totalPixels = sparse ? static_cast<int>(_nodePixelIndices.size())
+                                   : _bufferWi * _bufferHt;
 
-    for (int pixIdx = 0; pixIdx < totalPixels; ++pixIdx) {
+    for (int i = 0; i < totalPixels; ++i) {
+        int pixIdx = sparse ? _nodePixelIndices[i] : i;
         int px = pixIdx % _bufferWi;
         int py = pixIdx / _bufferWi;
 
@@ -949,7 +966,7 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
 
         _outputPixels[pixIdx] = result;
     }
-    } // end CPU fallback block
+    } // end CPU blending block
 
 sparkle_pass:
     // Apply per-node sparkle as a post-pass on the output pixels.
@@ -1009,61 +1026,49 @@ void NativePixelBuffer::setDimmingCurve(const NativeDimmingCurve& curve) {
 // =========================================================================
 
 void NativePixelBuffer::getColors(uint8_t* outputBuffer, uint32_t bufferSize) const {
+    const bool hasMask = _hasSubmodelMask;
+    const bool hasDimming = _dimmingCurve.active;
+
     for (const auto& node : _nodes) {
         if (node.bufX < 0 || node.bufX >= _bufferWi ||
             node.bufY < 0 || node.bufY >= _bufferHt) {
             continue;
         }
 
+        // Hoisted bounds check: verify all channels fit in one test
+        uint32_t endOffset = node.actChannel + node.channelsPerNode;
+        if (endOffset > bufferSize) continue;
+
         // When a submodel mask is active, nodes outside the mask write zero channels.
-        // This ensures batch rendering (renderAll/renderRange) only writes channel data
-        // for the submodel's nodes when effects come from a group with submodel refs.
-        if (_hasSubmodelMask &&
+        if (hasMask &&
             _submodelMask.find({node.bufX, node.bufY}) == _submodelMask.end()) {
-            for (int ch = 0; ch < node.channelsPerNode; ++ch) {
-                uint32_t destOffset = node.actChannel + ch;
-                if (destOffset < bufferSize) {
-                    outputBuffer[destOffset] = 0;
-                }
-            }
+            std::memset(outputBuffer + node.actChannel, 0, node.channelsPerNode);
             continue;
         }
 
         int pixIdx = node.bufY * _bufferWi + node.bufX;
         xlColor color = _outputPixels[pixIdx];
 
-        // Apply dimming curve (gamma/brightness correction) before channel output.
-        // For single-channel nodes, legacy behavior expands the mono value to RGB
-        // before applying the curve, then uses the dimmed value.
-        if (_dimmingCurve.active) {
+        // Apply dimming curve (gamma/brightness correction)
+        if (hasDimming) {
             if (node.channelsPerNode == 1) {
-                // Single-channel: GetForChannels outputs one byte from the node.
-                // Legacy uses the red channel value replicated to RGB, applies curve,
-                // then writes back the red component.
-                xlColor mono(color.red, color.red, color.red);
-                _dimmingCurve.apply(mono);
-                color = mono;
+                color.red = _dimmingCurve.red[color.red];
             } else {
                 _dimmingCurve.apply(color);
             }
         }
 
         // Extract RGB(W) channels in the correct order.
-        // For RGBW (4ch), the W channel uses a simple max(R,G,B) white extraction.
         uint8_t wChannel = 0;
         if (node.channelsPerNode == 4) {
             wChannel = std::min({color.red, color.green, color.blue});
         }
         uint8_t channels[4] = { color.red, color.green, color.blue, wChannel };
 
+        // Write channels — bounds already verified above
+        uint8_t* dest = outputBuffer + node.actChannel;
         for (int ch = 0; ch < node.channelsPerNode; ++ch) {
-            uint32_t destOffset = node.actChannel + ch;
-            if (destOffset < bufferSize) {
-                int srcIdx = node.colorOrder[ch];
-                if (srcIdx >= 0 && srcIdx < 4) {
-                    outputBuffer[destOffset] = channels[srcIdx];
-                }
-            }
+            dest[ch] = channels[node.colorOrder[ch]];
         }
     }
 }

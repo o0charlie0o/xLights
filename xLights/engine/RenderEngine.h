@@ -37,11 +37,13 @@
 #include <atomic>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <memory>
 
 #include "interfaces/IRenderProvider.h"
 #include "interfaces/IModelProvider.h"
 #include "interfaces/IOutputProvider.h"
+#include "EffectEngine.h"
 
 class xLightsFrame;
 class PixelBufferClass;
@@ -50,6 +52,8 @@ class NativeSequenceData;
 
 namespace xlEngine {
 
+class BackgroundRenderQueue;
+class DiskRenderCache;
 class IAudioProvider;
 class IEffectProvider;
 class NativeRenderCoordinator;
@@ -181,7 +185,7 @@ using RenderCompleteCallback = std::function<void(bool wasCancelled)>;
 // For backward compatibility during the transition period, a constructor
 // accepting xLightsFrame* is provided. It internally creates a
 // RenderContextAdapter to wrap the frame.
-class RenderEngine {
+class RenderEngine : public EffectEngineListener {
 public:
     /// Construct with an IRenderProvider interface.
     /// This is the preferred constructor for new code.
@@ -281,6 +285,37 @@ public:
 
     // Invalidate all render caches, forcing a full re-render.
     void invalidateAllCaches();
+
+#ifdef XLIGHTS_NATIVE
+    // Mark a single model as dirty (needs re-render), without destroying
+    // _renderedData. Clears the model's live cache entries and persistent state
+    // but preserves all other pre-rendered data.
+    void invalidateModel(const std::string& modelName);
+
+    // Mark a model and its parent group (if any) as dirty. If the model IS
+    // a group, also dirties all member models.
+    void invalidateModelAndGroup(const std::string& modelName);
+
+    // Check if any models need re-rendering.
+    bool hasDirtyModels() const;
+
+    // Get the set of dirty model names.
+    std::set<std::string> getDirtyModels() const;
+
+    // Connect this engine to an EffectEngine to receive change notifications.
+    // The engine will register/unregister itself as an EffectEngineListener.
+    void connectEffectEngine(EffectEngine* engine);
+    void disconnectEffectEngine();
+#endif
+
+    // --- Show folder ---
+
+#ifdef XLIGHTS_NATIVE
+    // Set the show folder path (needed for disk-backed render cache).
+    // Must be called before renderAll() for disk caching to work.
+    void setShowFolder(const std::string& path);
+    const std::string& getShowFolder() const { return _showFolderPath; }
+#endif
 
     // --- GPU / render mode ---
 
@@ -473,6 +508,36 @@ private:
     // Separate cache for per-model sidebar renders — not cleared by renderFrame().
     mutable std::mutex _sidebarCacheMutex;
     mutable std::map<std::string, FrameBuffer> _sidebarCache;
+
+#ifdef XLIGHTS_NATIVE
+    // --- EffectEngineListener overrides (native build only) ---
+    void onEffectCreated(const EffectEvent& event) override;
+    void onEffectDeleted(const EffectEvent& event) override;
+    void onEffectMoved(const EffectEvent& event) override;
+    void onEffectSettingChanged(const EffectEvent& event) override;
+    void onEffectPaletteChanged(const EffectEvent& event) override;
+    void onEffectTypeChanged(const EffectEvent& event) override;
+
+    // --- Dirty tracking state ---
+    std::set<std::string> _dirtyModels;
+    std::atomic<bool> _allDirty{true};
+    mutable std::mutex _dirtyMutex;
+    std::map<std::string, std::pair<uint32_t, uint32_t>> _modelChannelRanges;
+    EffectEngine* _connectedEffectEngine = nullptr;
+    std::string resolveModelNameFromEvent(const EffectEvent& event);
+
+    // --- Show folder path and disk render cache ---
+    std::string _showFolderPath;
+    std::unique_ptr<DiskRenderCache> _diskCache;
+
+    // --- Background render queue (Phase 4) ---
+    std::unique_ptr<BackgroundRenderQueue> _bgRenderQueue;
+    // Dedicated coordinator for background rendering — isolated from
+    // the batch (_coordinator) and live preview (_liveCoordinator) paths.
+    std::unique_ptr<NativeRenderCoordinator> _bgCoordinator;
+    std::unique_ptr<IRenderContext> _bgContext;
+    void ensureBackgroundRenderQueue();
+#endif
 };
 
 } // namespace xlEngine

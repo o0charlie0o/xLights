@@ -9,6 +9,7 @@
  **************************************************************/
 
 #include "NativeRenderCoordinator.h"
+#include "DiskRenderCache.h"
 #include "NativeSequenceData.h"
 #include "NativeRenderBuffer.h"
 #include "NativeDrawingContext.h"
@@ -662,81 +663,57 @@ bool NativeRenderCoordinator::renderAll(NativeSequenceData& output) {
 bool NativeRenderCoordinator::renderRange(
     int startMS, int endMS, NativeSequenceData& output)
 {
-    if (!_effectProvider || !_modelProvider || !_context) return false;
+    return renderAllFrames(startMS, endMS, output);
+}
 
-    // Ensure only one render at a time
-    bool expected = false;
-    if (!_rendering.compare_exchange_strong(expected, true)) return false;
+bool NativeRenderCoordinator::renderModels(
+    const std::vector<std::string>& modelNames, NativeSequenceData& output)
+{
+    if (!_context || modelNames.empty()) return true;
 
-    _abort.store(false);
-    _progress.store(0.0f);
+    // Use renderAllFrames but with a filtered model set.
+    // We temporarily override _skippedModels to skip everything EXCEPT the
+    // requested models, then run the full frame loop.
+    //
+    // The renderAllFrames path in preparePersistentJobs will only create jobs
+    // for models in modelNames that have effects. Models NOT in modelNames
+    // won't be rendered because we add them to _skippedModels.
 
-    int frameTimeMS = _context->getFrameTimeMS();
-    if (frameTimeMS <= 0) frameTimeMS = 50;
-
-    auto jobs = buildModelJobs();
-    if (jobs.empty()) {
-        _rendering.store(false);
-        std::lock_guard<std::mutex> lock(_listenerMutex);
-        if (_listener) _listener->onRenderComplete(false);
-        return true;
-    }
-
-    // Build render dependency tiers. Jobs within a tier have no channel
-    // overlap and can run in parallel. Tiers execute sequentially so that
-    // models sharing channels (groups + members, overlapping ranges) render
-    // in deterministic order matching legacy element precedence.
-    auto tiers = buildRenderTiers(jobs);
-
-    int totalModels = static_cast<int>(jobs.size());
-    std::atomic<int> modelsComplete{0};
-
-    unsigned int maxThreads = std::max(1u, std::thread::hardware_concurrency());
-
-    for (const auto& tierIndices : tiers) {
-        if (_abort.load()) break;
-
-        // Dispatch all jobs in this tier in parallel
-        unsigned int numThreads = std::min(
-            static_cast<unsigned int>(tierIndices.size()), maxThreads);
-
-        std::atomic<size_t> nextInTier{0};
-        std::vector<std::thread> threads;
-        threads.reserve(numThreads);
-
-        for (unsigned int t = 0; t < numThreads; ++t) {
-            threads.emplace_back([&]() {
-                size_t localIdx;
-                while ((localIdx = nextInTier.fetch_add(1)) < tierIndices.size()) {
-                    if (_abort.load()) return;
-
-                    size_t jobIdx = tierIndices[localIdx];
-                    renderModel(jobs[jobIdx], startMS, endMS, output);
-
-                    int completed = modelsComplete.fetch_add(1) + 1;
-                    float pct = static_cast<float>(completed) /
-                                static_cast<float>(totalModels);
-                    _progress.store(pct);
-                    std::lock_guard<std::mutex> lock(_listenerMutex);
-                    if (_listener) {
-                        _listener->onRenderProgress(pct * 100.0f, completed, totalModels);
-                    }
-                }
-            });
-        }
-
-        for (auto& t : threads) t.join();
-    }
-
-    bool wasCancelled = _abort.load();
-    _rendering.store(false);
-
+    // Save and clear existing skipped models, then add all non-dirty models
+    std::set<std::string> savedSkipped;
     {
-        std::lock_guard<std::mutex> lock(_listenerMutex);
-        if (_listener) _listener->onRenderComplete(wasCancelled);
+        std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+        savedSkipped = _skippedModels;
+        _skippedModels.clear();
+        _persistentJobs.clear(); // force re-creation of jobs for dirty models
+
+        // Build a set of models we want to render
+        std::set<std::string> targetModels(modelNames.begin(), modelNames.end());
+
+        // Get all physical model names and skip those not in our target set
+        auto allNames = _modelProvider->getModelNames();
+        for (const auto& name : allNames) {
+            auto attrs = _modelProvider->getModelAttributes(name);
+            auto displayAs = attrs.find("DisplayAs");
+            if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+            if (targetModels.find(name) == targetModels.end()) {
+                _skippedModels.insert(name);
+            }
+        }
     }
 
-    return !wasCancelled;
+    double duration = _context->getSequenceDuration();
+    int endMS = static_cast<int>(duration * 1000.0);
+    bool result = renderAllFrames(0, endMS, output);
+
+    // Restore skipped models state
+    {
+        std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+        _skippedModels = savedSkipped;
+        // Don't clear _persistentJobs here — they can be reused
+    }
+
+    return result;
 }
 
 RenderedFrame NativeRenderCoordinator::renderModelFrame(
@@ -1140,6 +1117,260 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
 }
 
 // ---------------------------------------------------------------------------
+// Shared job preparation (used by both live preview and batch rendering)
+// ---------------------------------------------------------------------------
+
+void NativeRenderCoordinator::preparePersistentJobs(
+    const std::vector<std::string>& modelNames,
+    std::vector<PreparedModel>& physicalJobs,
+    std::vector<std::string>& submodelNames)
+{
+    // Caller must hold _stateMutex.
+
+    // Build group membership map once per render pass (O(elements) scan, then O(1) lookups).
+    if (!_groupMapBuilt) {
+        buildGroupMembershipMap();
+    }
+
+    double geomTotalUS = 0, groupLookupTotalUS = 0, maskTotalUS = 0, bufferCreateTotalUS = 0;
+    int newJobsCreated = 0, existingJobsReused = 0;
+
+    // Collect jobs that need submodel mask computation for parallel execution.
+    struct PendingMask { std::string modelName; std::string groupName; };
+    std::vector<PendingMask> pendingMaskJobs;
+
+    for (size_t i = 0; i < modelNames.size(); ++i) {
+        const auto& name = modelNames[i];
+
+        // Skip models known to have no effects
+        if (_skippedModels.count(name)) continue;
+
+        auto it = _persistentJobs.find(name);
+        if (it == _persistentJobs.end()) {
+            auto tGeom0 = std::chrono::steady_clock::now();
+            ModelGeometry geom = extractGeometry(name);
+            auto tGeom1 = std::chrono::steady_clock::now();
+            geomTotalUS += std::chrono::duration<double, std::micro>(tGeom1 - tGeom0).count();
+
+            if (geom.bufferWi <= 0 || geom.bufferHt <= 0) {
+                _skippedModels.insert(name);
+                continue;
+            }
+
+            size_t ownElemIdx = _effectProvider->getElementIndex(name);
+            bool hasOwnEffects = false;
+            size_t ownLayerCount = 0;
+            if (ownElemIdx != SIZE_MAX) {
+                ElementInfo info;
+                if (_effectProvider->getElement(ownElemIdx, info)) {
+                    hasOwnEffects = (info.effectCount > 0);
+                    ownLayerCount = info.effectLayerCount;
+                }
+            }
+
+            size_t groupIdx = SIZE_MAX;
+            size_t groupLayerCount = 0;
+            std::string matchedGroupName;
+            {
+                auto tGrp0 = std::chrono::steady_clock::now();
+                // O(1) lookup via pre-built group membership map
+                auto grpIt = _modelToGroupIdx.find(name);
+                size_t gIdx = (grpIt != _modelToGroupIdx.end()) ? grpIt->second : SIZE_MAX;
+                if (gIdx != SIZE_MAX) {
+                    ElementInfo groupInfo;
+                    if (_effectProvider->getElement(gIdx, groupInfo)) {
+                        groupIdx = gIdx;
+                        groupLayerCount = groupInfo.effectLayerCount;
+                        matchedGroupName = groupInfo.name;
+                    }
+                }
+                auto tGrp1 = std::chrono::steady_clock::now();
+                groupLookupTotalUS += std::chrono::duration<double, std::micro>(tGrp1 - tGrp0).count();
+            }
+
+            if (!hasOwnEffects && groupIdx == SIZE_MAX) {
+                _skippedModels.insert(name);
+                continue;
+            }
+
+            size_t elemIdx;
+            size_t totalLayerCount;
+            if (groupIdx != SIZE_MAX && hasOwnEffects) {
+                elemIdx = ownElemIdx;
+                totalLayerCount = groupLayerCount + ownLayerCount;
+            } else if (groupIdx != SIZE_MAX) {
+                elemIdx = groupIdx;
+                totalLayerCount = groupLayerCount;
+            } else {
+                elemIdx = ownElemIdx;
+                totalLayerCount = ownLayerCount;
+            }
+            if (totalLayerCount == 0) totalLayerCount = 1;
+
+            ModelJob job;
+            job.elementIndex = elemIdx;
+            job.layerCount = totalLayerCount;
+            job.groupElementIndex = groupIdx;
+            job.groupLayerCount = groupLayerCount;
+            {
+                auto tBuf0 = std::chrono::steady_clock::now();
+                job.pixelBuffer = std::make_unique<NativePixelBuffer>(
+                    _context, geom.bufferWi, geom.bufferHt,
+                    static_cast<int>(totalLayerCount), geom.nodes);
+                job.pixelBuffer->setDimmingCurve(
+                    buildDimmingCurve(_modelProvider->getDimmingInfo(name)));
+                auto tBuf1 = std::chrono::steady_clock::now();
+                bufferCreateTotalUS += std::chrono::duration<double, std::micro>(tBuf1 - tBuf0).count();
+            }
+            job.geometry = std::move(geom);
+
+            auto [inserted, _] = _persistentJobs.emplace(name, std::move(job));
+            it = inserted;
+            newJobsCreated++;
+
+            // Defer submodel mask computation for parallel execution below.
+            if (!matchedGroupName.empty() && name.find('/') == std::string::npos) {
+                pendingMaskJobs.push_back({name, matchedGroupName});
+            }
+        } else {
+            existingJobsReused++;
+        }
+
+        physicalJobs.push_back({i, &it->second, false});
+    }
+
+    // Compute submodel masks in parallel using GCD dispatch_apply.
+    if (!pendingMaskJobs.empty()) {
+        auto tMask0 = std::chrono::steady_clock::now();
+        IModelProvider* modelProv = _modelProvider;
+
+        dispatch_apply(pendingMaskJobs.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                       ^(size_t idx) {
+            const auto& pm = pendingMaskJobs[idx];
+            auto groupAttrs = modelProv->getModelAttributes(pm.groupName);
+            auto membersIt = groupAttrs.find("models");
+            if (membersIt == groupAttrs.end()) return;
+
+            bool directMatch = false;
+            std::vector<std::string> subRefs;
+            std::set<std::string> visited;
+            visited.insert(pm.groupName);
+            collectSubmodelRefsRecursive(pm.modelName, membersIt->second,
+                                         modelProv, subRefs, directMatch, visited);
+            if (directMatch || subRefs.empty()) return;
+
+            auto parentAttrs = modelProv->getModelAttributes(pm.modelName);
+            auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+            std::set<std::pair<int,int>> validPos;
+            for (const auto& ref : subRefs) {
+                size_t sl = ref.find('/');
+                std::string subName = ref.substr(sl + 1);
+                auto subAttrs = modelProv->getSubmodelAttributes(pm.modelName, subName);
+                if (!subAttrs.empty()) {
+                    auto nodeIndices = getSubmodelNodeIndices(
+                        static_cast<int>(allParentNodes.size()), subAttrs);
+                    for (int idx2 : nodeIndices) {
+                        validPos.insert({allParentNodes[idx2].bufX,
+                                         allParentNodes[idx2].bufY});
+                    }
+                }
+            }
+            if (!validPos.empty()) {
+                // Each job writes to its own persistent job entry — no contention.
+                auto jIt = _persistentJobs.find(pm.modelName);
+                if (jIt != _persistentJobs.end()) {
+                    jIt->second.hasSubmodelMask = true;
+                    jIt->second.submodelMaskPositions = validPos;
+                    jIt->second.pixelBuffer->setSubmodelMask(validPos);
+                }
+            }
+        });
+
+        auto tMask1 = std::chrono::steady_clock::now();
+        maskTotalUS = std::chrono::duration<double, std::micro>(tMask1 - tMask0).count();
+    }
+
+    printf("[RENDER_PERF] preparePersistentJobs: %zu models, %d new / %d reused\n",
+           modelNames.size(), newJobsCreated, existingJobsReused);
+    if (newJobsCreated > 0) {
+        printf("[RENDER_PERF]   extractGeometry: %.1f ms\n", geomTotalUS / 1000.0);
+        printf("[RENDER_PERF]   findParentGroup: %.1f ms\n", groupLookupTotalUS / 1000.0);
+        printf("[RENDER_PERF]   bufferCreate:    %.1f ms\n", bufferCreateTotalUS / 1000.0);
+        printf("[RENDER_PERF]   submodelMask:    %.1f ms (parallel, %zu jobs)\n", maskTotalUS / 1000.0, pendingMaskJobs.size());
+    }
+
+    // Prepare submodel/strand jobs for models that need overlay compositing.
+    // Scan all physical models and set hasSubmodels flag when submodels are found.
+    for (auto& pm : physicalJobs) {
+        const auto& name = modelNames[pm.index];
+        ModelJob& parentJob = *pm.job;
+
+        size_t elCnt = _effectProvider->getElementCount();
+        for (size_t ei = 0; ei < elCnt; ++ei) {
+            ElementInfo subInfo;
+            if (!_effectProvider->getElement(ei, subInfo)) continue;
+            if (subInfo.type != SequenceElementType::Submodel &&
+                subInfo.type != SequenceElementType::Strand) continue;
+            if (subInfo.renderDisabled || subInfo.effectCount == 0) continue;
+            if (subInfo.parentElementName != name) continue;
+            pm.hasSubmodels = true;
+
+            if (_persistentJobs.find(subInfo.name) != _persistentJobs.end()) {
+                submodelNames.push_back(subInfo.name);
+                continue;
+            }
+
+            size_t slash = subInfo.name.find('/');
+            if (slash == std::string::npos) continue;
+            std::string pName = subInfo.name.substr(0, slash);
+
+            ModelGeometry subGeom;
+            if (subInfo.type == SequenceElementType::Strand && subInfo.strandIndex >= 0) {
+                auto pAttrs = _modelProvider->getModelAttributes(pName);
+                auto pNodes = generateNodesFromAttributes(pAttrs);
+                auto sNodes = filterNodesToStrand(pNodes, subInfo.strandIndex, pAttrs);
+                if (sNodes.empty()) continue;
+                subGeom.name = subInfo.name;
+                int mBX = 0, mBY = 0;
+                for (const auto& nc : sNodes) { if (nc.bufX > mBX) mBX = nc.bufX; if (nc.bufY > mBY) mBY = nc.bufY; }
+                subGeom.bufferWi = mBX + 1;
+                subGeom.bufferHt = mBY + 1;
+                subGeom.startChannel = parentJob.geometry.startChannel;
+                int cpn = 3;
+                auto stIt = pAttrs.find("StringType");
+                if (stIt != pAttrs.end()) {
+                    const std::string& st = stIt->second;
+                    if (st.find("RGBW") != std::string::npos || st.find("WRGB") != std::string::npos || st.find("4 Channel") != std::string::npos) cpn = 4;
+                    else if (st.find("Single Color") != std::string::npos) cpn = 1;
+                }
+                for (const auto& nc : sNodes) {
+                    NativeNodeInfo nd; nd.bufX = nc.bufX; nd.bufY = nc.bufY;
+                    int ci = (nc.parentNodeIndex >= 0) ? nc.parentNodeIndex : static_cast<int>(&nc - &sNodes[0]);
+                    nd.actChannel = subGeom.startChannel + ci * cpn; nd.channelsPerNode = cpn;
+                    subGeom.nodes.push_back(nd);
+                }
+                subGeom.nodeCount = static_cast<uint32_t>(subGeom.nodes.size());
+                subGeom.channelCount = subGeom.nodeCount * cpn;
+            } else {
+                subGeom = extractGeometry(subInfo.name);
+            }
+            if (subGeom.bufferWi <= 0 || subGeom.bufferHt <= 0) continue;
+
+            size_t sLC = subInfo.effectLayerCount; if (sLC == 0) sLC = 1;
+            ModelJob sj;
+            sj.elementIndex = ei; sj.layerCount = sLC; sj.isSubmodelJob = true;
+            sj.parentModelName = pName; sj.strandIndex = subInfo.strandIndex;
+            sj.pixelBuffer = std::make_unique<NativePixelBuffer>(
+                _context, subGeom.bufferWi, subGeom.bufferHt, static_cast<int>(sLC), subGeom.nodes);
+            sj.pixelBuffer->setDimmingCurve(buildDimmingCurve(_modelProvider->getDimmingInfo(pName)));
+            sj.geometry = std::move(subGeom);
+            _persistentJobs.emplace(subInfo.name, std::move(sj));
+            submodelNames.push_back(subInfo.name);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Parallel batch rendering for live preview
 // ---------------------------------------------------------------------------
 
@@ -1151,202 +1382,20 @@ std::vector<RenderedFrame> NativeRenderCoordinator::renderAllModelsStateful(
     if (!_effectProvider || !_modelProvider || !_context) return results;
 
     // Phase 1: Prepare all jobs under _stateMutex.
-    // This is typically fast (map lookups for existing jobs, geometry extraction
-    // only on the first frame). We collect pointers to jobs for phase 2.
-    struct PreparedModel {
-        size_t index;           // index into modelNames / results
-        ModelJob* job;          // pointer into _persistentJobs
-        bool hasSubmodels;      // needs submodel compositing after render
-    };
     std::vector<PreparedModel> prepared;
     prepared.reserve(modelNames.size());
+    std::vector<std::string> submodelNames;
 
     {
         std::lock_guard<std::recursive_mutex> lock(_stateMutex);
 
+        // Initialize result metadata
         for (size_t i = 0; i < modelNames.size(); ++i) {
-            const auto& name = modelNames[i];
-            results[i].modelName = name;
+            results[i].modelName = modelNames[i];
             results[i].timeMS = timeMS;
-
-            // Skip models known to have no effects
-            if (_skippedModels.count(name)) continue;
-
-            auto it = _persistentJobs.find(name);
-            if (it == _persistentJobs.end()) {
-                // Create the job — same logic as renderModelFrameStateful
-                ModelGeometry geom = extractGeometry(name);
-                if (geom.bufferWi <= 0 || geom.bufferHt <= 0) {
-                    _skippedModels.insert(name);
-                    continue;
-                }
-
-                size_t ownElemIdx = _effectProvider->getElementIndex(name);
-                bool hasOwnEffects = false;
-                size_t ownLayerCount = 0;
-                if (ownElemIdx != SIZE_MAX) {
-                    ElementInfo info;
-                    if (_effectProvider->getElement(ownElemIdx, info)) {
-                        hasOwnEffects = (info.effectCount > 0);
-                        ownLayerCount = info.effectLayerCount;
-                    }
-                }
-
-                size_t groupIdx = SIZE_MAX;
-                size_t groupLayerCount = 0;
-                std::string matchedGroupName;
-                {
-                    size_t gIdx = findParentGroupElement(name);
-                    if (gIdx != SIZE_MAX) {
-                        ElementInfo groupInfo;
-                        if (_effectProvider->getElement(gIdx, groupInfo)) {
-                            groupIdx = gIdx;
-                            groupLayerCount = groupInfo.effectLayerCount;
-                            matchedGroupName = groupInfo.name;
-                        }
-                    }
-                }
-
-                if (!hasOwnEffects && groupIdx == SIZE_MAX) {
-                    _skippedModels.insert(name);
-                    continue;
-                }
-
-                size_t elemIdx;
-                size_t totalLayerCount;
-                if (groupIdx != SIZE_MAX && hasOwnEffects) {
-                    elemIdx = ownElemIdx;
-                    totalLayerCount = groupLayerCount + ownLayerCount;
-                } else if (groupIdx != SIZE_MAX) {
-                    elemIdx = groupIdx;
-                    totalLayerCount = groupLayerCount;
-                } else {
-                    elemIdx = ownElemIdx;
-                    totalLayerCount = ownLayerCount;
-                }
-                if (totalLayerCount == 0) totalLayerCount = 1;
-
-                ModelJob job;
-                job.elementIndex = elemIdx;
-                job.layerCount = totalLayerCount;
-                job.groupElementIndex = groupIdx;
-                job.groupLayerCount = groupLayerCount;
-                job.pixelBuffer = std::make_unique<NativePixelBuffer>(
-                    _context, geom.bufferWi, geom.bufferHt,
-                    static_cast<int>(totalLayerCount), geom.nodes);
-                job.pixelBuffer->setDimmingCurve(
-                    buildDimmingCurve(_modelProvider->getDimmingInfo(name)));
-                job.geometry = std::move(geom);
-
-                // Submodel mask computation (same as renderModelFrameStateful)
-                if (!matchedGroupName.empty() && name.find('/') == std::string::npos) {
-                    auto groupAttrs = _modelProvider->getModelAttributes(matchedGroupName);
-                    auto membersIt = groupAttrs.find("models");
-                    if (membersIt != groupAttrs.end()) {
-                        bool directMatch = false;
-                        std::vector<std::string> subRefs;
-                        std::set<std::string> visited;
-                        visited.insert(matchedGroupName);
-                        collectSubmodelRefsRecursive(name, membersIt->second,
-                                                     _modelProvider, subRefs, directMatch, visited);
-                        if (!directMatch && !subRefs.empty()) {
-                            auto parentAttrs = _modelProvider->getModelAttributes(name);
-                            auto allParentNodes = generateNodesFromAttributes(parentAttrs);
-                            std::set<std::pair<int,int>> validPos;
-                            for (const auto& ref : subRefs) {
-                                size_t sl = ref.find('/');
-                                std::string subName = ref.substr(sl + 1);
-                                auto subAttrs = _modelProvider->getSubmodelAttributes(name, subName);
-                                if (!subAttrs.empty()) {
-                                    auto nodeIndices = getSubmodelNodeIndices(
-                                        static_cast<int>(allParentNodes.size()), subAttrs);
-                                    for (int idx : nodeIndices) {
-                                        validPos.insert({allParentNodes[idx].bufX,
-                                                         allParentNodes[idx].bufY});
-                                    }
-                                }
-                            }
-                            if (!validPos.empty()) {
-                                job.hasSubmodelMask = true;
-                                job.submodelMaskPositions = validPos;
-                                job.pixelBuffer->setSubmodelMask(validPos);
-                            }
-                        }
-                    }
-                }
-
-                auto [inserted, _] = _persistentJobs.emplace(name, std::move(job));
-                it = inserted;
-            }
-
-            prepared.push_back({i, &it->second, name.find('/') == std::string::npos});
         }
 
-        // Also prepare submodel/strand jobs that we'll need in phase 3.
-        // This avoids needing _stateMutex during the submodel compositing phase.
-        for (const auto& pm : prepared) {
-            if (!pm.hasSubmodels) continue;
-            const auto& name = modelNames[pm.index];
-            ModelJob& parentJob = *pm.job;
-
-            size_t elCnt = _effectProvider->getElementCount();
-            for (size_t ei = 0; ei < elCnt; ++ei) {
-                ElementInfo subInfo;
-                if (!_effectProvider->getElement(ei, subInfo)) continue;
-                if (subInfo.type != SequenceElementType::Submodel &&
-                    subInfo.type != SequenceElementType::Strand) continue;
-                if (subInfo.renderDisabled || subInfo.effectCount == 0) continue;
-                if (subInfo.parentElementName != name) continue;
-
-                if (_persistentJobs.find(subInfo.name) != _persistentJobs.end()) continue;
-
-                size_t slash = subInfo.name.find('/');
-                if (slash == std::string::npos) continue;
-                std::string pName = subInfo.name.substr(0, slash);
-
-                ModelGeometry subGeom;
-                if (subInfo.type == SequenceElementType::Strand && subInfo.strandIndex >= 0) {
-                    auto pAttrs = _modelProvider->getModelAttributes(pName);
-                    auto pNodes = generateNodesFromAttributes(pAttrs);
-                    auto sNodes = filterNodesToStrand(pNodes, subInfo.strandIndex, pAttrs);
-                    if (sNodes.empty()) continue;
-                    subGeom.name = subInfo.name;
-                    int mBX = 0, mBY = 0;
-                    for (const auto& nc : sNodes) { if (nc.bufX > mBX) mBX = nc.bufX; if (nc.bufY > mBY) mBY = nc.bufY; }
-                    subGeom.bufferWi = mBX + 1;
-                    subGeom.bufferHt = mBY + 1;
-                    subGeom.startChannel = parentJob.geometry.startChannel;
-                    int cpn = 3;
-                    auto stIt = pAttrs.find("StringType");
-                    if (stIt != pAttrs.end()) {
-                        const std::string& st = stIt->second;
-                        if (st.find("RGBW") != std::string::npos || st.find("WRGB") != std::string::npos || st.find("4 Channel") != std::string::npos) cpn = 4;
-                        else if (st.find("Single Color") != std::string::npos) cpn = 1;
-                    }
-                    for (const auto& nc : sNodes) {
-                        NativeNodeInfo nd; nd.bufX = nc.bufX; nd.bufY = nc.bufY;
-                        int ci = (nc.parentNodeIndex >= 0) ? nc.parentNodeIndex : static_cast<int>(&nc - &sNodes[0]);
-                        nd.actChannel = subGeom.startChannel + ci * cpn; nd.channelsPerNode = cpn;
-                        subGeom.nodes.push_back(nd);
-                    }
-                    subGeom.nodeCount = static_cast<uint32_t>(subGeom.nodes.size());
-                    subGeom.channelCount = subGeom.nodeCount * cpn;
-                } else {
-                    subGeom = extractGeometry(subInfo.name);
-                }
-                if (subGeom.bufferWi <= 0 || subGeom.bufferHt <= 0) continue;
-
-                size_t sLC = subInfo.effectLayerCount; if (sLC == 0) sLC = 1;
-                ModelJob sj;
-                sj.elementIndex = ei; sj.layerCount = sLC; sj.isSubmodelJob = true;
-                sj.parentModelName = pName; sj.strandIndex = subInfo.strandIndex;
-                sj.pixelBuffer = std::make_unique<NativePixelBuffer>(
-                    _context, subGeom.bufferWi, subGeom.bufferHt, static_cast<int>(sLC), subGeom.nodes);
-                sj.pixelBuffer->setDimmingCurve(buildDimmingCurve(_modelProvider->getDimmingInfo(pName)));
-                sj.geometry = std::move(subGeom);
-                _persistentJobs.emplace(subInfo.name, std::move(sj));
-            }
-        }
+        preparePersistentJobs(modelNames, prepared, submodelNames);
     }
     // _stateMutex released — all jobs are now in _persistentJobs.
 
@@ -1452,10 +1501,379 @@ std::vector<RenderedFrame> NativeRenderCoordinator::renderAllModelsStateful(
     return results;
 }
 
+// ---------------------------------------------------------------------------
+// Unified batch rendering: per-frame-all-models (same approach as live preview)
+// ---------------------------------------------------------------------------
+
+bool NativeRenderCoordinator::renderAllFrames(
+    int startMS, int endMS, NativeSequenceData& output)
+{
+    if (!_effectProvider || !_modelProvider || !_context) return false;
+
+    // Ensure only one render at a time
+    bool expected = false;
+    if (!_rendering.compare_exchange_strong(expected, true)) return false;
+
+    _abort.store(false);
+    _progress.store(0.0f);
+    _batchMode = true;
+
+    auto wallStart = std::chrono::steady_clock::now();
+
+    int frameTimeMS = _context->getFrameTimeMS();
+    if (frameTimeMS <= 0) frameTimeMS = 50;
+
+    // Get all physical model names from provider (skip groups)
+    auto t0 = std::chrono::steady_clock::now();
+    auto allModelNames = _modelProvider->getModelNames();
+    std::vector<std::string> modelNames;
+    modelNames.reserve(allModelNames.size());
+    for (const auto& name : allModelNames) {
+        auto attrs = _modelProvider->getModelAttributes(name);
+        auto displayAs = attrs.find("DisplayAs");
+        if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+        modelNames.push_back(name);
+    }
+    auto t1 = std::chrono::steady_clock::now();
+    printf("[RENDER_PERF] model name collection: %.1f ms (%zu all, %zu physical)\n",
+           std::chrono::duration<double, std::milli>(t1 - t0).count(),
+           allModelNames.size(), modelNames.size());
+
+    // Prepare all persistent jobs under _stateMutex
+    std::vector<PreparedModel> physicalJobs;
+    physicalJobs.reserve(modelNames.size());
+    std::vector<std::string> submodelNames;
+
+    {
+        auto t2 = std::chrono::steady_clock::now();
+        std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+        preparePersistentJobs(modelNames, physicalJobs, submodelNames);
+        auto t3 = std::chrono::steady_clock::now();
+        printf("[RENDER_PERF] preparePersistentJobs: %.1f ms (%zu jobs, %zu submodels)\n",
+               std::chrono::duration<double, std::milli>(t3 - t2).count(),
+               physicalJobs.size(), submodelNames.size());
+    }
+
+    if (physicalJobs.empty()) {
+        _rendering.store(false);
+        std::lock_guard<std::mutex> lock(_listenerMutex);
+        if (_listener) _listener->onRenderComplete(false);
+        return true;
+    }
+
+    // Count models that actually have effects vs those that are no-ops
+    int modelsWithEffects = 0;
+    int modelsWithGroupOnly = 0;
+    int modelsWithOwnEffects = 0;
+    for (const auto& pm : physicalJobs) {
+        bool hasGroup = (pm.job->groupElementIndex != SIZE_MAX);
+        bool hasOwn = (pm.job->elementIndex != pm.job->groupElementIndex ||
+                       !hasGroup);
+        if (hasGroup && !hasOwn) modelsWithGroupOnly++;
+        else if (hasOwn) modelsWithOwnEffects++;
+        modelsWithEffects++;
+    }
+    printf("[RENDER_PERF] jobs breakdown: %d total, %d own-effects, %d group-only, %zu skipped\n",
+           modelsWithEffects, modelsWithOwnEffects, modelsWithGroupOnly,
+           _skippedModels.size());
+
+    int totalFrames = (endMS - startMS + frameTimeMS - 1) / frameTimeMS;
+    if (totalFrames <= 0) totalFrames = 1;
+    int framesComplete = 0;
+
+    int mergedCount = 0, deferredCount = 0;
+    for (const auto& pm : physicalJobs) {
+        if (pm.hasSubmodels) deferredCount++; else mergedCount++;
+    }
+    printf("[RENDER_PERF] Unified render: %zu physical (%d merged, %d deferred), %zu submodels, %d frames\n",
+           physicalJobs.size(), mergedCount, deferredCount, submodelNames.size(), totalFrames);
+
+    // Enable batch mode on all pixel buffers: calcOutput() will only blend
+    // at node pixel positions, skipping the full buffer. This is safe because
+    // the batch path only reads node positions via getColors()/writeModelOutput().
+    for (auto& pm : physicalJobs) {
+        pm.job->pixelBuffer->setBatchMode(true);
+    }
+    for (const auto& subName : submodelNames) {
+        auto subIt = _persistentJobs.find(subName);
+        if (subIt != _persistentJobs.end()) {
+            subIt->second.pixelBuffer->setBatchMode(true);
+        }
+    }
+
+    // Cumulative timing accumulators (in microseconds)
+    double totalRenderUS = 0, totalSubmodelUS = 0, totalWriteUS = 0, totalProgressUS = 0;
+
+    // Per-model timing: track cumulative render time per model (first 100 frames sampled)
+    std::vector<double> perModelTotalUS(physicalJobs.size(), 0.0);
+    int sampledFrames = 0;
+    const int kSampleFrames = 100;
+
+    // Frame loop: sequential frame ordering (required for stateful effects)
+    for (int timeMS = startMS; timeMS < endMS; timeMS += frameTimeMS) {
+        if (_abort.load()) break;
+
+        int frameIndex = timeMS / frameTimeMS;
+        bool sampling = (sampledFrames < kSampleFrames);
+
+        // Phase 1+3 merged: Render and write channel data in one parallel pass.
+        // Models without submodels render → getColors → write in a single dispatch
+        // unit, keeping pixel data hot in L1 cache. Models with submodels only
+        // render here; their channel write happens after submodel compositing.
+        auto p1Start = std::chrono::steady_clock::now();
+
+        // Per-model timing storage (only during sampling)
+        __block std::vector<double> frameModelUS;
+        if (sampling) frameModelUS.resize(physicalJobs.size(), 0.0);
+
+        // Get frame pointer once — all models write to non-overlapping channel ranges
+        uint8_t* frameData = output.getFrame(static_cast<uint32_t>(frameIndex));
+        uint32_t numChannels = output.getNumChannels();
+
+#ifdef __APPLE__
+        dispatch_apply(physicalJobs.size(),
+            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+            ^(size_t idx) {
+                if (_abort.load()) return;
+                auto mStart = std::chrono::steady_clock::now();
+                renderModelAtTime(*physicalJobs[idx].job, timeMS);
+                // Write immediately if this model has no submodels to overlay
+                if (!physicalJobs[idx].hasSubmodels && frameData) {
+                    physicalJobs[idx].job->pixelBuffer->getColors(frameData, numChannels);
+                }
+                if (sampling) {
+                    auto mEnd = std::chrono::steady_clock::now();
+                    frameModelUS[idx] = std::chrono::duration<double, std::micro>(mEnd - mStart).count();
+                }
+            });
+#else
+        for (size_t idx = 0; idx < physicalJobs.size(); ++idx) {
+            if (_abort.load()) break;
+            auto mStart = std::chrono::steady_clock::now();
+            renderModelAtTime(*physicalJobs[idx].job, timeMS);
+            if (!physicalJobs[idx].hasSubmodels && frameData) {
+                physicalJobs[idx].job->pixelBuffer->getColors(frameData, numChannels);
+            }
+            if (sampling) {
+                auto mEnd = std::chrono::steady_clock::now();
+                frameModelUS[idx] = std::chrono::duration<double, std::micro>(mEnd - mStart).count();
+            }
+        }
+#endif
+        auto p1End = std::chrono::steady_clock::now();
+        totalRenderUS += std::chrono::duration<double, std::micro>(p1End - p1Start).count();
+
+        if (sampling) {
+            for (size_t idx = 0; idx < physicalJobs.size(); ++idx) {
+                perModelTotalUS[idx] += frameModelUS[idx];
+            }
+            sampledFrames++;
+        }
+
+        if (_abort.load()) break;
+
+        // Phase 2: Submodel compositing (serial per frame)
+        auto p2Start = std::chrono::steady_clock::now();
+        for (const auto& subName : submodelNames) {
+            auto subIt = _persistentJobs.find(subName);
+            if (subIt == _persistentJobs.end()) continue;
+            ModelJob& subJob = subIt->second;
+
+            renderModelAtTime(subJob, timeMS);
+
+            // Find parent job and composite onto parent's pixel buffer
+            auto parentIt = _persistentJobs.find(subJob.parentModelName);
+            if (parentIt == _persistentJobs.end()) continue;
+            ModelJob& parentJob = parentIt->second;
+
+            const auto& parentNds = parentJob.geometry.nodes;
+            const auto& subNds = subJob.geometry.nodes;
+            const uint8_t* subPx = subJob.pixelBuffer->getBlendedPixelData();
+            size_t subSz = subJob.pixelBuffer->getBlendedPixelDataSize();
+            if (!subPx || subSz == 0) continue;
+            uint8_t* parPx = const_cast<uint8_t*>(parentJob.pixelBuffer->getBlendedPixelData());
+            size_t parSz = parentJob.pixelBuffer->getBlendedPixelDataSize();
+            if (!parPx || parSz == 0) continue;
+            int subW = subJob.geometry.bufferWi;
+            int parW = parentJob.geometry.bufferWi;
+
+            std::unordered_map<uint32_t, std::pair<int,int>> chToPos;
+            for (const auto& pn : parentNds) chToPos[pn.actChannel] = {pn.bufX, pn.bufY};
+
+            for (size_t ni = 0; ni < subNds.size(); ++ni) {
+                auto pit = chToPos.find(subNds[ni].actChannel);
+                if (pit == chToPos.end()) continue;
+                size_t si = (static_cast<size_t>(subNds[ni].bufY) * subW + subNds[ni].bufX) * 4;
+                if (si + 3 >= subSz) continue;
+                if (!subPx[si] && !subPx[si+1] && !subPx[si+2]) continue;
+                size_t pi2 = (static_cast<size_t>(pit->second.second) * parW + pit->second.first) * 4;
+                if (pi2 + 3 >= parSz) continue;
+                parPx[pi2] = subPx[si]; parPx[pi2+1] = subPx[si+1];
+                parPx[pi2+2] = subPx[si+2]; parPx[pi2+3] = subPx[si+3];
+            }
+        }
+        auto p2End = std::chrono::steady_clock::now();
+        totalSubmodelUS += std::chrono::duration<double, std::micro>(p2End - p2Start).count();
+
+        // Phase 3: Write channel data for models that had submodel overlays,
+        // plus submodel channel writes. Models without submodels already wrote
+        // their channels in the merged Phase 1+3 above.
+        auto p3Start = std::chrono::steady_clock::now();
+        if (frameData) {
+            for (const auto& pm : physicalJobs) {
+                if (pm.hasSubmodels) {
+                    pm.job->pixelBuffer->getColors(frameData, numChannels);
+                }
+            }
+            for (const auto& subName : submodelNames) {
+                auto subIt = _persistentJobs.find(subName);
+                if (subIt == _persistentJobs.end()) continue;
+                ModelJob& subJob = subIt->second;
+                auto parentIt = _persistentJobs.find(subJob.parentModelName);
+                if (parentIt == _persistentJobs.end()) continue;
+                writeSubmodelChannelOutput(subJob, parentIt->second, frameIndex, output);
+            }
+        }
+        auto p3End = std::chrono::steady_clock::now();
+        totalWriteUS += std::chrono::duration<double, std::micro>(p3End - p3Start).count();
+
+        // Progress reporting
+        auto p4Start = std::chrono::steady_clock::now();
+        framesComplete++;
+        float pct = static_cast<float>(framesComplete) / static_cast<float>(totalFrames);
+        _progress.store(pct);
+        {
+            std::lock_guard<std::mutex> lock(_listenerMutex);
+            if (_listener) {
+                _listener->onRenderProgress(pct * 100.0f, framesComplete, totalFrames);
+            }
+        }
+        auto p4End = std::chrono::steady_clock::now();
+        totalProgressUS += std::chrono::duration<double, std::micro>(p4End - p4Start).count();
+    }
+
+    auto wallEnd = std::chrono::steady_clock::now();
+    double wallMS = std::chrono::duration<double, std::milli>(wallEnd - wallStart).count();
+
+    // Print timing summary
+    printf("[RENDER_PERF] ====== Render All Timing Summary ======\n");
+    printf("[RENDER_PERF] Total wall time:        %.1f ms (%.2f s)\n", wallMS, wallMS / 1000.0);
+    printf("[RENDER_PERF] Frames rendered:         %d of %d\n", framesComplete, totalFrames);
+    if (framesComplete > 0) {
+        printf("[RENDER_PERF] Avg per frame:            %.2f ms\n", wallMS / framesComplete);
+        printf("[RENDER_PERF]   Phase 1+3 (render+write): %.1f ms total, %.2f ms/frame (%.1f%%)\n",
+               totalRenderUS / 1000.0, totalRenderUS / 1000.0 / framesComplete,
+               totalRenderUS / 1000.0 / wallMS * 100.0);
+        printf("[RENDER_PERF]   Phase 2 (submodel):      %.1f ms total, %.2f ms/frame (%.1f%%)\n",
+               totalSubmodelUS / 1000.0, totalSubmodelUS / 1000.0 / framesComplete,
+               totalSubmodelUS / 1000.0 / wallMS * 100.0);
+        printf("[RENDER_PERF]   Phase 3 (residual write): %.1f ms total, %.2f ms/frame (%.1f%%)\n",
+               totalWriteUS / 1000.0, totalWriteUS / 1000.0 / framesComplete,
+               totalWriteUS / 1000.0 / wallMS * 100.0);
+        printf("[RENDER_PERF]   Progress callbacks:      %.1f ms total, %.2f ms/frame (%.1f%%)\n",
+               totalProgressUS / 1000.0, totalProgressUS / 1000.0 / framesComplete,
+               totalProgressUS / 1000.0 / wallMS * 100.0);
+        double accountedMS = (totalRenderUS + totalSubmodelUS + totalWriteUS + totalProgressUS) / 1000.0;
+        printf("[RENDER_PERF]   Unaccounted overhead:    %.1f ms (%.1f%%)\n",
+               wallMS - accountedMS, (wallMS - accountedMS) / wallMS * 100.0);
+    }
+
+    // Print top 10 slowest models (from sampled frames)
+    if (sampledFrames > 0 && !physicalJobs.empty()) {
+        std::vector<size_t> indices(physicalJobs.size());
+        for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
+        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            return perModelTotalUS[a] > perModelTotalUS[b];
+        });
+        int topN = std::min(10, static_cast<int>(indices.size()));
+        printf("[RENDER_PERF] Top %d slowest models (avg over %d frames):\n", topN, sampledFrames);
+        for (int i = 0; i < topN; i++) {
+            size_t idx = indices[i];
+            double avgUS = perModelTotalUS[idx] / sampledFrames;
+            if (avgUS < 1.0) break; // skip sub-microsecond models
+            printf("[RENDER_PERF]   %2d. %-40s %.1f us/frame (%zu layers, %ux%u buf)\n",
+                   i + 1,
+                   physicalJobs[idx].job->geometry.name.c_str(),
+                   avgUS,
+                   physicalJobs[idx].job->layerCount,
+                   physicalJobs[idx].job->geometry.bufferWi,
+                   physicalJobs[idx].job->geometry.bufferHt);
+        }
+    }
+    printf("[RENDER_PERF] =====================================\n");
+
+    _batchMode = false;
+
+    // Finish any open disk cache write sessions.
+    if (_diskCache && !_diskWriteSessions.empty()) {
+        for (uint64_t hash : _diskWriteSessions) {
+            _diskCache->finishWriteSession(hash);
+        }
+        _diskWriteSessions.clear();
+
+        // Enforce max cache size (500 MB default).
+        static constexpr size_t MAX_CACHE_BYTES = 500ULL * 1024 * 1024;
+        _diskCache->enforceMaxSize(MAX_CACHE_BYTES);
+    }
+
+    bool wasCancelled = _abort.load();
+    _rendering.store(false);
+
+    // Clean up persistent state used only for batch rendering
+    {
+        std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+        _persistentJobs.clear();
+        _skippedModels.clear();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(_listenerMutex);
+        if (_listener) _listener->onRenderComplete(wasCancelled);
+    }
+
+    return !wasCancelled;
+}
+
+void NativeRenderCoordinator::writeSubmodelChannelOutput(
+    const ModelJob& subJob, const ModelJob& parentJob,
+    int frameIndex, NativeSequenceData& output)
+{
+    uint8_t* frameData = output.getFrame(static_cast<uint32_t>(frameIndex));
+    if (!frameData) return;
+
+    const uint8_t* subPx = subJob.pixelBuffer->getBlendedPixelData();
+    size_t subSz = subJob.pixelBuffer->getBlendedPixelDataSize();
+    if (!subPx || subSz == 0) return;
+
+    uint32_t numChannels = output.getNumChannels();
+    int subW = subJob.geometry.bufferWi;
+    const auto& subNds = subJob.geometry.nodes;
+
+    for (size_t ni = 0; ni < subNds.size(); ++ni) {
+        const auto& node = subNds[ni];
+        size_t si = (static_cast<size_t>(node.bufY) * subW + node.bufX) * 4;
+        if (si + 3 >= subSz) continue;
+        // Skip black pixels
+        if (!subPx[si] && !subPx[si+1] && !subPx[si+2]) continue;
+
+        uint32_t ch = node.actChannel;
+        if (ch + node.channelsPerNode > numChannels) continue;
+
+        // Write RGB(W) channels using color order mapping
+        for (int c = 0; c < node.channelsPerNode && c < 4; ++c) {
+            uint8_t srcComponent = subPx[si + node.colorOrder[c]];
+            frameData[ch + c] = srcComponent;
+        }
+    }
+}
+
 void NativeRenderCoordinator::resetPersistentState() {
     std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.clear();
     _skippedModels.clear();
+    _geometryCache.clear();
+    _modelToGroupIdx.clear();
+    _groupMapBuilt = false;
     {
         std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
         _renderCache.clear();
@@ -1466,6 +1884,7 @@ void NativeRenderCoordinator::resetPersistentState(const std::string& modelName)
     std::lock_guard<std::recursive_mutex> lock(_stateMutex);
     _persistentJobs.erase(modelName);
     _skippedModels.erase(modelName);
+    _geometryCache.erase(modelName);
     {
         std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
         _renderCache.clearModel(modelName);
@@ -1475,6 +1894,10 @@ void NativeRenderCoordinator::resetPersistentState(const std::string& modelName)
 void NativeRenderCoordinator::invalidateAllCaches() {
     std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
     _renderCache.clear();
+    _diskWriteSessions.clear();
+    if (_diskCache) {
+        _diskCache->clearAll();
+    }
 }
 
 void NativeRenderCoordinator::invalidateCache(const std::string& modelName) {
@@ -1494,13 +1917,9 @@ float NativeRenderCoordinator::getProgress() const {
     return _progress.load();
 }
 
-// =========================================================================
-// Job building
-// =========================================================================
-
-std::vector<NativeRenderCoordinator::ModelJob>
-NativeRenderCoordinator::buildModelJobs()
-{
+// buildModelJobs() and buildRenderTiers() removed — see git history.
+// Replaced by preparePersistentJobs() + renderAllFrames().
+#if 0
     std::vector<ModelJob> jobs;
 
     size_t elementCount = _effectProvider->getElementCount();
@@ -1938,6 +2357,7 @@ NativeRenderCoordinator::buildRenderTiers(const std::vector<ModelJob>& jobs)
 
     return tiers;
 }
+#endif // Dead code
 
 // =========================================================================
 // Model geometry extraction
@@ -1946,6 +2366,12 @@ NativeRenderCoordinator::buildRenderTiers(const std::vector<ModelJob>& jobs)
 ModelGeometry NativeRenderCoordinator::extractGeometry(
     const std::string& modelName)
 {
+    // Return cached geometry if available (geometry doesn't change on effect edits)
+    auto cacheIt = _geometryCache.find(modelName);
+    if (cacheIt != _geometryCache.end()) {
+        return cacheIt->second;
+    }
+
     ModelGeometry geom;
     geom.name = modelName;
 
@@ -1988,7 +2414,10 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
         }
     }
 
-    if (nodeCoords.empty()) return geom;
+    if (nodeCoords.empty()) {
+        _geometryCache[modelName] = geom;
+        return geom;
+    }
 
     // Derive buffer dimensions from actual max bufX/bufY values
     int maxBufX = 0, maxBufY = 0;
@@ -2092,6 +2521,7 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
         }
     }
 
+    _geometryCache[modelName] = geom;
     return geom;
 }
 
@@ -2411,6 +2841,90 @@ static bool isModelInGroup(const std::string& modelName,
     return false;
 }
 
+// Recursively collect all physical model names that are members of a group.
+// For each member: if it's a submodel ref ("Parent/Sub"), extract the parent name.
+// If the member is itself a group, recurse into its members.
+// depth guards against infinite recursion from circular group definitions.
+static void collectGroupMembers(const std::string& membersStr,
+                                IModelProvider* modelProvider,
+                                std::set<std::string>& outModels,
+                                std::set<std::string>& visited,
+                                int depth = 0)
+{
+    if (depth > 10) return;
+
+    auto memberList = parseMemberList(membersStr);
+    for (const auto& member : memberList) {
+        // Strip submodel ref: "Tree/Outline" -> "Tree"
+        std::string baseName = member;
+        size_t slash = member.find('/');
+        if (slash != std::string::npos) {
+            baseName = member.substr(0, slash);
+        }
+
+        outModels.insert(baseName);
+
+        // Also insert the full submodel ref so that submodel-named models
+        // (which may appear as modelNames) can also be looked up.
+        if (slash != std::string::npos) {
+            outModels.insert(member);
+        }
+
+        // Check if this member is itself a group and recurse
+        if (visited.insert(member).second) {
+            auto memberAttrs = modelProvider->getModelAttributes(member);
+            auto modelsIt = memberAttrs.find("models");
+            if (modelsIt != memberAttrs.end() && !modelsIt->second.empty()) {
+                collectGroupMembers(modelsIt->second, modelProvider, outModels, visited, depth + 1);
+            }
+        }
+    }
+}
+
+void NativeRenderCoordinator::buildGroupMembershipMap()
+{
+    _modelToGroupIdx.clear();
+    _groupMapBuilt = true;
+
+    if (!_effectProvider || !_modelProvider) return;
+
+    auto tStart = std::chrono::steady_clock::now();
+
+    size_t elementCount = _effectProvider->getElementCount();
+    int groupsProcessed = 0;
+
+    for (size_t i = 0; i < elementCount; ++i) {
+        ElementInfo info;
+        if (!_effectProvider->getElement(i, info)) continue;
+        if (info.effectCount == 0) continue;
+
+        // Check if this element is a group by looking for the "models" attribute
+        auto attrs = _modelProvider->getModelAttributes(info.name);
+        auto modelsIt = attrs.find("models");
+        if (modelsIt == attrs.end() || modelsIt->second.empty()) continue;
+
+        // This element is a group with effects. Collect all member model names.
+        std::set<std::string> memberModels;
+        std::set<std::string> visited;
+        visited.insert(info.name);
+        collectGroupMembers(modelsIt->second, _modelProvider, memberModels, visited);
+
+        for (const auto& modelName : memberModels) {
+            // Only record the first matching group (same behavior as findParentGroupElement
+            // which returns the first group element that contains the model).
+            if (_modelToGroupIdx.find(modelName) == _modelToGroupIdx.end()) {
+                _modelToGroupIdx[modelName] = i;
+            }
+        }
+        groupsProcessed++;
+    }
+
+    auto tEnd = std::chrono::steady_clock::now();
+    double elapsedMS = std::chrono::duration<double, std::milli>(tEnd - tStart).count();
+    printf("[RENDER_PERF] buildGroupMembershipMap: %d groups, %zu model entries, %.1f ms\n",
+           groupsProcessed, _modelToGroupIdx.size(), elapsedMS);
+}
+
 size_t NativeRenderCoordinator::findParentGroupElement(
     const std::string& modelName)
 {
@@ -2459,31 +2973,55 @@ size_t NativeRenderCoordinator::findParentGroupElement(
     return SIZE_MAX;
 }
 
-// =========================================================================
-// Per-model rendering
-// =========================================================================
+// Detect whether an effect produces a uniform solid fill (same color for
+// every pixel). Returns true and sets outColor if so. Used by the batch-mode
+// fast path to skip full-buffer rendering for sparse models.
+static bool isSolidFillEffect(const EffectInstanceInfo& effectInfo,
+                               NativeRenderBuffer& buf,
+                               xlColor& outColor) {
+    const auto& type = effectInfo.effectType;
 
-void NativeRenderCoordinator::renderModel(
-    ModelJob& job, int startMS, int endMS, NativeSequenceData& output)
-{
-    int frameTimeMS = _context->getFrameTimeMS();
-    if (frameTimeMS <= 0) frameTimeMS = 50;
+    if (type == "On") {
+        auto it = effectInfo.settings.find("E_TEXTCTRL_Eff_On_Start");
+        if (it != effectInfo.settings.end() && !it->second.empty() &&
+            std::atoi(it->second.c_str()) != 100)
+            return false;
+        it = effectInfo.settings.find("E_TEXTCTRL_Eff_On_End");
+        if (it != effectInfo.settings.end() && !it->second.empty() &&
+            std::atoi(it->second.c_str()) != 100)
+            return false;
+        it = effectInfo.settings.find("E_CHECKBOX_On_Shimmer");
+        if (it != effectInfo.settings.end() && it->second == "1")
+            return false;
 
-    for (int timeMS = startMS; timeMS < endMS; timeMS += frameTimeMS) {
-        if (_abort.load()) return;
-
-        int frameIndex = timeMS / frameTimeMS;
-
-        renderModelAtTime(job, timeMS, &output, frameIndex);
-        writeModelOutput(job, frameIndex, output);
-
-        {
-            std::lock_guard<std::mutex> lock(_listenerMutex);
-            if (_listener) {
-                _listener->onModelFrameRendered(job.geometry.name, timeMS);
-            }
-        }
+        buf.palette.GetColor(0, outColor);
+        return true;
     }
+
+    if (type == "Color Wash" || type == "ColorWash") {
+        auto it = effectInfo.settings.find("E_CHECKBOX_ColorWash_HFade");
+        if (it != effectInfo.settings.end() && it->second == "1") return false;
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_VFade");
+        if (it != effectInfo.settings.end() && it->second == "1") return false;
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_Shimmer");
+        if (it != effectInfo.settings.end() && it->second == "1") return false;
+
+        double cycles = 1.0;
+        it = effectInfo.settings.find("E_TEXTCTRL_ColorWash_Cycles");
+        if (it != effectInfo.settings.end() && !it->second.empty())
+            cycles = std::atof(it->second.c_str());
+
+        bool circularPalette = false;
+        it = effectInfo.settings.find("E_CHECKBOX_ColorWash_CircularPalette");
+        if (it != effectInfo.settings.end() && it->second == "1")
+            circularPalette = true;
+
+        double position = buf.GetEffectTimeIntervalPosition(cycles);
+        buf.GetMultiColorBlend(position, circularPalette, outColor);
+        return true;
+    }
+
+    return false;
 }
 
 void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
@@ -2499,18 +3037,7 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
 
     std::vector<bool> validLayers(job.layerCount, false);
 
-    // Load blend layer from existing channel data (group render output).
-    // The blend layer is the last layer and must be populated before effect
-    // rendering so that model effects composite on top of group output.
-    if (job.hasBlendLayer && output && frameIndex >= 0) {
-        loadBlendLayer(job, *output, frameIndex);
-        validLayers[job.layerCount - 1] = true;
-    }
-
-    // Only iterate over effect layers (exclude blend layer if present).
-    size_t effectLayerCount = job.hasBlendLayer ? job.layerCount - 1 : job.layerCount;
-
-    for (size_t layer = 0; layer < effectLayerCount; ++layer) {
+    for (size_t layer = 0; layer < job.layerCount; ++layer) {
         NativeRenderBuffer& buf = job.pixelBuffer->getLayerBuffer(
             static_cast<int>(layer));
 
@@ -2593,9 +3120,10 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         bool cacheable = !layerInfo.persistent &&
                          RenderFrameCache::isEffectCacheable(effectInfo.effectType);
         size_t effectHash = 0;
+        uint64_t diskHash = 0;
         bool cacheHit = false;
 
-        if (cacheable) {
+        if (cacheable && !_batchMode) {
             effectHash = RenderFrameCache::hashEffect(
                 effectInfo.effectType, effectInfo.settings, effectInfo.palette);
             RenderFrameCache::CachedLayer cached;
@@ -2609,6 +3137,21 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                         cacheHit = true;
                     }
                 }
+            }
+        }
+
+        // In batch mode, check disk cache for cacheable effects.
+        if (cacheable && _batchMode && _diskCache && _diskCache->isEnabled()) {
+            diskHash = DiskRenderCache::hashEffect(
+                effectInfo.effectType, effectInfo.settings, effectInfo.palette,
+                buf.BufferWi, buf.BufferHt,
+                effectInfo.startTimeMS, effectInfo.endTimeMS);
+
+            int effectFrameIdx = (timeMS - effectInfo.startTimeMS) / frameTimeMS;
+            if (_diskCache->loadFrame(diskHash, effectFrameIdx,
+                                       buf.BufferWi, buf.BufferHt,
+                                       reinterpret_cast<uint8_t*>(buf.GetPixels()))) {
+                cacheHit = true;
             }
         }
 
@@ -2663,21 +3206,41 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             }
             buf.SetPalette(colors, colorCurves);
 
-            if (usePerModel) {
-                // Per Model path: render the effect using per-member rendering.
-                // This populates member info on first call and renders the effect
-                // into the model's own buffer (which is the Per Model behavior).
-                rendered = renderPerModelLayer(job, layer, effectInfo, layerInfo,
-                                               timeMS, period, frameTimeMS);
-            } else {
-                // Normal path: render the effect directly into the layer buffer.
-                // Even suppressed layers render (for state tracking in stateful
-                // effects), but suppressed layers are excluded from blending.
-                rendered = renderNativeEffect(effectInfo, buf);
+            // Solid fill fast path: in batch mode, for uniform-color effects
+            // (On, ColorWash without fades), only set pixels at node positions
+            // instead of filling the full WxH buffer. For a 200-node model
+            // with a 200x661 buffer, this renders 200 pixels instead of 132K.
+            bool usedFastPath = false;
+            if (!usePerModel && job.pixelBuffer->isBatchMode() &&
+                !layerInfo.hasSubBuffer && layerInfo.bufferStyle == "Default") {
+                xlColor fillColor;
+                if (isSolidFillEffect(effectInfo, buf, fillColor)) {
+                    const auto& indices = job.pixelBuffer->getNodePixelIndices();
+                    for (int idx : indices) {
+                        buf.SetPixel(idx % buf.BufferWi, idx / buf.BufferWi, fillColor);
+                    }
+                    rendered = true;
+                    usedFastPath = true;
+                }
             }
 
-            // Store successfully rendered cacheable layer in the LRU cache
-            if (rendered && cacheable) {
+            if (!usedFastPath) {
+                if (usePerModel) {
+                    // Per Model path: render the effect using per-member rendering.
+                    rendered = renderPerModelLayer(job, layer, effectInfo, layerInfo,
+                                                   timeMS, period, frameTimeMS);
+                } else {
+                    // Normal path: render the effect directly into the layer buffer.
+                    // Even suppressed layers render (for state tracking in stateful
+                    // effects), but suppressed layers are excluded from blending.
+                    rendered = renderNativeEffect(effectInfo, buf);
+                }
+            }
+
+            // Store successfully rendered cacheable layer in the LRU cache.
+            // Skip cache for fast path and batch mode — batch renders each
+            // frame once sequentially so caching adds overhead with no benefit.
+            if (rendered && cacheable && !usedFastPath && !_batchMode) {
                 RenderFrameCache::CachedLayer toCache;
                 toCache.width = buf.BufferWi;
                 toCache.height = buf.BufferHt;
@@ -2689,6 +3252,31 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                     std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
                     _renderCache.put(job.geometry.name, static_cast<int>(layer),
                                      effectHash, timeMS, toCache);
+                }
+            }
+
+            // Store to disk cache in batch mode for persistence across sessions.
+            if (rendered && cacheable && _batchMode && diskHash != 0 &&
+                _diskCache && _diskCache->isEnabled()) {
+                int effectFrameIdx = (timeMS - effectInfo.startTimeMS) / frameTimeMS;
+                int totalEffectFrames =
+                    (effectInfo.endTimeMS - effectInfo.startTimeMS) / frameTimeMS;
+
+                // Begin write session on first frame of this effect.
+                if (_diskWriteSessions.find(diskHash) == _diskWriteSessions.end()) {
+                    if (_diskCache->beginWriteSession(
+                            diskHash, buf.BufferWi, buf.BufferHt, totalEffectFrames)) {
+                        _diskWriteSessions.insert(diskHash);
+                    }
+                }
+
+                if (_diskWriteSessions.count(diskHash)) {
+                    size_t frameBytes = static_cast<size_t>(buf.BufferWi) *
+                                        buf.BufferHt * 4;
+                    _diskCache->writeFrame(
+                        diskHash, effectFrameIdx,
+                        reinterpret_cast<const uint8_t*>(buf.GetPixels()),
+                        frameBytes);
                 }
             }
         }
@@ -2766,31 +3354,6 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
     }
 
     job.pixelBuffer->calcOutput(period, validLayers);
-}
-
-// =========================================================================
-// Blend layer loading
-// =========================================================================
-
-void NativeRenderCoordinator::loadBlendLayer(
-    ModelJob& job, NativeSequenceData& output, int frameIndex)
-{
-    if (!job.hasBlendLayer || job.layerCount < 2) return;
-
-    const uint8_t* frameData = output.getFrame(static_cast<uint32_t>(frameIndex));
-    if (!frameData) return;
-
-    // The blend layer is the LAST layer in the pixel buffer.
-    // Load existing channel data (e.g., from a group job that rendered earlier)
-    // into this layer so that model effects can composite on top.
-    int blendLayerIdx = static_cast<int>(job.layerCount - 1);
-    job.pixelBuffer->loadChannelData(blendLayerIdx, frameData, output.getNumChannels());
-
-    // Set Normal mix for the blend layer so it acts as a base.
-    NativeLayerInfo blendSettings;
-    blendSettings.mixType = NativeMixType::Mix_Normal;
-    blendSettings.brightness = 100.0f;
-    job.pixelBuffer->setLayerSettings(blendLayerIdx, blendSettings);
 }
 
 // =========================================================================
@@ -17755,8 +18318,7 @@ void NativeRenderCoordinator::writeModelOutput(
     if (!frameData) return;
 
     // getColors() writes channel data at each node's actChannel offset.
-    // Thread-safe: models with overlapping channels are in separate render
-    // tiers and never execute concurrently (see buildRenderTiers).
+    // Thread-safe: called sequentially per frame after all models have rendered.
     job.pixelBuffer->getColors(frameData, output.getNumChannels());
 }
 
