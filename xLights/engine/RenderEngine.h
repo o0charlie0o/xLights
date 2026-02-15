@@ -232,6 +232,11 @@ public:
     // produces incorrect results or after major sequence changes.
     void forceRenderAll(RenderCompleteCallback callback = nullptr);
 
+    // Re-render after an effect parameter/palette change.
+    // Lighter than forceRenderAll: preserves _modelChannelMap and
+    // resolved start channel caches (model layout hasn't changed).
+    void reRenderForEffectChange(RenderCompleteCallback callback = nullptr);
+
     // Render a range of frames for all models.
     void renderRange(int startMS, int endMS, bool clear = false,
                      RenderCompleteCallback callback = nullptr);

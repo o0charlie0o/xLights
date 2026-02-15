@@ -1527,6 +1527,66 @@ void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
     renderAll(callback);
 }
 
+void RenderEngine::reRenderForEffectChange(RenderCompleteCallback callback)
+{
+    // Lighter than forceRenderAll: preserves _modelChannelMap and
+    // resolved start channel caches. Only effects changed, not model layout.
+    if (_renderInProgress.exchange(true, std::memory_order_acq_rel)) {
+        printf("[RDBG] reRenderForEffectChange: SKIPPED (already rendering)\n");
+        if (callback) callback(true);
+        return;
+    }
+
+    printf("[RDBG] reRenderForEffectChange: ENTRY — preserving channel map (size=%zu)\n",
+           _modelChannelMap.size());
+
+    // Destroy background render queue first (same safety as forceRenderAll)
+    _bgRenderQueue.reset();
+    _bgCoordinator.reset();
+    _bgContext.reset();
+
+    // Destroy rendered data and FSEQ (will be re-rendered)
+    _renderedData.reset();
+    _fseqFile.reset();
+    _fseqLoaded = false;
+
+    // Clear pixel caches but PRESERVE _modelChannelMap
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _bufferCache.clear();
+        // NOTE: _modelChannelMap is NOT cleared — model layout didn't change
+        _currentFrameIndex = -1;
+        _currentFrameData.clear();
+        _liveCoordinator.reset();
+        _liveContext.reset();
+        _lastLiveRenderTimeMS = -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        _sidebarCache.clear();
+        _sidebarCoordinator.reset();
+        _sidebarContext.reset();
+        _lastSidebarRenderTimeMS = -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        _allDirty.store(true);
+        _dirtyModels.clear();
+        // NOTE: _modelChannelRanges is NOT cleared — model layout didn't change
+    }
+
+    // NOTE: _controllerStartChannels, _modelTotalChannels,
+    // _resolvedStartChannels are NOT cleared — these are layout-dependent,
+    // not effect-dependent.
+
+    // Clear disk cache (effect data changed, cached renders are stale)
+    if (_diskCache) {
+        _diskCache->clearAll();
+    }
+
+    renderAll(callback);
+}
+
 void RenderEngine::renderAll(RenderCompleteCallback callback)
 {
     // Set _renderInProgress if not already set (forceRenderAll sets it first).
@@ -2287,10 +2347,10 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
     // so renderFrame() either reads FSEQ (before render starts) or
     // returns immediately (during render). After render, the PRERENDERED
     // path takes over with fresh data.
-    printf("[RDBG] invalidateModelAndGroup('%s'): dispatching background forceRenderAll\n",
+    printf("[RDBG] invalidateModelAndGroup('%s'): dispatching background reRenderForEffectChange\n",
            modelName.c_str());
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        this->forceRenderAll(nullptr);
+        this->reRenderForEffectChange(nullptr);
     });
 
     // Also check if this physical model belongs to any group with effects
