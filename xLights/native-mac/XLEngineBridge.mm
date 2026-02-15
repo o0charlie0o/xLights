@@ -1041,6 +1041,7 @@ static XLEngineBridge *_sharedBridge = nil;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         self->_renderEngine->renderAll(nullptr);
         NSLog(@"XLEngineBridge: renderAll() — complete, using pre-rendered data path");
+        [self exportFSEQAfterRender];
     });
 }
 
@@ -1055,7 +1056,39 @@ static XLEngineBridge *_sharedBridge = nil;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         self->_renderEngine->forceRenderAll(nullptr);
         NSLog(@"XLEngineBridge: forceRenderAll() — complete, using pre-rendered data path");
+        [self exportFSEQAfterRender];
     });
+}
+
+- (void)exportFSEQAfterRender {
+    if (!_renderEngine || !_nativeSequenceProvider) return;
+
+    std::string seqPath = _nativeSequenceProvider->getSequencePath();
+    if (seqPath.empty()) {
+        NSLog(@"XLEngineBridge: exportFSEQAfterRender — no sequence path, skipping FSEQ export");
+        return;
+    }
+
+    // Derive FSEQ path: replace extension with .fseq
+    std::string fseqPath = seqPath;
+    size_t dotPos = fseqPath.rfind('.');
+    if (dotPos != std::string::npos) {
+        fseqPath = fseqPath.substr(0, dotPos) + ".fseq";
+    } else {
+        fseqPath += ".fseq";
+    }
+
+    bool exported = _renderEngine->exportRenderedFSEQ(fseqPath, 2);
+    if (exported) {
+        NSLog(@"XLEngineBridge: exportFSEQAfterRender — saved FSEQ to %s", fseqPath.c_str());
+        // Do NOT call loadFSEQ here — the sidebar preview thread may be
+        // reading the old FSEQ concurrently, and replacing _fseqFile causes
+        // a use-after-free crash. Playback uses the PRERENDERED path
+        // (_renderedData) which was just populated by renderAll.
+        // The FSEQ on disk is for the next app launch.
+    } else {
+        NSLog(@"XLEngineBridge: exportFSEQAfterRender — FSEQ export failed (no rendered data?)");
+    }
 }
 
 - (void)renderRange:(NSInteger)startMS endMS:(NSInteger)endMS {

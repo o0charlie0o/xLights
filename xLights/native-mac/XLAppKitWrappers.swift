@@ -26,6 +26,13 @@ struct XLSetupTabView: NSViewControllerRepresentable {
     func updateNSViewController(_ nsViewController: XLSetupViewController, context: Context) {
         // Update if needed when SwiftUI state changes
     }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: XLSetupViewController, context: Context) -> CGSize? {
+        return CGSize(
+            width: proposal.width ?? 800,
+            height: proposal.height ?? 600
+        )
+    }
 }
 
 // MARK: - Layout Tab View Wrapper
@@ -97,6 +104,13 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
 
     func updateNSViewController(_ nsViewController: XLSequencerViewController, context: Context) {
         // Update if needed when SwiftUI state changes
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsViewController: XLSequencerViewController, context: Context) -> CGSize? {
+        return CGSize(
+            width: proposal.width ?? 800,
+            height: proposal.height ?? 600
+        )
     }
 
     class Coordinator: @unchecked Sendable {

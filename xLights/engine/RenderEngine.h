@@ -448,7 +448,10 @@ private:
 
     // --- FSEQ Playback State ---
 
-    std::unique_ptr<FSEQFile> _fseqFile;
+    // shared_ptr so renderFrame() can hold a local copy while
+    // forceRenderAll() resets the main pointer from another thread.
+    std::shared_ptr<FSEQFile> _fseqFile;
+    mutable std::mutex _fseqMutex; // protects _fseqFile pointer swaps
     std::vector<uint8_t> _currentFrameData;
     int _currentFrameIndex = -1;
     std::atomic<bool> _fseqLoaded{false};
@@ -458,6 +461,10 @@ private:
     // and main-thread renderFrame which share _renderedData, _fseqFile,
     // _modelChannelMap, and other state without fine-grained locking.
     std::atomic<bool> _renderInProgress{false};
+
+    // Incremented each time renderAll completes. renderFrame uses this to
+    // reset per-path diagnostic counters so we get fresh logs after each render.
+    std::atomic<uint32_t> _renderGeneration{0};
 
     // Cached channel info per model for FSEQ rendering
     struct ModelChannelInfo {

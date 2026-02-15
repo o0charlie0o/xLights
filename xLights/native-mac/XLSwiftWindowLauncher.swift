@@ -61,6 +61,13 @@ final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
         let contentView = XLMainContentView(appState: appState)
         let hostingController = NSHostingController(rootView: contentView)
 
+        // Prevent SwiftUI from constraining window min/max size based on content.
+        // Without this, the hosting controller propagates SwiftUI's intrinsic content
+        // size as the window minimum, preventing height resize on smaller screens.
+        if #available(macOS 13.0, *) {
+            hostingController.sizingOptions = []
+        }
+
         // Set as content view controller - SwiftUI handles all the layout
         window.contentViewController = hostingController
 
@@ -79,17 +86,29 @@ final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
 
     private func restoreWindowFrame() {
         guard let window = self.window else { return }
+        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 100, y: 100, width: 1600, height: 1000)
+
         if let frameString = UserDefaults.standard.string(forKey: "XLMainWindowFrame") {
-            let frame = NSRectFromString(frameString)
+            var frame = NSRectFromString(frameString)
             if frame.size.width > 0 && frame.size.height > 0 {
+                // Constrain to current screen — the saved frame may be from a larger monitor
+                frame.size.width = min(frame.size.width, screenFrame.size.width)
+                frame.size.height = min(frame.size.height, screenFrame.size.height)
+                // Ensure the window origin keeps it fully on-screen
+                frame.origin.x = max(frame.origin.x, screenFrame.origin.x)
+                frame.origin.y = max(frame.origin.y, screenFrame.origin.y)
+                if frame.maxX > screenFrame.maxX {
+                    frame.origin.x = screenFrame.maxX - frame.size.width
+                }
+                if frame.maxY > screenFrame.maxY {
+                    frame.origin.y = screenFrame.maxY - frame.size.height
+                }
                 window.setFrame(frame, display: false)
                 return
             }
         }
         // No saved frame — fill the screen's visible area
-        if let screenFrame = NSScreen.main?.visibleFrame {
-            window.setFrame(screenFrame, display: false)
-        }
+        window.setFrame(screenFrame, display: false)
     }
 
     private func saveWindowFrame() {
@@ -103,6 +122,14 @@ final class XLSwiftWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
+        saveWindowFrame()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        saveWindowFrame()
+    }
+
+    func windowDidMove(_ notification: Notification) {
         saveWindowFrame()
     }
 

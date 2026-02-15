@@ -1069,7 +1069,11 @@ void NativeOutputProvider::stopOutput() {
 int32_t NativeOutputProvider::getTotalChannels() const {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
 
-    if (_cachedTotalChannels >= 0) return _cachedTotalChannels;
+    if (_cachedTotalChannels >= 0) {
+        printf("[RDBG] getTotalChannels: returning cached %d (%zu controllers)\n",
+               _cachedTotalChannels, _controllers.size());
+        return _cachedTotalChannels;
+    }
 
     int32_t total = 0;
     for (const auto& config : _controllers) {
@@ -1079,6 +1083,8 @@ int32_t NativeOutputProvider::getTotalChannels() const {
     }
 
     _cachedTotalChannels = total;
+    printf("[RDBG] getTotalChannels: computed %d from %zu controllers\n",
+           total, _controllers.size());
     return total;
 }
 

@@ -139,13 +139,18 @@ bool RenderEngine::loadFSEQ(const std::string& fseqPath)
     closeFSEQ();
     _fseqPath = fseqPath;
 
-    _fseqFile.reset(FSEQFile::openFSEQFile(fseqPath));
-    if (!_fseqFile) {
+    auto newFile = std::shared_ptr<FSEQFile>(FSEQFile::openFSEQFile(fseqPath));
+    if (!newFile) {
         return false;
     }
 
     // Prepare for reading all channels
-    _fseqFile->prepareRead({});
+    newFile->prepareRead({});
+
+    {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        _fseqFile = std::move(newFile);
+    }
 
     // Build controller channel map for resolving !ControllerName:offset references
     buildControllerChannelMap();
@@ -165,8 +170,11 @@ bool RenderEngine::loadFSEQ(const std::string& fseqPath)
 
 void RenderEngine::closeFSEQ()
 {
-    _fseqFile.reset();
-    _fseqLoaded = false;
+    _fseqLoaded = false; // set BEFORE destroying — readers check this first
+    {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        _fseqFile.reset();
+    }
     _currentFrameIndex = -1;
     _currentFrameData.clear();
     _controllerStartChannels.clear();
@@ -740,42 +748,77 @@ void RenderEngine::renderFrame(int timeMS)
     if (_renderInProgress.load(std::memory_order_acquire)) return;
 
     // Log path changes and periodic state.
-    // sRdbgResetCounters is set when the path changes so per-path log counters
-    // reset and we get fresh diagnostics after render completion.
+    // Counters reset on path changes AND on render generation bumps (after renderAll).
     static bool sRdbgResetCounters = false;
     {
         static int sLastPath = 0; // 0=none, 1=fseq, 2=prerendered, 3=live
         static int sFrameCount = 0;
+        static uint32_t sLastGen = 0;
         int path = 0;
-        if (_fseqLoaded.load(std::memory_order_relaxed) && _fseqFile) path = 1;
-        else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) path = 2;
-        else if (_effectProvider && _modelProvider) path = 3;
+        if (_fseqLoaded.load(std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> fLock(_fseqMutex);
+            if (_fseqFile) path = 1;
+        }
+        if (path == 0 && _renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) path = 2;
+        if (path == 0 && _effectProvider && _modelProvider) path = 3;
 
-        if (path != sLastPath) {
+        // Reset counters on path change OR render generation change
+        uint32_t curGen = _renderGeneration.load(std::memory_order_relaxed);
+        if (path != sLastPath || curGen != sLastGen) {
             const char* names[] = {"NONE", "FSEQ", "PRERENDERED", "LIVE"};
-            printf("[RDBG] renderFrame(%dms): PATH CHANGE %s → %s (fseq=%d rendData=%d map=%zu)\n",
-                   timeMS, names[sLastPath], names[path],
-                   _fseqLoaded.load(std::memory_order_relaxed), (_renderedData != nullptr),
-                   _modelChannelMap.size());
+            if (path != sLastPath) {
+                printf("[RDBG] renderFrame(%dms): PATH CHANGE %s → %s (fseq=%d rendData=%d map=%zu gen=%u)\n",
+                       timeMS, names[sLastPath], names[path],
+                       _fseqLoaded.load(std::memory_order_relaxed), (_renderedData != nullptr),
+                       _modelChannelMap.size(), curGen);
+            } else {
+                printf("[RDBG] renderFrame(%dms): RENDER GEN %u → %u on %s path (map=%zu)\n",
+                       timeMS, sLastGen, curGen, names[path], _modelChannelMap.size());
+            }
             sLastPath = path;
+            sLastGen = curGen;
             sFrameCount = 0;
             sRdbgResetCounters = true;
         }
         sFrameCount++;
-        // Log first 3 frames on each path and then every 100th
-        if (sFrameCount <= 3 || sFrameCount % 100 == 0) {
-            printf("[RDBG] renderFrame(%dms): path=%d frame#%d\n", timeMS, path, sFrameCount);
+        // Log first 20 frames after each reset and then every 200th
+        if (sFrameCount <= 20 || sFrameCount % 200 == 0) {
+            if (path == 2 && _renderedData) {
+                int st = static_cast<int>(_renderedData->getFrameTimeMS());
+                if (st <= 0) st = 25;
+                int fi = timeMS / st;
+                uint32_t nz = 0;
+                const uint8_t* fd = _renderedData->getFrame(static_cast<uint32_t>(fi));
+                if (fd) {
+                    uint32_t nc = _renderedData->getNumChannels();
+                    for (uint32_t i = 0; i < nc && i < 1000; ++i) {
+                        if (fd[i] != 0) nz++;
+                    }
+                }
+                printf("[RDBG] renderFrame(%dms): path=2 gen=%u call#%d frameIdx=%d/%u nonZero(first1k)=%u\n",
+                       timeMS, curGen, sFrameCount, fi, _renderedData->getNumFrames(), nz);
+            } else {
+                printf("[RDBG] renderFrame(%dms): path=%d gen=%u call#%d\n", timeMS, path, curGen, sFrameCount);
+            }
         }
     }
 
-    if (_fseqLoaded.load(std::memory_order_acquire) && _fseqFile) {
+    // Grab a local shared_ptr to the FSEQ file — keeps the object alive
+    // even if forceRenderAll resets _fseqFile on another thread.
+    std::shared_ptr<FSEQFile> localFseq;
+    if (_fseqLoaded.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        localFseq = _fseqFile;
+    }
+
+    if (localFseq) {
         // FSEQ playback path: read pre-rendered channel data
-        int stepTime = _fseqFile->getStepTime();
+        int stepTime = localFseq->getStepTime();
         if (stepTime <= 0) stepTime = 50;
 
         int frameIndex = timeMS / stepTime;
         if (frameIndex < 0) frameIndex = 0;
-        int numFrames = static_cast<int>(_fseqFile->getNumFrames());
+        int numFrames = static_cast<int>(localFseq->getNumFrames());
         if (numFrames > 0 && frameIndex >= numFrames) {
             frameIndex = numFrames - 1;
         }
@@ -787,17 +830,17 @@ void RenderEngine::renderFrame(int timeMS)
         static bool firstFseqFrame = true;
         if (sRdbgResetCounters) { firstFseqFrame = true; }
         if (firstFseqFrame) {
-            uint32_t maxCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
+            uint32_t maxCh = static_cast<uint32_t>(localFseq->getChannelCount());
             printf("[RDBG] renderFrame(FSEQ): first frame at %dms, frameIndex=%d, numFrames=%d, channels=%u, models=%zu\n",
                    timeMS, frameIndex, numFrames, maxCh, _modelChannelMap.size());
             firstFseqFrame = false;
         }
 
-        // Read frame data from FSEQ
-        FSEQFile::FrameData* fd = _fseqFile->getFrame(static_cast<uint32_t>(frameIndex));
+        // Read frame data from FSEQ (no lock held — local shared_ptr keeps object alive)
+        FSEQFile::FrameData* fd = localFseq->getFrame(static_cast<uint32_t>(frameIndex));
         if (!fd) return;
 
-        uint32_t maxCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
+        uint32_t maxCh = static_cast<uint32_t>(localFseq->getChannelCount());
         _currentFrameData.resize(maxCh, 0);
         fd->readFrame(_currentFrameData.data(), maxCh);
         delete fd;
@@ -837,68 +880,88 @@ void RenderEngine::renderFrame(int timeMS)
         }
 
         // Build FrameBuffers for all mapped models
-        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-        _bufferCache.clear();
-
         int modelsWithPixels = 0;
-        for (const auto& [modelName, chInfo] : _modelChannelMap) {
-            if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+        {
+            std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+            _bufferCache.clear();
 
-            FrameBuffer fb;
-            fb.modelName = modelName;
-            fb.width = chInfo.bufferWidth;
-            fb.height = chInfo.bufferHeight;
-            fb.timeMS = timeMS;
-            fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+            for (const auto& [modelName, chInfo] : _modelChannelMap) {
+                if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
 
-            int nonBlackPixels = 0;
-            // Map each node's channel data to the pixel buffer
-            for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
-                uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
-                if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
+                FrameBuffer fb;
+                fb.modelName = modelName;
+                fb.width = chInfo.bufferWidth;
+                fb.height = chInfo.bufferHeight;
+                fb.timeMS = timeMS;
+                fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
 
-                uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
-                uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
-                uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
+                int nonBlackPixels = 0;
+                for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                    uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+                    if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
 
-                if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
+                    uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
+                    uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
+                    uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
 
-                int bx = chInfo.nodeBufCoords[i].first;
-                int by = chInfo.nodeBufCoords[i].second;
-                if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+                    if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
 
-                size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
-                fb.pixels[idx]     = r;
-                fb.pixels[idx + 1] = g;
-                fb.pixels[idx + 2] = b;
-                fb.pixels[idx + 3] = 255;
+                    int bx = chInfo.nodeBufCoords[i].first;
+                    int by = chInfo.nodeBufCoords[i].second;
+                    if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+                    size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                    fb.pixels[idx]     = r;
+                    fb.pixels[idx + 1] = g;
+                    fb.pixels[idx + 2] = b;
+                    fb.pixels[idx + 3] = 255;
+                }
+
+                if (nonBlackPixels > 0) modelsWithPixels++;
+                _bufferCache[modelName] = std::move(fb);
             }
 
-            if (nonBlackPixels > 0) modelsWithPixels++;
-            _bufferCache[modelName] = std::move(fb);
-        }
-
-        // Synthesize submodel FrameBuffers for any submodel refs in getModelNames()
-        // that aren't directly in _modelChannelMap but whose parent model IS.
-        if (_modelProvider) {
-            auto allNames = _modelProvider->getModelNames();
-            for (const auto& name : allNames) {
-                size_t slash = name.find('/');
-                if (slash == std::string::npos) continue;
-                if (_bufferCache.count(name)) continue; // already have it
-                std::string parentName = name.substr(0, slash);
-                auto parentIt = _modelChannelMap.find(parentName);
-                if (parentIt == _modelChannelMap.end()) continue;
-                synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
+            // Synthesize submodel FrameBuffers for any submodel refs in getModelNames()
+            // that aren't directly in _modelChannelMap but whose parent model IS.
+            if (_modelProvider) {
+                auto allNames = _modelProvider->getModelNames();
+                for (const auto& name : allNames) {
+                    size_t slash = name.find('/');
+                    if (slash == std::string::npos) continue;
+                    if (_bufferCache.count(name)) continue;
+                    std::string parentName = name.substr(0, slash);
+                    auto parentIt = _modelChannelMap.find(parentName);
+                    if (parentIt == _modelChannelMap.end()) continue;
+                    synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
+                }
             }
-        }
+        } // release _bufferCacheMutex before logging and notifying
 
         // Log stats on first few FSEQ frames (reset on path change)
         static int fseqFrameLogCount = 0;
         if (sRdbgResetCounters) { fseqFrameLogCount = 0; sRdbgResetCounters = false; }
-        if (fseqFrameLogCount < 5) {
-            printf("[RDBG] renderFrame(FSEQ): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu\n",
-                   frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size());
+        if (fseqFrameLogCount < 3) {
+            printf("[RDBG] renderFrame(FSEQ): t=%dms frame %d — %d/%zu models have non-black pixels, dataSz=%zu\n",
+                   timeMS, frameIndex, modelsWithPixels, _modelChannelMap.size(), _currentFrameData.size());
+
+            // Detailed: which models have non-zero pixels?
+            int litCount = 0;
+            for (const auto& [mn, ci] : _modelChannelMap) {
+                int nzNodes = 0;
+                for (uint32_t n = 0; n < ci.nodeCount && n < 50; n++) {
+                    uint32_t ch = ci.absStartChannel + n * ci.chansPerNode;
+                    if (ch + ci.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) break;
+                    if (_currentFrameData[ch] != 0 || _currentFrameData[ch+1] != 0 || _currentFrameData[ch+2] != 0)
+                        nzNodes++;
+                }
+                if (nzNodes > 0) {
+                    if (litCount < 10)
+                        printf("[RDBG]   FSEQ LIT model '%s' startCh=%u nodes=%u nzNodes=%d\n",
+                               mn.c_str(), ci.absStartChannel, ci.nodeCount, nzNodes);
+                    litCount++;
+                }
+            }
+            printf("[RDBG]   FSEQ total lit models: %d/%zu at t=%dms\n", litCount, _modelChannelMap.size(), timeMS);
             fseqFrameLogCount++;
         }
 
@@ -907,15 +970,51 @@ void RenderEngine::renderFrame(int timeMS)
         // Pre-rendered data path: read from in-memory rendered data (from renderAll).
         // Dirty models have their channels zeroed in invalidateModel() so they show
         // black until re-rendered (via background queue or next Render All).
-        static bool sPrerenderedPathLogged = false;
-        if (sRdbgResetCounters) { sPrerenderedPathLogged = false; }
-        if (!sPrerenderedPathLogged) {
-            printf("[RDBG] renderFrame(%dms): PRERENDERED DATA PATH, channels=%u frames=%u models=%zu\n",
-                   timeMS, _renderedData->getNumChannels(), _renderedData->getNumFrames(), _modelChannelMap.size());
-            sPrerenderedPathLogged = true;
-        }
         int stepTime = static_cast<int>(_renderedData->getFrameTimeMS());
         if (stepTime <= 0) stepTime = 50;
+
+        // One-time diagnostic: log pre-rendered data dimensions + sample frames
+        static bool prerenderedDiagLogged = false;
+        if (sRdbgResetCounters) prerenderedDiagLogged = false;
+        if (!prerenderedDiagLogged) {
+            uint32_t nFrames = _renderedData->getNumFrames();
+            uint32_t nc = _renderedData->getNumChannels();
+            printf("[RDBG] PRERENDERED DATA: stepTime=%d numFrames=%u numChannels=%u totalBytes=%zu mapModels=%zu\n",
+                   stepTime, nFrames, nc, _renderedData->getTotalBytes(), _modelChannelMap.size());
+
+            // Scan for first and last non-zero frames, and sample frames across sequence
+            uint32_t firstNZ = UINT32_MAX, lastNZ = 0;
+            int nzFrameCount = 0;
+            // Sample: scan every 100th frame plus the first 600
+            for (uint32_t fi = 0; fi < nFrames; fi++) {
+                if (fi >= 600 && fi % 100 != 0) continue; // scan first 600 + every 100th
+                const uint8_t* fd = _renderedData->getFrame(fi);
+                if (!fd) continue;
+                uint32_t nz = 0;
+                for (uint32_t c = 0; c < nc; c++) {
+                    if (fd[c] != 0) { nz++; if (nz > 10) break; } // just detect presence
+                }
+                if (nz > 0) {
+                    nzFrameCount++;
+                    if (fi < firstNZ) firstNZ = fi;
+                    if (fi > lastNZ) lastNZ = fi;
+                }
+            }
+            printf("[RDBG] PRERENDERED DATA: firstNZ frame=%u (%ums), lastNZ frame=%u (%ums), nzFrames(sampled)=%d\n",
+                   firstNZ, firstNZ * stepTime, lastNZ, lastNZ * stepTime, nzFrameCount);
+            // Show a few sample frames: 0, 25%, 50%, 75%, 100%
+            uint32_t sampleFrames[] = {0, nFrames/4, nFrames/2, nFrames*3/4, nFrames > 0 ? nFrames-1 : 0};
+            for (int s = 0; s < 5; s++) {
+                uint32_t sf = sampleFrames[s];
+                if (sf >= nFrames) continue;
+                const uint8_t* fd = _renderedData->getFrame(sf);
+                uint32_t nz = 0;
+                if (fd) { for (uint32_t c = 0; c < nc; c++) { if (fd[c] != 0) nz++; } }
+                printf("[RDBG] PRERENDERED SAMPLE: frame[%u] t=%ums nonZero=%u/%u\n",
+                       sf, sf * stepTime, nz, nc);
+            }
+            prerenderedDiagLogged = true;
+        }
 
         int frameIndex = timeMS / stepTime;
         if (frameIndex < 0) frameIndex = 0;
@@ -926,23 +1025,17 @@ void RenderEngine::renderFrame(int timeMS)
 
         // Skip if we already have this frame cached
         if (frameIndex == _currentFrameIndex) {
-            // Log first few cache hits to verify frame caching
-            static int cacheHitLogCount = 0;
-            if (sRdbgResetCounters) { cacheHitLogCount = 0; }
-            if (cacheHitLogCount < 3) {
-                printf("[RDBG] renderFrame(PRERENDERED): cache HIT frameIndex=%d, skipping re-read\n", frameIndex);
-                cacheHitLogCount++;
+            // Log early returns to detect stale-cache issues
+            static int earlyReturnCount = 0;
+            static int earlyReturnLogCount = 0;
+            if (sRdbgResetCounters) { earlyReturnCount = 0; earlyReturnLogCount = 0; }
+            earlyReturnCount++;
+            if (earlyReturnLogCount < 5) {
+                printf("[RDBG] PRERENDERED early-return: t=%dms frameIdx=%d (same as cached, earlyReturns=%d)\n",
+                       timeMS, frameIndex, earlyReturnCount);
+                earlyReturnLogCount++;
             }
             return;
-        }
-
-        // Log first frame read for debugging (reset on path change)
-        static bool firstPrerenderedFrame = true;
-        if (sRdbgResetCounters) { firstPrerenderedFrame = true; }
-        if (firstPrerenderedFrame) {
-            printf("[RDBG] renderFrame(PRERENDERED): first frame at %dms, frameIndex=%d, numFrames=%d, numChannels=%u\n",
-                   timeMS, frameIndex, numFrames, _renderedData->getNumChannels());
-            firstPrerenderedFrame = false;
         }
 
         // Read frame data from pre-rendered buffer
@@ -954,83 +1047,150 @@ void RenderEngine::renderFrame(int timeMS)
         std::memcpy(_currentFrameData.data(), frameData, numChannels);
         _currentFrameIndex = frameIndex;
 
+        // PRERENDERED frame diagnostics — comprehensive logging:
+        // First 20 frames: always log. After that: log any frame with nonZero > 0
+        // (rate-limited to every 40th such frame to avoid flood).
+        static int prerenderedLogCount = 0;
+        static int prerenderedNZLogCount = 0;
+        static int prerenderedTotalFrames = 0;
+        static int prerenderedNZFrames = 0;
+        if (sRdbgResetCounters) {
+            prerenderedLogCount = 0;
+            prerenderedNZLogCount = 0;
+            prerenderedTotalFrames = 0;
+            prerenderedNZFrames = 0;
+        }
+        prerenderedTotalFrames++;
+        {
+            // Quick check: does this frame have any non-zero data?
+            uint32_t nonZero = 0;
+            for (uint32_t i = 0; i < numChannels; ++i) {
+                if (_currentFrameData[i] != 0) { nonZero++; if (nonZero > 100) break; }
+            }
+            bool hasData = (nonZero > 0);
+            if (hasData) prerenderedNZFrames++;
+
+            // Log first 20 frames always, then every 40th non-zero frame
+            bool shouldLog = (prerenderedLogCount < 20) ||
+                             (hasData && (prerenderedNZLogCount % 40 == 0));
+            if (hasData) prerenderedNZLogCount++;
+
+            if (shouldLog) {
+                // Full nonZero count for logged frames
+                if (nonZero <= 100) {
+                    nonZero = 0;
+                    for (uint32_t i = 0; i < numChannels; ++i) {
+                        if (_currentFrameData[i] != 0) nonZero++;
+                    }
+                }
+                printf("[RDBG] renderFrame(PRERENDERED): t=%dms frameIdx=%d/%d stepTime=%d nonZero=%u/%u (frame#%d, nzFrames=%d)\n",
+                       timeMS, frameIndex, numFrames, stepTime, nonZero, numChannels,
+                       prerenderedTotalFrames, prerenderedNZFrames);
+                prerenderedLogCount++;
+            }
+
+            // Every 200th frame, log a status summary regardless
+            if (prerenderedTotalFrames % 200 == 0) {
+                printf("[RDBG] PRERENDERED STATUS: frame#%d t=%dms frameIdx=%d nzFrames=%d/%d (%.1f%%)\n",
+                       prerenderedTotalFrames, timeMS, frameIndex,
+                       prerenderedNZFrames, prerenderedTotalFrames,
+                       prerenderedTotalFrames > 0 ? 100.0 * prerenderedNZFrames / prerenderedTotalFrames : 0.0);
+            }
+        }
+
         // Build FrameBuffers for all mapped models (same logic as FSEQ path)
-        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-        _bufferCache.clear();
-
         int modelsWithPixels = 0;
-        for (const auto& [modelName, chInfo] : _modelChannelMap) {
-            if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+        {
+            std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+            _bufferCache.clear();
 
-            FrameBuffer fb;
-            fb.modelName = modelName;
-            fb.width = chInfo.bufferWidth;
-            fb.height = chInfo.bufferHeight;
-            fb.timeMS = timeMS;
-            fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+            for (const auto& [modelName, chInfo] : _modelChannelMap) {
+                if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
 
-            int nonBlackPixels = 0;
-            for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
-                uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
-                if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
+                FrameBuffer fb;
+                fb.modelName = modelName;
+                fb.width = chInfo.bufferWidth;
+                fb.height = chInfo.bufferHeight;
+                fb.timeMS = timeMS;
+                fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
 
-                uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
-                uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
-                uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
+                int nonBlackPixels = 0;
+                for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                    uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+                    if (nodeChannel + chInfo.chansPerNode > static_cast<uint32_t>(_currentFrameData.size())) continue;
 
-                if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
+                    uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
+                    uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
+                    uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
 
-                int bx = chInfo.nodeBufCoords[i].first;
-                int by = chInfo.nodeBufCoords[i].second;
-                if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+                    if (r > 0 || g > 0 || b > 0) nonBlackPixels++;
 
-                size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
-                fb.pixels[idx]     = r;
-                fb.pixels[idx + 1] = g;
-                fb.pixels[idx + 2] = b;
-                fb.pixels[idx + 3] = 255;
+                    int bx = chInfo.nodeBufCoords[i].first;
+                    int by = chInfo.nodeBufCoords[i].second;
+                    if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+                    size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                    fb.pixels[idx]     = r;
+                    fb.pixels[idx + 1] = g;
+                    fb.pixels[idx + 2] = b;
+                    fb.pixels[idx + 3] = 255;
+                }
+
+                if (nonBlackPixels > 0) modelsWithPixels++;
+
+                // Pixel-level diagnostic: log actual RGB values for first lit model
+                static int pixelDiagCount = 0;
+                if (sRdbgResetCounters) pixelDiagCount = 0;
+                if (nonBlackPixels > 0 && pixelDiagCount < 2) {
+                    printf("[RDBG-PIX] PRERENDERED model '%s' t=%dms: startCh=%u nodes=%u chPerNode=%u rgbOff=[%d,%d,%d] nonBlack=%d buf=%dx%d\n",
+                           modelName.c_str(), timeMS, chInfo.absStartChannel, chInfo.nodeCount,
+                           chInfo.chansPerNode, chInfo.rOffset, chInfo.gOffset, chInfo.bOffset,
+                           nonBlackPixels, fb.width, fb.height);
+                    // Dump first 5 non-black pixel values from the FrameBuffer
+                    int shown = 0;
+                    for (uint32_t ni = 0; ni < chInfo.nodeCount && shown < 5; ni++) {
+                        int bx = chInfo.nodeBufCoords[ni].first;
+                        int by = chInfo.nodeBufCoords[ni].second;
+                        if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+                        size_t pi = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                        uint8_t pr = fb.pixels[pi], pg = fb.pixels[pi+1], pb = fb.pixels[pi+2];
+                        if (pr == 0 && pg == 0 && pb == 0) continue;
+                        // Also show raw channel bytes at this node's offset
+                        uint32_t ch = chInfo.absStartChannel + ni * chInfo.chansPerNode;
+                        printf("[RDBG-PIX]   node[%u] buf(%d,%d) fb=(%d,%d,%d) raw_ch[%u]=(%d,%d,%d)\n",
+                               ni, bx, by, pr, pg, pb, ch,
+                               (ch < numChannels) ? _currentFrameData[ch] : 0,
+                               (ch+1 < numChannels) ? _currentFrameData[ch+1] : 0,
+                               (ch+2 < numChannels) ? _currentFrameData[ch+2] : 0);
+                        shown++;
+                    }
+                    pixelDiagCount++;
+                }
+
+                _bufferCache[modelName] = std::move(fb);
             }
 
-            if (nonBlackPixels > 0) modelsWithPixels++;
-            _bufferCache[modelName] = std::move(fb);
-        }
-
-        // Synthesize submodel FrameBuffers for submodel refs (same as FSEQ path)
-        if (_modelProvider) {
-            auto allNames = _modelProvider->getModelNames();
-            for (const auto& name : allNames) {
-                size_t slash = name.find('/');
-                if (slash == std::string::npos) continue;
-                if (_bufferCache.count(name)) continue;
-                std::string parentName = name.substr(0, slash);
-                auto parentIt = _modelChannelMap.find(parentName);
-                if (parentIt == _modelChannelMap.end()) continue;
-                synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
+            // Synthesize submodel FrameBuffers for submodel refs (same as FSEQ path)
+            if (_modelProvider) {
+                auto allNames = _modelProvider->getModelNames();
+                for (const auto& name : allNames) {
+                    size_t slash = name.find('/');
+                    if (slash == std::string::npos) continue;
+                    if (_bufferCache.count(name)) continue;
+                    std::string parentName = name.substr(0, slash);
+                    auto parentIt = _modelChannelMap.find(parentName);
+                    if (parentIt == _modelChannelMap.end()) continue;
+                    synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
+                }
             }
-        }
+        } // release _bufferCacheMutex before logging and notifying
 
-        // Log stats on first few frames and after path changes
+        // Log stats on first few frames and after each render completion
         static int prerenderedFrameLogCount = 0;
         if (sRdbgResetCounters) { prerenderedFrameLogCount = 0; sRdbgResetCounters = false; }
-        if (prerenderedFrameLogCount < 5) {
-            printf("[RDBG] renderFrame(PRERENDERED): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu, frameDataSize=%zu\n",
-                   frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size(), _currentFrameData.size());
-
-            // Sample first 2 models' raw channel data to verify correctness
-            int sampleCount = 0;
-            for (const auto& [name, chInfo] : _modelChannelMap) {
-                if (sampleCount >= 2) break;
-                uint32_t ch = chInfo.absStartChannel;
-                // Read first 6 bytes from this model's channel range
-                if (ch + 6 <= _currentFrameData.size()) {
-                    printf("[RDBG]   model='%s' ch=%u rawBytes=[%02x %02x %02x %02x %02x %02x] rOff=%d gOff=%d bOff=%d\n",
-                           name.c_str(), ch,
-                           _currentFrameData[ch], _currentFrameData[ch+1], _currentFrameData[ch+2],
-                           _currentFrameData[ch+3], _currentFrameData[ch+4], _currentFrameData[ch+5],
-                           chInfo.rOffset, chInfo.gOffset, chInfo.bOffset);
-                }
-                sampleCount++;
-            }
+        if (prerenderedFrameLogCount < 8) {
+            printf("[RDBG] renderFrame(PRERENDERED): t=%dms frame %d — %d/%zu models have non-black pixels, bufferCache=%zu\n",
+                   timeMS, frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size());
             prerenderedFrameLogCount++;
         }
 
@@ -1127,18 +1287,99 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 
     bool isSubRef = (modelName.find('/') != std::string::npos);
 
-    if (_fseqLoaded && _fseqFile) {
-        renderFrame(timeMS);
-        // Synthesize submodel FrameBuffer from parent's channel data
+    bool haveFseq = false;
+    if (_fseqLoaded.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        haveFseq = (_fseqFile != nullptr);
+    }
+
+    if (haveFseq || (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty())) {
+        // FSEQ / PRERENDERED path: build ONLY the requested model's FrameBuffer
+        // into _sidebarCache. Do NOT call renderFrame() here — that would overwrite
+        // _bufferCache (shared with the playback controller's render loop), causing
+        // the playback display to show stale sidebar-time data instead of the
+        // correct playback-time data.
+        std::string physicalModel = isSubRef ? modelName.substr(0, modelName.find('/')) : modelName;
+        auto chIt = _modelChannelMap.find(physicalModel);
+        if (chIt == _modelChannelMap.end()) return;
+        const auto& chInfo = chIt->second;
+        if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) return;
+
+        // Read frame data from the appropriate source
+        int stepTime = 25;
+        uint32_t numChannels = 0;
+        std::vector<uint8_t> localFrameData;
+
+        if (haveFseq) {
+            std::shared_ptr<FSEQFile> localFseq;
+            {
+                std::lock_guard<std::mutex> fLock(_fseqMutex);
+                localFseq = _fseqFile;
+            }
+            if (!localFseq) return;
+            stepTime = localFseq->getStepTime();
+            if (stepTime <= 0) stepTime = 50;
+            int frameIndex = timeMS / stepTime;
+            if (frameIndex < 0) frameIndex = 0;
+            int nf = static_cast<int>(localFseq->getNumFrames());
+            if (nf > 0 && frameIndex >= nf) frameIndex = nf - 1;
+            numChannels = static_cast<uint32_t>(localFseq->getChannelCount());
+            localFrameData.resize(numChannels, 0);
+            FSEQFile::FrameData* fd = localFseq->getFrame(static_cast<uint32_t>(frameIndex));
+            if (!fd) return;
+            fd->readFrame(localFrameData.data(), numChannels);
+            delete fd;
+        } else {
+            stepTime = static_cast<int>(_renderedData->getFrameTimeMS());
+            if (stepTime <= 0) stepTime = 25;
+            int frameIndex = timeMS / stepTime;
+            if (frameIndex < 0) frameIndex = 0;
+            int nf = static_cast<int>(_renderedData->getNumFrames());
+            if (nf > 0 && frameIndex >= nf) frameIndex = nf - 1;
+            const uint8_t* frameData = _renderedData->getFrame(static_cast<uint32_t>(frameIndex));
+            if (!frameData) return;
+            numChannels = _renderedData->getNumChannels();
+            localFrameData.assign(frameData, frameData + numChannels);
+        }
+
+        // Build FrameBuffer for this model only
+        FrameBuffer fb;
+        fb.modelName = physicalModel;
+        fb.width = chInfo.bufferWidth;
+        fb.height = chInfo.bufferHeight;
+        fb.timeMS = timeMS;
+        fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+        for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+            uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+            if (nodeChannel + chInfo.chansPerNode > numChannels) continue;
+
+            uint8_t r = localFrameData[nodeChannel + chInfo.rOffset];
+            uint8_t g = localFrameData[nodeChannel + chInfo.gOffset];
+            uint8_t b = localFrameData[nodeChannel + chInfo.bOffset];
+
+            int bx = chInfo.nodeBufCoords[i].first;
+            int by = chInfo.nodeBufCoords[i].second;
+            if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+            size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+            fb.pixels[idx]     = r;
+            fb.pixels[idx + 1] = g;
+            fb.pixels[idx + 2] = b;
+            fb.pixels[idx + 3] = 255;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+            _sidebarCache[physicalModel] = std::move(fb);
+        }
+
+        // For submodel refs, synthesize from the local frame data
         if (isSubRef) {
             synthesizeSubmodelBuffer(modelName, timeMS);
         }
-    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
-        renderFrame(timeMS);
-        // Synthesize submodel FrameBuffer from parent's channel data
-        if (isSubRef) {
-            synthesizeSubmodelBuffer(modelName, timeMS);
-        }
+
+        notifyModelFrameRendered(modelName, timeMS);
     } else if (_effectProvider && _modelProvider) {
         if (isSubRef) {
             static std::set<std::string> sLogged;
@@ -1487,8 +1728,11 @@ void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
 
     // Now safe to destroy the rest.
     _renderedData.reset();
-    _fseqFile.reset();
     _fseqLoaded = false;
+    {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        _fseqFile.reset();
+    }
 
     {
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
@@ -1547,8 +1791,11 @@ void RenderEngine::reRenderForEffectChange(RenderCompleteCallback callback)
 
     // Destroy rendered data and FSEQ (will be re-rendered)
     _renderedData.reset();
-    _fseqFile.reset();
     _fseqLoaded = false;
+    {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        _fseqFile.reset();
+    }
 
     // Clear pixel caches but PRESERVE _modelChannelMap
     {
@@ -1614,8 +1861,11 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         if (!_allDirty.load() && _dirtyModels.empty() && _renderedData && _renderedData->isValid()) {
             printf("RenderEngine::renderAll — nothing dirty, instant return (0ms)\n");
             // Close stale FSEQ so renderFrame uses pre-rendered data path
-            _fseqFile.reset();
             _fseqLoaded = false;
+            {
+                std::lock_guard<std::mutex> fLock(_fseqMutex);
+                _fseqFile.reset();
+            }
             // Reset frame cache so renderFrame picks up the existing data
             _currentFrameIndex = -1;
             _renderInProgress.store(false, std::memory_order_release);
@@ -1629,22 +1879,25 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     int frameTimeMS = getFrameTimeMS();
     int numFrames = getNumFrames();
     int32_t totalChannels = _outputProvider ? _outputProvider->getTotalChannels() : 0;
+    int32_t requiredChannels = computeRequiredChannels();
+
+    printf("[RDBG] renderAll: totalChannels=%d requiredChannels=%d numFrames=%d frameTimeMS=%d\n",
+           totalChannels, requiredChannels, numFrames, frameTimeMS);
+
+    // Use the larger of output channels and model-required channels
+    if (requiredChannels > totalChannels) {
+        printf("[RDBG] renderAll: expanding from %d to %d channels (models need more)\n",
+               totalChannels, requiredChannels);
+        totalChannels = requiredChannels;
+    }
 
     if (numFrames <= 0 || totalChannels <= 0) {
-        printf("RenderEngine::renderAll — invalid sequence: %d frames, %d channels\n",
+        printf("[RDBG] renderAll: BAIL — invalid sequence: %d frames, %d channels\n",
                numFrames, totalChannels);
         _renderInProgress.store(false, std::memory_order_release);
         if (callback) callback(false);
         notifyRenderComplete(false);
         return;
-    }
-
-    // Ensure the output buffer is large enough for all models.
-    int32_t requiredChannels = computeRequiredChannels();
-    if (requiredChannels > totalChannels) {
-        printf("RenderEngine::renderAll — expanding buffer from %d to %d channels (models need more)\n",
-               totalChannels, requiredChannels);
-        totalChannels = requiredChannels;
     }
 
     // --- Incremental path: re-render only dirty models ---
@@ -1687,8 +1940,11 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
             std::lock_guard<std::mutex> lock(_dirtyMutex);
             _dirtyModels.clear();
             // Close stale FSEQ so renderFrame uses pre-rendered data path
-            _fseqFile.reset();
             _fseqLoaded = false;
+            {
+                std::lock_guard<std::mutex> fLock(_fseqMutex);
+                _fseqFile.reset();
+            }
             _currentFrameIndex = -1;
 
             printf("RenderEngine::renderAll — all dirty models pre-rendered in background (0ms)\n");
@@ -1772,6 +2028,7 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     }
 
     // --- Full render path ---
+    auto fullRenderWallStart = std::chrono::steady_clock::now();
 
     // Cancel background queue before full render (it references _renderedData
     // which will be replaced below).
@@ -1784,6 +2041,12 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         _diskCache->clearAll();
     }
 
+    // Clear _modelChannelMap BEFORE allocating the new buffer. This forces
+    // renderFrame() to use the LIVE path during the 10+ second render instead
+    // of reading from the half-rendered _renderedData via the PRERENDERED path.
+    // The map is rebuilt after rendering completes.
+    _modelChannelMap.clear();
+
     double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
     printf("RenderEngine::renderAll — FULL render: %d frames (%dms), %d channels, %.1fs\n",
            numFrames, frameTimeMS, totalChannels, duration);
@@ -1791,8 +2054,9 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     // Create render context
     auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
 
-    // Allocate output buffer
-    _renderedData = std::make_unique<NativeSequenceData>(
+    // Render into a separate buffer, then swap into _renderedData when done.
+    // This prevents renderFrame() from reading partially-rendered data.
+    auto newRenderedData = std::make_unique<NativeSequenceData>(
         static_cast<uint32_t>(totalChannels),
         static_cast<uint32_t>(numFrames),
         static_cast<uint32_t>(frameTimeMS));
@@ -1860,10 +2124,19 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         _coordinator->setDiskCache(_diskCache.get());
     }
 
-    bool completed = _coordinator->renderAll(*_renderedData);
+    bool completed = _coordinator->renderAll(*newRenderedData);
+
+    auto fullRenderWallEnd = std::chrono::steady_clock::now();
+    auto fullRenderWallMS = std::chrono::duration<double, std::milli>(
+        fullRenderWallEnd - fullRenderWallStart).count();
 
     _coordinator->setListener(nullptr);
     _coordinator.reset();
+
+    // Swap the fully-rendered buffer into _renderedData atomically.
+    // Until this point, _renderedData was null (or old) and _modelChannelMap
+    // was empty, so renderFrame() used the LIVE path during rendering.
+    _renderedData = std::move(newRenderedData);
 
     bool wasCancelled = !completed;
     notifyRenderComplete(wasCancelled);
@@ -1882,13 +2155,16 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         // Close stale FSEQ so renderFrame() uses the pre-rendered data path
         // instead of reading from the old (now-overwritten) FSEQ file.
         // Don't use closeFSEQ() — it clears _modelChannelMap which we need.
-        _fseqFile.reset();
         _fseqLoaded = false;
-        if (_modelChannelMap.empty()) {
-            buildControllerChannelMap();
-            buildModelTotalChannelsMap();
-            buildModelChannelMap();
+        {
+            std::lock_guard<std::mutex> lock(_fseqMutex);
+            _fseqFile.reset();
         }
+        // Always rebuild the map after a full render — the previous map
+        // may have stale absStartChannel offsets from an earlier _renderedData.
+        buildControllerChannelMap();
+        buildModelTotalChannelsMap();
+        buildModelChannelMap();
         // Reset frame cache so next renderFrame reads from _renderedData
         _currentFrameIndex = -1;
 
@@ -1913,43 +2189,77 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
             _dirtyModels.clear();
         }
 
-        printf("RenderEngine::renderAll — rendered data ready for preview (%u frames, %u channels), %zu channel ranges cached\n",
-               _renderedData->getNumFrames(), _renderedData->getNumChannels(), _modelChannelRanges.size());
+        printf("[RDBG] renderAll: FULL RENDER COMPLETE in %.1fms (%s) — %u frames, %u channels, stepTime=%u ms (renderAll used %dms), mapSize=%zu\n",
+               fullRenderWallMS, wasCancelled ? "CANCELLED" : "ok",
+               _renderedData->getNumFrames(), _renderedData->getNumChannels(),
+               _renderedData->getFrameTimeMS(), frameTimeMS,
+               _modelChannelMap.size());
 
-        // Validate rendered data: sample frame 0 and count non-zero bytes
-        const uint8_t* frame0 = _renderedData->getFrame(0);
-        if (frame0) {
-            uint32_t numCh = _renderedData->getNumChannels();
+        // Validate rendered data: dense sampling around the 13-15s range
+        // where the second render shows unexpected nonZero data
+        uint32_t numCh = _renderedData->getNumChannels();
+        uint32_t nFrames = _renderedData->getNumFrames();
+        uint32_t gen = _renderGeneration.load(std::memory_order_relaxed);
+        uint32_t sampleTimes[] = {
+            0, 5000, 10000, 12000, 12500, 13000, 13500, 13750,
+            13900, 14000, 14100, 14200, 14300, 14500, 15000,
+            17500, 20000, 25000, 30000, 35000
+        };
+
+        for (uint32_t st : sampleTimes) {
+            uint32_t sf = st / frameTimeMS;
+            if (sf >= nFrames) continue;
+            const uint8_t* frameData = _renderedData->getFrame(sf);
+            if (!frameData) continue;
+
             uint32_t nonZero = 0;
             for (uint32_t i = 0; i < numCh; ++i) {
-                if (frame0[i] != 0) nonZero++;
+                if (frameData[i] != 0) nonZero++;
             }
-            printf("[RDBG] renderAll: COMPLETE — frame0 has %u/%u non-zero channels, fseqLoaded=%d, mapSize=%zu\n",
-                   nonZero, numCh, _fseqLoaded.load(), _modelChannelMap.size());
+            printf("[RDBG] renderAll(gen=%u): frame[%u] (t=%ums): %u/%u non-zero channels\n",
+                   gen, sf, st, nonZero, numCh);
+        }
 
-            // Sample first 3 mapped models to verify data integrity
+        // Sample up to 10 models at t=20s (within effect range) to check per-model data
+        uint32_t sampleFrame = 20000 / frameTimeMS;
+        if (sampleFrame >= nFrames) sampleFrame = nFrames / 2;
+        const uint8_t* midData = _renderedData->getFrame(sampleFrame);
+        if (midData) {
+            printf("[RDBG] renderAll: sampling models at frame %u (t=%ums):\n",
+                   sampleFrame, sampleFrame * frameTimeMS);
             int sampleCount = 0;
             for (const auto& [name, chInfo] : _modelChannelMap) {
-                if (sampleCount >= 3) break;
+                if (sampleCount >= 10) break;
                 uint32_t ch = chInfo.absStartChannel;
                 uint32_t end = ch + chInfo.nodeCount * chInfo.chansPerNode;
                 uint32_t modelNonZero = 0;
                 for (uint32_t i = ch; i < end && i < numCh; ++i) {
-                    if (frame0[i] != 0) modelNonZero++;
+                    if (midData[i] != 0) modelNonZero++;
                 }
-                printf("[RDBG] renderAll: model='%s' ch=[%u..%u) nodes=%u nonZero=%u rOff=%d gOff=%d bOff=%d\n",
-                       name.c_str(), ch, end, chInfo.nodeCount, modelNonZero,
-                       chInfo.rOffset, chInfo.gOffset, chInfo.bOffset);
+                // First 6 bytes as hex
+                char hexBuf[32] = {0};
+                if (ch + 6 <= numCh) {
+                    snprintf(hexBuf, sizeof(hexBuf), "[%02x %02x %02x %02x %02x %02x]",
+                             midData[ch], midData[ch+1], midData[ch+2],
+                             midData[ch+3], midData[ch+4], midData[ch+5]);
+                }
+                printf("[RDBG]   '%s' ch=%u..%u nodes=%u nonZero=%u bytes=%s\n",
+                       name.c_str(), ch, end, chInfo.nodeCount, modelNonZero, hexBuf);
                 sampleCount++;
             }
         }
+    } else {
+        printf("[RDBG] renderAll: FULL RENDER %s in %.1fms — renderedData=%s\n",
+               wasCancelled ? "CANCELLED" : "FAILED", fullRenderWallMS,
+               (_renderedData && _renderedData->isValid()) ? "valid" : "null/invalid");
     }
+
+    // Bump render generation so renderFrame resets its diagnostic counters.
+    uint32_t gen = _renderGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
 
     // Allow renderFrame() to resume reading the freshly rendered data.
     _renderInProgress.store(false, std::memory_order_release);
-    printf("[RDBG] renderAll: _renderInProgress → false\n");
-
-    printf("RenderEngine::renderAll — %s\n", wasCancelled ? "cancelled" : "complete");
+    printf("[RDBG] renderAll: _renderInProgress → false, generation=%u\n", gen);
 }
 
 void RenderEngine::renderRange(int startMS, int endMS, bool clear,
@@ -1963,15 +2273,18 @@ void RenderEngine::renderRange(int startMS, int endMS, bool clear,
     int frameTimeMS = getFrameTimeMS();
     int32_t totalChannels = _outputProvider ? _outputProvider->getTotalChannels() : 0;
     int numFrames = getNumFrames();
+    int32_t requiredChannels = computeRequiredChannels();
+
+    printf("[RDBG] renderRange: totalChannels=%d requiredChannels=%d numFrames=%d\n",
+           totalChannels, requiredChannels, numFrames);
+
+    if (requiredChannels > totalChannels) totalChannels = requiredChannels;
 
     if (numFrames <= 0 || totalChannels <= 0) {
+        printf("[RDBG] renderRange: BAIL — %d frames, %d channels\n", numFrames, totalChannels);
         if (callback) callback(false);
         return;
     }
-
-    // Ensure buffer is large enough for all models
-    int32_t requiredChannels = computeRequiredChannels();
-    if (requiredChannels > totalChannels) totalChannels = requiredChannels;
 
     double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
     auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
@@ -2200,6 +2513,13 @@ void RenderEngine::invalidateCache(const std::string& modelName)
 
 void RenderEngine::invalidateAllCaches()
 {
+    // Cancel background render queue FIRST — its destructor waits for
+    // in-progress renders that write to _renderedData. Destroying
+    // _renderedData first would cause use-after-free.
+    _bgRenderQueue.reset();
+    _bgCoordinator.reset();
+    _bgContext.reset();
+
     // Close FSEQ so the FSEQ playback path is no longer used.
     // Must be called before taking _bufferCacheMutex (closeFSEQ locks it too).
     closeFSEQ();
@@ -2209,10 +2529,7 @@ void RenderEngine::invalidateAllCaches()
         _bufferCache.clear();
         _currentFrameIndex = -1;
         _currentFrameData.clear();
-        // Discard pre-rendered data so the live effect path is used until
-        // the user clicks Render All again.
         _renderedData.reset();
-        // Destroy the live coordinator so it's recreated fresh
         _liveCoordinator.reset();
         _liveContext.reset();
         _lastLiveRenderTimeMS = -1;
@@ -2224,12 +2541,6 @@ void RenderEngine::invalidateAllCaches()
         _sidebarContext.reset();
         _lastSidebarRenderTimeMS = -1;
     }
-
-    // Cancel and destroy background render queue (it references _renderedData
-    // which was just destroyed above).
-    _bgRenderQueue.reset();
-    _bgCoordinator.reset();
-    _bgContext.reset();
 
     // Clear disk cache (full invalidation means all cached data is stale).
     if (_diskCache) {
@@ -2338,20 +2649,27 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
     printf("[RDBG] invalidateModelAndGroup('%s'): expanded to %zu models (%d physical), visited %zu total\n",
            modelName.c_str(), visited.size(), physicalCount, visited.size());
 
-    // Now dispatch a background forceRenderAll to re-render everything.
-    // This is the cleanest approach: the FSEQ path continues providing
-    // smooth (stale) playback while renderAll runs. Once complete,
-    // the path switches to PRERENDERED with fresh data.
-    //
-    // We clear _fseqLoaded ONLY after renderAll sets _renderInProgress,
-    // so renderFrame() either reads FSEQ (before render starts) or
-    // returns immediately (during render). After render, the PRERENDERED
-    // path takes over with fresh data.
-    printf("[RDBG] invalidateModelAndGroup('%s'): dispatching background reRenderForEffectChange\n",
-           modelName.c_str());
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        this->reRenderForEffectChange(nullptr);
-    });
+    // Clear ALL playback data so renderFrame falls back to LIVE path.
+    // FSEQ must be cleared too — stale FSEQ data is as wrong as stale
+    // pre-rendered data. LIVE path renders effects in real-time from
+    // the effect provider, so it always reflects the current edit state.
+    _fseqLoaded = false;
+    {
+        std::lock_guard<std::mutex> fLock(_fseqMutex);
+        _fseqFile.reset();
+    }
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _renderedData.reset();
+        _bufferCache.clear();
+        _currentFrameIndex = -1;
+        // Destroy live coordinator so it's recreated fresh with clean state
+        _liveCoordinator.reset();
+        _liveContext.reset();
+        _lastLiveRenderTimeMS = -1;
+    }
+    printf("[RDBG] invalidateModelAndGroup('%s'): %zu models dirtied, cleared FSEQ+renderedData → LIVE fallback\n",
+           modelName.c_str(), visited.size());
 
     // Also check if this physical model belongs to any group with effects
     if (visited.size() == 1 && physicalCount == 1) {
@@ -2413,14 +2731,55 @@ void RenderEngine::setShowFolder(const std::string& path)
 void RenderEngine::ensureBackgroundRenderQueue()
 {
     if (_bgRenderQueue) return;
-    if (!_renderedData || !_renderedData->isValid()) return;
     if (!_effectProvider || !_modelProvider) return;
 
-    // Create a dedicated coordinator for background rendering.
     int frameTimeMS = getFrameTimeMS();
     int numFrames = getNumFrames();
-    double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
+    if (numFrames <= 0 || frameTimeMS <= 0) return;
 
+    // Allocate _renderedData if it doesn't exist yet (e.g., after fresh FSEQ load).
+    // Zeroed initially — the FSEQ provides the baseline for unmodified models,
+    // and the background queue fills in only the dirty models' channel ranges.
+    if (!_renderedData || !_renderedData->isValid()) {
+        int32_t totalChannels = computeRequiredChannels();
+        if (_outputProvider) {
+            int32_t outputChannels = _outputProvider->getTotalChannels();
+            if (outputChannels > totalChannels) totalChannels = outputChannels;
+        }
+        if (totalChannels <= 0) return;
+
+        _renderedData = std::make_unique<NativeSequenceData>(
+            static_cast<uint32_t>(totalChannels),
+            static_cast<uint32_t>(numFrames),
+            static_cast<uint32_t>(frameTimeMS));
+        printf("[RDBG] ensureBackgroundRenderQueue: allocated _renderedData (%d channels, %d frames)\n",
+               totalChannels, numFrames);
+    }
+
+    // Ensure model channel map is built (needed for channel ranges)
+    if (_modelChannelMap.empty()) {
+        if (_controllerStartChannels.empty()) buildControllerChannelMap();
+        if (_modelTotalChannels.empty()) buildModelTotalChannelsMap();
+        buildModelChannelMap();
+    }
+
+    // Ensure _modelChannelRanges is populated (needed for FSEQ overlay)
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        if (_modelChannelRanges.empty() && !_modelChannelMap.empty()) {
+            for (const auto& [name, chInfo] : _modelChannelMap) {
+                uint32_t chCount = chInfo.nodeCount * chInfo.chansPerNode;
+                if (chCount > 0) {
+                    _modelChannelRanges[name] = {chInfo.absStartChannel, chCount};
+                }
+            }
+            printf("[RDBG] ensureBackgroundRenderQueue: populated %zu model channel ranges\n",
+                   _modelChannelRanges.size());
+        }
+    }
+
+    // Create a dedicated coordinator for background rendering.
+    double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
     _bgContext = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
     _bgCoordinator = std::make_unique<NativeRenderCoordinator>(
         _effectProvider, _modelProvider, _bgContext.get());
@@ -2450,7 +2809,8 @@ void RenderEngine::ensureBackgroundRenderQueue()
     _bgRenderQueue = std::make_unique<BackgroundRenderQueue>(
         _bgCoordinator.get(), _renderedData.get());
 
-    printf("RenderEngine: Background render queue created\n");
+    printf("[RDBG] ensureBackgroundRenderQueue: queue created with %zu resolved channels\n",
+           resolvedChannels.size());
 }
 
 // --- EffectEngineListener callbacks ---
@@ -2540,8 +2900,13 @@ bool RenderEngine::isRendering() const {
 RenderStatus RenderEngine::getRenderStatus() const {
     RenderStatus status;
     status.isRendering = isRendering();
-    if (_fseqLoaded && _fseqFile) {
-        status.framesTotal = static_cast<int>(_fseqFile->getNumFrames());
+    std::shared_ptr<FSEQFile> localFseq;
+    if (_fseqLoaded) {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        localFseq = _fseqFile;
+    }
+    if (localFseq) {
+        status.framesTotal = static_cast<int>(localFseq->getNumFrames());
     } else {
         status.framesTotal = getNumFrames();
     }
@@ -2553,8 +2918,9 @@ RenderStatus RenderEngine::getRenderStatus() const {
 
 int RenderEngine::getFrameTimeMS() const
 {
-    if (_fseqLoaded && _fseqFile) {
-        return _fseqFile->getStepTime();
+    if (_fseqLoaded) {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        if (_fseqFile) return _fseqFile->getStepTime();
     }
     if (_provider) {
         int ft = _provider->getFrameTimeMS();
@@ -2565,8 +2931,9 @@ int RenderEngine::getFrameTimeMS() const
 
 int RenderEngine::getNumFrames() const
 {
-    if (_fseqLoaded && _fseqFile) {
-        return static_cast<int>(_fseqFile->getNumFrames());
+    if (_fseqLoaded) {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        if (_fseqFile) return static_cast<int>(_fseqFile->getNumFrames());
     }
     if (_provider) {
         int n = _provider->getTotalFrames();

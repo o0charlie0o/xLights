@@ -1577,6 +1577,34 @@ bool NativeRenderCoordinator::renderAllFrames(
            modelsWithEffects, modelsWithOwnEffects, modelsWithGroupOnly,
            _skippedModels.size());
 
+    // Diagnostic: verify effect provider state before frame loop
+    {
+        size_t totalElements = _effectProvider->getElementCount();
+        printf("[RDBG-VERIFY] Effect provider: %zu elements\n", totalElements);
+        // Check first 3 jobs' element indices and probe effects at 15000ms and 25000ms
+        for (size_t idx = 0; idx < physicalJobs.size() && idx < 3; ++idx) {
+            auto& job = *physicalJobs[idx].job;
+            size_t eIdx = (job.groupElementIndex != SIZE_MAX) ? job.groupElementIndex : job.elementIndex;
+            ElementInfo eInfo;
+            bool got = _effectProvider->getElement(eIdx, eInfo);
+            printf("[RDBG-VERIFY]   job[%zu] elemIdx=%zu groupIdx=%zu: elem='%s' layers=%zu effects=%zu\n",
+                   idx, job.elementIndex, job.groupElementIndex,
+                   got ? eInfo.name.c_str() : "??", got ? eInfo.effectLayerCount : 0,
+                   got ? eInfo.effectCount : 0);
+            // Probe effects at key times
+            for (int probeT : {15000, 20000, 25000}) {
+                EffectInstanceInfo eff;
+                bool found = _effectProvider->getEffectAtTime(eIdx, 0, probeT, eff);
+                if (found) {
+                    printf("[RDBG-VERIFY]     @%dms: found '%s' %d-%dms\n",
+                           probeT, eff.effectType.c_str(), eff.startTimeMS, eff.endTimeMS);
+                } else {
+                    printf("[RDBG-VERIFY]     @%dms: NO effect\n", probeT);
+                }
+            }
+        }
+    }
+
     int totalFrames = (endMS - startMS + frameTimeMS - 1) / frameTimeMS;
     if (totalFrames <= 0) totalFrames = 1;
     int framesComplete = 0;
@@ -1608,6 +1636,10 @@ bool NativeRenderCoordinator::renderAllFrames(
     std::vector<double> perModelTotalUS(physicalJobs.size(), 0.0);
     int sampledFrames = 0;
     const int kSampleFrames = 100;
+
+    // Diagnostic flags: bitmask for which diagnostic times have been emitted
+    // bit 0 = t=14s done, bit 1 = t=25s done
+    int batchDiagDone = 0;
 
     // Frame loop: sequential frame ordering (required for stateful effects)
     for (int timeMS = startMS; timeMS < endMS; timeMS += frameTimeMS) {
@@ -1662,6 +1694,63 @@ bool NativeRenderCoordinator::renderAllFrames(
 #endif
         auto p1End = std::chrono::steady_clock::now();
         totalRenderUS += std::chrono::duration<double, std::micro>(p1End - p1Start).count();
+
+        // Two diagnostics: at t=14s (suspected wrong data) and t=25s (known effect range).
+        // Triggers once each PER renderAllFrames call.
+        // batchDiagDone is declared before the frame loop and used inside it.
+        static const int diagTargets[] = { 14000, 25000 };
+        static const int numDiagTargets = 2;
+        for (int dt = 0; dt < numDiagTargets; ++dt) {
+            int diagTimeMS = diagTargets[dt];
+            // Use batchDiagDone as a bitmask: bit 0 = 14s done, bit 1 = 25s done
+            bool thisDone = (dt == 0) ? (batchDiagDone & 1) : (batchDiagDone & 2);
+            if (thisDone) continue;
+            if (timeMS < diagTimeMS || !frameData) continue;
+            if (dt == 0) batchDiagDone |= 1; else batchDiagDone |= 2;
+            printf("[RDBG-BATCH] === DIAGNOSTIC at t=%dms (target=%d) ===\n", timeMS, diagTimeMS);
+            for (size_t idx = 0; idx < physicalJobs.size() && idx < 3; ++idx) {
+                auto& job = *physicalJobs[idx].job;
+                auto& geom = job.geometry;
+                // Check validLayers by re-examining effect availability
+                int layersWithEffects = 0;
+                for (size_t layer = 0; layer < job.layerCount; ++layer) {
+                    size_t srcElemIdx;
+                    size_t srcLayerIdx;
+                    if (job.groupElementIndex != SIZE_MAX && layer < job.groupLayerCount) {
+                        srcElemIdx = job.groupElementIndex;
+                        srcLayerIdx = layer;
+                    } else {
+                        srcElemIdx = job.elementIndex;
+                        srcLayerIdx = (job.groupElementIndex != SIZE_MAX)
+                                      ? layer - job.groupLayerCount : layer;
+                    }
+                    EffectInstanceInfo eff;
+                    bool found = _effectProvider->getEffectAtTime(srcElemIdx, srcLayerIdx, timeMS, eff);
+                    if (found) layersWithEffects++;
+                    if (layer < 3) {
+                        printf("[RDBG-BATCH]   '%s' layer %zu: elemIdx=%zu layerIdx=%zu found=%d",
+                               geom.name.c_str(), layer, srcElemIdx, srcLayerIdx, found);
+                        if (found) printf(" type='%s' start=%d end=%d", eff.effectType.c_str(), eff.startTimeMS, eff.endTimeMS);
+                        printf("\n");
+                    }
+                }
+                // Check pixel output
+                auto* pb = job.pixelBuffer.get();
+                const uint8_t* pixData = pb->getBlendedPixelData();
+                size_t pixSize = pb->getBlendedPixelDataSize();
+                int nonZeroRGB = 0;
+                if (pixData && pixSize >= 4) {
+                    for (size_t b = 0; b < pixSize; b += 4) {
+                        if (pixData[b] > 0 || pixData[b+1] > 0 || pixData[b+2] > 0) nonZeroRGB++;
+                    }
+                }
+                printf("[RDBG-BATCH]   '%s': elemIdx=%zu groupIdx=%zu layers=%zu layersWithEffects=%d pixBuf=%dx%d nonZeroRGBPixels=%d/%d nodes=%u\n",
+                       geom.name.c_str(), job.elementIndex, job.groupElementIndex,
+                       job.layerCount, layersWithEffects,
+                       pb->getBufferWi(), pb->getBufferHt(), nonZeroRGB,
+                       pb->getBufferWi() * pb->getBufferHt(), geom.nodeCount);
+            }
+        }
 
         if (sampling) {
             for (size_t idx = 0; idx < physicalJobs.size(); ++idx) {
@@ -1885,6 +1974,27 @@ void NativeRenderCoordinator::resetPersistentState(const std::string& modelName)
     _persistentJobs.erase(modelName);
     _skippedModels.erase(modelName);
     _geometryCache.erase(modelName);
+
+    // Cascade to submodel entries (e.g., "ModelA/Outline", "ModelA/Trunk").
+    // Without this, stale submodel pixel data persists after parent edit.
+    std::string prefix = modelName + "/";
+    for (auto it = _persistentJobs.begin(); it != _persistentJobs.end(); ) {
+        if (it->first.compare(0, prefix.size(), prefix) == 0)
+            it = _persistentJobs.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = _geometryCache.begin(); it != _geometryCache.end(); ) {
+        if (it->first.compare(0, prefix.size(), prefix) == 0)
+            it = _geometryCache.erase(it);
+        else
+            ++it;
+    }
+
+    // Force group membership map rebuild so group effects cascade correctly
+    // after the model's effects change.
+    _groupMapBuilt = false;
+
     {
         std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
         _renderCache.clearModel(modelName);
