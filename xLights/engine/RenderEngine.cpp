@@ -802,6 +802,39 @@ void RenderEngine::renderFrame(int timeMS)
         delete fd;
         _currentFrameIndex = frameIndex;
 
+        // Overlay: patch dirty models' channel data from _renderedData.
+        // When an effect is edited, the background render queue re-renders
+        // only the affected model into _renderedData. Once complete, we copy
+        // that model's channel range over the stale FSEQ data so the user
+        // sees the updated effect without re-rendering the entire sequence.
+        if (_renderedData && _renderedData->isValid() && _bgRenderQueue) {
+            auto completed = _bgRenderQueue->getCompletedModels();
+            if (!completed.empty()) {
+                const uint8_t* overlayFrame = _renderedData->getFrame(
+                    static_cast<uint32_t>(frameIndex));
+                if (overlayFrame) {
+                    std::lock_guard<std::mutex> dLock(_dirtyMutex);
+                    for (const auto& mName : completed) {
+                        auto rangeIt = _modelChannelRanges.find(mName);
+                        if (rangeIt == _modelChannelRanges.end()) continue;
+                        uint32_t startCh = rangeIt->second.first;
+                        uint32_t chCount = rangeIt->second.second;
+                        if (startCh + chCount <= maxCh) {
+                            std::memcpy(_currentFrameData.data() + startCh,
+                                        overlayFrame + startCh, chCount);
+                        }
+                    }
+                    // Log first overlay application
+                    static int overlayLogCount = 0;
+                    if (overlayLogCount < 5) {
+                        printf("[RDBG] renderFrame(FSEQ): overlaid %zu model(s) from _renderedData at frame %d\n",
+                               completed.size(), frameIndex);
+                        overlayLogCount++;
+                    }
+                }
+            }
+        }
+
         // Build FrameBuffers for all mapped models
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.clear();
@@ -2155,24 +2188,13 @@ void RenderEngine::invalidateModel(const std::string& modelName)
 {
     if (modelName.empty()) return;
 
-    bool wasFseqLoaded = _fseqLoaded.load(std::memory_order_relaxed);
+    bool isFseqActive = _fseqLoaded.load(std::memory_order_relaxed);
     printf("[RDBG] invalidateModel('%s'): renderedData=%s mapSize=%zu renderInProgress=%d fseqLoaded=%d\n",
            modelName.c_str(),
            (_renderedData && _renderedData->isValid()) ? "valid" : "null/invalid",
            _modelChannelMap.size(),
            _renderInProgress.load(std::memory_order_relaxed),
-           wasFseqLoaded);
-
-    // Switch away from stale FSEQ data. The FSEQ file on disk doesn't reflect
-    // the effect change, so continuing to read from it would show old data.
-    // Clearing _fseqLoaded causes renderFrame() to fall through to the
-    // PRERENDERED path (if _renderedData exists) or the LIVE path (renders
-    // effects on-the-fly for immediate feedback).
-    if (wasFseqLoaded) {
-        _fseqLoaded.store(false, std::memory_order_release);
-        printf("[RDBG] invalidateModel('%s'): cleared _fseqLoaded (was reading stale FSEQ)\n",
-               modelName.c_str());
-    }
+           isFseqActive);
 
     {
         std::lock_guard<std::mutex> lock(_dirtyMutex);
@@ -2185,7 +2207,7 @@ void RenderEngine::invalidateModel(const std::string& modelName)
         _bufferCache.erase(modelName);
         printf("[RDBG] invalidateModel('%s'): resetting _currentFrameIndex from %d to -1\n",
                modelName.c_str(), _currentFrameIndex);
-        _currentFrameIndex = -1; // force re-read from _renderedData on next renderFrame
+        _currentFrameIndex = -1; // force re-read on next renderFrame
 
         // Reset the model's persistent state in the live coordinator
         if (_liveCoordinator) {
@@ -2202,8 +2224,39 @@ void RenderEngine::invalidateModel(const std::string& modelName)
         }
     }
 
-    // Zero the dirty model's channel range in _renderedData so the pre-rendered
-    // data path shows black (not stale data) for this model until re-rendered.
+    // When FSEQ is active and _renderedData doesn't exist yet, create it so we
+    // can use it as an overlay buffer. The FSEQ path stays active for all clean
+    // models; only the dirty model's channels get patched from _renderedData
+    // once the background render completes.
+    if (isFseqActive && (!_renderedData || !_renderedData->isValid()) && _fseqFile) {
+        uint32_t numCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
+        uint32_t numFrames = static_cast<uint32_t>(_fseqFile->getNumFrames());
+        uint32_t frameTime = static_cast<uint32_t>(_fseqFile->getStepTime());
+        if (numCh > 0 && numFrames > 0) {
+            _renderedData = std::make_unique<NativeSequenceData>(numCh, numFrames, frameTime);
+            printf("[RDBG] invalidateModel('%s'): allocated overlay _renderedData (%u ch x %u frames)\n",
+                   modelName.c_str(), numCh, numFrames);
+        }
+    }
+
+    // Build _modelChannelRanges from _modelChannelMap if not already populated
+    // (happens on first edit when only FSEQ has been loaded, no renderAll yet).
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        if (_modelChannelRanges.empty() && !_modelChannelMap.empty()) {
+            for (const auto& [name, chInfo] : _modelChannelMap) {
+                uint32_t chCount = chInfo.nodeCount * chInfo.chansPerNode;
+                if (chCount > 0) {
+                    _modelChannelRanges[name] = {chInfo.absStartChannel, chCount};
+                }
+            }
+            printf("[RDBG] invalidateModel: built _modelChannelRanges from _modelChannelMap (%zu entries)\n",
+                   _modelChannelRanges.size());
+        }
+    }
+
+    // Zero the dirty model's channel range in _renderedData so background
+    // re-render writes fresh data (not mixed with stale data).
     if (_renderedData && _renderedData->isValid()) {
         std::lock_guard<std::mutex> lock(_dirtyMutex);
         auto rangeIt = _modelChannelRanges.find(modelName);
@@ -2227,11 +2280,11 @@ void RenderEngine::invalidateModel(const std::string& modelName)
                    modelName.c_str(), _modelChannelRanges.size());
         }
 
-        // Queue for background pre-rendering so the model will be re-rendered
-        // in the background before the user clicks Render All.
+        // Queue for background re-rendering. Once complete, the FSEQ path
+        // will overlay this model's fresh channel data from _renderedData.
         ensureBackgroundRenderQueue();
         if (_bgRenderQueue) {
-            printf("[RDBG] invalidateModel('%s'): queued for background re-render\n", modelName.c_str());
+            printf("[RDBG] invalidateModel('%s'): queued for background re-render (FSEQ overlay mode)\n", modelName.c_str());
             _bgRenderQueue->queueModel(modelName);
         }
     }
