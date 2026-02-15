@@ -741,6 +741,13 @@ void RenderEngine::renderFrame(int timeMS)
         sPathLogged = true;
     }
 
+    // Check if any models are dirty (edited since last Render All).
+    bool hasDirtyModels;
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        hasDirtyModels = !_dirtyModels.empty() || _allDirty.load();
+    }
+
     if (_fseqLoaded && _fseqFile) {
         // FSEQ playback path: read pre-rendered channel data
         int stepTime = _fseqFile->getStepTime();
@@ -841,9 +848,11 @@ void RenderEngine::renderFrame(int timeMS)
         }
 
         notifyFrameRendered(timeMS);
-    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
+    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()
+               && !hasDirtyModels) {
         // Pre-rendered data path: read from in-memory rendered data (from renderAll)
-        // This is the same as the FSEQ path but reads from NativeSequenceData in memory.
+        // Only use this when NO models are dirty — if any model was edited, fall through
+        // to the live rendering path so the user sees updated effects immediately.
         static bool sPrerenderedPathLogged = false;
         if (!sPrerenderedPathLogged) {
             printf("[SUBDBG] renderFrame(%dms): PRERENDERED DATA PATH, channels=%u frames=%u models=%zu\n",
@@ -1034,13 +1043,23 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 {
     bool isSubRef = (modelName.find('/') != std::string::npos);
 
+    // Check if any models are dirty (edited since last Render All).
+    // When dirty models exist, skip the pre-rendered data path and fall through
+    // to the live rendering path so the user sees updated effects immediately.
+    bool hasDirtyModels;
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        hasDirtyModels = !_dirtyModels.empty() || _allDirty.load();
+    }
+
     if (_fseqLoaded && _fseqFile) {
         renderFrame(timeMS);
         // Synthesize submodel FrameBuffer from parent's channel data
         if (isSubRef) {
             synthesizeSubmodelBuffer(modelName, timeMS);
         }
-    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
+    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()
+               && !hasDirtyModels) {
         renderFrame(timeMS);
         // Synthesize submodel FrameBuffer from parent's channel data
         if (isSubRef) {
