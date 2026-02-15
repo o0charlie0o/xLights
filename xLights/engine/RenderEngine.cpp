@@ -2155,11 +2155,24 @@ void RenderEngine::invalidateModel(const std::string& modelName)
 {
     if (modelName.empty()) return;
 
-    printf("[RDBG] invalidateModel('%s'): renderedData=%s mapSize=%zu renderInProgress=%d\n",
+    bool wasFseqLoaded = _fseqLoaded.load(std::memory_order_relaxed);
+    printf("[RDBG] invalidateModel('%s'): renderedData=%s mapSize=%zu renderInProgress=%d fseqLoaded=%d\n",
            modelName.c_str(),
            (_renderedData && _renderedData->isValid()) ? "valid" : "null/invalid",
            _modelChannelMap.size(),
-           _renderInProgress.load(std::memory_order_relaxed));
+           _renderInProgress.load(std::memory_order_relaxed),
+           wasFseqLoaded);
+
+    // Switch away from stale FSEQ data. The FSEQ file on disk doesn't reflect
+    // the effect change, so continuing to read from it would show old data.
+    // Clearing _fseqLoaded causes renderFrame() to fall through to the
+    // PRERENDERED path (if _renderedData exists) or the LIVE path (renders
+    // effects on-the-fly for immediate feedback).
+    if (wasFseqLoaded) {
+        _fseqLoaded.store(false, std::memory_order_release);
+        printf("[RDBG] invalidateModel('%s'): cleared _fseqLoaded (was reading stale FSEQ)\n",
+               modelName.c_str());
+    }
 
     {
         std::lock_guard<std::mutex> lock(_dirtyMutex);
