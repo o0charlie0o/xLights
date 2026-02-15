@@ -1369,6 +1369,55 @@ void RenderEngine::synthesizeSubmodelFrameBuffer(
     _bufferCache[subRefName] = std::move(fb);
 }
 
+void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
+{
+    printf("RenderEngine::forceRenderAll — clearing all caches and forcing full render\n");
+
+    // Destroy all cached state to force a complete re-render from scratch.
+    _renderedData.reset();
+    _bgRenderQueue.reset();
+    _bgCoordinator.reset();
+    _bgContext.reset();
+    _fseqFile.reset();
+    _fseqLoaded = false;
+
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        _bufferCache.clear();
+        _modelChannelMap.clear();
+        _currentFrameIndex = -1;
+        _currentFrameData.clear();
+        _liveCoordinator.reset();
+        _liveContext.reset();
+        _lastLiveRenderTimeMS = -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+        _sidebarCache.clear();
+        _sidebarCoordinator.reset();
+        _sidebarContext.reset();
+        _lastSidebarRenderTimeMS = -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        _allDirty.store(true);
+        _dirtyModels.clear();
+        _modelChannelRanges.clear();
+    }
+
+    // Clear resolved channel caches so they're rebuilt fresh
+    _controllerStartChannels.clear();
+    _modelTotalChannels.clear();
+    _resolvedStartChannels.clear();
+
+    // Clear disk cache
+    if (_diskCache) {
+        _diskCache->clearAll();
+    }
+
+    renderAll(callback);
+}
+
 void RenderEngine::renderAll(RenderCompleteCallback callback)
 {
     if (!_effectProvider || !_modelProvider) {
@@ -1544,6 +1593,11 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     _bgRenderQueue.reset();
     _bgCoordinator.reset();
     _bgContext.reset();
+
+    // Clear disk cache before full render to avoid stale data from previous sessions.
+    if (_diskCache) {
+        _diskCache->clearAll();
+    }
 
     double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
     printf("RenderEngine::renderAll — FULL render: %d frames (%dms), %d channels, %.1fs\n",

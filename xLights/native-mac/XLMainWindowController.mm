@@ -477,6 +477,10 @@ static NSString * const kXLCurrentTabKey = @"XLCurrentTab";
     [_engineBridge renderAll];
 }
 
+- (void)forceRenderAll:(id)sender {
+    [_engineBridge forceRenderAll];
+}
+
 - (void)renderCurrentFrame:(id)sender {
     [_playbackController renderCurrentFrame];
 }

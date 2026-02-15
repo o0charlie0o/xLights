@@ -9434,6 +9434,10 @@ static const CGFloat kZoomFactor = 1.5;
     [_engineBridge renderAll];
 }
 
+- (void)forceRenderAll {
+    [_engineBridge forceRenderAll];
+}
+
 #pragma mark - XLStemsContainerDelegate
 
 - (void)stemsContainer:(XLStemsContainerView *)container didChangeHeight:(CGFloat)newHeight {

@@ -95,6 +95,9 @@
 /// Render all effects.
 - (void)renderAll;
 
+/// Force a complete re-render from scratch, clearing all caches.
+- (void)forceRenderAll;
+
 #pragma mark - Zoom and Navigation Actions
 /// Zoom in on the timeline (increase zoom level).
 - (void)zoomIn:(id)sender;

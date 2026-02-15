@@ -402,6 +402,7 @@ NSToolbarItemIdentifier const XLToolbarItemPreview = @"XLToolbarItemPreview";
     [sequenceMenu addItem:[NSMenuItem separatorItem]];
     [sequenceMenu addItemWithTitle:@"Render All" action:@selector(renderAll:) keyEquivalent:@"r"];
     [sequenceMenu addItemWithTitle:@"Render Selected" action:@selector(renderSelected:) keyEquivalent:@"R"];
+    [sequenceMenu addItemWithTitle:@"Force Render All (Clear Caches)" action:@selector(forceRenderAll:) keyEquivalent:@""];
 
     [sequenceMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *timingItem = [sequenceMenu addItemWithTitle:@"Timing" action:nil keyEquivalent:@""];

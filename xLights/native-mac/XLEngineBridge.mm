@@ -1065,6 +1065,40 @@ static XLEngineBridge *_sharedBridge = nil;
     });
 }
 
+- (void)forceRenderAll {
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        NSLog(@"XLEngineBridge: Cannot force render - engine not available");
+        return;
+    }
+
+    NSLog(@"XLEngineBridge: forceRenderAll() — dispatching to background");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        self->_renderEngine->forceRenderAll(nullptr);
+        NSLog(@"XLEngineBridge: forceRenderAll() — complete");
+
+        // Export FSEQ file alongside the sequence
+        if (self->_nativeSequenceProvider) {
+            std::string seqPath = self->_nativeSequenceProvider->getSequencePath();
+            if (!seqPath.empty()) {
+                std::string fseqPath;
+                auto dotPos = seqPath.rfind('.');
+                if (dotPos != std::string::npos) {
+                    fseqPath = seqPath.substr(0, dotPos) + ".fseq";
+                } else {
+                    fseqPath = seqPath + ".fseq";
+                }
+                bool exported = self->_renderEngine->exportRenderedFSEQ(fseqPath, 2);
+                if (exported) {
+                    NSLog(@"XLEngineBridge: Exported FSEQ to %s", fseqPath.c_str());
+                } else {
+                    NSLog(@"XLEngineBridge: Failed to export FSEQ (no rendered data or write error)");
+                }
+            }
+        }
+    });
+}
+
 - (void)renderRange:(NSInteger)startMS endMS:(NSInteger)endMS {
     [self ensureEngineInitialized];
     if (!_renderEngine) {

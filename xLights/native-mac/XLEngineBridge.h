@@ -142,6 +142,7 @@
 #pragma mark - Rendering
 
 - (void)renderAll;
+- (void)forceRenderAll;
 - (void)renderRange:(NSInteger)startMS endMS:(NSInteger)endMS;
 - (void)abortRender;
 

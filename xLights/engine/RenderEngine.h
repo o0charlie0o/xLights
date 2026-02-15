@@ -227,6 +227,11 @@ public:
     // The optional callback is invoked when the render is complete.
     void renderAll(RenderCompleteCallback callback = nullptr);
 
+    // Force a complete re-render from scratch, clearing all caches
+    // (in-memory, disk, dirty tracking). Use when the normal render
+    // produces incorrect results or after major sequence changes.
+    void forceRenderAll(RenderCompleteCallback callback = nullptr);
+
     // Render a range of frames for all models.
     void renderRange(int startMS, int endMS, bool clear = false,
                      RenderCompleteCallback callback = nullptr);
