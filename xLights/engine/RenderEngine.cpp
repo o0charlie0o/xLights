@@ -1373,11 +1373,15 @@ void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
 {
     printf("RenderEngine::forceRenderAll — clearing all caches and forcing full render\n");
 
-    // Destroy all cached state to force a complete re-render from scratch.
-    _renderedData.reset();
+    // Destroy background render queue FIRST — its destructor waits for
+    // in-progress renders that write to _renderedData. Destroying
+    // _renderedData first would cause use-after-free.
     _bgRenderQueue.reset();
     _bgCoordinator.reset();
     _bgContext.reset();
+
+    // Now safe to destroy the rest.
+    _renderedData.reset();
     _fseqFile.reset();
     _fseqLoaded = false;
 

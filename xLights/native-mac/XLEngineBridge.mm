@@ -1042,26 +1042,10 @@ static XLEngineBridge *_sharedBridge = nil;
         self->_renderEngine->renderAll(nullptr);
         NSLog(@"XLEngineBridge: renderAll() — complete");
 
-        // Export FSEQ file alongside the sequence
-        if (self->_nativeSequenceProvider) {
-            std::string seqPath = self->_nativeSequenceProvider->getSequencePath();
-            if (!seqPath.empty()) {
-                // Derive FSEQ path: replace .xLights extension with .fseq
-                std::string fseqPath;
-                auto dotPos = seqPath.rfind('.');
-                if (dotPos != std::string::npos) {
-                    fseqPath = seqPath.substr(0, dotPos) + ".fseq";
-                } else {
-                    fseqPath = seqPath + ".fseq";
-                }
-                bool exported = self->_renderEngine->exportRenderedFSEQ(fseqPath, 2);
-                if (exported) {
-                    NSLog(@"XLEngineBridge: Exported FSEQ to %s", fseqPath.c_str());
-                } else {
-                    NSLog(@"XLEngineBridge: Failed to export FSEQ (no rendered data or write error)");
-                }
-            }
-        }
+        // Export FSEQ file alongside the sequence, then reload it for playback.
+        // The FSEQ playback path is proven correct; the in-memory pre-rendered
+        // data path has intermittent glitches from concurrent read/write races.
+        [self exportAndReloadFSEQ];
     });
 }
 
@@ -1077,26 +1061,44 @@ static XLEngineBridge *_sharedBridge = nil;
         self->_renderEngine->forceRenderAll(nullptr);
         NSLog(@"XLEngineBridge: forceRenderAll() — complete");
 
-        // Export FSEQ file alongside the sequence
-        if (self->_nativeSequenceProvider) {
-            std::string seqPath = self->_nativeSequenceProvider->getSequencePath();
-            if (!seqPath.empty()) {
-                std::string fseqPath;
-                auto dotPos = seqPath.rfind('.');
-                if (dotPos != std::string::npos) {
-                    fseqPath = seqPath.substr(0, dotPos) + ".fseq";
-                } else {
-                    fseqPath = seqPath + ".fseq";
-                }
-                bool exported = self->_renderEngine->exportRenderedFSEQ(fseqPath, 2);
-                if (exported) {
-                    NSLog(@"XLEngineBridge: Exported FSEQ to %s", fseqPath.c_str());
-                } else {
-                    NSLog(@"XLEngineBridge: Failed to export FSEQ (no rendered data or write error)");
-                }
-            }
-        }
+        // Export FSEQ file alongside the sequence, then reload it for playback.
+        [self exportAndReloadFSEQ];
     });
+}
+
+- (void)exportAndReloadFSEQ {
+    if (!_nativeSequenceProvider || !_renderEngine) return;
+
+    std::string seqPath = _nativeSequenceProvider->getSequencePath();
+    if (seqPath.empty()) return;
+
+    // Derive FSEQ path: replace .xLights extension with .fseq
+    std::string fseqPath;
+    auto dotPos = seqPath.rfind('.');
+    if (dotPos != std::string::npos) {
+        fseqPath = seqPath.substr(0, dotPos) + ".fseq";
+    } else {
+        fseqPath = seqPath + ".fseq";
+    }
+
+    bool exported = _renderEngine->exportRenderedFSEQ(fseqPath, 2);
+    if (exported) {
+        NSLog(@"XLEngineBridge: Exported FSEQ to %s", fseqPath.c_str());
+
+        // Reload the FSEQ for playback. The FSEQ playback path in renderFrame()
+        // is proven correct. The in-memory pre-rendered data path has intermittent
+        // glitches from concurrent modifications (invalidateModel zeroing channels
+        // while playback reads, background render queue writing while playback reads).
+        // By reloading the FSEQ, playback reads from a stable, immutable file.
+        bool loaded = _renderEngine->loadFSEQ(fseqPath);
+        if (loaded) {
+            NSLog(@"XLEngineBridge: Reloaded FSEQ for playback — using FSEQ path");
+        } else {
+            NSLog(@"XLEngineBridge: WARNING — failed to reload FSEQ, playback may use in-memory path");
+        }
+    } else {
+        NSLog(@"XLEngineBridge: Failed to export FSEQ (no rendered data or write error)");
+    }
 }
 
 - (void)renderRange:(NSInteger)startMS endMS:(NSInteger)endMS {

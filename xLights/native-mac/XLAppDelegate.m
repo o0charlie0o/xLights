@@ -314,6 +314,7 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
 }
 
 - (void)renderAll:(id)sender {
+    [[XLSwiftUIWindowHelper shared] setRenderingActive];
     XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
     if (vc) [vc renderAll];
 }
@@ -323,6 +324,7 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
 }
 
 - (void)forceRenderAll:(id)sender {
+    [[XLSwiftUIWindowHelper shared] setRenderingActive];
     XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
     if (vc) [vc forceRenderAll];
 }

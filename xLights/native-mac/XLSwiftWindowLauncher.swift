@@ -277,6 +277,19 @@ public final class XLSwiftUIWindowHelper: NSObject, @unchecked Sendable {
         }
     }
 
+    // MARK: - Render State
+
+    /// Signal that rendering has started (shows progress ring immediately).
+    /// Call this from ObjC before dispatching renderAll/forceRenderAll to the
+    /// background queue so the user sees immediate feedback.
+    @objc public func setRenderingActive() {
+        DispatchQueue.main.async {
+            guard let appState = sSwiftAppState else { return }
+            appState.isRendering = true
+            appState.renderProgress = 0.0
+        }
+    }
+
     // MARK: - Top Panel Toggles
 
     /// Toggle the Effects palette panel visibility.
