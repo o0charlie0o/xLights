@@ -30,6 +30,7 @@
 #include "render/DiskRenderCache.h"
 #include "render/IRenderContext.h"
 #include "interfaces/IEffectProvider.h"
+#include <dispatch/dispatch.h>
 #endif
 
 #include <algorithm>
@@ -2188,28 +2189,21 @@ void RenderEngine::invalidateModel(const std::string& modelName)
 {
     if (modelName.empty()) return;
 
-    bool isFseqActive = _fseqLoaded.load(std::memory_order_relaxed);
-    printf("[RDBG] invalidateModel('%s'): renderedData=%s mapSize=%zu renderInProgress=%d fseqLoaded=%d\n",
-           modelName.c_str(),
-           (_renderedData && _renderedData->isValid()) ? "valid" : "null/invalid",
-           _modelChannelMap.size(),
-           _renderInProgress.load(std::memory_order_relaxed),
-           isFseqActive);
+    // Lightweight: just mark dirty and clear caches. NO allocation,
+    // NO channel zeroing. Heavy work is done by the caller (e.g.,
+    // invalidateModelAndGroup dispatches a background renderAll).
+    printf("[RDBG] invalidateModel('%s'): marking dirty\n", modelName.c_str());
 
     {
         std::lock_guard<std::mutex> lock(_dirtyMutex);
         _dirtyModels.insert(modelName);
     }
 
-    // Clear the model's live preview cache entries
     {
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.erase(modelName);
-        printf("[RDBG] invalidateModel('%s'): resetting _currentFrameIndex from %d to -1\n",
-               modelName.c_str(), _currentFrameIndex);
         _currentFrameIndex = -1; // force re-read on next renderFrame
 
-        // Reset the model's persistent state in the live coordinator
         if (_liveCoordinator) {
             _liveCoordinator->resetPersistentState(modelName);
             _liveCoordinator->invalidateCache(modelName);
@@ -2223,81 +2217,6 @@ void RenderEngine::invalidateModel(const std::string& modelName)
             _sidebarCoordinator->invalidateCache(modelName);
         }
     }
-
-    // Build _modelChannelRanges from _modelChannelMap if not already populated
-    // (happens on first edit when only FSEQ has been loaded, no renderAll yet).
-    {
-        std::lock_guard<std::mutex> lock(_dirtyMutex);
-        if (_modelChannelRanges.empty() && !_modelChannelMap.empty()) {
-            for (const auto& [name, chInfo] : _modelChannelMap) {
-                uint32_t chCount = chInfo.nodeCount * chInfo.chansPerNode;
-                if (chCount > 0) {
-                    _modelChannelRanges[name] = {chInfo.absStartChannel, chCount};
-                }
-            }
-            printf("[RDBG] invalidateModel: built _modelChannelRanges from _modelChannelMap (%zu entries)\n",
-                   _modelChannelRanges.size());
-        }
-    }
-
-    // Check if this model has a physical channel range. Groups and unknown
-    // elements don't — they're handled by invalidateModelAndGroup expanding
-    // to member models. Skip the overlay allocation for non-physical models.
-    bool hasChannelRange = false;
-    {
-        std::lock_guard<std::mutex> lock(_dirtyMutex);
-        hasChannelRange = _modelChannelRanges.count(modelName) > 0;
-    }
-
-    if (!hasChannelRange) {
-        printf("[RDBG] invalidateModel('%s'): no channel range — skipping overlay (group/element handled by caller)\n",
-               modelName.c_str());
-        return;
-    }
-
-    // Physical model with channel range — use FSEQ overlay approach.
-    // Allocate _renderedData as overlay buffer if needed (same dimensions as FSEQ).
-    if (isFseqActive && (!_renderedData || !_renderedData->isValid()) && _fseqFile) {
-        uint32_t numCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
-        uint32_t numFrames = static_cast<uint32_t>(_fseqFile->getNumFrames());
-        uint32_t frameTime = static_cast<uint32_t>(_fseqFile->getStepTime());
-        if (numCh > 0 && numFrames > 0) {
-            _renderedData = std::make_unique<NativeSequenceData>(numCh, numFrames, frameTime);
-            printf("[RDBG] invalidateModel('%s'): allocated overlay _renderedData (%u ch x %u frames)\n",
-                   modelName.c_str(), numCh, numFrames);
-        }
-    }
-
-    // Zero the dirty model's channel range in _renderedData so background
-    // re-render writes fresh data (not mixed with stale data).
-    if (_renderedData && _renderedData->isValid()) {
-        std::lock_guard<std::mutex> lock(_dirtyMutex);
-        auto rangeIt = _modelChannelRanges.find(modelName);
-        if (rangeIt != _modelChannelRanges.end()) {
-            uint32_t startCh = rangeIt->second.first;
-            uint32_t chCount = rangeIt->second.second;
-            uint32_t numFrames = _renderedData->getNumFrames();
-            uint32_t numChannels = _renderedData->getNumChannels();
-            printf("[RDBG] invalidateModel('%s'): zeroing channels [%u..%u) across %u frames (numCh=%u)\n",
-                   modelName.c_str(), startCh, startCh + chCount, numFrames, numChannels);
-            if (startCh + chCount <= numChannels) {
-                for (uint32_t f = 0; f < numFrames; ++f) {
-                    uint8_t* frameData = _renderedData->getFrame(f);
-                    if (frameData) {
-                        std::memset(frameData + startCh, 0, chCount);
-                    }
-                }
-            }
-        }
-
-        // Queue for background re-rendering. Once complete, the FSEQ path
-        // will overlay this model's fresh channel data from _renderedData.
-        ensureBackgroundRenderQueue();
-        if (_bgRenderQueue) {
-            printf("[RDBG] invalidateModel('%s'): queued for background re-render (FSEQ overlay mode)\n", modelName.c_str());
-            _bgRenderQueue->queueModel(modelName);
-        }
-    }
 }
 
 void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
@@ -2306,93 +2225,87 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
 
     printf("[RDBG] invalidateModelAndGroup('%s')\n", modelName.c_str());
 
-    if (!_modelProvider) {
-        invalidateModel(modelName);
-        return;
-    }
-
-    // Check if this model is a group — if so, dirty all members
-    auto attrs = _modelProvider->getModelAttributes(modelName);
-    auto displayAs = attrs.find("DisplayAs");
-
-    printf("[RDBG] invalidateModelAndGroup('%s'): attrs=%zu DisplayAs=%s\n",
-           modelName.c_str(), attrs.size(),
-           displayAs != attrs.end() ? displayAs->second.c_str() : "(not found)");
-
-    if (displayAs != attrs.end() && displayAs->second == "ModelGroup") {
-        auto membersIt = attrs.find("models");
-        if (membersIt != attrs.end()) {
-            printf("[RDBG] invalidateModelAndGroup('%s'): IS GROUP, members='%.200s'\n",
-                   modelName.c_str(), membersIt->second.c_str());
-            // Parse comma-separated member list
-            const std::string& members = membersIt->second;
-            int memberCount = 0;
-            size_t pos = 0;
-            while (pos < members.size()) {
-                size_t comma = members.find(',', pos);
-                if (comma == std::string::npos) comma = members.size();
-                std::string member = members.substr(pos, comma - pos);
-                // Trim whitespace
-                size_t start = member.find_first_not_of(" \t");
-                size_t end = member.find_last_not_of(" \t");
-                if (start != std::string::npos) {
-                    member = member.substr(start, end - start + 1);
-                    // Strip submodel ref (e.g. "Tree/Outline" → "Tree")
-                    size_t slash = member.find('/');
-                    if (slash != std::string::npos) {
-                        member = member.substr(0, slash);
-                    }
-                    if (!member.empty()) {
-                        invalidateModel(member);
-                        memberCount++;
-                    }
-                }
-                pos = comma + 1;
-            }
-            printf("[RDBG] invalidateModelAndGroup('%s'): dirtied %d member models\n",
-                   modelName.c_str(), memberCount);
-        } else {
-            printf("[RDBG] invalidateModelAndGroup('%s'): IS GROUP but 'models' attr not found\n",
-                   modelName.c_str());
-        }
-        // Also dirty the group name itself (it may have its own effects)
-        invalidateModel(modelName);
-        return;
-    }
-
-    // Not a group in model provider — check if it has physical channels.
-    // If not, it's a group/container/element that we couldn't identify as a
-    // ModelGroup (e.g., missing DisplayAs attr). Fall back to dirtying all.
-    {
-        std::lock_guard<std::mutex> lock(_dirtyMutex);
-        bool hasChannelRange = _modelChannelRanges.count(modelName) > 0;
-        bool isInChannelMap = _modelChannelMap.count(modelName) > 0;
-        if (!hasChannelRange && !isInChannelMap) {
-            printf("[RDBG] invalidateModelAndGroup('%s'): no physical channels (attrs=%zu) — marking _allDirty, clearing _fseqLoaded\n",
-                   modelName.c_str(), attrs.size());
-            _allDirty.store(true);
-            _fseqLoaded.store(false, std::memory_order_release);
-            return;
-        }
-    }
-
-    // Physical model — dirty it
+    // Always dirty the model/group itself
     invalidateModel(modelName);
 
-    // Check if this model belongs to any group with effects
-    auto allNames = _modelProvider->getModelNames();
-    for (const auto& name : allNames) {
-        auto gAttrs = _modelProvider->getModelAttributes(name);
-        auto gDisplay = gAttrs.find("DisplayAs");
-        if (gDisplay == gAttrs.end() || gDisplay->second != "ModelGroup") continue;
-        auto gMembers = gAttrs.find("models");
-        if (gMembers == gAttrs.end()) continue;
+    if (!_modelProvider) return;
 
-        // Check if our model is in this group's member list
-        const std::string& memberList = gMembers->second;
-        if (memberList.find(modelName) != std::string::npos) {
-            // Dirty the group name so group effects re-render
-            invalidateModel(name);
+    // Recursively expand groups to dirty all leaf physical models.
+    // Uses a worklist to avoid deep recursion on nested groups.
+    std::set<std::string> visited;
+    std::vector<std::string> worklist = { modelName };
+    int physicalCount = 0;
+
+    while (!worklist.empty()) {
+        std::string current = std::move(worklist.back());
+        worklist.pop_back();
+        if (!visited.insert(current).second) continue; // already visited
+
+        auto attrs = _modelProvider->getModelAttributes(current);
+        auto displayAs = attrs.find("DisplayAs");
+
+        if (displayAs != attrs.end() && displayAs->second == "ModelGroup") {
+            // Group — expand to members
+            auto membersIt = attrs.find("models");
+            if (membersIt != attrs.end()) {
+                const std::string& members = membersIt->second;
+                size_t pos = 0;
+                while (pos < members.size()) {
+                    size_t comma = members.find(',', pos);
+                    if (comma == std::string::npos) comma = members.size();
+                    std::string member = members.substr(pos, comma - pos);
+                    size_t start = member.find_first_not_of(" \t");
+                    size_t end = member.find_last_not_of(" \t");
+                    if (start != std::string::npos) {
+                        member = member.substr(start, end - start + 1);
+                        size_t slash = member.find('/');
+                        if (slash != std::string::npos) {
+                            member = member.substr(0, slash);
+                        }
+                        if (!member.empty() && visited.find(member) == visited.end()) {
+                            invalidateModel(member);
+                            worklist.push_back(member);
+                        }
+                    }
+                    pos = comma + 1;
+                }
+            }
+        } else if (_modelChannelMap.count(current) > 0) {
+            physicalCount++;
+        }
+    }
+
+    printf("[RDBG] invalidateModelAndGroup('%s'): expanded to %zu models (%d physical), visited %zu total\n",
+           modelName.c_str(), visited.size(), physicalCount, visited.size());
+
+    // Now dispatch a background forceRenderAll to re-render everything.
+    // This is the cleanest approach: the FSEQ path continues providing
+    // smooth (stale) playback while renderAll runs. Once complete,
+    // the path switches to PRERENDERED with fresh data.
+    //
+    // We clear _fseqLoaded ONLY after renderAll sets _renderInProgress,
+    // so renderFrame() either reads FSEQ (before render starts) or
+    // returns immediately (during render). After render, the PRERENDERED
+    // path takes over with fresh data.
+    printf("[RDBG] invalidateModelAndGroup('%s'): dispatching background forceRenderAll\n",
+           modelName.c_str());
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        this->forceRenderAll(nullptr);
+    });
+
+    // Also check if this physical model belongs to any group with effects
+    if (visited.size() == 1 && physicalCount == 1) {
+        auto allNames = _modelProvider->getModelNames();
+        for (const auto& name : allNames) {
+            if (visited.count(name)) continue;
+            auto gAttrs = _modelProvider->getModelAttributes(name);
+            auto gDisplay = gAttrs.find("DisplayAs");
+            if (gDisplay == gAttrs.end() || gDisplay->second != "ModelGroup") continue;
+            auto gMembers = gAttrs.find("models");
+            if (gMembers == gAttrs.end()) continue;
+            if (gMembers->second.find(modelName) != std::string::npos) {
+                invalidateModel(name);
+            }
         }
     }
 }
