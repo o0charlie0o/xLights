@@ -249,6 +249,22 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
         XLEngineBridge *engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
         return engineBridge && [engineBridge isSequenceLoaded];
     }
+    // Sequence menu items require a loaded sequence
+    SEL action = menuItem.action;
+    if (action == @selector(playSequence:) ||
+        action == @selector(pauseSequence:) ||
+        action == @selector(stopSequence:) ||
+        action == @selector(seekToStart:) ||
+        action == @selector(seekToEnd:) ||
+        action == @selector(renderAll:) ||
+        action == @selector(renderSelected:) ||
+        action == @selector(forceRenderAll:) ||
+        action == @selector(addTimingTrack:) ||
+        action == @selector(importTiming:) ||
+        action == @selector(generateTiming:)) {
+        XLEngineBridge *engineBridge = [XLSwiftUIWindowHelper shared].engineBridge;
+        return engineBridge && [engineBridge isSequenceLoaded];
+    }
     return YES;
 }
 
@@ -268,6 +284,77 @@ NSNotificationName const XLShowFolderDidChangeNotification = @"XLShowFolderDidCh
             return;
         }
     }
+}
+
+#pragma mark - Sequence Menu Actions (responder chain forwarding)
+
+- (void)playSequence:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc play];
+}
+
+- (void)pauseSequence:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc pause];
+}
+
+- (void)stopSequence:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc stop];
+}
+
+- (void)seekToStart:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc seekToStart:sender];
+}
+
+- (void)seekToEnd:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc seekToEnd:sender];
+}
+
+- (void)renderAll:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc renderAll];
+}
+
+- (void)renderSelected:(id)sender {
+    // Not yet implemented on sequencer VC
+}
+
+- (void)forceRenderAll:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc forceRenderAll];
+}
+
+- (void)zoomIn:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc zoomIn:sender];
+}
+
+- (void)zoomOut:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc zoomOut:sender];
+}
+
+- (void)zoomToFit:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc zoomToFit:sender];
+}
+
+- (void)addTimingTrack:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc addTimingTrack:sender];
+}
+
+- (void)importTiming:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc importTiming:sender];
+}
+
+- (void)generateTiming:(id)sender {
+    XLSequencerViewController *vc = [XLSwiftUIWindowHelper shared].sequencerViewController;
+    if (vc) [vc generateTiming:sender];
 }
 
 #pragma mark - Private Helpers
