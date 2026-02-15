@@ -75,8 +75,13 @@ void BackgroundRenderQueue::queueModel(const std::string& modelName, int debounc
         // Render the model. renderModels() blocks until complete.
         // Each model writes to its own channel range in NativeSequenceData,
         // so no locking is needed for the pixel data.
+        printf("[RDBG] BackgroundRenderQueue: rendering model '%s' (gen=%llu)\n",
+               capturedName.c_str(), capturedGeneration);
         std::vector<std::string> models = { capturedName };
         bool success = coordinator->renderModels(models, *output);
+
+        printf("[RDBG] BackgroundRenderQueue: model '%s' render %s (gen=%llu)\n",
+               capturedName.c_str(), success ? "SUCCEEDED" : "FAILED", capturedGeneration);
 
         // Mark the model as completed if rendering succeeded.
         {
@@ -90,6 +95,8 @@ void BackgroundRenderQueue::queueModel(const std::string& modelName, int debounc
                 it->second.generation == capturedGeneration &&
                 success) {
                 this->_completedModels.insert(capturedName);
+                printf("[RDBG] BackgroundRenderQueue: model '%s' marked COMPLETED\n",
+                       capturedName.c_str());
             }
         }
     });

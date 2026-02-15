@@ -738,6 +738,35 @@ void RenderEngine::renderFrame(int timeMS)
     // preview will briefly freeze during rendering, then resume with correct data.
     if (_renderInProgress.load(std::memory_order_acquire)) return;
 
+    // Log path changes and periodic state.
+    // sRdbgResetCounters is set when the path changes so per-path log counters
+    // reset and we get fresh diagnostics after render completion.
+    static bool sRdbgResetCounters = false;
+    {
+        static int sLastPath = 0; // 0=none, 1=fseq, 2=prerendered, 3=live
+        static int sFrameCount = 0;
+        int path = 0;
+        if (_fseqLoaded.load(std::memory_order_relaxed) && _fseqFile) path = 1;
+        else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) path = 2;
+        else if (_effectProvider && _modelProvider) path = 3;
+
+        if (path != sLastPath) {
+            const char* names[] = {"NONE", "FSEQ", "PRERENDERED", "LIVE"};
+            printf("[RDBG] renderFrame(%dms): PATH CHANGE %s → %s (fseq=%d rendData=%d map=%zu)\n",
+                   timeMS, names[sLastPath], names[path],
+                   _fseqLoaded.load(std::memory_order_relaxed), (_renderedData != nullptr),
+                   _modelChannelMap.size());
+            sLastPath = path;
+            sFrameCount = 0;
+            sRdbgResetCounters = true;
+        }
+        sFrameCount++;
+        // Log first 3 frames on each path and then every 100th
+        if (sFrameCount <= 3 || sFrameCount % 100 == 0) {
+            printf("[RDBG] renderFrame(%dms): path=%d frame#%d\n", timeMS, path, sFrameCount);
+        }
+    }
+
     if (_fseqLoaded.load(std::memory_order_acquire) && _fseqFile) {
         // FSEQ playback path: read pre-rendered channel data
         int stepTime = _fseqFile->getStepTime();
@@ -753,11 +782,12 @@ void RenderEngine::renderFrame(int timeMS)
         // Skip if we already have this frame cached
         if (frameIndex == _currentFrameIndex) return;
 
-        // Log first FSEQ frame read
+        // Log first FSEQ frame read (reset on path change)
         static bool firstFseqFrame = true;
+        if (sRdbgResetCounters) { firstFseqFrame = true; }
         if (firstFseqFrame) {
             uint32_t maxCh = static_cast<uint32_t>(_fseqFile->getChannelCount());
-            printf("[CHANNEL_MAP] renderFrame(FSEQ): first frame at %dms, frameIndex=%d, numFrames=%d, channels=%u, models=%zu\n",
+            printf("[RDBG] renderFrame(FSEQ): first frame at %dms, frameIndex=%d, numFrames=%d, channels=%u, models=%zu\n",
                    timeMS, frameIndex, numFrames, maxCh, _modelChannelMap.size());
             firstFseqFrame = false;
         }
@@ -829,10 +859,11 @@ void RenderEngine::renderFrame(int timeMS)
             }
         }
 
-        // Log stats on first few FSEQ frames
+        // Log stats on first few FSEQ frames (reset on path change)
         static int fseqFrameLogCount = 0;
+        if (sRdbgResetCounters) { fseqFrameLogCount = 0; sRdbgResetCounters = false; }
         if (fseqFrameLogCount < 5) {
-            printf("[CHANNEL_MAP] renderFrame(FSEQ): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu\n",
+            printf("[RDBG] renderFrame(FSEQ): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu\n",
                    frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size());
             fseqFrameLogCount++;
         }
@@ -843,8 +874,9 @@ void RenderEngine::renderFrame(int timeMS)
         // Dirty models have their channels zeroed in invalidateModel() so they show
         // black until re-rendered (via background queue or next Render All).
         static bool sPrerenderedPathLogged = false;
+        if (sRdbgResetCounters) { sPrerenderedPathLogged = false; }
         if (!sPrerenderedPathLogged) {
-            printf("[SUBDBG] renderFrame(%dms): PRERENDERED DATA PATH, channels=%u frames=%u models=%zu\n",
+            printf("[RDBG] renderFrame(%dms): PRERENDERED DATA PATH, channels=%u frames=%u models=%zu\n",
                    timeMS, _renderedData->getNumChannels(), _renderedData->getNumFrames(), _modelChannelMap.size());
             sPrerenderedPathLogged = true;
         }
@@ -859,12 +891,22 @@ void RenderEngine::renderFrame(int timeMS)
         }
 
         // Skip if we already have this frame cached
-        if (frameIndex == _currentFrameIndex) return;
+        if (frameIndex == _currentFrameIndex) {
+            // Log first few cache hits to verify frame caching
+            static int cacheHitLogCount = 0;
+            if (sRdbgResetCounters) { cacheHitLogCount = 0; }
+            if (cacheHitLogCount < 3) {
+                printf("[RDBG] renderFrame(PRERENDERED): cache HIT frameIndex=%d, skipping re-read\n", frameIndex);
+                cacheHitLogCount++;
+            }
+            return;
+        }
 
-        // Log first frame read for debugging
+        // Log first frame read for debugging (reset on path change)
         static bool firstPrerenderedFrame = true;
+        if (sRdbgResetCounters) { firstPrerenderedFrame = true; }
         if (firstPrerenderedFrame) {
-            printf("[CHANNEL_MAP] renderFrame(prerendered): first frame at %dms, frameIndex=%d, numFrames=%d, numChannels=%u\n",
+            printf("[RDBG] renderFrame(PRERENDERED): first frame at %dms, frameIndex=%d, numFrames=%d, numChannels=%u\n",
                    timeMS, frameIndex, numFrames, _renderedData->getNumChannels());
             firstPrerenderedFrame = false;
         }
@@ -933,11 +975,28 @@ void RenderEngine::renderFrame(int timeMS)
             }
         }
 
-        // Log stats on first few frames
+        // Log stats on first few frames and after path changes
         static int prerenderedFrameLogCount = 0;
+        if (sRdbgResetCounters) { prerenderedFrameLogCount = 0; sRdbgResetCounters = false; }
         if (prerenderedFrameLogCount < 5) {
-            printf("[CHANNEL_MAP] renderFrame(prerendered): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu\n",
-                   frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size());
+            printf("[RDBG] renderFrame(PRERENDERED): frame %d — %d/%zu models have non-black pixels, bufferCache=%zu, frameDataSize=%zu\n",
+                   frameIndex, modelsWithPixels, _modelChannelMap.size(), _bufferCache.size(), _currentFrameData.size());
+
+            // Sample first 2 models' raw channel data to verify correctness
+            int sampleCount = 0;
+            for (const auto& [name, chInfo] : _modelChannelMap) {
+                if (sampleCount >= 2) break;
+                uint32_t ch = chInfo.absStartChannel;
+                // Read first 6 bytes from this model's channel range
+                if (ch + 6 <= _currentFrameData.size()) {
+                    printf("[RDBG]   model='%s' ch=%u rawBytes=[%02x %02x %02x %02x %02x %02x] rOff=%d gOff=%d bOff=%d\n",
+                           name.c_str(), ch,
+                           _currentFrameData[ch], _currentFrameData[ch+1], _currentFrameData[ch+2],
+                           _currentFrameData[ch+3], _currentFrameData[ch+4], _currentFrameData[ch+5],
+                           chInfo.rOffset, chInfo.gOffset, chInfo.bOffset);
+                }
+                sampleCount++;
+            }
             prerenderedFrameLogCount++;
         }
 
@@ -1372,9 +1431,16 @@ void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
 {
     // Prevent concurrent renders and block renderFrame() on main thread.
     if (_renderInProgress.exchange(true, std::memory_order_acq_rel)) {
-        printf("RenderEngine::forceRenderAll — already rendering, skipping\n");
+        printf("[RDBG] forceRenderAll: SKIPPED (already rendering)\n");
         if (callback) callback(true);
         return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        printf("[RDBG] forceRenderAll: ENTRY — allDirty=%d dirtyModels=%zu renderedData=%s fseqLoaded=%d channelRanges=%zu\n",
+               _allDirty.load(), _dirtyModels.size(),
+               (_renderedData && _renderedData->isValid()) ? "valid" : "null",
+               _fseqLoaded.load(), _modelChannelRanges.size());
     }
     printf("RenderEngine::forceRenderAll — clearing all caches and forcing full render\n");
 
@@ -1432,6 +1498,13 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     // Set _renderInProgress if not already set (forceRenderAll sets it first).
     // This blocks renderFrame() on the main thread during the entire render.
     bool wasAlreadyInProgress = _renderInProgress.exchange(true, std::memory_order_acq_rel);
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        printf("[RDBG] renderAll: ENTRY — allDirty=%d dirtyModels=%zu renderedData=%s fseqLoaded=%d mapSize=%zu wasAlreadyInProgress=%d\n",
+               _allDirty.load(), _dirtyModels.size(),
+               (_renderedData && _renderedData->isValid()) ? "valid" : "null",
+               _fseqLoaded.load(), _modelChannelMap.size(), wasAlreadyInProgress);
+    }
 
     if (!_effectProvider || !_modelProvider) {
         printf("RenderEngine::renderAll — missing effect or model provider, skipping\n");
@@ -1748,10 +1821,39 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
 
         printf("RenderEngine::renderAll — rendered data ready for preview (%u frames, %u channels), %zu channel ranges cached\n",
                _renderedData->getNumFrames(), _renderedData->getNumChannels(), _modelChannelRanges.size());
+
+        // Validate rendered data: sample frame 0 and count non-zero bytes
+        const uint8_t* frame0 = _renderedData->getFrame(0);
+        if (frame0) {
+            uint32_t numCh = _renderedData->getNumChannels();
+            uint32_t nonZero = 0;
+            for (uint32_t i = 0; i < numCh; ++i) {
+                if (frame0[i] != 0) nonZero++;
+            }
+            printf("[RDBG] renderAll: COMPLETE — frame0 has %u/%u non-zero channels, fseqLoaded=%d, mapSize=%zu\n",
+                   nonZero, numCh, _fseqLoaded.load(), _modelChannelMap.size());
+
+            // Sample first 3 mapped models to verify data integrity
+            int sampleCount = 0;
+            for (const auto& [name, chInfo] : _modelChannelMap) {
+                if (sampleCount >= 3) break;
+                uint32_t ch = chInfo.absStartChannel;
+                uint32_t end = ch + chInfo.nodeCount * chInfo.chansPerNode;
+                uint32_t modelNonZero = 0;
+                for (uint32_t i = ch; i < end && i < numCh; ++i) {
+                    if (frame0[i] != 0) modelNonZero++;
+                }
+                printf("[RDBG] renderAll: model='%s' ch=[%u..%u) nodes=%u nonZero=%u rOff=%d gOff=%d bOff=%d\n",
+                       name.c_str(), ch, end, chInfo.nodeCount, modelNonZero,
+                       chInfo.rOffset, chInfo.gOffset, chInfo.bOffset);
+                sampleCount++;
+            }
+        }
     }
 
     // Allow renderFrame() to resume reading the freshly rendered data.
     _renderInProgress.store(false, std::memory_order_release);
+    printf("[RDBG] renderAll: _renderInProgress → false\n");
 
     printf("RenderEngine::renderAll — %s\n", wasCancelled ? "cancelled" : "complete");
 }
@@ -2053,6 +2155,12 @@ void RenderEngine::invalidateModel(const std::string& modelName)
 {
     if (modelName.empty()) return;
 
+    printf("[RDBG] invalidateModel('%s'): renderedData=%s mapSize=%zu renderInProgress=%d\n",
+           modelName.c_str(),
+           (_renderedData && _renderedData->isValid()) ? "valid" : "null/invalid",
+           _modelChannelMap.size(),
+           _renderInProgress.load(std::memory_order_relaxed));
+
     {
         std::lock_guard<std::mutex> lock(_dirtyMutex);
         _dirtyModels.insert(modelName);
@@ -2062,6 +2170,8 @@ void RenderEngine::invalidateModel(const std::string& modelName)
     {
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.erase(modelName);
+        printf("[RDBG] invalidateModel('%s'): resetting _currentFrameIndex from %d to -1\n",
+               modelName.c_str(), _currentFrameIndex);
         _currentFrameIndex = -1; // force re-read from _renderedData on next renderFrame
 
         // Reset the model's persistent state in the live coordinator
@@ -2089,6 +2199,8 @@ void RenderEngine::invalidateModel(const std::string& modelName)
             uint32_t chCount = rangeIt->second.second;
             uint32_t numFrames = _renderedData->getNumFrames();
             uint32_t numChannels = _renderedData->getNumChannels();
+            printf("[RDBG] invalidateModel('%s'): zeroing channels [%u..%u) across %u frames (numCh=%u)\n",
+                   modelName.c_str(), startCh, startCh + chCount, numFrames, numChannels);
             if (startCh + chCount <= numChannels) {
                 for (uint32_t f = 0; f < numFrames; ++f) {
                     uint8_t* frameData = _renderedData->getFrame(f);
@@ -2097,12 +2209,16 @@ void RenderEngine::invalidateModel(const std::string& modelName)
                     }
                 }
             }
+        } else {
+            printf("[RDBG] invalidateModel('%s'): NO channel range found (modelChannelRanges has %zu entries)\n",
+                   modelName.c_str(), _modelChannelRanges.size());
         }
 
         // Queue for background pre-rendering so the model will be re-rendered
         // in the background before the user clicks Render All.
         ensureBackgroundRenderQueue();
         if (_bgRenderQueue) {
+            printf("[RDBG] invalidateModel('%s'): queued for background re-render\n", modelName.c_str());
             _bgRenderQueue->queueModel(modelName);
         }
     }
@@ -2111,6 +2227,8 @@ void RenderEngine::invalidateModel(const std::string& modelName)
 void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
 {
     if (modelName.empty()) return;
+
+    printf("[RDBG] invalidateModelAndGroup('%s')\n", modelName.c_str());
 
     // Always dirty the model itself
     invalidateModel(modelName);
@@ -2301,6 +2419,8 @@ void RenderEngine::onEffectMoved(const EffectEvent& event)
 void RenderEngine::onEffectSettingChanged(const EffectEvent& event)
 {
     std::string modelName = resolveModelNameFromEvent(event);
+    printf("[RDBG] onEffectSettingChanged: effectId=%d key='%s' → model='%s'\n",
+           event.effectId, event.paramKey.c_str(), modelName.c_str());
     if (!modelName.empty()) {
         invalidateModelAndGroup(modelName);
     }
@@ -2309,6 +2429,8 @@ void RenderEngine::onEffectSettingChanged(const EffectEvent& event)
 void RenderEngine::onEffectPaletteChanged(const EffectEvent& event)
 {
     std::string modelName = resolveModelNameFromEvent(event);
+    printf("[RDBG] onEffectPaletteChanged: effectId=%d → model='%s'\n",
+           event.effectId, modelName.c_str());
     if (!modelName.empty()) {
         invalidateModelAndGroup(modelName);
     }
