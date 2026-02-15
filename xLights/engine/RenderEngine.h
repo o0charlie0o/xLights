@@ -446,7 +446,13 @@ private:
     std::unique_ptr<FSEQFile> _fseqFile;
     std::vector<uint8_t> _currentFrameData;
     int _currentFrameIndex = -1;
-    bool _fseqLoaded = false;
+    std::atomic<bool> _fseqLoaded{false};
+
+    // Guard flag: when true, renderFrame() returns immediately.
+    // Prevents data races between background renderAll/forceRenderAll
+    // and main-thread renderFrame which share _renderedData, _fseqFile,
+    // _modelChannelMap, and other state without fine-grained locking.
+    std::atomic<bool> _renderInProgress{false};
 
     // Cached channel info per model for FSEQ rendering
     struct ModelChannelInfo {

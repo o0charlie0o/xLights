@@ -732,16 +732,13 @@ void RenderEngine::buildModelChannelMap()
 
 void RenderEngine::renderFrame(int timeMS)
 {
-    // Log which rendering path is taken (once per path)
-    static bool sPathLogged = false;
-    if (!sPathLogged) {
-        printf("[SUBDBG] renderFrame(%dms): fseqLoaded=%d renderedData=%d modelChannelMap=%zu effectProvider=%d modelProvider=%d\n",
-               timeMS, (int)_fseqLoaded, (_renderedData != nullptr), _modelChannelMap.size(),
-               (_effectProvider != nullptr), (_modelProvider != nullptr));
-        sPathLogged = true;
-    }
+    // Skip frame rendering while a batch render (renderAll/forceRenderAll) is
+    // in progress on a background thread. Those methods modify _renderedData,
+    // _fseqFile, _modelChannelMap, etc. without fine-grained locking. The
+    // preview will briefly freeze during rendering, then resume with correct data.
+    if (_renderInProgress.load(std::memory_order_acquire)) return;
 
-    if (_fseqLoaded && _fseqFile) {
+    if (_fseqLoaded.load(std::memory_order_acquire) && _fseqFile) {
         // FSEQ playback path: read pre-rendered channel data
         int stepTime = _fseqFile->getStepTime();
         if (stepTime <= 0) stepTime = 50;
@@ -1033,6 +1030,8 @@ void RenderEngine::renderFrame(int timeMS)
 
 void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 {
+    if (_renderInProgress.load(std::memory_order_acquire)) return;
+
     bool isSubRef = (modelName.find('/') != std::string::npos);
 
     if (_fseqLoaded && _fseqFile) {
@@ -1371,6 +1370,12 @@ void RenderEngine::synthesizeSubmodelFrameBuffer(
 
 void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
 {
+    // Prevent concurrent renders and block renderFrame() on main thread.
+    if (_renderInProgress.exchange(true, std::memory_order_acq_rel)) {
+        printf("RenderEngine::forceRenderAll — already rendering, skipping\n");
+        if (callback) callback(true);
+        return;
+    }
     printf("RenderEngine::forceRenderAll — clearing all caches and forcing full render\n");
 
     // Destroy background render queue FIRST — its destructor waits for
@@ -1424,8 +1429,13 @@ void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
 
 void RenderEngine::renderAll(RenderCompleteCallback callback)
 {
+    // Set _renderInProgress if not already set (forceRenderAll sets it first).
+    // This blocks renderFrame() on the main thread during the entire render.
+    bool wasAlreadyInProgress = _renderInProgress.exchange(true, std::memory_order_acq_rel);
+
     if (!_effectProvider || !_modelProvider) {
         printf("RenderEngine::renderAll — missing effect or model provider, skipping\n");
+        if (!wasAlreadyInProgress) _renderInProgress.store(false, std::memory_order_release);
         if (callback) callback(false);
         notifyRenderComplete(false);
         return;
@@ -1441,6 +1451,7 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
             _fseqLoaded = false;
             // Reset frame cache so renderFrame picks up the existing data
             _currentFrameIndex = -1;
+            _renderInProgress.store(false, std::memory_order_release);
             notifyRenderComplete(false);
             if (callback) callback(false);
             return;
@@ -1455,6 +1466,7 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     if (numFrames <= 0 || totalChannels <= 0) {
         printf("RenderEngine::renderAll — invalid sequence: %d frames, %d channels\n",
                numFrames, totalChannels);
+        _renderInProgress.store(false, std::memory_order_release);
         if (callback) callback(false);
         notifyRenderComplete(false);
         return;
@@ -1513,6 +1525,7 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
             _currentFrameIndex = -1;
 
             printf("RenderEngine::renderAll — all dirty models pre-rendered in background (0ms)\n");
+            _renderInProgress.store(false, std::memory_order_release);
             notifyRenderComplete(false);
             if (callback) callback(false);
             return;
@@ -1585,6 +1598,7 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
                wallMS, dirtyModels.size(), bgCompleted.size());
 
         bool wasCancelled = !completed;
+        _renderInProgress.store(false, std::memory_order_release);
         notifyRenderComplete(wasCancelled);
         if (callback) callback(wasCancelled);
         return;
@@ -1735,6 +1749,9 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         printf("RenderEngine::renderAll — rendered data ready for preview (%u frames, %u channels), %zu channel ranges cached\n",
                _renderedData->getNumFrames(), _renderedData->getNumChannels(), _modelChannelRanges.size());
     }
+
+    // Allow renderFrame() to resume reading the freshly rendered data.
+    _renderInProgress.store(false, std::memory_order_release);
 
     printf("RenderEngine::renderAll — %s\n", wasCancelled ? "cancelled" : "complete");
 }
@@ -2311,7 +2328,8 @@ void RenderEngine::setGPUEnabled(bool enabled) {}
 void RenderEngine::setRenderMode(RenderMode mode) { _renderMode.store(mode); }
 RenderMode RenderEngine::getRenderMode() const { return _renderMode.load(); }
 bool RenderEngine::isRendering() const {
-    return _coordinator && _coordinator->isRendering();
+    return _renderInProgress.load(std::memory_order_acquire)
+        || (_coordinator && _coordinator->isRendering());
 }
 
 RenderStatus RenderEngine::getRenderStatus() const {
