@@ -741,13 +741,6 @@ void RenderEngine::renderFrame(int timeMS)
         sPathLogged = true;
     }
 
-    // Check if any models are dirty (edited since last Render All).
-    bool hasDirtyModels;
-    {
-        std::lock_guard<std::mutex> lock(_dirtyMutex);
-        hasDirtyModels = !_dirtyModels.empty() || _allDirty.load();
-    }
-
     if (_fseqLoaded && _fseqFile) {
         // FSEQ playback path: read pre-rendered channel data
         int stepTime = _fseqFile->getStepTime();
@@ -848,11 +841,10 @@ void RenderEngine::renderFrame(int timeMS)
         }
 
         notifyFrameRendered(timeMS);
-    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()
-               && !hasDirtyModels) {
-        // Pre-rendered data path: read from in-memory rendered data (from renderAll)
-        // Only use this when NO models are dirty — if any model was edited, fall through
-        // to the live rendering path so the user sees updated effects immediately.
+    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
+        // Pre-rendered data path: read from in-memory rendered data (from renderAll).
+        // Dirty models have their channels zeroed in invalidateModel() so they show
+        // black until re-rendered (via background queue or next Render All).
         static bool sPrerenderedPathLogged = false;
         if (!sPrerenderedPathLogged) {
             printf("[SUBDBG] renderFrame(%dms): PRERENDERED DATA PATH, channels=%u frames=%u models=%zu\n",
@@ -1043,23 +1035,13 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 {
     bool isSubRef = (modelName.find('/') != std::string::npos);
 
-    // Check if any models are dirty (edited since last Render All).
-    // When dirty models exist, skip the pre-rendered data path and fall through
-    // to the live rendering path so the user sees updated effects immediately.
-    bool hasDirtyModels;
-    {
-        std::lock_guard<std::mutex> lock(_dirtyMutex);
-        hasDirtyModels = !_dirtyModels.empty() || _allDirty.load();
-    }
-
     if (_fseqLoaded && _fseqFile) {
         renderFrame(timeMS);
         // Synthesize submodel FrameBuffer from parent's channel data
         if (isSubRef) {
             synthesizeSubmodelBuffer(modelName, timeMS);
         }
-    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()
-               && !hasDirtyModels) {
+    } else if (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty()) {
         renderFrame(timeMS);
         // Synthesize submodel FrameBuffer from parent's channel data
         if (isSubRef) {
@@ -2011,10 +1993,28 @@ void RenderEngine::invalidateModel(const std::string& modelName)
         }
     }
 
-    // Queue for background pre-rendering if _renderedData exists
-    // (i.e., a full Render All has been done before). This way the model
-    // will be re-rendered in the background before the user clicks Render All.
+    // Zero the dirty model's channel range in _renderedData so the pre-rendered
+    // data path shows black (not stale data) for this model until re-rendered.
     if (_renderedData && _renderedData->isValid()) {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        auto rangeIt = _modelChannelRanges.find(modelName);
+        if (rangeIt != _modelChannelRanges.end()) {
+            uint32_t startCh = rangeIt->second.first;
+            uint32_t chCount = rangeIt->second.second;
+            uint32_t numFrames = _renderedData->getNumFrames();
+            uint32_t numChannels = _renderedData->getNumChannels();
+            if (startCh + chCount <= numChannels) {
+                for (uint32_t f = 0; f < numFrames; ++f) {
+                    uint8_t* frameData = _renderedData->getFrame(f);
+                    if (frameData) {
+                        std::memset(frameData + startCh, 0, chCount);
+                    }
+                }
+            }
+        }
+
+        // Queue for background pre-rendering so the model will be re-rendered
+        // in the background before the user clicks Render All.
         ensureBackgroundRenderQueue();
         if (_bgRenderQueue) {
             _bgRenderQueue->queueModel(modelName);
