@@ -1383,6 +1383,9 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         std::lock_guard<std::mutex> lock(_dirtyMutex);
         if (!_allDirty.load() && _dirtyModels.empty() && _renderedData && _renderedData->isValid()) {
             printf("RenderEngine::renderAll — nothing dirty, instant return (0ms)\n");
+            // Close stale FSEQ so renderFrame uses pre-rendered data path
+            _fseqFile.reset();
+            _fseqLoaded = false;
             // Reset frame cache so renderFrame picks up the existing data
             _currentFrameIndex = -1;
             notifyRenderComplete(false);
@@ -1451,6 +1454,9 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         if (dirtyModels.empty()) {
             std::lock_guard<std::mutex> lock(_dirtyMutex);
             _dirtyModels.clear();
+            // Close stale FSEQ so renderFrame uses pre-rendered data path
+            _fseqFile.reset();
+            _fseqLoaded = false;
             _currentFrameIndex = -1;
 
             printf("RenderEngine::renderAll — all dirty models pre-rendered in background (0ms)\n");
@@ -1634,6 +1640,11 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
     // After successful render, build the model channel map so renderFrame()
     // can read from _renderedData instead of re-rendering effects live.
     if (!wasCancelled && _renderedData && _renderedData->isValid()) {
+        // Close stale FSEQ so renderFrame() uses the pre-rendered data path
+        // instead of reading from the old (now-overwritten) FSEQ file.
+        // Don't use closeFSEQ() — it clears _modelChannelMap which we need.
+        _fseqFile.reset();
+        _fseqLoaded = false;
         if (_modelChannelMap.empty()) {
             buildControllerChannelMap();
             buildModelTotalChannelsMap();
