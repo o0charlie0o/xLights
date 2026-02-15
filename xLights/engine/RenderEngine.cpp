@@ -2360,16 +2360,16 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
         return;
     }
 
-    // Not a group in model provider — check if it's a known element name
-    // that we can't resolve. This happens for sequence elements that don't
-    // map to any physical model. Fall back to dirtying everything.
+    // Not a group in model provider — check if it has physical channels.
+    // If not, it's a group/container/element that we couldn't identify as a
+    // ModelGroup (e.g., missing DisplayAs attr). Fall back to dirtying all.
     {
         std::lock_guard<std::mutex> lock(_dirtyMutex);
         bool hasChannelRange = _modelChannelRanges.count(modelName) > 0;
         bool isInChannelMap = _modelChannelMap.count(modelName) > 0;
-        if (!hasChannelRange && !isInChannelMap && attrs.empty()) {
-            printf("[RDBG] invalidateModelAndGroup('%s'): UNKNOWN model — not in model provider, marking _allDirty\n",
-                   modelName.c_str());
+        if (!hasChannelRange && !isInChannelMap) {
+            printf("[RDBG] invalidateModelAndGroup('%s'): no physical channels (attrs=%zu) — marking _allDirty, clearing _fseqLoaded\n",
+                   modelName.c_str(), attrs.size());
             _allDirty.store(true);
             _fseqLoaded.store(false, std::memory_order_release);
             return;

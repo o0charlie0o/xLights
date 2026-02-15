@@ -650,6 +650,10 @@ bool NativeModelProvider::loadModelsFromFile(const std::string& xmlFilePath) {
                     gAttrs[[attr.name UTF8String]] = [attr.stringValue UTF8String];
                 }
             }
+            // The XML tag <modelGroup> identifies this as a group, but the
+            // tag name isn't stored as an attribute. Add DisplayAs explicitly
+            // so consumers can identify groups without knowing the XML schema.
+            gAttrs["DisplayAs"] = "ModelGroup";
             _groupAttributes[gName] = std::move(gAttrs);
         }
     }
