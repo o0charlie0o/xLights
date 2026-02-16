@@ -1025,3 +1025,88 @@ Completion handlers from `scheduleBuffer:completionHandler:` can fire after the 
 | `XLSequencerViewController.m` | Delegates play/stop/pause to playback controller (never calls engine directly) |
 | `XLMainWindowController.mm` | Creates playback controller; menu item handlers |
 | `sequencer/XLWaveformView.m` | Click-to-seek fires `waveformView:didSeekToTimeMS:` regardless of playback state |
+
+---
+
+## Rendering Bug: Sidebar Preview Overwrites Playback Buffers
+
+### The Symptom
+
+After editing effects and running Render All, playback shows effects at the wrong times — regardless of where in the sequence the user starts playing. The pattern of effects displayed corresponds to the selected effect's time region (the first effects in the sequence), not the current playback position. Restarting the app and reloading the same sequence fixes it temporarily.
+
+### Root Cause: Shared Buffer Corruption
+
+The sidebar model preview (`XLMainContentView.swift`) has its own timer loop that, when playback is not active, cycles through `effectStartMS..effectEndMS` to animate the selected effect:
+
+```swift
+if playbackActive {
+    timeMS = Int(bridge.getPosition())
+} else {
+    timeMS = loopPositionMS
+    loopPositionMS += frameTimeMS
+    if loopPositionMS >= effectEndMS { loopPositionMS = effectStartMS }
+}
+bridge.renderModelFrame(name, timeMS: Int(timeMS))
+```
+
+Before the fix, `renderModelFrame` called the shared `renderFrame(timeMS)` for FSEQ and PRERENDERED paths. This overwrote `_bufferCache`, `_currentFrameData`, and `_currentFrameIndex` — the same shared state that `XLPlaybackController` reads on the playback render queue.
+
+**Timeline of corruption during playback**:
+1. Playback controller calls `renderFrame(playbackTimeMS)` → writes correct data to `_bufferCache`
+2. Between `renderFrame` and `enumerateFrameBuffersWithBlock`, the sidebar timer fires
+3. Sidebar calls `renderModelFrame` → calls `renderFrame(effectRegionTimeMS)` → overwrites `_bufferCache` with effect-region data
+4. Playback controller reads `_bufferCache` → gets the sidebar's effect-region data instead of playback data
+5. Display shows effects at the wrong times
+
+### Three Interacting Bugs
+
+The full issue was a cascade of three bugs:
+
+| Bug | Location | Impact |
+|-----|----------|--------|
+| **FSEQ `shared_ptr` use-after-free** | `RenderEngine.cpp` | `forceRenderAll` destroyed `_fseqFile` (unique_ptr) while `renderFrame` could be mid-read on the FSEQ path → crash or corruption |
+| **Edit stuck on stale FSEQ** | `invalidateModelAndGroup` | After editing, stale FSEQ data remained loaded. The FSEQ path kept serving pre-edit pixel data until the next full Render All |
+| **Sidebar overwrites playback buffers** | `renderModelFrame` | The smoking gun — sidebar preview called shared `renderFrame()`, corrupting playback state (described above) |
+
+### The Fixes
+
+**1. FSEQ thread safety**: Changed `_fseqFile` from `unique_ptr` to `shared_ptr`. All access sites grab a local copy under `_fseqMutex`. The FSEQ path in `renderFrame` grabs a local `shared_ptr` copy, then reads without holding the lock:
+
+```cpp
+std::shared_ptr<FSEQFile> localFseq;
+{
+    std::lock_guard<std::mutex> lock(_fseqMutex);
+    localFseq = _fseqFile;
+}
+// Use localFseq safely — even if forceRenderAll destroys _fseqFile
+```
+
+**2. Edit clears stale data**: `invalidateModelAndGroup` now clears both FSEQ and renderedData so edits immediately fall to the LIVE rendering path instead of serving stale pre-edit data.
+
+**3. Sidebar isolation** (the key fix): `renderModelFrame` no longer calls the shared `renderFrame()` for FSEQ/PRERENDERED paths. Instead, it reads frame data directly into a local buffer and writes to `_sidebarCache` (a separate buffer that doesn't interfere with playback):
+
+```cpp
+if (haveFseq || (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty())) {
+    // Build ONLY the requested model's FrameBuffer into _sidebarCache.
+    // Do NOT call renderFrame() — that would overwrite _bufferCache
+    auto chIt = _modelChannelMap.find(physicalModel);
+    // ... reads frame data into localFrameData
+    // ... builds FrameBuffer from model's channel range
+    // ... writes to _sidebarCache (NOT _bufferCache)
+}
+```
+
+### The Rule
+
+**`renderModelFrame` must NEVER call shared `renderFrame()` for FSEQ or PRERENDERED paths.** The sidebar has its own timer loop with different time values. If it writes to `_bufferCache`, it corrupts playback data. The sidebar must always use its own isolated buffer (`_sidebarCache`).
+
+For the LIVE rendering path, calling `renderFrame()` from the sidebar is acceptable because live rendering doesn't cache frame data in `_bufferCache` the same way.
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `xLights/engine/RenderEngine.cpp` | `renderModelFrame` sidebar isolation, `renderFrame` FSEQ mutex, `invalidateModelAndGroup` stale data clearing |
+| `xLights/engine/RenderEngine.h` | `shared_ptr<FSEQFile> _fseqFile`, `_fseqMutex`, `_sidebarCache` |
+| `xLights/native-mac/XLMainContentView.swift` | Sidebar preview timer loop that calls `renderModelFrame` |
+| `xLights/native-mac/XLPlaybackController.m` | Playback render loop that reads `_bufferCache` |

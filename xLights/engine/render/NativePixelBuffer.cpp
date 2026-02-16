@@ -1117,6 +1117,15 @@ void NativePixelBuffer::setDimmingCurve(const NativeDimmingCurve& curve) {
     _dimmingCurve = curve;
 }
 
+void NativePixelBuffer::setGroupSpatialLayout(int combinedW, int combinedH,
+                                               const std::vector<std::pair<int,int>>& spatialPositions,
+                                               size_t groupLayerCount) {
+    _spatialBufW = combinedW;
+    _spatialBufH = combinedH;
+    _spatialNodePositions = spatialPositions;
+    _spatialGroupLayerCount = groupLayerCount;
+}
+
 // =========================================================================
 // getColors — extract blended data to output channels
 // =========================================================================
@@ -1426,6 +1435,18 @@ void NativePixelBuffer::prepareBufferStyle(int layer) {
     if (style == "Single Line" || style == "As Pixel") {
         ls.bufferStyleActive = true;
         ls.buffer.InitBuffer(1, nodeCount, "None");
+    } else if (_spatialBufW > 0 && _spatialBufH > 0 &&
+               !_spatialNodePositions.empty() &&
+               static_cast<size_t>(layer) < _spatialGroupLayerCount &&
+               style != "Default" && !style.empty()) {
+        // Spatial group buffer style: reshape to the combined group dimensions.
+        // The spatial node positions are pre-computed and stored via
+        // setGroupSpatialLayout(). After effect rendering, expandBufferStyle()
+        // maps pixels from spatial positions back to local node positions.
+        // This handles "Per Preview", "Horizontal Stack", "Vertical Per Model",
+        // and all other group-specific buffer styles.
+        ls.bufferStyleActive = true;
+        ls.buffer.InitBuffer(_spatialBufH, _spatialBufW, "None");
     } else {
         ls.bufferStyleActive = false;
     }
@@ -1437,21 +1458,58 @@ void NativePixelBuffer::expandBufferStyle(int layer) {
     if (!ls.bufferStyleActive) return;
 
     int styleW = ls.buffer.BufferWi;
+    int styleH = ls.buffer.BufferHt;
     int fullW = ls.styleOrigW;
     int fullH = ls.styleOrigH;
     int nodeCount = static_cast<int>(_nodes.size());
 
-    std::vector<xlColor> stylePixels(static_cast<size_t>(styleW));
-    for (int x = 0; x < styleW; ++x)
-        ls.buffer.GetPixel(x, 0, stylePixels[x]);
+    // Check if this is a spatial expand (combined group geometry) or
+    // a simple 1D expand (Single Line / As Pixel).
+    bool isSpatialExpand = _spatialBufW > 0 && _spatialBufH > 0
+                           && !_spatialNodePositions.empty()
+                           && styleW == _spatialBufW && styleH == _spatialBufH;
 
-    ls.buffer.InitBuffer(fullH, fullW, "None");
-    for (int i = 0; i < nodeCount && i < styleW; ++i) {
-        const xlColor& c = stylePixels[i];
-        if (c == xlBLACK) continue;
-        const auto& node = _nodes[i];
-        if (node.bufX >= 0 && node.bufX < fullW && node.bufY >= 0 && node.bufY < fullH)
-            ls.buffer.SetPixel(node.bufX, node.bufY, c);
+    if (isSpatialExpand) {
+        // Spatial expand: read each node's pixel from its spatial position
+        // in the rendered combined buffer, then write to local (bufX, bufY).
+        // Only read the pixels we need (at spatial node positions) rather
+        // than the full W×H buffer, since the spatial buffer can be large.
+        size_t spatialCount = _spatialNodePositions.size();
+        std::vector<xlColor> nodeColors(static_cast<size_t>(nodeCount));
+        for (int i = 0; i < nodeCount; ++i) {
+            if (static_cast<size_t>(i) >= spatialCount) break;
+            int sx = _spatialNodePositions[i].first;
+            int sy = _spatialNodePositions[i].second;
+            if (sx >= 0 && sx < styleW && sy >= 0 && sy < styleH) {
+                ls.buffer.GetPixel(sx, sy, nodeColors[i]);
+            }
+        }
+
+        // Re-init to model's local buffer dimensions
+        ls.buffer.InitBuffer(fullH, fullW, "None");
+
+        // Map each node's spatial pixel to its local position
+        for (int i = 0; i < nodeCount; ++i) {
+            const xlColor& c = nodeColors[i];
+            if (c == xlBLACK) continue;
+            const auto& node = _nodes[i];
+            if (node.bufX >= 0 && node.bufX < fullW && node.bufY >= 0 && node.bufY < fullH)
+                ls.buffer.SetPixel(node.bufX, node.bufY, c);
+        }
+    } else {
+        // 1D expand (Single Line / As Pixel)
+        std::vector<xlColor> stylePixels(static_cast<size_t>(styleW));
+        for (int x = 0; x < styleW; ++x)
+            ls.buffer.GetPixel(x, 0, stylePixels[x]);
+
+        ls.buffer.InitBuffer(fullH, fullW, "None");
+        for (int i = 0; i < nodeCount && i < styleW; ++i) {
+            const xlColor& c = stylePixels[i];
+            if (c == xlBLACK) continue;
+            const auto& node = _nodes[i];
+            if (node.bufX >= 0 && node.bufX < fullW && node.bufY >= 0 && node.bufY < fullH)
+                ls.buffer.SetPixel(node.bufX, node.bufY, c);
+        }
     }
     ls.bufferStyleActive = false;
 }

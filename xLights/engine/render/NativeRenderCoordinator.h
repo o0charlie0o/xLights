@@ -396,8 +396,18 @@ private:
         int frameIndex, NativeSequenceData& output);
 
     ModelGeometry extractGeometry(const std::string& modelName);
-    ModelGeometry extractGroupGeometry(const std::string& groupName);
+    ModelGeometry extractGroupGeometry(const std::string& groupName,
+                                       const std::string& bufferStyle = "Single Line");
     size_t findParentGroupElement(const std::string& modelName);
+
+    // Resolve "Default" buffer style to the group's actual default based on
+    // the `layout` XML attribute (matching legacy ModelGroup.cpp:558-568).
+    std::string resolveGroupDefaultStyle(const std::string& groupName) const;
+
+    // Get the effective buffer style for a group's first layer.
+    // Reads B_CHOICE_BufferStyle from the first effect, resolves "Default".
+    std::string getGroupEffectiveBufferStyle(size_t groupElementIndex,
+                                              const std::string& groupName) const;
 
     void renderModelAtTime(ModelJob& job, int timeMS,
                            NativeSequenceData* output = nullptr,

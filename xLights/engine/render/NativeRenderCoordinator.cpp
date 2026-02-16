@@ -1219,6 +1219,42 @@ void NativeRenderCoordinator::preparePersistentJobs(
                     static_cast<int>(totalLayerCount), geom.nodes);
                 job.pixelBuffer->setDimmingCurve(
                     buildDimmingCurve(_modelProvider->getDimmingInfo(name)));
+
+                // If this model has group layers, compute the group's combined
+                // spatial geometry and store per-node positions on the pixel buffer.
+                // This enables "Per Preview" and other spatial buffer styles on
+                // group layers to reshape to the combined group dimensions.
+                if (groupIdx != SIZE_MAX && !matchedGroupName.empty()) {
+                    std::string groupStyle = getGroupEffectiveBufferStyle(groupIdx, matchedGroupName);
+                    // Only set spatial layout for non-trivial styles
+                    if (groupStyle != "Single Line" && !groupStyle.empty() &&
+                        groupStyle.compare(0, 9, "Per Model") != 0) {
+                        ModelGeometry groupGeom = extractGroupGeometry(matchedGroupName, groupStyle);
+                        if (groupGeom.bufferWi > 0 && groupGeom.bufferHt > 0 &&
+                            !groupGeom.nodes.empty()) {
+                            // Build actChannel → spatial position map
+                            std::unordered_map<uint32_t, std::pair<int,int>> channelToSpatial;
+                            for (const auto& gNode : groupGeom.nodes) {
+                                channelToSpatial[gNode.actChannel] = {gNode.bufX, gNode.bufY};
+                            }
+                            // Map each model node to its spatial position
+                            std::vector<std::pair<int,int>> spatialPositions;
+                            spatialPositions.reserve(geom.nodes.size());
+                            for (const auto& mNode : geom.nodes) {
+                                auto cit = channelToSpatial.find(mNode.actChannel);
+                                if (cit != channelToSpatial.end()) {
+                                    spatialPositions.push_back(cit->second);
+                                } else {
+                                    spatialPositions.push_back({0, 0});
+                                }
+                            }
+                            job.pixelBuffer->setGroupSpatialLayout(
+                                groupGeom.bufferWi, groupGeom.bufferHt,
+                                spatialPositions, groupLayerCount);
+                        }
+                    }
+                }
+
                 auto tBuf1 = std::chrono::steady_clock::now();
                 bufferCreateTotalUS += std::chrono::duration<double, std::micro>(tBuf1 - tBuf0).count();
             }
@@ -2636,12 +2672,64 @@ ModelGeometry NativeRenderCoordinator::extractGeometry(
 }
 
 // =========================================================================
-// Combined group geometry extraction
+// Combined group geometry extraction (buffer-style-aware)
 // =========================================================================
 
-ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
-    const std::string& groupName)
+// Resolve "Default" to the group's actual default buffer style, matching
+// legacy ModelGroup.cpp:558-568 which reads the `layout` XML attribute.
+std::string NativeRenderCoordinator::resolveGroupDefaultStyle(
+    const std::string& groupName) const
 {
+    if (!_modelProvider) return "Per Preview";
+    auto attrs = _modelProvider->getModelAttributes(groupName);
+    auto layoutIt = attrs.find("layout");
+    std::string layout = (layoutIt != attrs.end()) ? layoutIt->second : "minimalGrid";
+
+    if (layout == "grid" || layout == "minimalGrid") {
+        return "Per Preview"; // spatial 2D layout
+    } else if (layout == "vertical") {
+        return "Vertical Per Model";
+    } else if (layout == "horizontal") {
+        return "Horizontal Per Model";
+    }
+    // Other layout values (e.g., a buffer style name stored directly)
+    return layout;
+}
+
+// Get the effective buffer style for a group's first layer.
+std::string NativeRenderCoordinator::getGroupEffectiveBufferStyle(
+    size_t groupElementIndex, const std::string& groupName) const
+{
+    if (!_effectProvider) return "Per Preview";
+
+    // Get the first effect on layer 0 to read B_CHOICE_BufferStyle
+    auto effects = _effectProvider->getEffectsOnLayer(groupElementIndex, 0);
+    std::string style = "Default";
+    if (!effects.empty()) {
+        auto it = effects[0].settings.find("B_CHOICE_BufferStyle");
+        if (it != effects[0].settings.end() && !it->second.empty()) {
+            style = it->second;
+        }
+    }
+
+    // Resolve "Default" to the group's natural default
+    if (style == "Default" || style.empty()) {
+        style = resolveGroupDefaultStyle(groupName);
+    }
+
+    return style;
+}
+
+ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
+    const std::string& groupName, const std::string& bufferStyle)
+{
+    // Cache key combines group name and style to avoid recomputing for each member model
+    std::string cacheKey = groupName + "##" + bufferStyle;
+    auto cacheIt = _geometryCache.find(cacheKey);
+    if (cacheIt != _geometryCache.end()) {
+        return cacheIt->second;
+    }
+
     ModelGeometry geom;
     geom.name = groupName;
 
@@ -2653,32 +2741,30 @@ ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
     if (memberList.empty()) return geom;
 
     // Collect nodes from all member models, resolving submodel refs and nested groups.
-    // Each member's nodes are extracted with their correct absolute channel offsets.
-    // Buffer coordinates are assigned sequentially in a single-line layout to prevent
-    // overlapping buffer positions (matching legacy "Single Line" for blend layer).
-    // However, for combined group rendering we want the effect to span the combined
-    // geometry, so we use a sequential 1D layout across all member nodes.
+    struct MemberNodes {
+        std::string name;
+        std::vector<NativeNodeInfo> nodes;
+        int memberBufW = 0;
+        int memberBufH = 0;
+    };
+    std::vector<MemberNodes> members;
     std::vector<NativeNodeInfo> allNodes;
     std::set<std::string> visited;
     visited.insert(groupName);
 
     std::function<void(const std::string&)> collectMemberNodes;
     collectMemberNodes = [&](const std::string& memberName) {
-        // Check if this is a submodel ref (Parent/SubName)
         std::string resolvedName = memberName;
         size_t slash = memberName.find('/');
 
-        // Check if this member is itself a nested group
         auto memberAttrs = _modelProvider->getModelAttributes(resolvedName);
         if (memberAttrs.empty() && slash != std::string::npos) {
-            // Try parent model for submodel ref
             resolvedName = memberName.substr(0, slash);
             memberAttrs = _modelProvider->getModelAttributes(resolvedName);
         }
 
         auto displayAs = memberAttrs.find("DisplayAs");
         if (displayAs != memberAttrs.end() && displayAs->second == "ModelGroup") {
-            // Nested group — recurse into its members
             if (visited.count(memberName)) return;
             visited.insert(memberName);
             auto nestedMembers = memberAttrs.find("models");
@@ -2690,11 +2776,16 @@ ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
             return;
         }
 
-        // Physical model — extract its geometry and add nodes
         ModelGeometry memberGeom = extractGeometry(memberName);
+        MemberNodes mn;
+        mn.name = memberName;
+        mn.memberBufW = memberGeom.bufferWi;
+        mn.memberBufH = memberGeom.bufferHt;
+        mn.nodes = memberGeom.nodes;
         for (const auto& node : memberGeom.nodes) {
             allNodes.push_back(node);
         }
+        members.push_back(std::move(mn));
     };
 
     for (const auto& member : memberList) {
@@ -2703,16 +2794,294 @@ ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
 
     if (allNodes.empty()) return geom;
 
-    // Assign sequential buffer coordinates so the combined buffer is a 1D strip
-    // spanning all member nodes. This matches the legacy approach where a group's
-    // render buffer treats all member nodes as one continuous model.
-    for (size_t i = 0; i < allNodes.size(); ++i) {
-        allNodes[i].bufX = static_cast<int>(i);
-        allNodes[i].bufY = 0;
+    // =========================================================================
+    // Assign buffer coordinates based on the requested style
+    // =========================================================================
+
+    if (bufferStyle == "Per Preview") {
+        // 2D spatial layout from world coordinates (like ModelEngine::getGroupBufferNodes).
+        // Use generateNodesFromAttributes to get world x/y positions, compute global
+        // bounding box, and map to a grid.
+        float globalMinX = 1e30f, globalMaxX = -1e30f;
+        float globalMinY = 1e30f, globalMaxY = -1e30f;
+
+        // Collect world-space positions for all member nodes
+        struct WorldNode {
+            float worldX, worldY;
+            size_t allNodeIndex;  // index into allNodes
+        };
+        std::vector<WorldNode> worldNodes;
+        size_t nodeOffset = 0;
+
+        for (const auto& mn : members) {
+            // Get world coords via generateNodesFromAttributes
+            std::string resolvedName = mn.name;
+            size_t slash = mn.name.find('/');
+            auto attrs = _modelProvider->getModelAttributes(resolvedName);
+            if (attrs.empty() && slash != std::string::npos) {
+                resolvedName = mn.name.substr(0, slash);
+                attrs = _modelProvider->getModelAttributes(resolvedName);
+            }
+
+            auto nodeCoords = generateNodesFromAttributes(attrs);
+
+            // If this is a submodel, filter to submodel nodes
+            if (slash != std::string::npos) {
+                std::string parentName = mn.name.substr(0, slash);
+                std::string subName = mn.name.substr(slash + 1);
+                auto subAttrs = _modelProvider->getSubmodelAttributes(parentName, subName);
+                if (!subAttrs.empty()) {
+                    nodeCoords = filterNodesToSubmodel(nodeCoords, subAttrs);
+                }
+            }
+
+            // Map each member node to its world position
+            for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                float wx = 0.0f, wy = 0.0f;
+                if (ni < nodeCoords.size()) {
+                    wx = nodeCoords[ni].x;
+                    wy = nodeCoords[ni].y;
+                }
+                globalMinX = std::min(globalMinX, wx);
+                globalMaxX = std::max(globalMaxX, wx);
+                globalMinY = std::min(globalMinY, wy);
+                globalMaxY = std::max(globalMaxY, wy);
+                worldNodes.push_back({wx, wy, nodeOffset + ni});
+            }
+            nodeOffset += mn.nodes.size();
+        }
+
+        float rangeX = globalMaxX - globalMinX;
+        float rangeY = globalMaxY - globalMinY;
+        if (rangeX < 1.0f) rangeX = 1.0f;
+        if (rangeY < 1.0f) rangeY = 1.0f;
+
+        int gridSize = 400;
+        auto gsIt = groupAttrs.find("GridSize");
+        if (gsIt != groupAttrs.end() && !gsIt->second.empty()) {
+            try { gridSize = std::stoi(gsIt->second); } catch (...) {}
+        }
+        if (gridSize < 10) gridSize = 400;
+
+        float aspect = rangeX / rangeY;
+        int gridW, gridH;
+        if (aspect >= 1.0f) {
+            gridW = gridSize;
+            gridH = std::max(1, static_cast<int>(gridSize / aspect));
+        } else {
+            gridH = gridSize;
+            gridW = std::max(1, static_cast<int>(gridSize * aspect));
+        }
+
+        for (const auto& wn : worldNodes) {
+            float nx = (wn.worldX - globalMinX) / rangeX;
+            float ny = (wn.worldY - globalMinY) / rangeY;
+            allNodes[wn.allNodeIndex].bufX = static_cast<int>(std::round(nx * gridW));
+            allNodes[wn.allNodeIndex].bufY = static_cast<int>(std::round(ny * gridH));
+        }
+
+        geom.bufferWi = gridW + 1;
+        geom.bufferHt = gridH + 1;
+
+    } else if (bufferStyle == "Horizontal Per Model") {
+        // Each model = 1 column, nodes stacked vertically
+        int maxNodesPerModel = 0;
+        for (const auto& mn : members) {
+            maxNodesPerModel = std::max(maxNodesPerModel, static_cast<int>(mn.nodes.size()));
+        }
+        size_t nodeOffset = 0;
+        int col = 0;
+        for (const auto& mn : members) {
+            for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                allNodes[nodeOffset + ni].bufX = col;
+                allNodes[nodeOffset + ni].bufY = static_cast<int>(ni);
+            }
+            nodeOffset += mn.nodes.size();
+            col++;
+        }
+        geom.bufferWi = col;
+        geom.bufferHt = maxNodesPerModel;
+
+    } else if (bufferStyle == "Vertical Per Model") {
+        // Each model = 1 row, nodes stretched horizontally
+        int maxNodesPerModel = 0;
+        for (const auto& mn : members) {
+            maxNodesPerModel = std::max(maxNodesPerModel, static_cast<int>(mn.nodes.size()));
+        }
+        size_t nodeOffset = 0;
+        int row = 0;
+        for (const auto& mn : members) {
+            for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                allNodes[nodeOffset + ni].bufX = static_cast<int>(ni);
+                allNodes[nodeOffset + ni].bufY = row;
+            }
+            nodeOffset += mn.nodes.size();
+            row++;
+        }
+        geom.bufferWi = maxNodesPerModel;
+        geom.bufferHt = row;
+
+    } else if (bufferStyle == "Horizontal Stack") {
+        // Models side by side, preserving each model's own buffer shape
+        int totalW = 0;
+        int maxH = 0;
+        size_t nodeOffset = 0;
+        for (const auto& mn : members) {
+            for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                allNodes[nodeOffset + ni].bufX = mn.nodes[ni].bufX + totalW;
+                allNodes[nodeOffset + ni].bufY = mn.nodes[ni].bufY;
+            }
+            totalW += mn.memberBufW;
+            maxH = std::max(maxH, mn.memberBufH);
+            nodeOffset += mn.nodes.size();
+        }
+        geom.bufferWi = totalW;
+        geom.bufferHt = maxH;
+
+    } else if (bufferStyle == "Vertical Stack") {
+        // Models stacked top to bottom, preserving each model's own buffer shape
+        int totalH = 0;
+        int maxW = 0;
+        size_t nodeOffset = 0;
+        for (const auto& mn : members) {
+            for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                allNodes[nodeOffset + ni].bufX = mn.nodes[ni].bufX;
+                allNodes[nodeOffset + ni].bufY = mn.nodes[ni].bufY + totalH;
+            }
+            totalH += mn.memberBufH;
+            maxW = std::max(maxW, mn.memberBufW);
+            nodeOffset += mn.nodes.size();
+        }
+        geom.bufferWi = maxW;
+        geom.bufferHt = totalH;
+
+    } else if (bufferStyle == "Horizontal Stack - Scaled") {
+        // Models side by side, scaled to uniform width/height
+        int numModels = static_cast<int>(members.size());
+        if (numModels == 0) {
+            geom.bufferWi = 1; geom.bufferHt = 1;
+        } else {
+            // Total buffer: sum of max widths, max of heights
+            int totalW = 0, maxH = 0;
+            for (const auto& mn : members) {
+                totalW += mn.memberBufW;
+                maxH = std::max(maxH, mn.memberBufH);
+            }
+            if (totalW < 1) totalW = 1;
+            if (maxH < 1) maxH = 1;
+            int modBufW = totalW / numModels;
+            size_t nodeOffset = 0;
+            int modelX = 0;
+            for (const auto& mn : members) {
+                int mw = mn.memberBufW > 0 ? mn.memberBufW : 1;
+                int mh = mn.memberBufH > 0 ? mn.memberBufH : 1;
+                for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                    allNodes[nodeOffset + ni].bufX =
+                        static_cast<int>((double)mn.nodes[ni].bufX * ((double)modBufW / (double)mw)) + modelX;
+                    allNodes[nodeOffset + ni].bufY =
+                        static_cast<int>((double)mn.nodes[ni].bufY * ((double)maxH / (double)mh));
+                }
+                modelX += modBufW;
+                nodeOffset += mn.nodes.size();
+            }
+            geom.bufferWi = totalW;
+            geom.bufferHt = maxH;
+        }
+
+    } else if (bufferStyle == "Vertical Stack - Scaled") {
+        // Models stacked, scaled to uniform width/height
+        int numModels = static_cast<int>(members.size());
+        if (numModels == 0) {
+            geom.bufferWi = 1; geom.bufferHt = 1;
+        } else {
+            int maxW = 0, totalH = 0;
+            for (const auto& mn : members) {
+                maxW = std::max(maxW, mn.memberBufW);
+                totalH += mn.memberBufH;
+            }
+            if (maxW < 1) maxW = 1;
+            if (totalH < 1) totalH = 1;
+            int modBufH = totalH / numModels;
+            size_t nodeOffset = 0;
+            int modelY = 0;
+            for (const auto& mn : members) {
+                int mw = mn.memberBufW > 0 ? mn.memberBufW : 1;
+                int mh = mn.memberBufH > 0 ? mn.memberBufH : 1;
+                for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                    allNodes[nodeOffset + ni].bufX =
+                        static_cast<int>((double)mn.nodes[ni].bufX * ((double)maxW / (double)mw));
+                    allNodes[nodeOffset + ni].bufY =
+                        static_cast<int>((double)mn.nodes[ni].bufY * ((double)modBufH / (double)mh)) + modelY;
+                }
+                modelY += modBufH;
+                nodeOffset += mn.nodes.size();
+            }
+            geom.bufferWi = maxW;
+            geom.bufferHt = totalH;
+        }
+
+    } else if (bufferStyle == "Overlay - Centered" || bufferStyle == "Overlay - Scaled") {
+        // All models overlaid on the same buffer (centered or scaled)
+        bool scale = (bufferStyle == "Overlay - Scaled");
+        int maxW = 0, maxH = 0;
+        for (const auto& mn : members) {
+            maxW = std::max(maxW, mn.memberBufW);
+            maxH = std::max(maxH, mn.memberBufH);
+        }
+        if (maxW < 1) maxW = 1;
+        if (maxH < 1) maxH = 1;
+
+        size_t nodeOffset = 0;
+        for (const auto& mn : members) {
+            int mw = mn.memberBufW > 0 ? mn.memberBufW : 1;
+            int mh = mn.memberBufH > 0 ? mn.memberBufH : 1;
+            for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                if (scale) {
+                    allNodes[nodeOffset + ni].bufX =
+                        static_cast<int>((double)mn.nodes[ni].bufX * ((double)maxW / (double)mw));
+                    allNodes[nodeOffset + ni].bufY =
+                        static_cast<int>((double)mn.nodes[ni].bufY * ((double)maxH / (double)mh));
+                } else {
+                    int offX = (maxW - mw) / 2;
+                    int offY = (maxH - mh) / 2;
+                    allNodes[nodeOffset + ni].bufX = mn.nodes[ni].bufX + offX;
+                    allNodes[nodeOffset + ni].bufY = mn.nodes[ni].bufY + offY;
+                }
+            }
+            nodeOffset += mn.nodes.size();
+        }
+        geom.bufferWi = maxW;
+        geom.bufferHt = maxH;
+
+    } else if (bufferStyle == "Single Line Model As A Pixel") {
+        // Each model collapses to a single pixel in a line
+        int outX = 0;
+        size_t nodeOffset = 0;
+        for (const auto& mn : members) {
+            for (size_t ni = 0; ni < mn.nodes.size(); ++ni) {
+                allNodes[nodeOffset + ni].bufX = outX;
+                allNodes[nodeOffset + ni].bufY = 0;
+            }
+            outX++;
+            nodeOffset += mn.nodes.size();
+        }
+        geom.bufferWi = outX;
+        geom.bufferHt = 1;
+
+    } else {
+        // "Single Line" (default) — sequential 1D strip
+        for (size_t i = 0; i < allNodes.size(); ++i) {
+            allNodes[i].bufX = static_cast<int>(i);
+            allNodes[i].bufY = 0;
+        }
+        geom.bufferWi = static_cast<int>(allNodes.size());
+        geom.bufferHt = 1;
     }
 
-    geom.bufferWi = static_cast<int>(allNodes.size());
-    geom.bufferHt = 1;
+    // Ensure minimum dimensions
+    if (geom.bufferWi < 1) geom.bufferWi = 1;
+    if (geom.bufferHt < 1) geom.bufferHt = 1;
+
     geom.nodeCount = static_cast<uint32_t>(allNodes.size());
     geom.nodes = std::move(allNodes);
 
@@ -2726,10 +3095,12 @@ ModelGeometry NativeRenderCoordinator::extractGroupGeometry(
     geom.startChannel = (minCh != UINT32_MAX) ? minCh : 0;
     geom.channelCount = (maxCh > minCh) ? (maxCh - minCh) : 0;
 
-    printf("[GROUP_GEOM] '%s': %u nodes, buffer=%dx%d, channels=%u-%u\n",
-           groupName.c_str(), geom.nodeCount, geom.bufferWi, geom.bufferHt,
+    printf("[GROUP_GEOM] '%s' style='%s': %u nodes, buffer=%dx%d, channels=%u-%u\n",
+           groupName.c_str(), bufferStyle.c_str(),
+           geom.nodeCount, geom.bufferWi, geom.bufferHt,
            geom.startChannel, geom.startChannel + geom.channelCount);
 
+    _geometryCache[cacheKey] = geom;
     return geom;
 }
 
@@ -3181,6 +3552,19 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             effectInfo.settings, effectInfo.palette,
             frameTimeMS, timeMS, effectInfo.startTimeMS, effectInfo.endTimeMS,
             job.pixelBuffer->getBufferWi(), job.pixelBuffer->getBufferHt());
+
+        // For group layers, resolve "Default" buffer style to the group's actual
+        // default (e.g., "Per Preview" for grid groups). This ensures
+        // prepareBufferStyle() sees the resolved style and reshapes correctly.
+        bool isGroupLayer = (job.groupElementIndex != SIZE_MAX &&
+                             layer < job.groupLayerCount);
+        if (isGroupLayer && (layerInfo.bufferStyle == "Default" || layerInfo.bufferStyle.empty())) {
+            ElementInfo groupInfo;
+            if (_effectProvider->getElement(job.groupElementIndex, groupInfo)) {
+                layerInfo.bufferStyle = resolveGroupDefaultStyle(groupInfo.name);
+            }
+        }
+
         job.pixelBuffer->setLayerSettings(static_cast<int>(layer), layerInfo);
 
         // Compute how many frames into the effect we are (0-based).

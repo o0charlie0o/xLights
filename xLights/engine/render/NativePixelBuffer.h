@@ -343,6 +343,22 @@ public:
     // Expand buffer style back to full size after effect rendering.
     void expandBufferStyle(int layer);
 
+    // Set the combined group spatial layout for "Per Preview" and other spatial
+    // buffer styles on group layers. When set, prepareBufferStyle("Per Preview")
+    // reshapes the layer buffer to these combined dimensions. expandBufferStyle()
+    // then maps each node's pixel from its spatial position back to its local
+    // (bufX, bufY) in the model's own buffer.
+    //
+    // @param combinedW        Width of the combined spatial grid
+    // @param combinedH        Height of the combined spatial grid
+    // @param spatialPositions Per-node (x, y) position in the combined grid.
+    //                         Must have exactly _nodes.size() entries.
+    // @param groupLayerCount  Number of leading group layers. Only these layers
+    //                         use the spatial layout; model's own layers don't.
+    void setGroupSpatialLayout(int combinedW, int combinedH,
+                                const std::vector<std::pair<int,int>>& spatialPositions,
+                                size_t groupLayerCount);
+
 private:
     // Internal structure holding per-layer state
     struct LayerState {
@@ -406,6 +422,16 @@ private:
     // Sorted unique pixel indices for node positions (bufY * bufferWi + bufX).
     // Populated in constructor. Used by calcOutput() in batch mode.
     std::vector<int> _nodePixelIndices;
+
+    // Group spatial layout: combined group buffer dimensions and per-node
+    // spatial positions for "Per Preview" / "Horizontal Stack" / etc. styles.
+    // Populated via setGroupSpatialLayout(). Used by prepareBufferStyle() and
+    // expandBufferStyle() to reshape group layers to the combined geometry.
+    // Only applies to the first _spatialGroupLayerCount layers (group layers).
+    int _spatialBufW = 0;
+    int _spatialBufH = 0;
+    size_t _spatialGroupLayerCount = 0;
+    std::vector<std::pair<int,int>> _spatialNodePositions;
 
     // Sparkle state: per-node random counters
     std::vector<uint16_t> _sparkleState;
