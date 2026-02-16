@@ -804,6 +804,19 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
 
     int numLayers = static_cast<int>(_layers.size());
 
+    // Fast path: if no layers are valid, output is all black.
+    // Skip blur/RotoZoom/transitions/blending entirely.
+    {
+        bool anyValid = false;
+        for (int i = 0; i < numLayers; ++i) {
+            if (validLayers[i]) { anyValid = true; break; }
+        }
+        if (!anyValid) {
+            std::memset(_outputPixels.data(), 0, _outputPixels.size() * sizeof(xlColor));
+            return;
+        }
+    }
+
     // Initialize sparkle state if any layer has sparkles
     bool hasSparkles = false;
     for (int i = 0; i < numLayers; ++i) {
@@ -885,63 +898,6 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
     const bool sparse = _batchMode && !_nodePixelIndices.empty();
     const int totalPixels = sparse ? static_cast<int>(_nodePixelIndices.size())
                                    : _bufferWi * _bufferHt;
-
-    // Diagnostic: check layer buffer contents at node positions in batch mode.
-    // Only trigger after period 600 (t=15s at 25ms/frame) to hit actual effects.
-    static int calcOutputDiagCount = 0;
-    if (_batchMode && calcOutputDiagCount < 3 && effectPeriod >= 600) {
-        // Count valid layers and check for non-zero pixels in each valid layer
-        int numValid = 0;
-        for (int l = 0; l < numLayers; ++l) if (validLayers[l]) numValid++;
-        if (numValid > 0) {
-            calcOutputDiagCount++;
-            printf("[RDBG-CALCOUT] batch sparse=%d totalPixels=%d nodeIndices=%zu validLayers=%d/%d\n",
-                   sparse, totalPixels, _nodePixelIndices.size(), numValid, numLayers);
-            for (int l = 0; l < numLayers; ++l) {
-                if (!validLayers[l]) continue;
-                auto& ls = _layers[l];
-                int layerNonZero = 0, layerTotal = 0;
-                // Check ALL pixels in this layer (not just node positions)
-                for (int py2 = 0; py2 < ls.buffer.BufferHt; ++py2) {
-                    for (int px2 = 0; px2 < ls.buffer.BufferWi; ++px2) {
-                        xlColor c;
-                        ls.buffer.GetPixel(px2, py2, c);
-                        if (c.red > 0 || c.green > 0 || c.blue > 0) layerNonZero++;
-                        layerTotal++;
-                    }
-                }
-                // Check pixels at node positions specifically
-                int nodeHits = 0;
-                for (int idx : _nodePixelIndices) {
-                    int npx = idx % _bufferWi, npy = idx / _bufferWi;
-                    if (npx < ls.buffer.BufferWi && npy < ls.buffer.BufferHt) {
-                        xlColor c;
-                        ls.buffer.GetPixel(npx, npy, c);
-                        if (c.red > 0 || c.green > 0 || c.blue > 0) nodeHits++;
-                    }
-                }
-                printf("[RDBG-CALCOUT]   layer %d: bufSize=%dx%d allNonZero=%d/%d nodeNonZero=%d/%zu\n",
-                       l, ls.buffer.BufferWi, ls.buffer.BufferHt,
-                       layerNonZero, layerTotal, nodeHits, _nodePixelIndices.size());
-                // Print first non-zero pixel if any
-                if (layerNonZero > 0) {
-                    for (int py2 = 0; py2 < ls.buffer.BufferHt; ++py2) {
-                        bool found = false;
-                        for (int px2 = 0; px2 < ls.buffer.BufferWi; ++px2) {
-                            xlColor c;
-                            ls.buffer.GetPixel(px2, py2, c);
-                            if (c.red > 0 || c.green > 0 || c.blue > 0) {
-                                printf("[RDBG-CALCOUT]   layer %d first color at (%d,%d)=(%d,%d,%d,%d)\n",
-                                       l, px2, py2, c.red, c.green, c.blue, c.alpha);
-                                found = true; break;
-                            }
-                        }
-                        if (found) break;
-                    }
-                }
-            }
-        }
-    }
 
     for (int i = 0; i < totalPixels; ++i) {
         int pixIdx = sparse ? _nodePixelIndices[i] : i;
@@ -1025,45 +981,6 @@ void NativePixelBuffer::calcOutput(int effectPeriod, const std::vector<bool>& va
     }
     } // end CPU blending block
 
-    // Post-blend diagnostic: verify _outputPixels got the data
-    {
-        static int postBlendDiag = 0;
-        if (_batchMode && postBlendDiag < 3 && effectPeriod >= 600) {
-            int numValid2 = 0;
-            for (int l = 0; l < numLayers; ++l) if (validLayers[l]) numValid2++;
-            if (numValid2 > 0) {
-                postBlendDiag++;
-                int outNonZero = 0;
-                for (size_t pi = 0; pi < _outputPixels.size(); ++pi) {
-                    if (_outputPixels[pi].red > 0 || _outputPixels[pi].green > 0 || _outputPixels[pi].blue > 0)
-                        outNonZero++;
-                }
-                printf("[RDBG-POSTBLEND] period=%d outputPixels=%zu nonZeroRGB=%d nodeIndices=%zu\n",
-                       effectPeriod, _outputPixels.size(), outNonZero, _nodePixelIndices.size());
-                if (outNonZero > 0 && !_nodePixelIndices.empty()) {
-                    int idx0 = _nodePixelIndices[0];
-                    xlColor c0 = _outputPixels[idx0];
-                    printf("[RDBG-POSTBLEND]   nodeIdx[0]=%d pixel=(%d,%d,%d,%d)\n",
-                           idx0, c0.red, c0.green, c0.blue, c0.alpha);
-                } else if (outNonZero == 0 && !_nodePixelIndices.empty()) {
-                    int idx0 = _nodePixelIndices[0];
-                    xlColor c0 = _outputPixels[idx0];
-                    printf("[RDBG-POSTBLEND]   ZERO! nodeIdx[0]=%d pixel=(%d,%d,%d,%d)\n",
-                           idx0, c0.red, c0.green, c0.blue, c0.alpha);
-                    int px0 = idx0 % _bufferWi, py0 = idx0 / _bufferWi;
-                    for (int l = 0; l < numLayers; ++l) {
-                        if (!validLayers[l]) continue;
-                        xlColor lc;
-                        _layers[l].buffer.GetPixel(px0, py0, lc);
-                        printf("[RDBG-POSTBLEND]   layer[%d] at (%d,%d): (%d,%d,%d,%d) fade=%.3f bright=%d\n",
-                               l, px0, py0, lc.red, lc.green, lc.blue, lc.alpha,
-                               _layers[l].settings.fadeFactor, _layers[l].outputBrightness);
-                    }
-                }
-            }
-        }
-    }
-
 sparkle_pass:
     // Apply per-node sparkle as a post-pass on the output pixels.
     // This matches the legacy behavior where sparkle is applied to the
@@ -1133,53 +1050,6 @@ void NativePixelBuffer::setGroupSpatialLayout(int combinedW, int combinedH,
 void NativePixelBuffer::getColors(uint8_t* outputBuffer, uint32_t bufferSize) const {
     const bool hasMask = _hasSubmodelMask;
     const bool hasDimming = _dimmingCurve.active;
-
-    // One-time diagnostic: fires when we first see non-zero RGB pixels in the
-    // output buffer (i.e., at a frame where effects actually produced color).
-    // Also fires once for a frame with zero RGB to compare.
-    static int getColorsDiagHit = 0;
-    static int getColorsDiagZero = 0;
-    if (!_nodes.empty() && _batchMode && (getColorsDiagHit < 2 || getColorsDiagZero < 1)) {
-        // Count non-zero RGB in the full output pixel buffer
-        int totalNonZeroRGB = 0;
-        for (size_t pi = 0; pi < _outputPixels.size(); ++pi) {
-            if (_outputPixels[pi].red > 0 || _outputPixels[pi].green > 0 || _outputPixels[pi].blue > 0)
-                totalNonZeroRGB++;
-        }
-        // Count non-zero at node positions specifically
-        int nodeNonZero = 0;
-        for (const auto& n : _nodes) {
-            if (n.bufX < 0 || n.bufX >= _bufferWi || n.bufY < 0 || n.bufY >= _bufferHt) continue;
-            int pi = n.bufY * _bufferWi + n.bufX;
-            xlColor c = _outputPixels[pi];
-            if (c.red > 0 || c.green > 0 || c.blue > 0) nodeNonZero++;
-        }
-        bool hasColor = totalNonZeroRGB > 0;
-        if ((hasColor && getColorsDiagHit < 2) || (!hasColor && getColorsDiagZero < 1)) {
-            if (hasColor) getColorsDiagHit++; else getColorsDiagZero++;
-            printf("[RDBG-GETCOL] nodes=%zu bufWi=%d bufHt=%d totalPixels=%zu totalNonZeroRGB=%d nodeNonZeroRGB=%d batchMode=%d\n",
-                   _nodes.size(), _bufferWi, _bufferHt, _outputPixels.size(), totalNonZeroRGB, nodeNonZero, _batchMode ? 1 : 0);
-            // Print first 3 node details
-            for (size_t ni = 0; ni < _nodes.size() && ni < 3; ++ni) {
-                auto& n = _nodes[ni];
-                int pi = n.bufY * _bufferWi + n.bufX;
-                xlColor c = (pi >= 0 && pi < (int)_outputPixels.size()) ? _outputPixels[pi] : xlBLACK;
-                printf("[RDBG-GETCOL]   node[%zu]: bufX=%d bufY=%d actCh=%u pixIdx=%d color=(%d,%d,%d,%d)\n",
-                       ni, n.bufX, n.bufY, n.actChannel, pi, c.red, c.green, c.blue, c.alpha);
-            }
-            // If there ARE non-zero RGB pixels but NOT at node positions, print one that has color
-            if (totalNonZeroRGB > 0 && nodeNonZero == 0) {
-                for (size_t pi = 0; pi < _outputPixels.size(); ++pi) {
-                    if (_outputPixels[pi].red > 0 || _outputPixels[pi].green > 0 || _outputPixels[pi].blue > 0) {
-                        int px = pi % _bufferWi, py = pi / _bufferWi;
-                        printf("[RDBG-GETCOL]   MISMATCH: pixel at (%d,%d) idx=%zu has color=(%d,%d,%d,%d) but no node maps here\n",
-                               px, py, pi, _outputPixels[pi].red, _outputPixels[pi].green, _outputPixels[pi].blue, _outputPixels[pi].alpha);
-                        break;
-                    }
-                }
-            }
-        }
-    }
 
     for (const auto& node : _nodes) {
         if (node.bufX < 0 || node.bufX >= _bufferWi ||
@@ -1357,7 +1227,8 @@ void NativePixelBuffer::prepareSubBuffer(int layer) {
     ls.subBufOrigW = _bufferWi;
     ls.subBufOrigH = _bufferHt;
     ls.subBufferActive = true;
-    ls.buffer.InitBuffer(subH, subW, "None");
+    ls.buffer.Resize(subH, subW);
+    ls.buffer.Clear();
 }
 
 void NativePixelBuffer::expandSubBuffer(int layer) {
@@ -1377,7 +1248,8 @@ void NativePixelBuffer::expandSubBuffer(int layer) {
         for (int x = 0; x < subW; ++x)
             ls.buffer.GetPixel(x, y, subPixels[y * subW + x]);
 
-    ls.buffer.InitBuffer(fullH, fullW, "None");
+    ls.buffer.Resize(fullH, fullW);
+    ls.buffer.Clear();
     for (int y = 0; y < subH; ++y) {
         int destY = y + y1;
         if (destY < 0 || destY >= fullH) continue;
@@ -1434,19 +1306,18 @@ void NativePixelBuffer::prepareBufferStyle(int layer) {
 
     if (style == "Single Line" || style == "As Pixel") {
         ls.bufferStyleActive = true;
-        ls.buffer.InitBuffer(1, nodeCount, "None");
+        // Use Resize + Clear instead of InitBuffer to avoid clearing tempbuf.
+        // The buffer dimensions alternate between styled and full every frame
+        // but the vector capacity is retained, so Resize never allocates.
+        ls.buffer.Resize(1, nodeCount);
+        ls.buffer.Clear();
     } else if (_spatialBufW > 0 && _spatialBufH > 0 &&
                !_spatialNodePositions.empty() &&
                static_cast<size_t>(layer) < _spatialGroupLayerCount &&
                style != "Default" && !style.empty()) {
-        // Spatial group buffer style: reshape to the combined group dimensions.
-        // The spatial node positions are pre-computed and stored via
-        // setGroupSpatialLayout(). After effect rendering, expandBufferStyle()
-        // maps pixels from spatial positions back to local node positions.
-        // This handles "Per Preview", "Horizontal Stack", "Vertical Per Model",
-        // and all other group-specific buffer styles.
         ls.bufferStyleActive = true;
-        ls.buffer.InitBuffer(_spatialBufH, _spatialBufW, "None");
+        ls.buffer.Resize(_spatialBufH, _spatialBufW);
+        ls.buffer.Clear();
     } else {
         ls.bufferStyleActive = false;
     }
@@ -1485,8 +1356,10 @@ void NativePixelBuffer::expandBufferStyle(int layer) {
             }
         }
 
-        // Re-init to model's local buffer dimensions
-        ls.buffer.InitBuffer(fullH, fullW, "None");
+        // Resize to model's local buffer dimensions and clear pixels only
+        // (no tempbuf clear — saves ~50% of the expand cost).
+        ls.buffer.Resize(fullH, fullW);
+        ls.buffer.Clear();
 
         // Map each node's spatial pixel to its local position
         for (int i = 0; i < nodeCount; ++i) {
@@ -1502,7 +1375,8 @@ void NativePixelBuffer::expandBufferStyle(int layer) {
         for (int x = 0; x < styleW; ++x)
             ls.buffer.GetPixel(x, 0, stylePixels[x]);
 
-        ls.buffer.InitBuffer(fullH, fullW, "None");
+        ls.buffer.Resize(fullH, fullW);
+        ls.buffer.Clear();
         for (int i = 0; i < nodeCount && i < styleW; ++i) {
             const xlColor& c = stylePixels[i];
             if (c == xlBLACK) continue;

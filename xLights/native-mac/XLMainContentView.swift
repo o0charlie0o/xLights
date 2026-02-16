@@ -112,6 +112,10 @@ final class XLAppState {
         if defaults.object(forKey: "XLSongRegionOverlay") != nil {
             songRegionOverlayVisible = defaults.bool(forKey: "XLSongRegionOverlay")
         }
+        if defaults.object(forKey: "XLHousePreviewVisible") != nil {
+            housePreviewVisible = defaults.bool(forKey: "XLHousePreviewVisible")
+            NSLog("[PERSIST] loadState: housePreviewVisible=\(housePreviewVisible)")
+        }
         if let widthsDict = defaults.dictionary(forKey: "XLPanelWidthProportions") as? [String: Double] {
             for (key, value) in widthsDict {
                 if let rawValue = Int(key), let tab = XLTopPanelTab(rawValue: rawValue) {
@@ -131,6 +135,9 @@ final class XLAppState {
         defaults.set(inspectorWidth, forKey: "XLInspectorWidth")
         defaults.set(topPanelHeight, forKey: "XLTopPanelHeight")
         defaults.set(songRegionOverlayVisible, forKey: "XLSongRegionOverlay")
+        // Note: housePreviewVisible is saved directly in toggleHousePreview,
+        // not here, to avoid race conditions during app termination
+        // (the preview window closes before saveState runs).
         // Save panel width proportions
         var widthsDict: [String: Double] = [:]
         for (tab, proportion) in panelWidthProportions {

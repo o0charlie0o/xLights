@@ -33,6 +33,7 @@
 // - Changes can be saved back with saveToSequenceXML()
 
 #include "../../engine/interfaces/IEffectProvider.h"
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -189,6 +190,21 @@ public:
         size_t layerIndex,
         int timeMS,
         EffectInstanceInfo& outInfo) const override;
+
+    bool hasEffectAtTime(
+        size_t elementIndex,
+        size_t layerIndex,
+        int timeMS) const override;
+
+    bool getLayerEffectTimeRange(
+        size_t elementIndex,
+        size_t layerIndex,
+        int& outMinStartMS,
+        int& outMaxEndMS) const override;
+
+    /// Enter batch read mode: skips mutex acquisition on read-only queries.
+    /// Only safe when no writes can occur (during batch rendering).
+    void setBatchReadMode(bool enabled) override { _batchReadMode = enabled; }
 
     // --- IEffectProvider Implementation: Effect Type Information ---
 
@@ -444,6 +460,7 @@ private:
 
     // Thread safety
     mutable std::recursive_mutex _mutex;
+    std::atomic<bool> _batchReadMode{false}; // Skip mutex for read-only batch rendering
 };
 
 } // namespace xlEngine

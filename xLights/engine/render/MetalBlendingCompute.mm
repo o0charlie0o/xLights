@@ -20,21 +20,70 @@
 #include "MetalBlendingCompute.h"
 
 #include <cstring>
+#include <dispatch/dispatch.h>
 
 namespace xlEngine {
 
 // =========================================================================
-// Implementation detail — holds Metal objects
+// Shared Metal resources — initialized once via dispatch_once.
+// Device, command queue, and pipeline state are expensive to create and
+// must not be created concurrently from multiple threads (crashes under
+// Xcode GPU capture). These are safe to share across all instances.
+// =========================================================================
+
+static id<MTLDevice> sSharedDevice = nil;
+static id<MTLCommandQueue> sSharedCommandQueue = nil;
+static id<MTLComputePipelineState> sSharedBlendPipeline = nil;
+static bool sSharedAvailable = false;
+static dispatch_once_t sSharedOnceToken;
+
+static void initSharedMetalResources() {
+    dispatch_once(&sSharedOnceToken, ^{
+        @autoreleasepool {
+            sSharedDevice = MTLCreateSystemDefaultDevice();
+            if (!sSharedDevice) {
+                NSLog(@"MetalBlendingCompute: No Metal device available");
+                return;
+            }
+
+            sSharedCommandQueue = [sSharedDevice newCommandQueue];
+            if (!sSharedCommandQueue) {
+                NSLog(@"MetalBlendingCompute: Failed to create command queue");
+                return;
+            }
+
+            NSError *error = nil;
+            id<MTLLibrary> library = [sSharedDevice newDefaultLibrary];
+            if (!library) {
+                NSLog(@"MetalBlendingCompute: Failed to load default Metal library: %@", error);
+                return;
+            }
+
+            id<MTLFunction> blendFunction = [library newFunctionWithName:@"blendLayers"];
+            if (!blendFunction) {
+                NSLog(@"MetalBlendingCompute: 'blendLayers' function not found in Metal library");
+                return;
+            }
+
+            sSharedBlendPipeline = [sSharedDevice newComputePipelineStateWithFunction:blendFunction error:&error];
+            if (!sSharedBlendPipeline) {
+                NSLog(@"MetalBlendingCompute: Failed to create compute pipeline: %@", error);
+                return;
+            }
+
+            NSLog(@"MetalBlendingCompute: Shared resources initialized on %@", [sSharedDevice name]);
+            sSharedAvailable = true;
+        }
+    });
+}
+
+// =========================================================================
+// Per-instance implementation — holds only working buffers
 // =========================================================================
 
 struct MetalBlendingComputeImpl {
-    id<MTLDevice> device = nil;
-    id<MTLCommandQueue> commandQueue = nil;
-    id<MTLComputePipelineState> blendPipeline = nil;
-    bool available = false;
-
     // Reusable Metal buffers — grown as needed, never shrunk.
-    // This avoids per-frame allocation overhead.
+    // These are per-instance so different threads can blend concurrently.
     id<MTLBuffer> paramsBuffer = nil;
     id<MTLBuffer> layerSettingsBuffer = nil;
     id<MTLBuffer> layerPixelBuffer = nil;
@@ -47,79 +96,34 @@ struct MetalBlendingComputeImpl {
     size_t layerSettingsBufferSize = 0;
 
     bool initialize() {
+        initSharedMetalResources();
+        if (!sSharedAvailable) return false;
+
         @autoreleasepool {
-            device = MTLCreateSystemDefaultDevice();
-            if (!device) {
-                NSLog(@"MetalBlendingCompute: No Metal device available");
-                return false;
-            }
-
-            commandQueue = [device newCommandQueue];
-            if (!commandQueue) {
-                NSLog(@"MetalBlendingCompute: Failed to create command queue");
-                return false;
-            }
-
-            // Load the default Metal library (compiled .metal files in the app bundle)
-            NSError *error = nil;
-            id<MTLLibrary> library = [device newDefaultLibrary];
-            if (!library) {
-                NSLog(@"MetalBlendingCompute: Failed to load default Metal library: %@", error);
-                return false;
-            }
-
-            // Find the blendLayers compute function
-            id<MTLFunction> blendFunction = [library newFunctionWithName:@"blendLayers"];
-            if (!blendFunction) {
-                NSLog(@"MetalBlendingCompute: 'blendLayers' function not found in Metal library");
-                return false;
-            }
-
-            blendPipeline = [device newComputePipelineStateWithFunction:blendFunction error:&error];
-            if (!blendPipeline) {
-                NSLog(@"MetalBlendingCompute: Failed to create compute pipeline: %@", error);
-                return false;
-            }
-
-            // Pre-allocate the small params buffer (constant size)
-            paramsBuffer = [device newBufferWithLength:sizeof(GPUBlendParams)
-                                              options:MTLResourceStorageModeShared];
-
-            static bool sLogged = false;
-            if (!sLogged) {
-                sLogged = true;
-                NSLog(@"MetalBlendingCompute: Initialized successfully on %@", [device name]);
-            }
-            available = true;
-            return true;
+            paramsBuffer = [sSharedDevice newBufferWithLength:sizeof(GPUBlendParams)
+                                                     options:MTLResourceStorageModeShared];
+            return paramsBuffer != nil;
         }
     }
 
     void cleanup() {
         @autoreleasepool {
-            blendPipeline = nil;
             paramsBuffer = nil;
             layerSettingsBuffer = nil;
             layerPixelBuffer = nil;
             maskBuffer = nil;
             outputBuffer = nil;
-            commandQueue = nil;
-            device = nil;
-            available = false;
         }
     }
 
-    // Ensure a buffer is at least the requested size. Returns the buffer.
     id<MTLBuffer> ensureBuffer(id<MTLBuffer> __strong &buf, size_t &currentSize, size_t requiredSize) {
         if (buf && currentSize >= requiredSize) {
             return buf;
         }
-        // Grow with some headroom to avoid frequent reallocations
         size_t allocSize = requiredSize + (requiredSize / 4);
-        // Minimum 256 bytes for Metal alignment
         if (allocSize < 256) allocSize = 256;
-        buf = [device newBufferWithLength:allocSize
-                                  options:MTLResourceStorageModeShared];
+        buf = [sSharedDevice newBufferWithLength:allocSize
+                                         options:MTLResourceStorageModeShared];
         currentSize = allocSize;
         return buf;
     }
@@ -161,7 +165,7 @@ MetalBlendingCompute& MetalBlendingCompute::operator=(MetalBlendingCompute&& oth
 }
 
 bool MetalBlendingCompute::isAvailable() const {
-    return _impl && _impl->available;
+    return _impl && sSharedAvailable;
 }
 
 bool MetalBlendingCompute::blendLayers(
@@ -173,7 +177,7 @@ bool MetalBlendingCompute::blendLayers(
     size_t maskDataSize,
     xlColor* outputPixels)
 {
-    if (!_impl || !_impl->available) return false;
+    if (!_impl || !sSharedAvailable) return false;
     if (params.totalPixels <= 0 || params.numLayers <= 0) return false;
 
     @autoreleasepool {
@@ -208,13 +212,13 @@ bool MetalBlendingCompute::blendLayers(
 
         // ---- Create command buffer and encoder ----
 
-        id<MTLCommandBuffer> commandBuffer = [_impl->commandQueue commandBuffer];
+        id<MTLCommandBuffer> commandBuffer = [sSharedCommandQueue commandBuffer];
         if (!commandBuffer) return false;
 
         id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
         if (!encoder) return false;
 
-        [encoder setComputePipelineState:_impl->blendPipeline];
+        [encoder setComputePipelineState:sSharedBlendPipeline];
         [encoder setBuffer:_impl->paramsBuffer         offset:0 atIndex:0];
         [encoder setBuffer:_impl->layerSettingsBuffer  offset:0 atIndex:1];
         [encoder setBuffer:_impl->layerPixelBuffer     offset:0 atIndex:2];
@@ -224,7 +228,7 @@ bool MetalBlendingCompute::blendLayers(
         // ---- Dispatch ----
 
         NSUInteger threadCount = static_cast<NSUInteger>(params.totalPixels);
-        NSUInteger threadgroupSize = _impl->blendPipeline.maxTotalThreadsPerThreadgroup;
+        NSUInteger threadgroupSize = sSharedBlendPipeline.maxTotalThreadsPerThreadgroup;
         if (threadgroupSize > 256) threadgroupSize = 256;
         if (threadgroupSize > threadCount) threadgroupSize = threadCount;
 

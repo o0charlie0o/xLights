@@ -388,6 +388,31 @@ void DiskRenderCache::deleteEntry(uint64_t hash)
     fs::remove(pathForHash(hash), ec);
 }
 
+void DiskRenderCache::registerModelHash(const std::string& modelName, uint64_t hash)
+{
+    if (!modelName.empty()) {
+        _modelHashIndex[modelName].insert(hash);
+    }
+}
+
+void DiskRenderCache::clearModel(const std::string& modelName)
+{
+    if (!isEnabled() || modelName.empty()) {
+        return;
+    }
+
+    auto it = _modelHashIndex.find(modelName);
+    if (it == _modelHashIndex.end()) {
+        return;
+    }
+
+    std::error_code ec;
+    for (uint64_t hash : it->second) {
+        fs::remove(pathForHash(hash), ec);
+    }
+    _modelHashIndex.erase(it);
+}
+
 void DiskRenderCache::clearAll()
 {
     if (!isEnabled()) {
@@ -400,6 +425,7 @@ void DiskRenderCache::clearAll()
             fs::remove(entry.path(), ec);
         }
     }
+    _modelHashIndex.clear();
 }
 
 size_t DiskRenderCache::getTotalCacheSize() const

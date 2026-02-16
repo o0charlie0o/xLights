@@ -85,6 +85,22 @@ void NativeRenderBuffer::InitBuffer(int newBufferHt, int newBufferWi, const std:
     isTransformed = (bufferTransform != "None");
 }
 
+void NativeRenderBuffer::Resize(int newBufferHt, int newBufferWi)
+{
+    BufferHt = newBufferHt;
+    BufferWi = newBufferWi;
+
+    size_t numPixels = static_cast<size_t>(BufferWi) * BufferHt;
+    if (pixelVector.size() < numPixels) {
+        pixelVector.resize(numPixels);
+        pixels = pixelVector.data();
+    }
+    if (tempbufVector.size() < numPixels) {
+        tempbufVector.resize(numPixels);
+        tempbuf = tempbufVector.data();
+    }
+}
+
 // =========================================================================
 // Pixel Access
 // =========================================================================
@@ -184,8 +200,8 @@ void NativeRenderBuffer::ProcessPixel(int x, int y, const xlColor& color, bool w
 
 void NativeRenderBuffer::ClearTempBuf()
 {
-    for (size_t i = 0; i < tempbufVector.size(); i++) {
-        tempbuf[i].Set(0, 0, 0, 0);
+    if (!tempbufVector.empty()) {
+        std::memset(tempbuf, 0x00, sizeof(xlColor) * tempbufVector.size());
     }
 }
 

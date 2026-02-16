@@ -12,6 +12,7 @@
 #include "NativeRenderCoordinator.h"
 #include "NativeSequenceData.h"
 
+#include <chrono>
 #include <dispatch/dispatch.h>
 
 namespace xlEngine {
@@ -99,6 +100,94 @@ void BackgroundRenderQueue::queueModel(const std::string& modelName, int debounc
                        capturedName.c_str());
             }
         }
+
+        // Invoke completion callback outside the lock
+        if (success) {
+            CompletionCallback cb;
+            {
+                std::lock_guard<std::mutex> innerLock(this->_mutex);
+                cb = this->_completionCallback;
+            }
+            if (cb) cb(capturedName);
+        }
+    });
+}
+
+void BackgroundRenderQueue::queueBatch(const std::vector<std::string>& modelNames, int debounceMS)
+{
+    if (modelNames.empty()) return;
+
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (_cancelled) return;
+
+    // Merge new models into the pending batch set
+    for (const auto& name : modelNames) {
+        _pendingBatchModels.insert(name);
+        _completedModels.erase(name);
+    }
+
+    // Bump batch generation — any previously scheduled batch block will see
+    // a stale generation and skip.
+    _batchGeneration++;
+    uint64_t capturedGeneration = _batchGeneration;
+
+    dispatch_time_t when = dispatch_time(
+        DISPATCH_TIME_NOW,
+        static_cast<int64_t>(debounceMS) * NSEC_PER_MSEC);
+
+    NativeRenderCoordinator* coordinator = _coordinator;
+    NativeSequenceData* output = _output;
+
+    dispatch_after(when, _bgQueue, ^{
+        // Snapshot the pending batch under lock, checking generation
+        std::vector<std::string> batch;
+        {
+            std::lock_guard<std::mutex> innerLock(this->_mutex);
+            if (this->_cancelled) return;
+            if (this->_batchGeneration != capturedGeneration) return;
+
+            batch.assign(this->_pendingBatchModels.begin(),
+                         this->_pendingBatchModels.end());
+            this->_pendingBatchModels.clear();
+        }
+
+        if (batch.empty()) return;
+
+        this->_batchRendering.store(true);
+
+        printf("[RDBG] BackgroundRenderQueue: batch rendering %zu models (gen=%llu)\n",
+               batch.size(), capturedGeneration);
+
+        auto t0 = std::chrono::steady_clock::now();
+        bool success = coordinator->renderModels(batch, *output);
+        auto t1 = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+        this->_batchRendering.store(false);
+
+        printf("[RDBG] BackgroundRenderQueue: batch render %s (%zu models, %.1fms)\n",
+               success ? "SUCCEEDED" : "FAILED", batch.size(), ms);
+
+        if (!success) return;
+
+        // Mark all models as completed and fire per-model callbacks
+        CompletionCallback cb;
+        {
+            std::lock_guard<std::mutex> innerLock(this->_mutex);
+            if (this->_cancelled) return;
+            cb = this->_completionCallback;
+            for (const auto& name : batch) {
+                this->_completedModels.insert(name);
+            }
+        }
+
+        // Fire completion callback for each model so RenderEngine can
+        // update cache entries individually
+        if (cb) {
+            for (const auto& name : batch) {
+                cb(name);
+            }
+        }
     });
 }
 
@@ -113,6 +202,8 @@ void BackgroundRenderQueue::cancelAll()
         for (auto& [name, entry] : _debounceState) {
             entry.generation++;
         }
+        _batchGeneration++;
+        _pendingBatchModels.clear();
     }
 
     // Wait for any in-progress render on the serial queue to finish.
@@ -128,6 +219,11 @@ void BackgroundRenderQueue::cancelAll()
         _completedModels.clear();
         _cancelled = false; // Allow reuse after cancelAll
     }
+}
+
+bool BackgroundRenderQueue::isBatchRendering() const
+{
+    return _batchRendering.load();
 }
 
 bool BackgroundRenderQueue::isModelReady(const std::string& modelName) const
@@ -146,6 +242,12 @@ void BackgroundRenderQueue::clearCompletedModel(const std::string& modelName)
 {
     std::lock_guard<std::mutex> lock(_mutex);
     _completedModels.erase(modelName);
+}
+
+void BackgroundRenderQueue::setCompletionCallback(CompletionCallback cb)
+{
+    std::lock_guard<std::mutex> lock(_mutex);
+    _completionCallback = std::move(cb);
 }
 
 } // namespace xlEngine

@@ -4650,8 +4650,13 @@ static NSDictionary<NSString *, NSString *> *sEffectIconMapping = nil;
 }
 
 - (void)setScrollOffset:(CGPoint)scrollOffset {
+    CGPoint before = _scrollOffset;
     _scrollOffset = scrollOffset;
     [self clampScrollOffset];
+    if (fabs(before.x - _scrollOffset.x) > 1.0 || fabs(scrollOffset.x - _scrollOffset.x) > 1.0) {
+        NSLog(@"[PERSIST] EffectsGrid setScrollOffset: requested=%.1f before=%.1f after=%.1f (seqLen=%.0f zoom=%.4f boundsW=%.0f)",
+              scrollOffset.x, before.x, _scrollOffset.x, _sequenceLengthMS, _zoomLevel, self.bounds.size.width);
+    }
     _needsRedraw = YES;
 }
 

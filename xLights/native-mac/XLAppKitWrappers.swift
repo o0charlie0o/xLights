@@ -128,6 +128,20 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
                     self?.viewController?.reloadSequenceData()
                     // Restore saved zoom only on sequence open/create (not on every reload)
                     self?.viewController?.loadZoomLevelForCurrentSequence()
+
+                    // Defer scroll restore and house preview to next run loop tick
+                    // so views have time to layout with the new zoom level first
+                    DispatchQueue.main.async {
+                        // Restore scroll position after zoom so offset maps to correct pixel position
+                        self?.viewController?.loadScrollOffsetForCurrentSequence()
+
+                        // Auto-reopen house preview if it was visible last session
+                        let shouldOpenPreview = UserDefaults.standard.bool(forKey: "XLHousePreviewVisible")
+                        NSLog("[PERSIST] sequence loaded: XLHousePreviewVisible=\(shouldOpenPreview)")
+                        if shouldOpenPreview {
+                            self?.viewController?.toggleHousePreview()
+                        }
+                    }
                 }
             }
         }

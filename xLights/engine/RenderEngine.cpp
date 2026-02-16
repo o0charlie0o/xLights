@@ -111,6 +111,11 @@ void RenderEngine::setAudioProvider(IAudioProvider* provider)
     _audioProvider = provider;
 }
 
+void RenderEngine::setBackgroundRenderCallback(std::function<void(const std::string&)> cb)
+{
+    _bgRenderCompleteCallback = std::move(cb);
+}
+
 // Lightweight IRenderContext adapter for the coordinator
 namespace {
 class RenderEngineContext : public IRenderContext {
@@ -823,8 +828,16 @@ void RenderEngine::renderFrame(int timeMS)
             frameIndex = numFrames - 1;
         }
 
-        // Skip if we already have this frame cached
-        if (frameIndex == _currentFrameIndex) return;
+        // Skip if we already have this frame cached.
+        // If models are dirty, live-render them without re-reading FSEQ
+        // (avoids concurrent FSEQ decompression races with sidebar renders).
+        if (frameIndex == _currentFrameIndex) {
+            if (hasDirtyModels()) {
+                int n = liveRenderDirtyModels(timeMS);
+                if (n > 0) notifyFrameRendered(timeMS);
+            }
+            return;
+        }
 
         // Log first FSEQ frame read (reset on path change)
         static bool firstFseqFrame = true;
@@ -937,6 +950,21 @@ void RenderEngine::renderFrame(int timeMS)
             }
         } // release _bufferCacheMutex before logging and notifying
 
+        // Live-render dirty models at the current frame for immediate feedback.
+        // Erase their stale FSEQ-sourced cache entries first so liveRenderDirtyModels
+        // knows to re-render them (it skips models already in cache).
+        if (hasDirtyModels()) {
+            std::set<std::string> dirtySnapshot;
+            { std::lock_guard<std::mutex> dlock(_dirtyMutex); dirtySnapshot = _dirtyModels; }
+            {
+                std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+                for (const auto& name : dirtySnapshot) {
+                    _bufferCache.erase(name);
+                }
+            }
+            liveRenderDirtyModels(timeMS);
+        }
+
         // Log stats on first few FSEQ frames (reset on path change)
         static int fseqFrameLogCount = 0;
         if (sRdbgResetCounters) { fseqFrameLogCount = 0; sRdbgResetCounters = false; }
@@ -1023,17 +1051,12 @@ void RenderEngine::renderFrame(int timeMS)
             frameIndex = numFrames - 1;
         }
 
-        // Skip if we already have this frame cached
+        // Skip if we already have this frame cached.
+        // If models are dirty, live-render them without re-reading _renderedData.
         if (frameIndex == _currentFrameIndex) {
-            // Log early returns to detect stale-cache issues
-            static int earlyReturnCount = 0;
-            static int earlyReturnLogCount = 0;
-            if (sRdbgResetCounters) { earlyReturnCount = 0; earlyReturnLogCount = 0; }
-            earlyReturnCount++;
-            if (earlyReturnLogCount < 5) {
-                printf("[RDBG] PRERENDERED early-return: t=%dms frameIdx=%d (same as cached, earlyReturns=%d)\n",
-                       timeMS, frameIndex, earlyReturnCount);
-                earlyReturnLogCount++;
+            if (hasDirtyModels()) {
+                int n = liveRenderDirtyModels(timeMS);
+                if (n > 0) notifyFrameRendered(timeMS);
             }
             return;
         }
@@ -1184,6 +1207,20 @@ void RenderEngine::renderFrame(int timeMS)
                 }
             }
         } // release _bufferCacheMutex before logging and notifying
+
+        // Live-render dirty models at the current frame for immediate feedback.
+        // Erase their stale prerendered-sourced cache entries first.
+        if (hasDirtyModels()) {
+            std::set<std::string> dirtySnapshot;
+            { std::lock_guard<std::mutex> dlock(_dirtyMutex); dirtySnapshot = _dirtyModels; }
+            {
+                std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+                for (const auto& name : dirtySnapshot) {
+                    _bufferCache.erase(name);
+                }
+            }
+            liveRenderDirtyModels(timeMS);
+        }
 
         // Log stats on first few frames and after each render completion
         static int prerenderedFrameLogCount = 0;
@@ -1908,6 +1945,31 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         dirtyModels = _dirtyModels;
     }
 
+    // Count physical (non-group) models to decide if incremental is worthwhile.
+    // If most models are dirty, the full render path is faster because it doesn't
+    // pay the overhead of renderModels() skip-set management + job clearing.
+    int totalPhysicalModels = 0;
+    if (!fullRender && !dirtyModels.empty() && _modelProvider) {
+        auto allNames = _modelProvider->getModelNames();
+        for (const auto& n : allNames) {
+            auto attrs = _modelProvider->getModelAttributes(n);
+            auto da = attrs.find("DisplayAs");
+            if (da == attrs.end() || da->second != "ModelGroup") {
+                totalPhysicalModels++;
+            }
+        }
+        // If >50% of physical models are dirty, full render is faster
+        int dirtyPhysical = 0;
+        for (const auto& d : dirtyModels) {
+            if (_modelChannelMap.count(d) > 0) dirtyPhysical++;
+        }
+        if (totalPhysicalModels > 0 && dirtyPhysical > totalPhysicalModels / 2) {
+            printf("RenderEngine::renderAll — %d/%d physical models dirty (>50%%), using full render path\n",
+                   dirtyPhysical, totalPhysicalModels);
+            fullRender = true;
+        }
+    }
+
     if (!fullRender && _renderedData && _renderedData->isValid()
         && _renderedData->getNumChannels() == static_cast<uint32_t>(totalChannels)
         && _renderedData->getNumFrames() == static_cast<uint32_t>(numFrames)
@@ -1996,16 +2058,20 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
             }
         }
 
-        // Create coordinator for incremental render
-        _coordinator = std::make_unique<NativeRenderCoordinator>(
-            _effectProvider, _modelProvider, context.get());
+        // Reuse coordinator for incremental render (same persistence benefits)
+        if (!_coordinator) {
+            _coordinator = std::make_unique<NativeRenderCoordinator>(
+                _effectProvider, _modelProvider, context.get());
+        } else {
+            _coordinator->setContext(context.get());
+            _coordinator->prepareForNewBatchRender();
+        }
         _coordinator->setResolvedStartChannels(resolvedChannels);
 
         // Use renderModels for selective rendering
         std::vector<std::string> dirtyModelVec(dirtyModels.begin(), dirtyModels.end());
         bool completed = _coordinator->renderModels(dirtyModelVec, *_renderedData);
-
-        _coordinator.reset();
+        // Keep _coordinator alive for reuse.
 
         // Clear dirty state
         {
@@ -2014,6 +2080,10 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         }
 
         _currentFrameIndex = -1;
+
+        // Re-create background render queue if it was destroyed (e.g., by
+        // forceRenderAll or reRenderForEffectChange before this incremental path).
+        ensureBackgroundRenderQueue();
 
         auto wallEnd = std::chrono::steady_clock::now();
         auto wallMS = std::chrono::duration<double, std::milli>(wallEnd - wallStart).count();
@@ -2032,14 +2102,18 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
 
     // Cancel background queue before full render (it references _renderedData
     // which will be replaced below).
+    auto tBg0 = std::chrono::steady_clock::now();
     _bgRenderQueue.reset();
     _bgCoordinator.reset();
     _bgContext.reset();
+    auto tBg1 = std::chrono::steady_clock::now();
 
     // Clear disk cache before full render to avoid stale data from previous sessions.
+    auto tDisk0 = std::chrono::steady_clock::now();
     if (_diskCache) {
         _diskCache->clearAll();
     }
+    auto tDisk1 = std::chrono::steady_clock::now();
 
     // Clear _modelChannelMap BEFORE allocating the new buffer. This forces
     // renderFrame() to use the LIVE path during the 10+ second render instead
@@ -2056,12 +2130,25 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
 
     // Render into a separate buffer, then swap into _renderedData when done.
     // This prevents renderFrame() from reading partially-rendered data.
-    auto newRenderedData = std::make_unique<NativeSequenceData>(
-        static_cast<uint32_t>(totalChannels),
-        static_cast<uint32_t>(numFrames),
-        static_cast<uint32_t>(frameTimeMS));
+    // Use the pre-allocated buffer from warm-up if dimensions match.
+    auto tAlloc0 = std::chrono::steady_clock::now();
+    std::unique_ptr<NativeSequenceData> newRenderedData;
+    if (_preAllocatedRenderData &&
+        _preAllocatedRenderData->getNumChannels() == static_cast<uint32_t>(totalChannels) &&
+        _preAllocatedRenderData->getNumFrames() == static_cast<uint32_t>(numFrames)) {
+        newRenderedData = std::move(_preAllocatedRenderData);
+        printf("RenderEngine::renderAll — using pre-allocated render buffer\n");
+    } else {
+        _preAllocatedRenderData.reset();
+        newRenderedData = std::make_unique<NativeSequenceData>(
+            static_cast<uint32_t>(totalChannels),
+            static_cast<uint32_t>(numFrames),
+            static_cast<uint32_t>(frameTimeMS));
+    }
+    auto tAlloc1 = std::chrono::steady_clock::now();
 
     // Resolve start channels BEFORE rendering
+    auto tResolve0 = std::chrono::steady_clock::now();
     if (_controllerStartChannels.empty()) {
         buildControllerChannelMap();
     }
@@ -2069,9 +2156,12 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         buildModelTotalChannelsMap();
     }
 
-    // Pre-resolve all model start channels
+    // Use cached resolved channels from warm-up if available,
+    // otherwise resolve now.
     std::unordered_map<std::string, uint32_t> resolvedChannels;
-    {
+    if (!_cachedResolvedChannels.empty()) {
+        resolvedChannels = _cachedResolvedChannels;
+    } else {
         auto modelNames = _modelProvider->getModelNames();
         for (const auto& name : modelNames) {
             auto attrs = _modelProvider->getModelAttributes(name);
@@ -2082,13 +2172,29 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
                 resolvedChannels[name] = resolveStartChannel(scIt->second);
             }
         }
-        printf("RenderEngine::renderAll — pre-resolved %zu model start channels\n",
-               resolvedChannels.size());
     }
+    auto tResolve1 = std::chrono::steady_clock::now();
 
-    // Create coordinator and set up progress forwarding
-    _coordinator = std::make_unique<NativeRenderCoordinator>(
-        _effectProvider, _modelProvider, context.get());
+    printf("[PRE_RENDER] bg queue reset: %.1fms, disk cache clear: %.1fms, "
+           "buffer alloc (%u ch × %u fr = %.1f MB): %.1fms, channel resolve: %.1fms\n",
+           std::chrono::duration<double, std::milli>(tBg1 - tBg0).count(),
+           std::chrono::duration<double, std::milli>(tDisk1 - tDisk0).count(),
+           static_cast<uint32_t>(totalChannels), static_cast<uint32_t>(numFrames),
+           static_cast<double>(totalChannels) * numFrames / (1024.0 * 1024.0),
+           std::chrono::duration<double, std::milli>(tAlloc1 - tAlloc0).count(),
+           std::chrono::duration<double, std::milli>(tResolve1 - tResolve0).count());
+
+    // Reuse existing coordinator if available (persistent jobs save ~1s setup).
+    // Create a new one only on first render or after invalidateAllCaches().
+    if (!_coordinator) {
+        _coordinator = std::make_unique<NativeRenderCoordinator>(
+            _effectProvider, _modelProvider, context.get());
+        printf("RenderEngine::renderAll — created NEW coordinator\n");
+    } else {
+        _coordinator->setContext(context.get());
+        _coordinator->prepareForNewBatchRender();
+        printf("RenderEngine::renderAll — REUSING coordinator (persistent jobs warm)\n");
+    }
     _coordinator->setResolvedStartChannels(resolvedChannels);
 
     // Bridge coordinator listener to RenderEngineListener
@@ -2131,7 +2237,8 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
         fullRenderWallEnd - fullRenderWallStart).count();
 
     _coordinator->setListener(nullptr);
-    _coordinator.reset();
+    // Keep _coordinator alive for reuse on subsequent renders.
+    // Its persistent jobs will be reused by preparePersistentJobs().
 
     // Swap the fully-rendered buffer into _renderedData atomically.
     // Until this point, _renderedData was null (or old) and _modelChannelMap
@@ -2187,6 +2294,24 @@ void RenderEngine::renderAll(RenderCompleteCallback callback)
             std::lock_guard<std::mutex> lock(_dirtyMutex);
             _allDirty.store(false);
             _dirtyModels.clear();
+        }
+
+        // Create background render queue so future invalidateModelAndGroup()
+        // calls can dispatch dirty models for immediate background re-rendering
+        // instead of waiting for the next synchronous renderAll().
+        ensureBackgroundRenderQueue();
+
+        // Pre-allocate render buffer for the next render on a background thread.
+        // This avoids the ~200ms+ allocation+zeroing delay on subsequent renders.
+        {
+            uint32_t preCh = _renderedData->getNumChannels();
+            uint32_t preFr = _renderedData->getNumFrames();
+            uint32_t preFt = _renderedData->getFrameTimeMS();
+            RenderEngine* self = this;
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                auto preData = std::make_unique<NativeSequenceData>(preCh, preFr, preFt);
+                self->_preAllocatedRenderData = std::move(preData);
+            });
         }
 
         printf("[RDBG] renderAll: FULL RENDER COMPLETE in %.1fms (%s) — %u frames, %u channels, stepTime=%u ms (renderAll used %dms), mapSize=%zu\n",
@@ -2328,13 +2453,17 @@ void RenderEngine::renderRange(int startMS, int endMS, bool clear,
         }
     }
 
-    _coordinator = std::make_unique<NativeRenderCoordinator>(
-        _effectProvider, _modelProvider, context.get());
+    if (!_coordinator) {
+        _coordinator = std::make_unique<NativeRenderCoordinator>(
+            _effectProvider, _modelProvider, context.get());
+    } else {
+        _coordinator->setContext(context.get());
+        _coordinator->prepareForNewBatchRender();
+    }
     _coordinator->setResolvedStartChannels(resolvedChannels);
 
     bool completed = _coordinator->renderRange(startMS, endMS, *_renderedData);
-
-    _coordinator.reset();
+    // Keep _coordinator alive for reuse.
 
     bool wasCancelled = !completed;
     notifyRenderComplete(wasCancelled);
@@ -2357,6 +2486,96 @@ bool RenderEngine::abortRender(int timeoutMS)
         return true;
     }
     return true;
+}
+
+void RenderEngine::warmUpCoordinator()
+{
+    if (!_effectProvider || !_modelProvider) return;
+
+    // Skip if coordinator already has warm persistent jobs
+    if (_coordinator && _coordinator->hasPersistentJobs()) {
+        printf("RenderEngine::warmUpCoordinator — already warm, skipping\n");
+        return;
+    }
+
+    // Acquire _renderInProgress to prevent concurrent render/warmup.
+    // If a render is already in progress, skip — it will create the coordinator.
+    if (_renderInProgress.exchange(true, std::memory_order_acq_rel)) {
+        printf("RenderEngine::warmUpCoordinator — render in progress, skipping\n");
+        return;
+    }
+
+    int frameTimeMS = getFrameTimeMS();
+    int numFrames = getNumFrames();
+    if (frameTimeMS <= 0 || numFrames <= 0) {
+        printf("RenderEngine::warmUpCoordinator — no sequence loaded, skipping\n");
+        _renderInProgress.store(false, std::memory_order_release);
+        return;
+    }
+
+    double duration = static_cast<double>(numFrames) * frameTimeMS / 1000.0;
+
+    // Build channel maps if needed
+    if (_controllerStartChannels.empty()) {
+        buildControllerChannelMap();
+    }
+    if (_modelTotalChannels.empty()) {
+        buildModelTotalChannelsMap();
+    }
+
+    // Pre-resolve all model start channels and cache for renderAll reuse
+    std::unordered_map<std::string, uint32_t> resolvedChannels;
+    {
+        auto modelNames = _modelProvider->getModelNames();
+        for (const auto& name : modelNames) {
+            auto attrs = _modelProvider->getModelAttributes(name);
+            auto displayAs = attrs.find("DisplayAs");
+            if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+            auto scIt = attrs.find("StartChannel");
+            if (scIt != attrs.end() && !scIt->second.empty()) {
+                resolvedChannels[name] = resolveStartChannel(scIt->second);
+            }
+        }
+    }
+    _cachedResolvedChannels = resolvedChannels;
+
+    // Pre-allocate the NativeSequenceData buffer in the background so
+    // renderAll doesn't have to allocate+zero hundreds of MB synchronously.
+    int32_t totalChannels = _outputProvider ? _outputProvider->getTotalChannels() : 0;
+    int32_t requiredChannels = computeRequiredChannels();
+    if (requiredChannels > totalChannels) totalChannels = requiredChannels;
+    if (totalChannels > 0 && numFrames > 0) {
+        auto tAlloc0 = std::chrono::steady_clock::now();
+        _preAllocatedRenderData = std::make_unique<NativeSequenceData>(
+            static_cast<uint32_t>(totalChannels),
+            static_cast<uint32_t>(numFrames),
+            static_cast<uint32_t>(frameTimeMS));
+        auto tAlloc1 = std::chrono::steady_clock::now();
+        printf("[WARMUP] Pre-allocated render buffer: %d ch × %d fr (%.1f MB) in %.1fms\n",
+               totalChannels, numFrames,
+               static_cast<double>(totalChannels) * numFrames / (1024.0 * 1024.0),
+               std::chrono::duration<double, std::milli>(tAlloc1 - tAlloc0).count());
+    }
+
+    // Create coordinator and run warmUp() to populate persistent jobs
+    auto context = std::make_unique<RenderEngineContext>(frameTimeMS, duration, _audioProvider);
+
+    if (!_coordinator) {
+        _coordinator = std::make_unique<NativeRenderCoordinator>(
+            _effectProvider, _modelProvider, context.get());
+    } else {
+        _coordinator->setContext(context.get());
+        _coordinator->prepareForNewBatchRender();
+    }
+    _coordinator->setResolvedStartChannels(resolvedChannels);
+
+    // Store the context so it stays alive while the coordinator references it.
+    // The next renderAll() will replace it with its own context via setContext().
+    _warmUpContext = std::move(context);
+
+    _coordinator->warmUp();
+
+    _renderInProgress.store(false, std::memory_order_release);
 }
 
 bool RenderEngine::exportRenderedFSEQ(const std::string& outputPath,
@@ -2505,9 +2724,10 @@ void RenderEngine::invalidateCache(const std::string& modelName)
     std::lock_guard<std::mutex> lock(_bufferCacheMutex);
     _bufferCache.erase(modelName);
     _currentFrameIndex = -1; // Force re-read on next renderFrame
-    // Reset persistent state for this model so stale effect caches don't linger
-    if (_liveCoordinator) {
-        _liveCoordinator->resetPersistentState(modelName);
+    // Do NOT reset _liveCoordinator here — it runs on a different thread.
+    // Dirty model tracking ensures liveRenderDirtyModels resets on the render queue.
+    if (_coordinator) {
+        _coordinator->resetPersistentState(modelName);
     }
 }
 
@@ -2519,6 +2739,13 @@ void RenderEngine::invalidateAllCaches()
     _bgRenderQueue.reset();
     _bgCoordinator.reset();
     _bgContext.reset();
+
+    // Destroy the persistent batch coordinator — model geometry or
+    // effects may have changed, so persistent jobs are stale.
+    _coordinator.reset();
+    _warmUpContext.reset();
+    _cachedResolvedChannels.clear();
+    _preAllocatedRenderData.reset();
 
     // Close FSEQ so the FSEQ playback path is no longer used.
     // Must be called before taking _bufferCacheMutex (closeFSEQ locks it too).
@@ -2573,21 +2800,111 @@ void RenderEngine::invalidateModel(const std::string& modelName)
     {
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         _bufferCache.erase(modelName);
-        _currentFrameIndex = -1; // force re-read on next renderFrame
-
-        if (_liveCoordinator) {
-            _liveCoordinator->resetPersistentState(modelName);
-            _liveCoordinator->invalidateCache(modelName);
-        }
+        // Do NOT reset _liveCoordinator here — invalidateModel() runs on the main
+        // thread, but _liveCoordinator is used by renderAllModelsStateful() on the
+        // render queue. Modifying _persistentJobs here would cause a dangling pointer
+        // race. Instead, liveRenderDirtyModels() resets dirty models on the coordinator
+        // before rendering (safely, on the render queue).
     }
     {
         std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
         _sidebarCache.erase(modelName);
-        if (_sidebarCoordinator) {
-            _sidebarCoordinator->resetPersistentState(modelName);
-            _sidebarCoordinator->invalidateCache(modelName);
+        // Same concern for sidebar coordinator — defer reset to the sidebar render path.
+    }
+}
+
+int RenderEngine::liveRenderDirtyModels(int timeMS)
+{
+    if (!_effectProvider || !_modelProvider) return 0;
+
+    // Skip live rendering while the bg batch render is in progress.
+    // Both paths use dispatch_apply on the global concurrent queue and share
+    // the effect provider — running them simultaneously causes heap corruption.
+    // The bg batch will finish in seconds and update _renderedData for all frames.
+    if (_bgRenderQueue && _bgRenderQueue->isBatchRendering()) return 0;
+
+    std::set<std::string> dirtyNow;
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        dirtyNow = _dirtyModels;
+    }
+    if (dirtyNow.empty()) return 0;
+
+    // Filter to physical models that are NOT already in the buffer cache.
+    // Models already in cache were either:
+    //   a) Live-rendered on a previous call at this frame (no need to redo), or
+    //   b) Read from FSEQ with stale data (caller erases before calling us).
+    std::vector<std::string> dirtyPhysical;
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        for (const auto& name : dirtyNow) {
+            if (_modelChannelMap.count(name) > 0 &&
+                _bufferCache.find(name) == _bufferCache.end()) {
+                dirtyPhysical.push_back(name);
+            }
         }
     }
+    if (dirtyPhysical.empty()) return 0;
+
+    // Determine timing from provider or _renderedData
+    int ft = _provider ? _provider->getFrameTimeMS() : 50;
+    if (ft <= 0) ft = 50;
+    int durMS = _provider ? _provider->getSequenceDurationMS() : 0;
+    if (durMS <= 0) {
+        int totalF = _provider ? _provider->getTotalFrames() : 0;
+        durMS = (totalF > 0) ? totalF * ft : 60000;
+    }
+    double durSec = durMS / 1000.0;
+
+    // Create/reuse _liveCoordinator
+    std::shared_ptr<NativeRenderCoordinator> liveCoord;
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        if (!_liveCoordinator) {
+            _liveContext = std::make_shared<RenderEngineContext>(ft, durSec, _audioProvider);
+            _liveCoordinator = std::make_shared<NativeRenderCoordinator>(
+                _effectProvider, _modelProvider, _liveContext.get());
+            _lastLiveRenderTimeMS = -1;
+        }
+        if (_lastLiveRenderTimeMS >= 0 && timeMS < _lastLiveRenderTimeMS) {
+            _liveCoordinator->resetPersistentState();
+        }
+        _lastLiveRenderTimeMS = timeMS;
+        liveCoord = _liveCoordinator;
+    }
+
+    // No persistent state reset needed — renderModelAtTime re-reads effect
+    // parameters from the provider on every call (getEffectAtTime). The
+    // ModelJob geometry/layer structure is still valid for parameter changes.
+
+    // Render all dirty models in a single parallel call. Metal shared resources
+    // (device, command queue, pipeline) are singletons, so concurrent creation
+    // from dispatch_apply is safe.
+    auto t0 = std::chrono::steady_clock::now();
+    auto liveFrames = liveCoord->renderAllModelsStateful(dirtyPhysical, timeMS);
+    auto t1 = std::chrono::steady_clock::now();
+    double renderMS = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    int count = 0;
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        for (auto& rf : liveFrames) {
+            if (rf.isValid()) {
+                FrameBuffer fb;
+                fb.modelName = rf.modelName;
+                fb.width = rf.width;
+                fb.height = rf.height;
+                fb.timeMS = rf.timeMS;
+                fb.pixels = std::move(rf.pixels);
+                _bufferCache[rf.modelName] = std::move(fb);
+                count++;
+            }
+        }
+    }
+
+    printf("[RDBG] liveRenderDirtyModels: %d/%zu models at t=%dms, render=%.1fms\n",
+           count, dirtyPhysical.size(), timeMS, renderMS);
+    return count;
 }
 
 void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
@@ -2646,30 +2963,31 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
         }
     }
 
-    printf("[RDBG] invalidateModelAndGroup('%s'): expanded to %zu models (%d physical), visited %zu total\n",
-           modelName.c_str(), visited.size(), physicalCount, visited.size());
+    // Note: invalidateModel() already cleared each model's buffer cache entry
+    // and reset its live coordinator persistent state. No additional cache
+    // clearing needed here.
 
-    // Clear ALL playback data so renderFrame falls back to LIVE path.
-    // FSEQ must be cleared too — stale FSEQ data is as wrong as stale
-    // pre-rendered data. LIVE path renders effects in real-time from
-    // the effect provider, so it always reflects the current edit state.
-    _fseqLoaded = false;
-    {
-        std::lock_guard<std::mutex> fLock(_fseqMutex);
-        _fseqFile.reset();
+    // Queue dirty physical models for a single batched background re-render
+    // with 150ms debounce. All dirty models are rendered in one parallel
+    // renderModels() call (like "Render All"), not one-by-one serially.
+    if (_bgRenderQueue) {
+        std::vector<std::string> dirtyPhysical;
+        for (const auto& name : visited) {
+            if (_modelChannelMap.count(name) > 0) {
+                dirtyPhysical.push_back(name);
+            }
+        }
+        if (!dirtyPhysical.empty()) {
+            _bgRenderQueue->queueBatch(dirtyPhysical, 150);
+        }
     }
-    {
-        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-        _renderedData.reset();
-        _bufferCache.clear();
-        _currentFrameIndex = -1;
-        // Destroy live coordinator so it's recreated fresh with clean state
-        _liveCoordinator.reset();
-        _liveContext.reset();
-        _lastLiveRenderTimeMS = -1;
+
+    // Clear disk cache entries for dirty models only (not the entire cache).
+    if (_diskCache) {
+        for (const auto& name : visited) {
+            _diskCache->clearModel(name);
+        }
     }
-    printf("[RDBG] invalidateModelAndGroup('%s'): %zu models dirtied, cleared FSEQ+renderedData → LIVE fallback\n",
-           modelName.c_str(), visited.size());
 
     // Also check if this physical model belongs to any group with effects
     if (visited.size() == 1 && physicalCount == 1) {
@@ -2809,8 +3127,75 @@ void RenderEngine::ensureBackgroundRenderQueue()
     _bgRenderQueue = std::make_unique<BackgroundRenderQueue>(
         _bgCoordinator.get(), _renderedData.get());
 
+    // Wire up completion callback to refresh preview after bg render finishes
+    RenderEngine* self = this;
+    _bgRenderQueue->setCompletionCallback([self](const std::string& modelName) {
+        self->notifyBackgroundRenderComplete(modelName);
+    });
+
     printf("[RDBG] ensureBackgroundRenderQueue: queue created with %zu resolved channels\n",
            resolvedChannels.size());
+}
+
+void RenderEngine::notifyBackgroundRenderComplete(const std::string& modelName)
+{
+    printf("[RDBG] notifyBackgroundRenderComplete('%s')\n", modelName.c_str());
+
+    // Remove from dirty set — bg render has updated _renderedData
+    {
+        std::lock_guard<std::mutex> lock(_dirtyMutex);
+        _dirtyModels.erase(modelName);
+    }
+
+    // Update just this model's buffer cache entry from _renderedData so the
+    // preview reflects the bg-rendered data. Do NOT reset _currentFrameIndex —
+    // that would force a full re-read of ALL models and trigger mass live-rendering
+    // of every remaining dirty model.
+    {
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        if (_currentFrameIndex >= 0 && _renderedData && _renderedData->isValid()) {
+            auto chIt = _modelChannelMap.find(modelName);
+            if (chIt != _modelChannelMap.end()) {
+                const auto& chInfo = chIt->second;
+                const uint8_t* frameData = _renderedData->getFrame(
+                    static_cast<uint32_t>(_currentFrameIndex));
+                if (frameData) {
+                    FrameBuffer fb;
+                    fb.modelName = modelName;
+                    fb.width = chInfo.bufferWidth;
+                    fb.height = chInfo.bufferHeight;
+                    fb.timeMS = _currentFrameIndex * (getFrameTimeMS() > 0 ? getFrameTimeMS() : 50);
+                    fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+                    uint32_t maxCh = _renderedData->getNumChannels();
+                    for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                        uint32_t ch = chInfo.absStartChannel + i * chInfo.chansPerNode;
+                        if (ch + chInfo.chansPerNode > maxCh) continue;
+                        uint8_t r = frameData[ch + chInfo.rOffset];
+                        uint8_t g = frameData[ch + chInfo.gOffset];
+                        uint8_t b = frameData[ch + chInfo.bOffset];
+                        int bx = chInfo.nodeBufCoords[i].first;
+                        int by = chInfo.nodeBufCoords[i].second;
+                        if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+                        size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                        fb.pixels[idx]     = r;
+                        fb.pixels[idx + 1] = g;
+                        fb.pixels[idx + 2] = b;
+                        fb.pixels[idx + 3] = 255;
+                    }
+                    _bufferCache[modelName] = std::move(fb);
+                }
+            }
+        }
+    }
+
+    // Invoke callback if set (typically posts an NSNotification from Obj-C++ bridge)
+    if (_bgRenderCompleteCallback) {
+        std::string capturedName = modelName;
+        auto cb = _bgRenderCompleteCallback;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            cb(capturedName);
+        });
+    }
 }
 
 // --- EffectEngineListener callbacks ---

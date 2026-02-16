@@ -287,6 +287,15 @@ static XLEngineBridge *_sharedBridge = nil;
         // the affected model(s) as dirty instead of destroying all caches.
         _renderEngine->connectEffectEngine(_effectEngine.get());
 
+        // Wire up background render completion → NSNotification for UI refresh.
+        // Called on the main queue when a dirty model finishes background rendering.
+        _renderEngine->setBackgroundRenderCallback([](const std::string& modelName) {
+            [[NSNotificationCenter defaultCenter]
+                postNotificationName:@"XLBackgroundRenderCompleteNotification"
+                              object:nil
+                            userInfo:@{@"modelName": [NSString stringWithUTF8String:modelName.c_str()]}];
+        });
+
         _standaloneMode = YES;
         _engineInitialized = YES;
         NSLog(@"XLEngineBridge: Engines created with native providers (standalone mode)");
@@ -411,6 +420,15 @@ static XLEngineBridge *_sharedBridge = nil;
 
             // Try to load the corresponding FSEQ file for playback rendering
             [self loadFSEQForSequence:path];
+
+            // Pre-warm the render coordinator on a background thread so the
+            // first render doesn't spend ~1s in preparePersistentJobs setup.
+            if (_renderEngine) {
+                xlEngine::RenderEngine* engine = _renderEngine.get();
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    engine->warmUpCoordinator();
+                });
+            }
         }
 
         return result ? YES : NO;
@@ -757,6 +775,16 @@ static XLEngineBridge *_sharedBridge = nil;
             @"album": album,
             @"comment": comment,
         } mutableCopy];
+
+        // Include file path from the sequence provider
+#ifdef XLIGHTS_NATIVE
+        if (_nativeSequenceProvider) {
+            std::string seqPath = _nativeSequenceProvider->getSequencePath();
+            if (!seqPath.empty()) {
+                result[@"filePath"] = [NSString stringWithUTF8String:seqPath.c_str()];
+            }
+        }
+#endif
 
         // Include audio stem references from loaded sequence metadata
 #ifdef XLIGHTS_NATIVE

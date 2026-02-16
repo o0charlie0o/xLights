@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,14 @@ public:
     // Delete a specific cache entry.
     void deleteEntry(uint64_t hash);
 
+    // Register that a cache entry (identified by hash) belongs to a model.
+    // Called when writing cache entries so clearModel() can find them later.
+    void registerModelHash(const std::string& modelName, uint64_t hash);
+
+    // Clear all cache entries belonging to a specific model.
+    // Uses the model-to-hash index built by registerModelHash().
+    void clearModel(const std::string& modelName);
+
     // Clear all cache entries in the cache directory.
     void clearAll();
 
@@ -113,6 +122,10 @@ public:
 
 private:
     std::string _cacheDir;
+
+    // In-memory index: model name → set of effect hashes written for that model.
+    // Populated by registerModelHash(), used by clearModel().
+    std::map<std::string, std::set<uint64_t>> _modelHashIndex;
 
     // Build the file path for a given hash.
     std::string pathForHash(uint64_t hash) const;

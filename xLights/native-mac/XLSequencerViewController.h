@@ -70,6 +70,10 @@
 /// Call this only when initially opening/creating a sequence, not on every refresh.
 - (void)loadZoomLevelForCurrentSequence;
 
+/// Load the saved horizontal scroll offset for the current sequence.
+/// Call after loadZoomLevelForCurrentSequence so the offset maps to correct pixels.
+- (void)loadScrollOffsetForCurrentSequence;
+
 /// Refresh the view selector dropdown with current views.
 /// Called automatically by reloadSequenceData.
 - (void)refreshViewSelector;

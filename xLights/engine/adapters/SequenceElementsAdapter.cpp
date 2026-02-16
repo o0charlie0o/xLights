@@ -343,6 +343,24 @@ bool SequenceElementsAdapter::getEffectAtTime(
     return true;
 }
 
+bool SequenceElementsAdapter::getLayerEffectTimeRange(
+    size_t elementIndex,
+    size_t layerIndex,
+    int& outMinStartMS,
+    int& outMaxEndMS) const
+{
+    Element* elem = getElementByIndex(elementIndex);
+    if (!elem) return false;
+    if (layerIndex >= elem->GetEffectLayerCount()) return false;
+
+    EffectLayer* el = elem->GetEffectLayer(layerIndex);
+    if (!el || el->GetEffectCount() == 0) return false;
+
+    outMinStartMS = el->GetEffect(0)->GetStartTimeMS();
+    outMaxEndMS = el->GetEffect(static_cast<int>(el->GetEffectCount()) - 1)->GetEndTimeMS();
+    return true;
+}
+
 // --- IEffectProvider Implementation: Effect Type Information ---
 
 std::vector<std::string> SequenceElementsAdapter::getEffectTypes() const

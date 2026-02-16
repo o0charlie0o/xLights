@@ -649,6 +649,60 @@ void NativeRenderCoordinator::setResolvedStartChannels(
     _resolvedStartChannels = channels;
 }
 
+void NativeRenderCoordinator::prepareForNewBatchRender() {
+    // Clear per-render caches while keeping expensive persistent state
+    // (_persistentJobs, _skippedModels, _geometryCache, _modelToGroupIdx).
+    {
+        std::lock_guard<std::mutex> lock(_renderCacheMutex);
+        _renderCache.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(_groupRenderCacheMutex);
+        _groupRenderCache.clear();
+    }
+    _diskWriteSessions.clear();
+    _batchMode = false;
+    _abort.store(false);
+    _progress.store(0.0f);
+}
+
+bool NativeRenderCoordinator::hasPersistentJobs() const {
+    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+    return !_persistentJobs.empty();
+}
+
+void NativeRenderCoordinator::warmUp() {
+    if (!_effectProvider || !_modelProvider || !_context) return;
+
+    auto wallStart = std::chrono::steady_clock::now();
+
+    // Get all physical model names (same as renderAllFrames)
+    auto allModelNames = _modelProvider->getModelNames();
+    std::vector<std::string> modelNames;
+    modelNames.reserve(allModelNames.size());
+    for (const auto& name : allModelNames) {
+        auto attrs = _modelProvider->getModelAttributes(name);
+        auto displayAs = attrs.find("DisplayAs");
+        if (displayAs != attrs.end() && displayAs->second == "ModelGroup") continue;
+        modelNames.push_back(name);
+    }
+
+    // Run preparePersistentJobs to create all ModelJob objects
+    std::vector<PreparedModel> physicalJobs;
+    physicalJobs.reserve(modelNames.size());
+    std::vector<std::string> submodelNames;
+
+    {
+        std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+        preparePersistentJobs(modelNames, physicalJobs, submodelNames);
+    }
+
+    auto wallEnd = std::chrono::steady_clock::now();
+    auto wallMS = std::chrono::duration<double, std::milli>(wallEnd - wallStart).count();
+    printf("[WARMUP] NativeRenderCoordinator::warmUp — %zu jobs, %zu submodels, %zu skipped in %.1fms\n",
+           physicalJobs.size(), submodelNames.size(), _skippedModels.size(), wallMS);
+}
+
 // =========================================================================
 // Public render API
 // =========================================================================
@@ -685,7 +739,11 @@ bool NativeRenderCoordinator::renderModels(
         std::lock_guard<std::recursive_mutex> lock(_stateMutex);
         savedSkipped = _skippedModels;
         _skippedModels.clear();
-        _persistentJobs.clear(); // force re-creation of jobs for dirty models
+        // Only remove dirty model jobs so they get recreated with fresh state.
+        // Non-dirty model jobs survive for reuse on the next full render.
+        for (const auto& name : modelNames) {
+            _persistentJobs.erase(name);
+        }
 
         // Build a set of models we want to render
         std::set<std::string> targetModels(modelNames.begin(), modelNames.end());
@@ -1597,6 +1655,38 @@ bool NativeRenderCoordinator::renderAllFrames(
         return true;
     }
 
+    // Pre-compute per-job effect time ranges for early frame skipping.
+    // This lets renderModelAtTime() skip entirely when timeMS is outside
+    // the union of all effect time ranges across all layers.
+    int jobsWithTimeRange = 0;
+    for (auto& pm : physicalJobs) {
+        auto& job = *pm.job;
+        int globalMin = INT_MAX, globalMax = 0;
+        for (size_t layer = 0; layer < job.layerCount; ++layer) {
+            size_t srcElemIdx, srcLayerIdx;
+            if (job.groupElementIndex != SIZE_MAX && layer < job.groupLayerCount) {
+                srcElemIdx = job.groupElementIndex;
+                srcLayerIdx = layer;
+            } else {
+                srcElemIdx = job.elementIndex;
+                srcLayerIdx = (job.groupElementIndex != SIZE_MAX)
+                              ? layer - job.groupLayerCount : layer;
+            }
+            int layerMin, layerMax;
+            if (_effectProvider->getLayerEffectTimeRange(srcElemIdx, srcLayerIdx,
+                                                         layerMin, layerMax)) {
+                globalMin = std::min(globalMin, layerMin);
+                globalMax = std::max(globalMax, layerMax);
+            }
+        }
+        if (globalMin < globalMax) {
+            job.effectMinStartMS = globalMin;
+            job.effectMaxEndMS = globalMax;
+            job.hasEffectTimeRange = true;
+            jobsWithTimeRange++;
+        }
+    }
+
     // Count models that actually have effects vs those that are no-ops
     int modelsWithEffects = 0;
     int modelsWithGroupOnly = 0;
@@ -1609,37 +1699,9 @@ bool NativeRenderCoordinator::renderAllFrames(
         else if (hasOwn) modelsWithOwnEffects++;
         modelsWithEffects++;
     }
-    printf("[RENDER_PERF] jobs breakdown: %d total, %d own-effects, %d group-only, %zu skipped\n",
+    printf("[RENDER_PERF] jobs breakdown: %d total, %d own-effects, %d group-only, %zu skipped, %d with time ranges\n",
            modelsWithEffects, modelsWithOwnEffects, modelsWithGroupOnly,
-           _skippedModels.size());
-
-    // Diagnostic: verify effect provider state before frame loop
-    {
-        size_t totalElements = _effectProvider->getElementCount();
-        printf("[RDBG-VERIFY] Effect provider: %zu elements\n", totalElements);
-        // Check first 3 jobs' element indices and probe effects at 15000ms and 25000ms
-        for (size_t idx = 0; idx < physicalJobs.size() && idx < 3; ++idx) {
-            auto& job = *physicalJobs[idx].job;
-            size_t eIdx = (job.groupElementIndex != SIZE_MAX) ? job.groupElementIndex : job.elementIndex;
-            ElementInfo eInfo;
-            bool got = _effectProvider->getElement(eIdx, eInfo);
-            printf("[RDBG-VERIFY]   job[%zu] elemIdx=%zu groupIdx=%zu: elem='%s' layers=%zu effects=%zu\n",
-                   idx, job.elementIndex, job.groupElementIndex,
-                   got ? eInfo.name.c_str() : "??", got ? eInfo.effectLayerCount : 0,
-                   got ? eInfo.effectCount : 0);
-            // Probe effects at key times
-            for (int probeT : {15000, 20000, 25000}) {
-                EffectInstanceInfo eff;
-                bool found = _effectProvider->getEffectAtTime(eIdx, 0, probeT, eff);
-                if (found) {
-                    printf("[RDBG-VERIFY]     @%dms: found '%s' %d-%dms\n",
-                           probeT, eff.effectType.c_str(), eff.startTimeMS, eff.endTimeMS);
-                } else {
-                    printf("[RDBG-VERIFY]     @%dms: NO effect\n", probeT);
-                }
-            }
-        }
-    }
+           _skippedModels.size(), jobsWithTimeRange);
 
     int totalFrames = (endMS - startMS + frameTimeMS - 1) / frameTimeMS;
     if (totalFrames <= 0) totalFrames = 1;
@@ -1665,6 +1727,10 @@ bool NativeRenderCoordinator::renderAllFrames(
         }
     }
 
+    // Enable batch read mode on the effect provider: skips mutex acquisition
+    // on read-only queries since no writes occur during batch rendering.
+    _effectProvider->setBatchReadMode(true);
+
     // Cumulative timing accumulators (in microseconds)
     double totalRenderUS = 0, totalSubmodelUS = 0, totalWriteUS = 0, totalProgressUS = 0;
 
@@ -1673,9 +1739,8 @@ bool NativeRenderCoordinator::renderAllFrames(
     int sampledFrames = 0;
     const int kSampleFrames = 100;
 
-    // Diagnostic flags: bitmask for which diagnostic times have been emitted
-    // bit 0 = t=14s done, bit 1 = t=25s done
-    int batchDiagDone = 0;
+    // Fine-grained breakdown accumulators (atomic for thread safety in dispatch_apply).
+    RenderPerfStats perfStats;
 
     // Frame loop: sequential frame ordering (required for stateful effects)
     for (int timeMS = startMS; timeMS < endMS; timeMS += frameTimeMS) {
@@ -1699,15 +1764,21 @@ bool NativeRenderCoordinator::renderAllFrames(
         uint32_t numChannels = output.getNumChannels();
 
 #ifdef __APPLE__
+        RenderPerfStats* statsPtr = &perfStats;
         dispatch_apply(physicalJobs.size(),
             dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
             ^(size_t idx) {
                 if (_abort.load()) return;
                 auto mStart = std::chrono::steady_clock::now();
-                renderModelAtTime(*physicalJobs[idx].job, timeMS);
+                renderModelAtTime(*physicalJobs[idx].job, timeMS, nullptr, -1, statsPtr);
                 // Write immediately if this model has no submodels to overlay
                 if (!physicalJobs[idx].hasSubmodels && frameData) {
+                    auto gcStart = std::chrono::steady_clock::now();
                     physicalJobs[idx].job->pixelBuffer->getColors(frameData, numChannels);
+                    auto gcEnd = std::chrono::steady_clock::now();
+                    statsPtr->getColorsUS.fetch_add(
+                        std::chrono::duration_cast<std::chrono::microseconds>(gcEnd - gcStart).count(),
+                        std::memory_order_relaxed);
                 }
                 if (sampling) {
                     auto mEnd = std::chrono::steady_clock::now();
@@ -1718,9 +1789,14 @@ bool NativeRenderCoordinator::renderAllFrames(
         for (size_t idx = 0; idx < physicalJobs.size(); ++idx) {
             if (_abort.load()) break;
             auto mStart = std::chrono::steady_clock::now();
-            renderModelAtTime(*physicalJobs[idx].job, timeMS);
+            renderModelAtTime(*physicalJobs[idx].job, timeMS, nullptr, -1, &perfStats);
             if (!physicalJobs[idx].hasSubmodels && frameData) {
+                auto gcStart = std::chrono::steady_clock::now();
                 physicalJobs[idx].job->pixelBuffer->getColors(frameData, numChannels);
+                auto gcEnd = std::chrono::steady_clock::now();
+                perfStats.getColorsUS.fetch_add(
+                    std::chrono::duration_cast<std::chrono::microseconds>(gcEnd - gcStart).count(),
+                    std::memory_order_relaxed);
             }
             if (sampling) {
                 auto mEnd = std::chrono::steady_clock::now();
@@ -1730,63 +1806,6 @@ bool NativeRenderCoordinator::renderAllFrames(
 #endif
         auto p1End = std::chrono::steady_clock::now();
         totalRenderUS += std::chrono::duration<double, std::micro>(p1End - p1Start).count();
-
-        // Two diagnostics: at t=14s (suspected wrong data) and t=25s (known effect range).
-        // Triggers once each PER renderAllFrames call.
-        // batchDiagDone is declared before the frame loop and used inside it.
-        static const int diagTargets[] = { 14000, 25000 };
-        static const int numDiagTargets = 2;
-        for (int dt = 0; dt < numDiagTargets; ++dt) {
-            int diagTimeMS = diagTargets[dt];
-            // Use batchDiagDone as a bitmask: bit 0 = 14s done, bit 1 = 25s done
-            bool thisDone = (dt == 0) ? (batchDiagDone & 1) : (batchDiagDone & 2);
-            if (thisDone) continue;
-            if (timeMS < diagTimeMS || !frameData) continue;
-            if (dt == 0) batchDiagDone |= 1; else batchDiagDone |= 2;
-            printf("[RDBG-BATCH] === DIAGNOSTIC at t=%dms (target=%d) ===\n", timeMS, diagTimeMS);
-            for (size_t idx = 0; idx < physicalJobs.size() && idx < 3; ++idx) {
-                auto& job = *physicalJobs[idx].job;
-                auto& geom = job.geometry;
-                // Check validLayers by re-examining effect availability
-                int layersWithEffects = 0;
-                for (size_t layer = 0; layer < job.layerCount; ++layer) {
-                    size_t srcElemIdx;
-                    size_t srcLayerIdx;
-                    if (job.groupElementIndex != SIZE_MAX && layer < job.groupLayerCount) {
-                        srcElemIdx = job.groupElementIndex;
-                        srcLayerIdx = layer;
-                    } else {
-                        srcElemIdx = job.elementIndex;
-                        srcLayerIdx = (job.groupElementIndex != SIZE_MAX)
-                                      ? layer - job.groupLayerCount : layer;
-                    }
-                    EffectInstanceInfo eff;
-                    bool found = _effectProvider->getEffectAtTime(srcElemIdx, srcLayerIdx, timeMS, eff);
-                    if (found) layersWithEffects++;
-                    if (layer < 3) {
-                        printf("[RDBG-BATCH]   '%s' layer %zu: elemIdx=%zu layerIdx=%zu found=%d",
-                               geom.name.c_str(), layer, srcElemIdx, srcLayerIdx, found);
-                        if (found) printf(" type='%s' start=%d end=%d", eff.effectType.c_str(), eff.startTimeMS, eff.endTimeMS);
-                        printf("\n");
-                    }
-                }
-                // Check pixel output
-                auto* pb = job.pixelBuffer.get();
-                const uint8_t* pixData = pb->getBlendedPixelData();
-                size_t pixSize = pb->getBlendedPixelDataSize();
-                int nonZeroRGB = 0;
-                if (pixData && pixSize >= 4) {
-                    for (size_t b = 0; b < pixSize; b += 4) {
-                        if (pixData[b] > 0 || pixData[b+1] > 0 || pixData[b+2] > 0) nonZeroRGB++;
-                    }
-                }
-                printf("[RDBG-BATCH]   '%s': elemIdx=%zu groupIdx=%zu layers=%zu layersWithEffects=%d pixBuf=%dx%d nonZeroRGBPixels=%d/%d nodes=%u\n",
-                       geom.name.c_str(), job.elementIndex, job.groupElementIndex,
-                       job.layerCount, layersWithEffects,
-                       pb->getBufferWi(), pb->getBufferHt(), nonZeroRGB,
-                       pb->getBufferWi() * pb->getBufferHt(), geom.nodeCount);
-            }
-        }
 
         if (sampling) {
             for (size_t idx = 0; idx < physicalJobs.size(); ++idx) {
@@ -1925,6 +1944,36 @@ bool NativeRenderCoordinator::renderAllFrames(
                    physicalJobs[idx].job->geometry.bufferHt);
         }
     }
+    // Fine-grained breakdown from inside renderModelAtTime (cumulative across ALL frames)
+    printf("[RENDER_PERF] --- renderModelAtTime breakdown (cumulative, all frames) ---\n");
+    printf("[RENDER_PERF]   Early exits (time out of range): %lld\n",
+           perfStats.earlyExitCount.load());
+    printf("[RENDER_PERF]   Layer iterations total:          %lld\n",
+           perfStats.layerIterations.load());
+    printf("[RENDER_PERF]   Effect hits / misses:            %lld / %lld\n",
+           perfStats.effectHits.load(), perfStats.effectMisses.load());
+    printf("[RENDER_PERF]   Cache hits / full renders:       %lld / %lld\n",
+           perfStats.cacheHits.load(), perfStats.fullRenders.load());
+    printf("[RENDER_PERF]   Fast path (solid fill) hits:     %lld\n",
+           perfStats.fastPathHits.load());
+    double elUS = static_cast<double>(perfStats.effectLookupUS.load());
+    double psUS = static_cast<double>(perfStats.parseSettingsUS.load());
+    double bpUS = static_cast<double>(perfStats.bufferPrepUS.load());
+    double ccUS = static_cast<double>(perfStats.cacheCheckUS.load());
+    double plUS = static_cast<double>(perfStats.paletteSetupUS.load());
+    double erUS = static_cast<double>(perfStats.effectRenderUS.load());
+    double coUS = static_cast<double>(perfStats.calcOutputUS.load());
+    double gcUS = static_cast<double>(perfStats.getColorsUS.load());
+    double innerTotal = elUS + psUS + bpUS + ccUS + plUS + erUS + coUS + gcUS;
+    printf("[RENDER_PERF]   Effect lookup (getEffectAtTime): %.1f ms\n", elUS / 1000.0);
+    printf("[RENDER_PERF]   Parse layer settings:            %.1f ms\n", psUS / 1000.0);
+    printf("[RENDER_PERF]   Buffer prepare (style+sub):      %.1f ms\n", bpUS / 1000.0);
+    printf("[RENDER_PERF]   Cache check (mem+disk+group):    %.1f ms\n", ccUS / 1000.0);
+    printf("[RENDER_PERF]   Palette setup:                   %.1f ms\n", plUS / 1000.0);
+    printf("[RENDER_PERF]   Effect render:                   %.1f ms\n", erUS / 1000.0);
+    printf("[RENDER_PERF]   calcOutput (blend):              %.1f ms\n", coUS / 1000.0);
+    printf("[RENDER_PERF]   getColors (channel write):       %.1f ms\n", gcUS / 1000.0);
+    printf("[RENDER_PERF]   Inner total (sum of above):      %.1f ms\n", innerTotal / 1000.0);
     printf("[RENDER_PERF] =====================================\n");
 
     _batchMode = false;
@@ -1941,13 +1990,20 @@ bool NativeRenderCoordinator::renderAllFrames(
         _diskCache->enforceMaxSize(MAX_CACHE_BYTES);
     }
 
+    // Disable batch read mode on the effect provider
+    _effectProvider->setBatchReadMode(false);
+
     bool wasCancelled = _abort.load();
     _rendering.store(false);
 
-    // Clean up persistent state used only for batch rendering
+    // Keep _persistentJobs and _skippedModels alive for reuse on
+    // subsequent renders. The coordinator is now persisted across batch
+    // renders, so preparePersistentJobs() can reuse existing ModelJob
+    // objects (~1s savings on 200+ model sequences).
+    // Reset _skippedModels so models that gained/lost effects since
+    // the last render are re-evaluated on the next preparePersistentJobs call.
     {
         std::lock_guard<std::recursive_mutex> lock(_stateMutex);
-        _persistentJobs.clear();
         _skippedModels.clear();
     }
 
@@ -3508,9 +3564,21 @@ static bool isSolidFillEffect(const EffectInstanceInfo& effectInfo,
 
 void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                                                  NativeSequenceData* output,
-                                                 int frameIndex) {
+                                                 int frameIndex,
+                                                 RenderPerfStats* stats) {
     int frameTimeMS = _context->getFrameTimeMS();
     if (frameTimeMS <= 0) frameTimeMS = 50;
+
+    // Fast path: skip entirely when timeMS is outside all effect time ranges.
+    // The output buffer is already zeroed, so no channel writes needed.
+    if (job.hasEffectTimeRange &&
+        (timeMS < job.effectMinStartMS || timeMS >= job.effectMaxEndMS)) {
+        // Clear output pixels to black so getColors() writes zeros
+        job.pixelBuffer->clearOutputPixels();
+        if (stats) stats->earlyExitCount.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     int period = timeMS / frameTimeMS;
 
     // Don't call pixelBuffer->clear() unconditionally — persistent and frozen
@@ -3520,6 +3588,8 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
     std::vector<bool> validLayers(job.layerCount, false);
 
     for (size_t layer = 0; layer < job.layerCount; ++layer) {
+        if (stats) stats->layerIterations.fetch_add(1, std::memory_order_relaxed);
+
         NativeRenderBuffer& buf = job.pixelBuffer->getLayerBuffer(
             static_cast<int>(layer));
 
@@ -3537,22 +3607,39 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                           : layer;
         }
 
+        auto tLookup0 = std::chrono::steady_clock::now();
         EffectInstanceInfo effectInfo;
-        if (!_effectProvider->getEffectAtTime(
-                srcElementIdx, srcLayerIdx, timeMS, effectInfo)) {
+        bool hasEffect = _effectProvider->getEffectAtTime(
+                srcElementIdx, srcLayerIdx, timeMS, effectInfo);
+        if (stats) {
+            auto tLookup1 = std::chrono::steady_clock::now();
+            stats->effectLookupUS.fetch_add(
+                std::chrono::duration_cast<std::chrono::microseconds>(tLookup1 - tLookup0).count(),
+                std::memory_order_relaxed);
+        }
+        if (!hasEffect) {
             // No effect on this layer at this time — always clear.
             // Even persistent layers clear when there's no active effect,
             // matching legacy behavior (the second condition in the clear check).
             buf.Clear();
+            if (stats) stats->effectMisses.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
+        if (stats) stats->effectHits.fetch_add(1, std::memory_order_relaxed);
 
         // Parse and apply layer settings from the effect.
         // B_ keys from settings, C_ keys from palette, with value curve evaluation.
+        auto tParse0 = std::chrono::steady_clock::now();
         NativeLayerInfo layerInfo = parseLayerSettings(
             effectInfo.settings, effectInfo.palette,
             frameTimeMS, timeMS, effectInfo.startTimeMS, effectInfo.endTimeMS,
             job.pixelBuffer->getBufferWi(), job.pixelBuffer->getBufferHt());
+        if (stats) {
+            auto tParse1 = std::chrono::steady_clock::now();
+            stats->parseSettingsUS.fetch_add(
+                std::chrono::duration_cast<std::chrono::microseconds>(tParse1 - tParse0).count(),
+                std::memory_order_relaxed);
+        }
 
         // For group layers, resolve "Default" buffer style to the group's actual
         // default (e.g., "Per Preview" for grid groups). This ensures
@@ -3583,13 +3670,24 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         // reshapes to Nx1), sub-buffer further narrows to a viewport region.
         // Both resize the layer's NativeRenderBuffer so the effect renders
         // into the smaller buffer, then expand back to full size afterward.
+        auto tBufPrep0 = std::chrono::steady_clock::now();
         job.pixelBuffer->prepareBufferStyle(static_cast<int>(layer));
         job.pixelBuffer->prepareSubBuffer(static_cast<int>(layer));
+        if (stats) {
+            auto tBufPrep1 = std::chrono::steady_clock::now();
+            stats->bufferPrepUS.fetch_add(
+                std::chrono::duration_cast<std::chrono::microseconds>(tBufPrep1 - tBufPrep0).count(),
+                std::memory_order_relaxed);
+        }
 
         // Clear the layer buffer unless persistent or frozen.
         // Persistent layers keep previous frame data so effects accumulate.
         // Frozen layers preserve whatever was rendered on the freeze frame.
-        if (!layerInfo.persistent && !freeze) {
+        // Skip if prepareBufferStyle or prepareSubBuffer already cleared
+        // (they now call Resize+Clear instead of InitBuffer).
+        bool alreadyCleared = job.pixelBuffer->isLayerBufferStyleActive(static_cast<int>(layer)) ||
+                              job.pixelBuffer->isLayerSubBufferActive(static_cast<int>(layer));
+        if (!layerInfo.persistent && !freeze && !alreadyCleared) {
             buf.Clear();
         }
 
@@ -3612,6 +3710,7 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         // Check render cache for non-stateful, non-persistent effects.
         // Stateful effects (Fire, Life, etc.) accumulate across frames and
         // cannot be cached by time alone. Persistent layers also skip caching.
+        auto tCache0 = std::chrono::steady_clock::now();
         bool cacheable = !layerInfo.persistent &&
                          RenderFrameCache::isEffectCacheable(effectInfo.effectType);
         size_t effectHash = 0;
@@ -3671,10 +3770,17 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                 cacheHit = true;
             }
         }
+        if (stats) {
+            auto tCache1 = std::chrono::steady_clock::now();
+            stats->cacheCheckUS.fetch_add(
+                std::chrono::duration_cast<std::chrono::microseconds>(tCache1 - tCache0).count(),
+                std::memory_order_relaxed);
+        }
 
         bool rendered;
         if (cacheHit) {
             rendered = true;
+            if (stats) stats->cacheHits.fetch_add(1, std::memory_order_relaxed);
         } else {
             // Check for "Per Model" / "Per Model Deep" buffer style on group layers.
             // When a group layer has this style, the effect renders independently
@@ -3685,9 +3791,7 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             bool usePerModel = isGroupLayer && isPerModelStyle(layerInfo.bufferStyle);
 
             // Set palette colors from the effect's palette map.
-            // Color curves (animated palette colors) are detected via ColorCurve::IsColorCurve()
-            // on the C_BUTTON_Palette* value. When present, the initial color is taken from
-            // the curve at t=0 and the curve is stored for per-frame evaluation.
+            auto tPal0 = std::chrono::steady_clock::now();
             xlColorVector colors;
             xlColorCurveVector colorCurves;
             for (int ci = 1; ci <= 8; ++ci) {
@@ -3720,6 +3824,12 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                 colorCurves.push_back(ColorCurve());
             }
             buf.SetPalette(colors, colorCurves);
+            if (stats) {
+                auto tPal1 = std::chrono::steady_clock::now();
+                stats->paletteSetupUS.fetch_add(
+                    std::chrono::duration_cast<std::chrono::microseconds>(tPal1 - tPal0).count(),
+                    std::memory_order_relaxed);
+            }
 
             // Solid fill fast path: in batch mode, for uniform-color effects
             // (On, ColorWash without fades), only set pixels at node positions
@@ -3740,6 +3850,7 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             }
 
             if (!usedFastPath) {
+                auto tRender0 = std::chrono::steady_clock::now();
                 if (usePerModel) {
                     // Per Model path: render the effect using per-member rendering.
                     rendered = renderPerModelLayer(job, layer, effectInfo, layerInfo,
@@ -3750,6 +3861,15 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                     // effects), but suppressed layers are excluded from blending.
                     rendered = renderNativeEffect(effectInfo, buf);
                 }
+                if (stats) {
+                    auto tRender1 = std::chrono::steady_clock::now();
+                    stats->effectRenderUS.fetch_add(
+                        std::chrono::duration_cast<std::chrono::microseconds>(tRender1 - tRender0).count(),
+                        std::memory_order_relaxed);
+                    stats->fullRenders.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else {
+                if (stats) stats->fastPathHits.fetch_add(1, std::memory_order_relaxed);
             }
 
             // Store in group render cache so other models in the same group
@@ -3798,6 +3918,7 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                     if (_diskCache->beginWriteSession(
                             diskHash, buf.BufferWi, buf.BufferHt, totalEffectFrames)) {
                         _diskWriteSessions.insert(diskHash);
+                        _diskCache->registerModelHash(job.geometry.name, diskHash);
                     }
                 }
 
@@ -3884,7 +4005,14 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
         }
     }
 
+    auto tCalc0 = std::chrono::steady_clock::now();
     job.pixelBuffer->calcOutput(period, validLayers);
+    if (stats) {
+        auto tCalc1 = std::chrono::steady_clock::now();
+        stats->calcOutputUS.fetch_add(
+            std::chrono::duration_cast<std::chrono::microseconds>(tCalc1 - tCalc0).count(),
+            std::memory_order_relaxed);
+    }
 }
 
 // =========================================================================

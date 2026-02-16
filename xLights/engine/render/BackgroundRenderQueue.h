@@ -26,7 +26,9 @@
 //   - Each model writes to its own channel range in NativeSequenceData, so
 //     no locking is needed for the pixel data itself.
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -59,9 +61,18 @@ public:
     // another queue call for this model, rendering begins.
     void queueModel(const std::string& modelName, int debounceMS = 500);
 
+    // Queue multiple models for a single batched background render.
+    // All models are rendered in one renderModels() call (parallel per-frame).
+    // If called again within the debounce window, the new models are merged
+    // into the pending batch and the timer restarts.
+    void queueBatch(const std::vector<std::string>& modelNames, int debounceMS = 500);
+
     // Cancel all pending debounce timers and wait for any in-progress
     // render to finish. After this returns, no background work is active.
     void cancelAll();
+
+    // Check if a batch render is currently in progress.
+    bool isBatchRendering() const;
 
     // Check if a background render has completed for the given model.
     bool isModelReady(const std::string& modelName) const;
@@ -71,6 +82,14 @@ public:
 
     // Remove a model from the completed set (after its data has been consumed).
     void clearCompletedModel(const std::string& modelName);
+
+    // Completion callback type: called on the bg queue after each model completes.
+    using CompletionCallback = std::function<void(const std::string& modelName)>;
+
+    // Set a callback invoked after each model finishes background rendering.
+    // The callback fires on the private serial GCD queue — callers must dispatch
+    // to their own thread if needed.
+    void setCompletionCallback(CompletionCallback cb);
 
 private:
     // Per-model debounce state. Each queueModel() call increments the
@@ -98,6 +117,16 @@ private:
 
     // Set to true in destructor / cancelAll() to reject new work.
     bool _cancelled = false;
+
+    // Optional callback invoked after each model render completes.
+    CompletionCallback _completionCallback;
+
+    // Batch rendering state. queueBatch() adds models here and schedules
+    // a single dispatch_after. When the timer fires, all pending models
+    // are rendered in one renderModels() call.
+    uint64_t _batchGeneration = 0;
+    std::set<std::string> _pendingBatchModels;
+    std::atomic<bool> _batchRendering{false};
 };
 
 } // namespace xlEngine

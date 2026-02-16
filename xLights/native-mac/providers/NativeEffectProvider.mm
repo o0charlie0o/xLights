@@ -1168,27 +1168,94 @@ bool NativeEffectProvider::getEffect(int64_t effectId, EffectInstanceInfo& outIn
     return true;
 }
 
+// Binary search helper: find the first effect that could contain timeMS.
+// Effects are sorted by startTimeMS. We find the rightmost effect whose
+// startTimeMS <= timeMS, then check if timeMS < endTimeMS.
+static const NativeEffect* findEffectAtTimeBinarySearch(
+    const std::vector<std::unique_ptr<NativeEffect>>& effects, int timeMS)
+{
+    if (effects.empty()) return nullptr;
+
+    // Binary search for rightmost effect with startTimeMS <= timeMS
+    int lo = 0, hi = static_cast<int>(effects.size()) - 1;
+    int candidate = -1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (effects[mid]->startTimeMS <= timeMS) {
+            candidate = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    if (candidate >= 0 && effects[candidate]->endTimeMS > timeMS) {
+        return effects[candidate].get();
+    }
+    return nullptr;
+}
+
 bool NativeEffectProvider::getEffectAtTime(
     size_t elementIndex,
     size_t layerIndex,
     int timeMS,
     EffectInstanceInfo& outInfo) const
 {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!_batchReadMode) {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
+    }
 
     NativeElement* elem = getElementPtr(elementIndex);
     if (!elem) return false;
     if (layerIndex >= elem->layers.size()) return false;
 
     const auto& layer = elem->layers[layerIndex];
-    for (const auto& effect : layer->effects) {
-        if (effect->startTimeMS <= timeMS && effect->endTimeMS > timeMS) {
-            outInfo = buildEffectInfo(effect.get(), elementIndex, layerIndex);
-            return true;
-        }
+    const NativeEffect* found = findEffectAtTimeBinarySearch(layer->effects, timeMS);
+    if (found) {
+        outInfo = buildEffectInfo(found, elementIndex, layerIndex);
+        return true;
+    }
+    return false;
+}
+
+bool NativeEffectProvider::hasEffectAtTime(
+    size_t elementIndex,
+    size_t layerIndex,
+    int timeMS) const
+{
+    if (!_batchReadMode) {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
     }
 
-    return false;
+    NativeElement* elem = getElementPtr(elementIndex);
+    if (!elem) return false;
+    if (layerIndex >= elem->layers.size()) return false;
+
+    const auto& layer = elem->layers[layerIndex];
+    return findEffectAtTimeBinarySearch(layer->effects, timeMS) != nullptr;
+}
+
+bool NativeEffectProvider::getLayerEffectTimeRange(
+    size_t elementIndex,
+    size_t layerIndex,
+    int& outMinStartMS,
+    int& outMaxEndMS) const
+{
+    if (!_batchReadMode) {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
+    }
+
+    NativeElement* elem = getElementPtr(elementIndex);
+    if (!elem) return false;
+    if (layerIndex >= elem->layers.size()) return false;
+
+    const auto& layer = elem->layers[layerIndex];
+    if (layer->effects.empty()) return false;
+
+    // Effects are sorted by startTimeMS
+    outMinStartMS = layer->effects.front()->startTimeMS;
+    outMaxEndMS = layer->effects.back()->endTimeMS;
+    return true;
 }
 
 // --- IEffectProvider Implementation: Effect Type Information ---

@@ -249,6 +249,15 @@ public:
     // Returns true if all renders were successfully aborted within timeoutMS.
     bool abortRender(int timeoutMS = 60000);
 
+#ifdef XLIGHTS_NATIVE
+    // Pre-warm the batch render coordinator on a background thread.
+    // Creates the coordinator and runs preparePersistentJobs() so that
+    // the first renderAll() can skip the ~1s job setup phase.
+    // Call after loading a sequence (loadSequence / loadFSEQ).
+    // Safe to call multiple times — no-op if already warmed.
+    void warmUpCoordinator();
+#endif
+
     // --- Buffer access ---
 
     // Get the rendered pixel data for a model.
@@ -305,6 +314,11 @@ public:
     // Mark a model and its parent group (if any) as dirty. If the model IS
     // a group, also dirties all member models.
     void invalidateModelAndGroup(const std::string& modelName);
+
+    // Set a callback invoked (on main queue) after a single dirty model
+    // finishes background re-rendering. Used by Obj-C++ bridge to post
+    // NSNotification for UI refresh.
+    void setBackgroundRenderCallback(std::function<void(const std::string&)> cb);
 
     // Check if any models need re-rendering.
     bool hasDirtyModels() const;
@@ -425,8 +439,12 @@ private:
     IEffectProvider* _effectProvider = nullptr;
     IAudioProvider* _audioProvider = nullptr;
 
-    // Render coordinator for batch rendering (renderAll/renderRange)
+    // Render coordinator for batch rendering (renderAll/renderRange).
+    // Persisted across renders so preparePersistentJobs can reuse ModelJob objects.
     std::unique_ptr<NativeRenderCoordinator> _coordinator;
+    std::unique_ptr<IRenderContext> _warmUpContext; // keeps context alive between warm-up and first render
+    std::unordered_map<std::string, uint32_t> _cachedResolvedChannels; // from warm-up
+    std::unique_ptr<NativeSequenceData> _preAllocatedRenderData; // from warm-up
     std::unique_ptr<NativeSequenceData> _renderedData;
     std::string _fseqPath; // Path of currently loaded FSEQ
 
@@ -560,6 +578,15 @@ private:
     std::unique_ptr<NativeRenderCoordinator> _bgCoordinator;
     std::unique_ptr<IRenderContext> _bgContext;
     void ensureBackgroundRenderQueue();
+    void notifyBackgroundRenderComplete(const std::string& modelName);
+
+    // Live-render dirty models at timeMS using _liveCoordinator and insert
+    // results into _bufferCache. Returns the number of models rendered.
+    int liveRenderDirtyModels(int timeMS);
+
+    // Callback invoked on a bg thread after a single dirty model finishes
+    // background re-rendering. Set from Obj-C++ bridge to post UI notifications.
+    std::function<void(const std::string&)> _bgRenderCompleteCallback;
 #endif
 };
 

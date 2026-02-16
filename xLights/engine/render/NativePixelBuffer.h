@@ -28,12 +28,13 @@
 // Multiple instances can safely run in parallel on different threads.
 
 #include <array>
-#include <memory>
-#include <vector>
-#include <set>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <set>
 #include <string>
+#include <vector>
 #include <utility>
 
 #include "NativeRenderBuffer.h"
@@ -240,6 +241,14 @@ public:
     void setBatchMode(bool batch) { _batchMode = batch; }
     bool isBatchMode() const { return _batchMode; }
 
+    // Clear output pixel buffer to black. Used for early-exit when no effects
+    // are active, so getColors() writes zeros to the output channel buffer.
+    void clearOutputPixels() {
+        if (!_outputPixels.empty()) {
+            std::memset(_outputPixels.data(), 0, _outputPixels.size() * sizeof(xlColor));
+        }
+    }
+
     // Sorted unique pixel indices (bufY * bufferWi + bufX) for node positions.
     const std::vector<int>& getNodePixelIndices() const { return _nodePixelIndices; }
 
@@ -361,6 +370,15 @@ public:
 
     // Returns true if this buffer has a spatial group layout (set via setGroupSpatialLayout).
     bool hasSpatialGroupLayout() const { return _spatialBufW > 0 && _spatialBufH > 0; }
+
+    // Check if a layer's buffer style or sub-buffer is active (was set by prepare*).
+    // Used to skip redundant Clear() calls when prepare already cleared the buffer.
+    bool isLayerBufferStyleActive(int layer) const {
+        return layer >= 0 && layer < static_cast<int>(_layers.size()) && _layers[layer].bufferStyleActive;
+    }
+    bool isLayerSubBufferActive(int layer) const {
+        return layer >= 0 && layer < static_cast<int>(_layers.size()) && _layers[layer].subBufferActive;
+    }
 
 private:
     // Internal structure holding per-layer state

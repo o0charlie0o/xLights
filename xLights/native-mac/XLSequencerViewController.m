@@ -1096,6 +1096,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
                                                  name:XLStemManagerDidChangeNotification
                                                object:nil];
 
+    // Listen for background render completion to refresh preview
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(backgroundRenderDidComplete:)
+                                                 name:@"XLBackgroundRenderCompleteNotification"
+                                               object:nil];
+
     // Check sequence state and show/hide empty state accordingly.
     // This is needed because SwiftUI recreates this VC on tab switches,
     // and the empty state starts hidden by default in loadView.
@@ -1324,6 +1330,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     }
 }
 
+- (void)backgroundRenderDidComplete:(NSNotification *)notification {
+    _renderProgressIndicator.animating = NO;
+    [_playbackController renderCurrentFrame];
+}
+
 - (void)effectTypeDidChange:(NSNotification *)notification {
     [self loadRealSequenceData];
     [_effectsGridView reloadData];
@@ -1380,10 +1391,14 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     if (previewWindow.isVisible) {
         [previewWindow orderOut:nil];
         [[XLSwiftUIWindowHelper shared] setHousePreviewVisible:NO];
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"XLHousePreviewVisible"];
+        NSLog(@"[PERSIST] toggleHousePreview: saved visible=NO");
     } else {
         [previewWindow makeKeyAndOrderFront:nil];
         [_housePreviewController reloadModels];
         [[XLSwiftUIWindowHelper shared] setHousePreviewVisible:YES];
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"XLHousePreviewVisible"];
+        NSLog(@"[PERSIST] toggleHousePreview: saved visible=YES");
     }
 }
 
@@ -7413,12 +7428,14 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (NSString *)zoomLevelKeyForCurrentSequence {
     if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        NSLog(@"[PERSIST] zoomLevelKeyForCurrentSequence: no engine or sequence not loaded");
         return nil;
     }
 
     NSDictionary *seqInfo = [self.engineBridge getSequenceInfo];
     NSString *filePath = seqInfo[@"filePath"];
     if (!filePath || filePath.length == 0) {
+        NSLog(@"[PERSIST] zoomLevelKeyForCurrentSequence: no filePath in seqInfo (keys: %@)", [seqInfo allKeys]);
         return nil;
     }
 
@@ -7426,7 +7443,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Use the file name + a hash of the full path for uniqueness
     NSString *fileName = [filePath lastPathComponent];
     NSUInteger pathHash = [filePath hash];
-    return [NSString stringWithFormat:@"XLSequencerZoom_%@_%lu", fileName, (unsigned long)pathHash];
+    NSString *key = [NSString stringWithFormat:@"XLSequencerZoom_%@_%lu", fileName, (unsigned long)pathHash];
+    NSLog(@"[PERSIST] zoomLevelKeyForCurrentSequence: key=%@", key);
+    return key;
 }
 
 - (void)saveZoomLevelForCurrentSequence {
@@ -7435,24 +7454,70 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     CGFloat zoomLevel = _scrollCoordinator.zoomLevel;
     [[NSUserDefaults standardUserDefaults] setDouble:zoomLevel forKey:key];
+    NSLog(@"[PERSIST] saveZoomLevel: %.4f for key=%@", zoomLevel, key);
 }
 
 - (void)loadZoomLevelForCurrentSequence {
     NSString *key = [self zoomLevelKeyForCurrentSequence];
     if (!key) {
-        // No sequence loaded, zoom to fit as default
+        NSLog(@"[PERSIST] loadZoomLevel: no key, defaulting to zoom-to-fit");
         [self zoomToFit:nil];
         return;
     }
 
     CGFloat savedZoom = [[NSUserDefaults standardUserDefaults] doubleForKey:key];
+    NSLog(@"[PERSIST] loadZoomLevel: savedZoom=%.4f for key=%@", savedZoom, key);
     if (savedZoom > 0) {
-        // Apply the saved zoom level
         [_scrollCoordinator setZoomLevel:savedZoom];
         _transportBar.zoomLevel = savedZoom;
     } else {
-        // No saved zoom for this sequence - default to zoom-to-fit
+        NSLog(@"[PERSIST] loadZoomLevel: no saved value, defaulting to zoom-to-fit");
         [self zoomToFit:nil];
+    }
+}
+
+#pragma mark - Scroll Offset Persistence
+
+- (NSString *)scrollOffsetKeyForCurrentSequence {
+    if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
+        NSLog(@"[PERSIST] scrollOffsetKey: no engine or sequence not loaded");
+        return nil;
+    }
+
+    NSDictionary *seqInfo = [self.engineBridge getSequenceInfo];
+    NSString *filePath = seqInfo[@"filePath"];
+    if (!filePath || filePath.length == 0) {
+        NSLog(@"[PERSIST] scrollOffsetKey: no filePath in seqInfo");
+        return nil;
+    }
+
+    NSString *fileName = [filePath lastPathComponent];
+    NSUInteger pathHash = [filePath hash];
+    NSString *key = [NSString stringWithFormat:@"XLSequencerScrollX_%@_%lu", fileName, (unsigned long)pathHash];
+    NSLog(@"[PERSIST] scrollOffsetKey: key=%@", key);
+    return key;
+}
+
+- (void)saveScrollOffsetForCurrentSequence {
+    NSString *key = [self scrollOffsetKeyForCurrentSequence];
+    if (!key) return;
+
+    CGFloat scrollOffset = _scrollCoordinator.horizontalScrollOffset;
+    [[NSUserDefaults standardUserDefaults] setDouble:scrollOffset forKey:key];
+    NSLog(@"[PERSIST] saveScrollOffset: %.1f for key=%@", scrollOffset, key);
+}
+
+- (void)loadScrollOffsetForCurrentSequence {
+    NSString *key = [self scrollOffsetKeyForCurrentSequence];
+    if (!key) {
+        NSLog(@"[PERSIST] loadScrollOffset: no key, skipping");
+        return;
+    }
+
+    CGFloat savedOffset = [[NSUserDefaults standardUserDefaults] doubleForKey:key];
+    NSLog(@"[PERSIST] loadScrollOffset: savedOffset=%.1f for key=%@", savedOffset, key);
+    if (savedOffset > 0) {
+        [_scrollCoordinator setHorizontalScrollOffset:savedOffset];
     }
 }
 
@@ -7601,6 +7666,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     CGFloat viewWidth = NSWidth(_effectsGridView.bounds);
     CGFloat maxScroll = _sequenceDurationMS * coordinator.zoomLevel - viewWidth;
     coordinator.maxHorizontalScrollOffset = fmax(0, maxScroll);
+
+    [self saveScrollOffsetForCurrentSequence];
 }
 
 - (void)scrollCoordinator:(XLScrollCoordinator *)coordinator didChangeVerticalScrollOffset:(CGFloat)offsetY {

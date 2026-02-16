@@ -15,6 +15,10 @@
 // Stores rendered channel data as a flat contiguous array (numFrames * numChannels bytes)
 // laid out as: frame 0 channels [0..N-1], frame 1 channels [0..N-1], etc.
 //
+// Uses calloc for allocation — on macOS this leverages mmap with lazy zero-fill
+// pages, making even 1 GB+ allocations near-instant (pages are zero-filled by
+// the kernel on first access rather than upfront).
+//
 // Thread safety: Multiple threads may write to different channel ranges within
 // the same frame simultaneously (non-overlapping channel ranges are independent).
 // Frame-level operations (zeroFrame) should not overlap with channel writes to
@@ -22,7 +26,6 @@
 
 #include <cstdint>
 #include <string>
-#include <vector>
 
 class NativeSequenceData {
 public:
@@ -73,10 +76,10 @@ public:
     uint32_t getFrameTimeMS() const { return _frameTimeMS; }
 
     // Total size of the data buffer in bytes.
-    size_t getTotalBytes() const { return static_cast<size_t>(_numFrames) * _numChannels; }
+    size_t getTotalBytes() const { return _totalBytes; }
 
     // Check if the buffer has been allocated and has valid dimensions.
-    bool isValid() const { return !_data.empty() && _numChannels > 0 && _numFrames > 0; }
+    bool isValid() const { return _data != nullptr && _numChannels > 0 && _numFrames > 0; }
 
     // --- FSEQ export ---
 
@@ -88,8 +91,9 @@ public:
     bool exportToFSEQ(const std::string& outputPath, int compressionLevel = 2);
 
 private:
-    std::vector<uint8_t> _data;  // Flat array: numFrames * numChannels
-    uint32_t _numChannels;
-    uint32_t _numFrames;
-    uint32_t _frameTimeMS;
+    uint8_t* _data = nullptr;       // calloc-allocated flat array: numFrames * numChannels
+    size_t _totalBytes = 0;
+    uint32_t _numChannels = 0;
+    uint32_t _numFrames = 0;
+    uint32_t _frameTimeMS = 0;
 };

@@ -56,6 +56,26 @@ class DiskRenderCache;
 class IEffectProvider;
 class IModelProvider;
 
+// Atomic counters for fine-grained render performance profiling.
+// Passed to renderModelAtTime() during instrumented renders.
+struct RenderPerfStats {
+    std::atomic<int64_t> earlyExitCount{0};
+    std::atomic<int64_t> effectLookupUS{0};
+    std::atomic<int64_t> parseSettingsUS{0};
+    std::atomic<int64_t> effectRenderUS{0};
+    std::atomic<int64_t> calcOutputUS{0};
+    std::atomic<int64_t> getColorsUS{0};
+    std::atomic<int64_t> bufferPrepUS{0};
+    std::atomic<int64_t> cacheCheckUS{0};
+    std::atomic<int64_t> paletteSetupUS{0};
+    std::atomic<int64_t> layerIterations{0};
+    std::atomic<int64_t> effectHits{0};
+    std::atomic<int64_t> effectMisses{0};
+    std::atomic<int64_t> cacheHits{0};
+    std::atomic<int64_t> fullRenders{0};
+    std::atomic<int64_t> fastPathHits{0};
+};
+
 // In-memory LRU cache for rendered effect layer output.
 // Avoids redundant re-rendering when the same effect with the same
 // parameters is queried at the same time (e.g., scrubbing back to a
@@ -249,6 +269,26 @@ public:
 
     void setListener(RenderCoordinatorListener* listener);
 
+    // Update the render context (timing/audio). Call before renderAll() when
+    // reusing a coordinator across renders — the context pointer may have changed.
+    void setContext(IRenderContext* context) { _context = context; }
+
+    // Prepare for a new batch render while preserving persistent jobs.
+    // Clears per-render state (caches, disk write sessions, group render cache)
+    // but keeps _persistentJobs and _skippedModels so preparePersistentJobs()
+    // can reuse existing ModelJob objects instead of rebuilding them (~1s savings).
+    void prepareForNewBatchRender();
+
+    // Returns true if persistent jobs are populated (i.e., the coordinator
+    // has been through at least one preparePersistentJobs cycle).
+    bool hasPersistentJobs() const;
+
+    // Pre-populate persistent jobs without rendering any frames.
+    // Runs the same preparePersistentJobs() that renderAllFrames() uses,
+    // creating ModelJob objects (geometry, pixel buffers, group mapping) for
+    // all models with effects. Call from a background thread after sequence load.
+    void warmUp();
+
     // Set pre-resolved start channels for all models (0-based absolute channels).
     // Must be called before renderAll()/renderRange() for correct channel mapping.
     // Without this, extractGeometry() falls back to atoi() which only handles plain numbers.
@@ -346,6 +386,13 @@ private:
         std::string parentModelName;   // parent model name for channel overlay
         int strandIndex = -1;          // strand index (-1 = submodel, not strand)
 
+        // Pre-computed effect time range across ALL layers for this job.
+        // Used for early-exit: if timeMS is outside [effectMinStartMS, effectMaxEndMS),
+        // no layer has an effect at this time and the entire render can be skipped.
+        int effectMinStartMS = 0;
+        int effectMaxEndMS = 0;
+        bool hasEffectTimeRange = false; // false = no effects anywhere
+
         // Per Model buffer style: cached member model geometries for group layers.
         // When a group layer has "Per Model" or "Per Model Deep" buffer style,
         // the effect renders separately into each member's own buffer, then
@@ -411,7 +458,8 @@ private:
 
     void renderModelAtTime(ModelJob& job, int timeMS,
                            NativeSequenceData* output = nullptr,
-                           int frameIndex = -1);
+                           int frameIndex = -1,
+                           RenderPerfStats* stats = nullptr);
     bool renderNativeEffect(const EffectInstanceInfo& effectInfo, NativeRenderBuffer& buf);
     void writeModelOutput(const ModelJob& job, int frameIndex,
                           NativeSequenceData& output);

@@ -171,6 +171,35 @@ public:
         int timeMS,
         EffectInstanceInfo& outInfo) const = 0;
 
+    // Lightweight check: does any effect exist on this layer at this time?
+    // Unlike getEffectAtTime, does NOT copy settings/palette maps.
+    // Default implementation delegates to getEffectAtTime for backward compat.
+    virtual bool hasEffectAtTime(
+        size_t elementIndex,
+        size_t layerIndex,
+        int timeMS) const {
+        EffectInstanceInfo dummy;
+        return getEffectAtTime(elementIndex, layerIndex, timeMS, dummy);
+    }
+
+    // Get the time range of effects on a layer (min startTimeMS, max endTimeMS).
+    // Returns false if no effects exist on the layer.
+    // Used by the render coordinator to skip frames outside effect ranges.
+    virtual bool getLayerEffectTimeRange(
+        size_t elementIndex,
+        size_t layerIndex,
+        int& outMinStartMS,
+        int& outMaxEndMS) const = 0;
+
+    // =========================================================================
+    // Batch Rendering Optimization
+    // =========================================================================
+
+    // Enable/disable batch read mode. When enabled, read-only queries can
+    // skip mutex acquisition since no writes occur during batch rendering.
+    // Default implementation is a no-op.
+    virtual void setBatchReadMode(bool /*enabled*/) {}
+
     // =========================================================================
     // Effect Type Information
     // =========================================================================

@@ -155,16 +155,10 @@ NSNotificationName const XLEffectSelectionDidChangeNotification = @"XLEffectSele
     didChangeParameter:(NSString *)key
                  value:(NSString *)value
 {
-    if (_selectedEffectId == 0 || !_engineBridge) {
-        return;
-    }
-
-    // Update the effect parameter in the engine
-    BOOL success = [_engineBridge setEffectParameter:_selectedEffectId key:key value:value];
-    if (!success) {
-        NSLog(@"XLEffectPropertiesViewController: Failed to set parameter %@ = %@ for effect %ld",
-              key, value, (long)_selectedEffectId);
-    }
+    // The XLEffectPanelView already writes the parameter to the engine bridge
+    // in notifyParameterChange: before calling this delegate method.
+    // Do NOT call setEffectParameter again here — that would cause a duplicate
+    // write and 2x invalidation in the RenderEngine.
 }
 
 - (void)effectPanel:(NSString *)effectName

@@ -217,6 +217,11 @@ public:
     // Re-initialize with new dimensions. Clears all pixel data.
     void InitBuffer(int newBufferHt, int newBufferWi, const std::string& bufferTransform);
 
+    // Resize buffers to new dimensions without clearing. Only reallocates
+    // if the new size exceeds current capacity. Used by buffer style
+    // prepare/expand to avoid redundant clears in the hot render loop.
+    void Resize(int newBufferHt, int newBufferWi);
+
     // =========================================================================
     // Pixel access — 0,0 is lower left
     // =========================================================================

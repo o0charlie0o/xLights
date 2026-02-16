@@ -95,6 +95,12 @@ public:
         int timeMS,
         EffectInstanceInfo& outInfo) const override;
 
+    bool getLayerEffectTimeRange(
+        size_t elementIndex,
+        size_t layerIndex,
+        int& outMinStartMS,
+        int& outMaxEndMS) const override;
+
     // --- IEffectProvider Implementation: Effect Type Information ---
 
     std::vector<std::string> getEffectTypes() const override;

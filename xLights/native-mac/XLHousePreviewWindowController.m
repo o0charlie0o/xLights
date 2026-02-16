@@ -80,10 +80,13 @@ static NSToolbarItemIdentifier const kToolbarViewpointItem = @"XLHousePreviewVie
 
         // Restore saved window frame
         NSString *frameString = [[NSUserDefaults standardUserDefaults] stringForKey:kWindowFrameKey];
+        NSLog(@"[PERSIST] HousePreview init: saved frame string=%@", frameString ?: @"(none)");
         if (frameString) {
             NSRect frame = NSRectFromString(frameString);
             if (frame.size.width > 0 && frame.size.height > 0) {
                 [panel setFrame:frame display:NO];
+                NSLog(@"[PERSIST] HousePreview init: restored frame=%.0fx%.0f at (%.0f,%.0f)",
+                      frame.size.width, frame.size.height, frame.origin.x, frame.origin.y);
             }
         }
 
@@ -279,7 +282,16 @@ static NSToolbarItemIdentifier const kToolbarViewpointItem = @"XLHousePreviewVie
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
+    NSString *frameString = NSStringFromRect(self.window.frame);
+    [[NSUserDefaults standardUserDefaults] setObject:frameString forKey:kWindowFrameKey];
+    NSLog(@"[PERSIST] windowDidResize: saved frame=%@", frameString);
     [_previewView setNeedsRender];
+}
+
+- (void)windowDidMove:(NSNotification *)notification {
+    NSString *frameString = NSStringFromRect(self.window.frame);
+    [[NSUserDefaults standardUserDefaults] setObject:frameString forKey:kWindowFrameKey];
+    NSLog(@"[PERSIST] windowDidMove: saved frame=%@", frameString);
 }
 
 #pragma mark - XLMetalPreviewDelegate
