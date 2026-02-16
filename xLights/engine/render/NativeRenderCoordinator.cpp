@@ -4094,6 +4094,92 @@ bool NativeRenderCoordinator::renderNativeEffect(
 
         xlColor color;
 
+        if (useGPU) {
+            // Build palette as float4 array (r, g, b, a)
+            // Use the full palette including highlight color at index 0
+            std::vector<float> gpuPalette;
+            size_t fullPalSize = buf.GetColorCount();
+            if (fullPalSize < 1) fullPalSize = 1;
+            for (size_t i = 0; i < fullPalSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                gpuPalette.push_back(c.red / 255.0f);
+                gpuPalette.push_back(c.green / 255.0f);
+                gpuPalette.push_back(c.blue / 255.0f);
+                gpuPalette.push_back(1.0f);
+            }
+
+            // Compute bar dimensions and offset on CPU (matches CPU path below)
+            int gpuBarDim = 1;
+            int gpuBlockDim = 1;
+            int gpuNewCenter = 0;
+            int gpuFOffset = 0;
+
+            if (direction < 4 || direction == 8 || direction == 9) {
+                // Vertical
+                gpuBarDim = (int)std::ceil((float)buf.BufferHt / (float)barCount);
+                if (gpuBarDim < 1) gpuBarDim = 1;
+                gpuNewCenter = buf.BufferHt * (100 + center) / 200;
+                gpuBlockDim = colorcnt * gpuBarDim;
+                if (gpuBlockDim < 1) gpuBlockDim = 1;
+                gpuFOffset = position * gpuBlockDim;
+                if (direction == 8 || direction == 9) {
+                    gpuFOffset = floor(position * barCount) * gpuBarDim;
+                }
+            } else if (direction == 12 || direction == 13) {
+                // Custom Horz / Custom Vert
+                int width_dim = (direction == 13) ? buf.BufferHt : buf.BufferWi;
+                gpuBarDim = (int)std::ceil((float)width_dim / (float)barCount);
+                if (gpuBarDim < 1) gpuBarDim = 1;
+                gpuNewCenter = (width_dim * (100.0 + center) / 200.0 - width_dim / 2);
+                gpuBlockDim = colorcnt * gpuBarDim;
+                if (gpuBlockDim < 1) gpuBlockDim = 1;
+                gpuFOffset = 0;  // Custom directions don't use f_offset
+            } else {
+                // Horizontal
+                gpuBarDim = (int)std::ceil((float)buf.BufferWi / (float)barCount);
+                if (gpuBarDim < 1) gpuBarDim = 1;
+                gpuNewCenter = buf.BufferWi * (100 + center) / 200;
+                gpuBlockDim = colorcnt * gpuBarDim;
+                if (gpuBlockDim < 1) gpuBlockDim = 1;
+                gpuFOffset = position * gpuBlockDim;
+                if (direction > 9) {
+                    gpuFOffset = floor(position * barCount) * gpuBarDim;
+                }
+            }
+
+            GPUBarsParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.direction = static_cast<uint32_t>(direction);
+            params.barCount = static_cast<uint32_t>(barCount);
+            params.colorcnt = static_cast<uint32_t>(colorcnt);
+            params.highlight = highlight ? 1 : 0;
+            params.useFirstColorForHighlight = useFirstColorForHighlight ? 1 : 0;
+            params.show3D = show3D ? 1 : 0;
+            params.gradient = gradient ? 1 : 0;
+            params.paletteSize = static_cast<uint32_t>(fullPalSize);
+            params.position = static_cast<float>(position);
+            params.center = static_cast<float>(center);
+            params.barDim = static_cast<uint32_t>(gpuBarDim);
+            params.blockDim = static_cast<uint32_t>(gpuBlockDim);
+            params.fOffset = static_cast<int32_t>(gpuFOffset);
+            params.newCenter = static_cast<int32_t>(gpuNewCenter);
+
+            if (gpu.renderBars(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                               params, gpuPalette)) {
+                static bool sBarsGPULogged = false;
+                if (!sBarsGPULogged) {
+                    sBarsGPULogged = true;
+                    printf("[GPU_EFFECT] Bars: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
         if (direction < 4 || direction == 8 || direction == 9) {
             // Vertical directions: up, down, expand, compress, alternate up/down
             int barHt = (int)std::ceil((float)buf.BufferHt / (float)barCount);
@@ -4382,6 +4468,47 @@ bool NativeRenderCoordinator::renderNativeEffect(
             int state = buf.curPeriod - buf.curEffStartPer;
             double speedPlasma = (style == 10) ? (101 - speed) * 3.0 : (101 - speed) * 5.0;
             plasmaTime = (state + 1.0) / speedPlasma;
+        }
+
+        if (useGPU) {
+            // Build palette as float4 array (r, g, b, a)
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUButterflyParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.style = static_cast<uint32_t>(style);
+            params.chunks = static_cast<uint32_t>(chunks);
+            params.skip = static_cast<uint32_t>(skip);
+            params.colorScheme = static_cast<uint32_t>(colorScheme);
+            params.offset = static_cast<float>(offset);
+            params.curState = static_cast<int32_t>(curState);
+            params.plasmaTime = static_cast<float>(plasmaTime);
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.circularPalette = 0;
+
+            if (gpu.renderButterfly(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                    params, palette)) {
+                static bool sBfGPULogged = false;
+                if (!sBfGPULogged) {
+                    sBfGPULogged = true;
+                    printf("[GPU_EFFECT] Butterfly: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
         }
 
         // HSV hue-only to RGB (s=1, v=1) — port of ISPC h2rgb
@@ -5167,6 +5294,48 @@ bool NativeRenderCoordinator::renderNativeEffect(
             ylimit = buf.BufferHt - ylimit - 1;
         }
 
+        // --- GPU path ---
+        if (useGPU) {
+            // Build palette as float4 array
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            // Convert SwagArray to int32_t vector for GPU
+            std::vector<int32_t> gpuSwag(SwagArray.begin(), SwagArray.end());
+
+            GPUCurtainParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.edge = static_cast<uint32_t>(edge);
+            params.xlimit = static_cast<int32_t>(xlimit);
+            params.ylimit = static_cast<int32_t>(ylimit);
+            params.swagLen = static_cast<uint32_t>(gpuSwag.size());
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.circularPalette = 1; // CPU code uses true for circular
+
+            if (gpu.renderCurtain(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                  params, palette, gpuSwag)) {
+                static bool sCurtainGPULogged = false;
+                if (!sCurtainGPULogged) {
+                    sCurtainGPULogged = true;
+                    printf("[GPU_EFFECT] Curtain: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
         // --- Lambda: DrawCurtain (horizontal) ---
         auto DrawCurtain = [&](bool LeftEdge, int lim) {
             for (int i = 0; i < lim; i++) {
@@ -5813,6 +5982,56 @@ bool NativeRenderCoordinator::renderNativeEffect(
         }
 
         int max_radius = std::max(start_radius, end_radius);
+
+        // --- GPU path for Fan ---
+        if (useGPU) {
+            // Build palette as float4 array
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize == 0) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUFanParams gpuParams;
+            gpuParams.width = static_cast<uint32_t>(buf.BufferWi);
+            gpuParams.height = static_cast<uint32_t>(buf.BufferHt);
+            gpuParams.totalPixels = static_cast<uint32_t>(totalPixels);
+            gpuParams.centerX = static_cast<float>(xc_adj + (buf.BufferWi / 2));
+            gpuParams.centerY = static_cast<float>(yc_adj + (buf.BufferHt / 2));
+            gpuParams.radius1 = static_cast<float>(radius1);
+            gpuParams.radius2 = static_cast<float>(radius2);
+            gpuParams.maxRadius = static_cast<float>(max_radius);
+            gpuParams.bladeDivAngle = static_cast<float>(blade_div_angle);
+            gpuParams.bladeWidthAngle = static_cast<float>(blade_width_angle);
+            gpuParams.colorAngle = static_cast<float>(color_angle);
+            gpuParams.angleOffset = static_cast<float>(angle_offset);
+            gpuParams.elementAngle = static_cast<float>(element_angle);
+            gpuParams.elementSize = static_cast<float>(element_size);
+            gpuParams.bladeAngle = static_cast<float>(blade_angle);
+            gpuParams.startAngle = static_cast<float>(start_angle);
+            gpuParams.reverseDir = reverse_dir ? 1 : 0;
+            gpuParams.blendEdges = blend_edges ? 1 : 0;
+            gpuParams.allowAlpha = buf.allowAlpha ? 1 : 0;
+            gpuParams.numColors = static_cast<uint32_t>(num_colors);
+
+            if (gpu.renderFan(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                              gpuParams, palette)) {
+                static bool sFanGPULogged = false;
+                if (!sFanGPULogged) {
+                    sFanGPULogged = true;
+                    printf("[GPU_EFFECT] Fan: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
 
         for (int x = 0; x < buf.BufferWi; x++) {
             int x1 = x - xc_adj - (buf.BufferWi / 2);
@@ -6882,6 +7101,47 @@ bool NativeRenderCoordinator::renderNativeEffect(
         double total = buffMax * PixelSpacing - buffMax + 1;
         double positionOffset = total * position;
 
+        // --- GPU path ---
+        if (useGPU) {
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUGarlandsParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.garlandType = static_cast<uint32_t>(GarlandType);
+            params.spacing = static_cast<uint32_t>(Spacing);
+            params.dir = static_cast<uint32_t>(dir);
+            params.buffMax = static_cast<uint32_t>(buffMax);
+            params.garlandWid = static_cast<uint32_t>(garlandWid);
+            params.pixelSpacing = static_cast<float>(PixelSpacing);
+            params.positionOffset = static_cast<float>(positionOffset);
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.circularPalette = 0;
+
+            if (gpu.renderGarlands(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                   params, palette)) {
+                static bool sGarlandsGPULogged = false;
+                if (!sGarlandsGPULogged) {
+                    sGarlandsGPULogged = true;
+                    printf("[GPU_EFFECT] Garlands: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
         for (int ring = 0; ring < buffMax; ring++) {
             double ratio = static_cast<double>(buffMax - ring - 1) / static_cast<double>(buffMax);
             xlColor color;
@@ -7711,6 +7971,54 @@ bool NativeRenderCoordinator::renderNativeEffect(
         if (!pixelOffsets) {
             xoffset_adj = static_cast<int>((xoffset_adj * buf.BufferWi) / 100.0);
             yoffset_adj = static_cast<int>((yoffset_adj * buf.BufferHt) / 100.0);
+        }
+
+        // --- GPU path for Marquee ---
+        if (useGPU) {
+            // Build palette as float4 array
+            std::vector<float> palette;
+            for (size_t i = 0; i < colorcnt; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUMarqueeParams gparams;
+            gparams.width = static_cast<uint32_t>(buf.BufferWi);
+            gparams.height = static_cast<uint32_t>(buf.BufferHt);
+            gparams.totalPixels = static_cast<uint32_t>(totalPixels);
+            gparams.bandSize = BandSize;
+            gparams.skipSize = SkipSize;
+            gparams.thickness = Thickness;
+            gparams.stagger = stagger;
+            gparams.speed = mSpeed;
+            gparams.startOffset = mStart;
+            gparams.corner_x1 = 0;
+            gparams.corner_y1 = 0;
+            gparams.corner_x2 = static_cast<int>(std::round(((double)(buf.BufferWi * x_scale) / 100.0) - 1.0));
+            gparams.corner_y2 = static_cast<int>(std::round(((double)(buf.BufferHt * y_scale) / 100.0) - 1.0));
+            gparams.xoffset_adj = xoffset_adj;
+            gparams.yoffset_adj = yoffset_adj;
+            gparams.sign = sign;
+            gparams.effPos = static_cast<int>((mSpeed * (buf.curPeriod - buf.curEffStartPer)) / 5);
+            gparams.paletteSize = static_cast<uint32_t>(colorcnt);
+            gparams.wrapX = wrap_x ? 1 : 0;
+            gparams.wrapY = wrap_y ? 1 : 0;
+
+            if (gpu.renderMarquee(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                  gparams, palette)) {
+                static bool sMarqueeGPULogged = false;
+                if (!sMarqueeGPULogged) {
+                    sMarqueeGPULogged = true;
+                    printf("[GPU_EFFECT] Marquee: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
         }
 
         // UpdateMarqueeColor: advance position and color band through the
@@ -8917,6 +9225,74 @@ bool NativeRenderCoordinator::renderNativeEffect(
         else if (pinwheel_3d_str == "3D Inverted") pw3dType = 2;
         else if (pinwheel_3d_str == "Sweep") pw3dType = 3;
 
+        // --- GPU path: Pinwheel "New Render Method" only ---
+        if (useGPU && pinwheel_style == "New Render Method") {
+            constexpr int PINWHEEL_SPEED_MAX_GPU = 50;
+
+            if (pinwheel_arms < 1) pinwheel_arms = 1;
+            int degrees_per_arm_gpu = 360 / pinwheel_arms;
+            float armsize_gpu = pinwheel_armsize / 100.0f;
+
+            float pos_gpu = static_cast<float>(
+                (buf.curPeriod - buf.curEffStartPer) * pspeed * buf.frameTimeInMs)
+                / static_cast<float>(PINWHEEL_SPEED_MAX_GPU);
+
+            int xc_half = static_cast<int>(std::ceil(std::hypot(
+                static_cast<float>(buf.BufferWi), static_cast<float>(buf.BufferHt)) / 2.0f));
+            int xc_adj_px = (xc_adj * buf.BufferWi) / 200;
+            int yc_adj_px = (yc_adj * buf.BufferHt) / 200;
+            int max_radius_gpu = static_cast<int>(xc_half * armsize_gpu);
+
+            int thickness_clamped = pinwheel_thickness;
+            if (thickness_clamped == 0) thickness_clamped = 1;
+            float tmax_gpu = (thickness_clamped / 100.0f) * degrees_per_arm_gpu;
+
+            // Build palette as float4 array (r, g, b, a)
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUPinwheelParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.pos = pos_gpu;
+            params.tmax = tmax_gpu;
+            params.halfW = static_cast<float>(buf.BufferWi) / 2.0f;
+            params.halfH = static_cast<float>(buf.BufferHt) / 2.0f;
+            params.xc_adj_px = static_cast<float>(xc_adj_px);
+            params.yc_adj_px = static_cast<float>(yc_adj_px);
+            params.max_radius = static_cast<float>(max_radius_gpu);
+            params.pinwheel_twist = static_cast<float>(pinwheel_twist);
+            params.poffset = static_cast<float>(poffset);
+            params.pinwheel_arms = static_cast<uint32_t>(pinwheel_arms);
+            params.degrees_per_arm = static_cast<uint32_t>(degrees_per_arm_gpu);
+            params.pinwheel_rotation = pinwheel_rotation ? 1 : 0;
+            params.pw3dType = static_cast<uint32_t>(pw3dType);
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.allowAlpha = buf.allowAlpha ? 1 : 0;
+
+            if (gpu.renderPinwheel(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                   params, palette)) {
+                static bool sPWGPULogged = false;
+                if (!sPWGPULogged) {
+                    sPWGPULogged = true;
+                    printf("[GPU_EFFECT] Pinwheel: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
         if (pinwheel_arms < 1) pinwheel_arms = 1;
         int degrees_per_arm = 360 / pinwheel_arms;
         float armsize = pinwheel_armsize / 100.0f;
@@ -9145,6 +9521,48 @@ bool NativeRenderCoordinator::renderNativeEffect(
         double Speed_plasma = (101 - PlasmaSpeed) * 3; // large divisor
         double time = (state + 1.0) / Speed_plasma;
 
+        if (useGPU) {
+            // Build palette as float4 array (r, g, b, a)
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUPlasmaParams params;
+            params.width = static_cast<uint32_t>(width);
+            params.height = static_cast<uint32_t>(height);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.style = static_cast<uint32_t>(Style);
+            params.lineDensity = static_cast<uint32_t>(Line_Density);
+            params.colorScheme = static_cast<uint32_t>(ColorScheme);
+            params.time = static_cast<float>(time);
+            params.sinTime5 = static_cast<float>(std::sin(time / 5.0));
+            params.cosTime3 = static_cast<float>(std::cos(time / 3.0));
+            params.sinTime2 = static_cast<float>(std::sin(time / 2.0));
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.circularPalette = 0; // Plasma uses non-circular blend
+
+            if (gpu.renderPlasma(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                 params, palette)) {
+                static bool sPlasmaGPULogged = false;
+                if (!sPlasmaGPULogged) {
+                    sPlasmaGPULogged = true;
+                    printf("[GPU_EFFECT] Plasma: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
+        // CPU path
         double sin_time_5 = std::sin(time / 5.0);
         double cos_time_3 = std::cos(time / 3.0);
         double sin_time_2 = std::sin(time / 2.0);
@@ -9362,6 +9780,47 @@ bool NativeRenderCoordinator::renderNativeEffect(
 
         HSVValue hsv;
         buf.palette.GetHSV(ColorIdx, hsv);
+
+        // --- GPU path for Circle and Square shapes ---
+        if (useGPU && (objectType == OBJ_CIRCLE || objectType == OBJ_SQUARE)) {
+            GPURippleParams gpuParams;
+            gpuParams.width = static_cast<uint32_t>(buf.BufferWi);
+            gpuParams.height = static_cast<uint32_t>(buf.BufferHt);
+            gpuParams.totalPixels = static_cast<uint32_t>(totalPixels);
+            gpuParams.objectType = static_cast<uint32_t>(objectType); // 0=Circle, 1=Square
+            gpuParams.movement = static_cast<uint32_t>(movement);
+            gpuParams.thickness = static_cast<uint32_t>(thickness);
+            gpuParams.is3D = is3D ? 1 : 0;
+            gpuParams.allowAlpha = buf.allowAlpha ? 1 : 0;
+            gpuParams.radius = static_cast<float>(radius);
+            gpuParams.radiusX = static_cast<float>(radiusX);
+            gpuParams.radiusY = static_cast<float>(radiusY);
+            gpuParams.maxRadius = static_cast<float>(maxRadius);
+            gpuParams.xc = static_cast<int32_t>(xc);
+            gpuParams.yc = static_cast<int32_t>(yc);
+
+            // Pass HSV values for the selected palette color
+            gpuParams.baseH = static_cast<float>(hsv.hue);
+            gpuParams.baseS = static_cast<float>(hsv.saturation);
+            gpuParams.baseV = static_cast<float>(hsv.value);
+
+            // Also pass RGB for potential direct use
+            xlColor baseColor(hsv);
+            gpuParams.baseR = baseColor.red;
+            gpuParams.baseG = baseColor.green;
+            gpuParams.baseB = baseColor.blue;
+
+            if (gpu.renderRipple(buf.GetPixels(), buf.BufferWi, buf.BufferHt, gpuParams)) {
+                static bool sRippleGPULogged = false;
+                if (!sRippleGPULogged) {
+                    sRippleGPULogged = true;
+                    printf("[GPU_EFFECT] Ripple (%s): GPU rendering %dx%d (%d pixels)\n",
+                           objectStr.c_str(), buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on GPU failure
+        }
 
         // ---- Shape drawing (Old-style) ----
 
@@ -9969,6 +10428,52 @@ bool NativeRenderCoordinator::renderNativeEffect(
         if (ColorIdx >= colorcnt) ColorIdx = colorcnt - 1;
         if (ColorIdx < 0) ColorIdx = 0;
 
+        // Check if any palette colors have active spatial color curves.
+        // GPU path does not support spatial gradients — fall through to CPU.
+        bool hasSpatialCurves = false;
+        for (int ci = 0; ci < colorcnt; ++ci) {
+            if (buf.palette.IsSpatial(ci)) {
+                hasSpatialCurves = true;
+                break;
+            }
+        }
+
+        if (useGPU && !hasSpatialCurves) {
+            // Build palette as float4 array (r, g, b, a)
+            std::vector<float> palette;
+            size_t palSize = static_cast<size_t>(colorcnt);
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUShimmerParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.colorIdx = static_cast<uint32_t>(ColorIdx);
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.useAllColors = useAllColors ? 1 : 0;
+            params.frameSeed = static_cast<uint32_t>(buf.curPeriod);
+
+            if (gpu.renderShimmer(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                  params, palette)) {
+                static bool sShimmerGPULogged = false;
+                if (!sShimmerGPULogged) {
+                    sShimmerGPULogged = true;
+                    printf("[GPU_EFFECT] Shimmer: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
+        // CPU path
         xlColor color;
         buf.palette.GetColor(static_cast<size_t>(ColorIdx), color);
 
@@ -10081,6 +10586,49 @@ bool NativeRenderCoordinator::renderNativeEffect(
         radius2 = radius_center + half_width;
         if (radius1 < 0.0) radius1 = 0.0;
 
+        // --- GPU path ---
+        if (useGPU) {
+            // Build palette as float4 array (r, g, b, a)
+            std::vector<float> palette;
+            size_t palSize = buf.palette.Size();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUShockwaveParams gpuParams;
+            gpuParams.width = static_cast<uint32_t>(buf.BufferWi);
+            gpuParams.height = static_cast<uint32_t>(buf.BufferHt);
+            gpuParams.totalPixels = static_cast<uint32_t>(totalPixels);
+            gpuParams.centerX = static_cast<float>(xc_adj);
+            gpuParams.centerY = static_cast<float>(yc_adj);
+            gpuParams.radius1 = static_cast<float>(radius1);
+            gpuParams.radius2 = static_cast<float>(radius2);
+            gpuParams.radiusCenter = static_cast<float>(radius_center);
+            gpuParams.halfWidth = static_cast<float>(half_width);
+            gpuParams.blendEdges = blend_edges ? 1 : 0;
+            gpuParams.allowAlpha = buf.allowAlpha ? 1 : 0;
+            gpuParams.paletteSize = static_cast<uint32_t>(num_colors);
+            gpuParams.effPosAdj = static_cast<float>(eff_pos_adj);
+
+            if (gpu.renderShockwave(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                    gpuParams, palette)) {
+                static bool sSWGPULogged = false;
+                if (!sSWGPULogged) {
+                    sSWGPULogged = true;
+                    printf("[GPU_EFFECT] Shockwave: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
         // Render the shockwave ring
         for (int x = 0; x < buf.BufferWi; x++) {
             int x1 = x - xc_adj;
@@ -10151,6 +10699,66 @@ bool NativeRenderCoordinator::renderNativeEffect(
                 return (it->second == "1" || it->second == "true");
             return def;
         };
+
+        // --- GPU path for SingleStrand ---
+        if (useGPU) {
+            // Build palette
+            std::vector<float> gpuPalette;
+            size_t palSize = buf.GetColorCount();
+            for (size_t ci = 0; ci < palSize; ++ci) {
+                xlColor c;
+                buf.palette.GetColor(ci, c);
+                gpuPalette.push_back(c.red / 255.0f);
+                gpuPalette.push_back(c.green / 255.0f);
+                gpuPalette.push_back(c.blue / 255.0f);
+                gpuPalette.push_back(1.0f);
+            }
+
+            GPUSingleStrandParams gpuParams;
+            std::memset(&gpuParams, 0, sizeof(gpuParams));
+            gpuParams.width = static_cast<uint32_t>(buf.BufferWi);
+            gpuParams.height = static_cast<uint32_t>(buf.BufferHt);
+            gpuParams.totalPixels = static_cast<uint32_t>(buf.BufferWi * buf.BufferHt);
+            gpuParams.paletteSize = static_cast<uint32_t>(palSize);
+            gpuParams.bufferWi = static_cast<uint32_t>(buf.BufferWi);
+            gpuParams.bufferHt = static_cast<uint32_t>(buf.BufferHt);
+
+            bool gpuHandled = false;
+
+            if (subType == "Skips") {
+                int bandSize  = getIntSetting("E_SLIDER_Skips_BandSize", 1);
+                int skipSize  = getIntSetting("E_SLIDER_Skips_SkipSize", 1);
+                int startPos  = getIntSetting("E_SLIDER_Skips_StartPos", 1);
+                int advances  = getIntSetting("E_SLIDER_Skips_Advance", 0);
+                std::string dirStr = getStrSetting("E_CHOICE_Skips_Direction", "Left");
+                int direction = 0;
+                if (dirStr == "Left")        direction = 1;
+                else if (dirStr == "From Middle") direction = 2;
+                else if (dirStr == "To Middle")   direction = 3;
+                double position = buf.GetEffectTimeIntervalPosition();
+
+                gpuParams.subType = 0;
+                gpuParams.bandSize = bandSize;
+                gpuParams.skipSize = skipSize;
+                gpuParams.startPos = startPos;
+                gpuParams.direction = direction;
+                gpuParams.skipsPosition = static_cast<float>(position);
+
+                gpuHandled = gpu.renderSingleStrand(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                                     gpuParams, gpuPalette);
+            }
+
+            if (gpuHandled) {
+                static bool sSingleStrandGPULogged = false;
+                if (!sSingleStrandGPULogged) {
+                    sSingleStrandGPULogged = true;
+                    printf("[GPU_EFFECT] SingleStrand (%s): GPU rendering %dx%d (%d pixels)\n",
+                           subType.c_str(), buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU path on failure or unsupported configuration
+        }
 
         if (subType == "Skips") {
             // =================================================================
@@ -12301,6 +12909,50 @@ bool NativeRenderCoordinator::renderNativeEffect(
 
         SpiralThickness += ThicknessState;
 
+        // --- GPU path ---
+        if (useGPU) {
+            std::vector<float> palette;
+            size_t palSize = colorcnt;
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUSpiralsParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.spiralCount = static_cast<uint32_t>(SpiralCount);
+            params.colorcnt = static_cast<uint32_t>(colorcnt);
+            params.deltaStrands = static_cast<float>(deltaStrands);
+            params.spiralThickness = static_cast<float>(SpiralThickness);
+            params.spiralState = static_cast<float>(SpiralState / 10.0);
+            params.rotation = static_cast<float>(Rotation);
+            params.blend = Blend ? 1 : 0;
+            params.show3D = Show3D ? 1 : 0;
+            params.allowAlpha = buf.allowAlpha ? 1 : 0;
+            params.rotationRaw = static_cast<float>(Rotation);
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.circularPalette = 0;
+
+            if (gpu.renderSpirals(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                  params, palette)) {
+                static bool sSpiralsGPULogged = false;
+                if (!sSpiralsGPULogged) {
+                    sSpiralsGPULogged = true;
+                    printf("[GPU_EFFECT] Spirals: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
         for (int ns = 0; ns < SpiralCount; ns++) {
             int strand_base = static_cast<int>(ns * deltaStrands);
             int ColorIdx = ns % static_cast<int>(colorcnt);
@@ -12420,6 +13072,74 @@ bool NativeRenderCoordinator::renderNativeEffect(
         float stepw = 1.0f / (std::log10((float)width) + 1.0f);
         if (step == 0.0f) step = 1.0f;
         if (stepw == 0.0f) stepw = 1.0f;
+
+        if (useGPU) {
+            // Build palette as float4 array
+            std::vector<float> palette;
+            for (size_t i = 0; i < colorcnt; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+            if (palette.empty()) {
+                palette = {1.0f, 1.0f, 1.0f, 1.0f};
+            }
+
+            // Compute width samples count: how many w values from -width/2 to width/2 stepping by stepw
+            float halfW = width / 2.0f;
+            float stepwGPU = 1.0f / (std::log10((float)width) + 1.0f);
+            if (stepwGPU <= 0.0f) stepwGPU = 1.0f;
+            uint32_t numWidthSamples = 0;
+            for (float w = -halfW; w <= halfW; w += stepwGPU) {
+                numWidthSamples++;
+            }
+            if (numWidthSamples == 0) numWidthSamples = 1;
+
+            // Compute curve samples count
+            float stepGPU = 1.0f / width;
+            if (stepGPU <= 0.0f) stepGPU = 1.0f;
+            float lengthScaled = length; // already multiplied by 18 above
+            uint32_t numCurveSamples = 0;
+            for (float ci = 1.0f; ci <= lengthScaled; ci += stepGPU) {
+                numCurveSamples++;
+            }
+            if (numCurveSamples == 0) numCurveSamples = 1;
+
+            GPUSpirographParams gparams;
+            gparams.width = static_cast<uint32_t>(buf.BufferWi);
+            gparams.height = static_cast<uint32_t>(buf.BufferHt);
+            gparams.totalPixels = static_cast<uint32_t>(totalPixels);
+            gparams.xc = xc;
+            gparams.yc = yc;
+            gparams.R = R;
+            gparams.r = r;
+            gparams.d = d;
+            gparams.mod1440 = mod1440;
+            gparams.lengthScaled = lengthScaled;
+            gparams.stepCurve = stepGPU;
+            gparams.stepWidth = stepwGPU;
+            gparams.halfWidth = halfW;
+            gparams.paletteSize = static_cast<uint32_t>(colorcnt);
+            gparams.d_mod = d_mod;
+            gparams.numCurveSamples = numCurveSamples;
+            gparams.numWidthSamples = numWidthSamples;
+
+            if (gpu.renderSpirograph(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                      gparams, palette)) {
+                static bool sSpiroGPULogged = false;
+                if (!sSpiroGPULogged) {
+                    sSpiroGPULogged = true;
+                    printf("[GPU_EFFECT] Spirograph: GPU rendering %dx%d (%d pixels, %u curve samples, %u width samples)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels,
+                           numCurveSamples, numWidthSamples);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
 
         for (float i = 1.0f; i <= length; i += step) {
             float t = (i + mod1440) * (float)M_PI / 180.0f;
@@ -12603,6 +13323,87 @@ bool NativeRenderCoordinator::renderNativeEffect(
             strobes.push_back(e);
         }
 
+        // --- GPU path for Strobe ---
+        if (useGPU) {
+            // Build draw commands from the strobe cache
+            std::vector<GPUStrobeDrawCmd> drawCmds;
+            drawCmds.reserve(strobes.size());
+
+            auto sit = strobes.begin();
+            while (sit != strobes.end()) {
+                GPUStrobeDrawCmd cmd;
+                cmd.x = sit->x;
+                cmd.y = sit->y;
+
+                // Center color: full brightness original color
+                cmd.centerR = sit->color.red;
+                cmd.centerG = sit->color.green;
+                cmd.centerB = sit->color.blue;
+                cmd.centerA = 255;
+
+                // Surround color: dimmed based on remaining duration
+                double v = 1.0;
+                if (sit->duration == 1) v = 0.5;
+                else if (sit->duration == 2) v = 0.75;
+
+                if (buf.allowAlpha) {
+                    cmd.surroundR = sit->color.red;
+                    cmd.surroundG = sit->color.green;
+                    cmd.surroundB = sit->color.blue;
+                    cmd.surroundA = static_cast<uint8_t>(255.0 * v);
+                } else {
+                    HSVValue hsv = sit->hsv;
+                    hsv.value *= v;
+                    xlColor dimmed(hsv);
+                    cmd.surroundR = dimmed.red;
+                    cmd.surroundG = dimmed.green;
+                    cmd.surroundB = dimmed.blue;
+                    cmd.surroundA = 255;
+                }
+
+                cmd.drawCenter = (sit->duration > 0) ? 1 : 0;
+
+                // Pre-resolve random orientation for types 2 and 4
+                cmd.orientation = (Strobe_Type == 2 || Strobe_Type == 4)
+                                  ? static_cast<uint32_t>(std::rand() % 2) : 0;
+
+                drawCmds.push_back(cmd);
+
+                // Decrement duration; remove expired strobes
+                sit->duration--;
+                if (sit->duration <= 0) {
+                    sit = strobes.erase(sit);
+                } else {
+                    ++sit;
+                }
+            }
+
+            GPUStrobeParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.strobeType = static_cast<uint32_t>(Strobe_Type);
+            params.numDrawCommands = static_cast<uint32_t>(drawCmds.size());
+            params.allowAlpha = buf.allowAlpha ? 1 : 0;
+
+            if (gpu.renderStrobe(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                 params, drawCmds)) {
+                static bool sStrobeGPULogged = false;
+                if (!sStrobeGPULogged) {
+                    sStrobeGPULogged = true;
+                    printf("[GPU_EFFECT] Strobe: GPU rendering %dx%d (%d pixels, %zu cmds)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels, drawCmds.size());
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+            // NOTE: strobe durations were already decremented above, so we
+            // cannot re-run the CPU loop. If GPU fails, the frame is lost.
+            // This is acceptable since GPU failure is rare and non-fatal.
+            return true;
+        }
+
+        // CPU path (existing code follows unchanged)
         // Render active strobes
         auto sit = strobes.begin();
         while (sit != strobes.end()) {
@@ -12810,6 +13611,51 @@ bool NativeRenderCoordinator::renderNativeEffect(
         if (Steps < 2) Steps = 2;
         if (Steps > 200) Steps = 200;
 
+        // --- GPU path: stateless deterministic twinkle ---
+        if (useGPU) {
+            // Build palette as float4 array
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            // Use effectId as a stable seed for deterministic per-pixel hashing
+            uint32_t seed = static_cast<uint32_t>(effectInfo.effectId & 0xFFFFFFFF);
+            uint32_t frameNumber = static_cast<uint32_t>(buf.curPeriod - buf.curEffStartPer);
+
+            GPUTwinkleParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.count = static_cast<uint32_t>(Count);
+            params.steps = static_cast<uint32_t>(Steps);
+            params.strobe = Strobe ? 1 : 0;
+            params.frameNumber = frameNumber;
+            params.seed = seed;
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.allowAlpha = buf.allowAlpha ? 1 : 0;
+
+            if (gpu.renderTwinkle(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                                  params, palette)) {
+                static bool sTwinkleGPULogged = false;
+                if (!sTwinkleGPULogged) {
+                    sTwinkleGPULogged = true;
+                    printf("[GPU_EFFECT] Twinkle: GPU rendering %dx%d (%d pixels)\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
+        }
+
+        // --- CPU path (existing code continues below) ---
         int strobeCount = buf.BufferHt * buf.BufferWi;
         if (strobeCount < 1) strobeCount = 1;
 
@@ -13147,6 +13993,54 @@ bool NativeRenderCoordinator::renderNativeEffect(
                 }
                 buf.needToInit = false;
             }
+        }
+
+        // GPU path: accelerate wave types 0-3 (skip IvyFractal which needs state)
+        if (useGPU && waveType != WAVETYPE_IVYFRACTAL) {
+            std::vector<float> palette;
+            size_t palSize = buf.GetColorCount();
+            if (palSize < 1) palSize = 1;
+            for (size_t i = 0; i < palSize; ++i) {
+                xlColor c;
+                buf.palette.GetColor(i, c);
+                palette.push_back(c.red / 255.0f);
+                palette.push_back(c.green / 255.0f);
+                palette.push_back(c.blue / 255.0f);
+                palette.push_back(1.0f);
+            }
+
+            GPUWaveParams params;
+            params.width = static_cast<uint32_t>(buf.BufferWi);
+            params.height = static_cast<uint32_t>(buf.BufferHt);
+            params.totalPixels = static_cast<uint32_t>(totalPixels);
+            params.waveType = static_cast<uint32_t>(waveType);
+            params.fillColor = static_cast<uint32_t>(fillColor);
+            params.mirrorWave = mirrorWave ? 1 : 0;
+            params.numberWaves = static_cast<uint32_t>(numberWaves);
+            params.thicknessWave = static_cast<uint32_t>(thicknessWave);
+            params.waveHeight = static_cast<uint32_t>(waveHeight);
+            params.waveDirection = waveDirection ? 1 : 0;
+            params.state = state;
+            params.yc = static_cast<float>(yc);
+            params.r = static_cast<float>(r);
+            params.roundedWaveYOffset = roundedWaveYOffset;
+            params.paletteSize = static_cast<uint32_t>(palSize);
+            params.circularPalette = 0; // Wave doesn't use circular palette
+            params.hsv0_h = static_cast<float>(hsv0.hue);
+            params.hsv0_s = static_cast<float>(hsv0.saturation);
+            params.hsv0_v = static_cast<float>(hsv0.value);
+
+            if (gpu.renderWave(buf.GetPixels(), buf.BufferWi, buf.BufferHt,
+                               params, palette)) {
+                static bool sWaveGPULogged = false;
+                if (!sWaveGPULogged) {
+                    sWaveGPULogged = true;
+                    printf("[GPU_EFFECT] Wave: GPU rendering %dx%d (%d pixels), type=%d\n",
+                           buf.BufferWi, buf.BufferHt, totalPixels, waveType);
+                }
+                return true;
+            }
+            // Fall through to CPU on failure
         }
 
         double degree_per_x = static_cast<double>(numberWaves) / buf.BufferWi;
