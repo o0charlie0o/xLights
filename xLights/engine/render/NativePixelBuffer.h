@@ -359,6 +359,9 @@ public:
                                 const std::vector<std::pair<int,int>>& spatialPositions,
                                 size_t groupLayerCount);
 
+    // Returns true if this buffer has a spatial group layout (set via setGroupSpatialLayout).
+    bool hasSpatialGroupLayout() const { return _spatialBufW > 0 && _spatialBufH > 0; }
+
 private:
     // Internal structure holding per-layer state
     struct LayerState {

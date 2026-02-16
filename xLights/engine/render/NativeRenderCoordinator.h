@@ -508,6 +508,19 @@ private:
     // for the same effect.
     std::unordered_set<uint64_t> _diskWriteSessions;
 
+    // Group render cache: avoids rendering the same group effect N times
+    // (once per member model). The effect renders once into the full spatial
+    // buffer, and subsequent models in the same group reuse the cached pixels.
+    // Key: "groupElemIdx_layerIdx", cleared each frame (when timeMS changes).
+    struct GroupLayerCacheEntry {
+        int timeMS = -1;
+        int bufW = 0;
+        int bufH = 0;
+        std::vector<xlColor> pixels;
+    };
+    std::unordered_map<std::string, GroupLayerCacheEntry> _groupRenderCache;
+    mutable std::mutex _groupRenderCacheMutex;
+
 public:
     // Set the disk cache instance (owned by RenderEngine). Pass nullptr to disable.
     void setDiskCache(DiskRenderCache* cache) { _diskCache = cache; }

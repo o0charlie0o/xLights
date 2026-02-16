@@ -1999,6 +1999,7 @@ void NativeRenderCoordinator::resetPersistentState() {
     _geometryCache.clear();
     _modelToGroupIdx.clear();
     _groupMapBuilt = false;
+    _groupRenderCache.clear();
     {
         std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
         _renderCache.clear();
@@ -3649,6 +3650,28 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             }
         }
 
+        // Check group render cache: for spatial group layers, the effect
+        // renders identically across all member models (same spatial buffer,
+        // same effect). Cache the first model's render and reuse for others,
+        // matching legacy behavior where the group renders once and
+        // distributes to members. This turns N renders into 1 render.
+        bool isGroupSpatialLayer = isGroupLayer &&
+                                    job.pixelBuffer->hasSpatialGroupLayout();
+        if (!cacheHit && isGroupSpatialLayer && cacheable) {
+            std::string gcKey = std::to_string(job.groupElementIndex) + "_" +
+                                std::to_string(layer);
+            std::lock_guard<std::mutex> gLock(_groupRenderCacheMutex);
+            auto git = _groupRenderCache.find(gcKey);
+            if (git != _groupRenderCache.end() &&
+                git->second.timeMS == timeMS &&
+                git->second.bufW == buf.BufferWi &&
+                git->second.bufH == buf.BufferHt) {
+                std::memcpy(buf.GetPixels(), git->second.pixels.data(),
+                            git->second.pixels.size() * sizeof(xlColor));
+                cacheHit = true;
+            }
+        }
+
         bool rendered;
         if (cacheHit) {
             rendered = true;
@@ -3659,8 +3682,6 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
             // native pipeline, group effects already cascade to per-model jobs, so
             // this is the natural behavior. The renderPerModelLayer() path handles
             // populating member info and ensures correct sub-style buffer reshaping.
-            bool isGroupLayer = (job.groupElementIndex != SIZE_MAX &&
-                                 layer < job.groupLayerCount);
             bool usePerModel = isGroupLayer && isPerModelStyle(layerInfo.bufferStyle);
 
             // Set palette colors from the effect's palette map.
@@ -3729,6 +3750,22 @@ void NativeRenderCoordinator::renderModelAtTime(ModelJob& job, int timeMS,
                     // effects), but suppressed layers are excluded from blending.
                     rendered = renderNativeEffect(effectInfo, buf);
                 }
+            }
+
+            // Store in group render cache so other models in the same group
+            // can reuse this spatial render instead of re-rendering the effect.
+            if (isGroupSpatialLayer && rendered && !usedFastPath && cacheable) {
+                std::string gcKey = std::to_string(job.groupElementIndex) + "_" +
+                                    std::to_string(layer);
+                std::lock_guard<std::mutex> gLock(_groupRenderCacheMutex);
+                auto& entry = _groupRenderCache[gcKey];
+                entry.timeMS = timeMS;
+                entry.bufW = buf.BufferWi;
+                entry.bufH = buf.BufferHt;
+                size_t pixelCount = static_cast<size_t>(buf.BufferWi) * buf.BufferHt;
+                entry.pixels.resize(pixelCount);
+                std::memcpy(entry.pixels.data(), buf.GetPixels(),
+                            pixelCount * sizeof(xlColor));
             }
 
             // Store successfully rendered cacheable layer in the LRU cache.
