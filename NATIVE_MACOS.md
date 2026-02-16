@@ -1110,3 +1110,67 @@ For the LIVE rendering path, calling `renderFrame()` from the sidebar is accepta
 | `xLights/engine/RenderEngine.h` | `shared_ptr<FSEQFile> _fseqFile`, `_fseqMutex`, `_sidebarCache` |
 | `xLights/native-mac/XLMainContentView.swift` | Sidebar preview timer loop that calls `renderModelFrame` |
 | `xLights/native-mac/XLPlaybackController.m` | Playback render loop that reads `_bufferCache` |
+
+---
+
+## Group Buffer Style / Render Style
+
+Groups in xLights can have effects with buffer styles like "Per Preview", "Horizontal Per Model", "Vertical Stack", etc. These control how the group's combined node layout maps to the effect's render buffer. In the legacy engine, the group renders the effect **once** into a combined buffer and distributes the result to member models via channel data. The native engine uses a per-model architecture instead.
+
+### How It Works (Native Engine)
+
+The native engine doesn't have group-level render jobs. Instead, each member model renders group effects independently via cascaded group layers (`groupElementIndex` / `groupLayerCount` on `ModelJob`). To support spatial buffer styles, we:
+
+1. **Compute combined group geometry** at job creation time (`extractGroupGeometry(groupName, bufferStyle)`)
+2. **Store per-node spatial positions** on each model's `NativePixelBuffer` via `setGroupSpatialLayout()`
+3. **Reshape group layers** to the combined spatial dimensions during `prepareBufferStyle()`
+4. **Extract model pixels** from the spatial buffer during `expandBufferStyle()` using the stored positions
+5. **Cache the group render** so the effect renders once and subsequent models reuse the cached pixels
+
+### Buffer Style Resolution
+
+The effective buffer style for a group comes from two sources:
+
+- **Explicit**: The first effect on layer 0's `B_CHOICE_BufferStyle` setting
+- **Default**: The group's XML `layout` attribute, resolved by `resolveGroupDefaultStyle()`:
+  - `"grid"` / `"minimalGrid"` → `"Per Preview"` (2D spatial from world coordinates)
+  - `"vertical"` → `"Vertical Per Model"`
+  - `"horizontal"` → `"Horizontal Per Model"`
+
+### Supported Buffer Styles
+
+| Style | Layout |
+|-------|--------|
+| Per Preview | 2D spatial from world coordinates (gridSize from XML, default 400) |
+| Horizontal Per Model | Each model = 1 column, nodes stacked vertically |
+| Vertical Per Model | Each model = 1 row, nodes horizontally |
+| Horizontal Stack | Models side by side, preserving each model's buffer shape |
+| Vertical Stack | Models stacked top to bottom |
+| Horizontal/Vertical Stack - Scaled | Same as stack but scaled to uniform dimensions |
+| Overlay - Centered / Scaled | All models overlaid on the same buffer |
+| Single Line Model As A Pixel | Each model collapses to 1 pixel |
+| Single Line | Sequential 1D strip (fallback) |
+
+### Group Render Cache
+
+Since all models in a group render the identical effect into the same spatial buffer, the **first model's render is cached** and reused by subsequent models. This matches legacy performance (1 render per group per frame, not N).
+
+- Cache key: `groupElementIndex` + `layerIndex`
+- Cache validation: `timeMS` + buffer dimensions
+- Thread-safe: protected by `_groupRenderCacheMutex` (models render in parallel via `dispatch_apply`)
+- Only cacheable (non-stateful) effects are cached; Fire, Life, etc. render per-model
+
+### Spatial Position Mapping
+
+Each model node's `actChannel` is matched against the combined group geometry's nodes to find its spatial `(bufX, bufY)` position. During `expandBufferStyle()`, the model reads its pixels from those positions in the rendered spatial buffer and writes them back to the model's local buffer coordinates.
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `engine/render/NativeRenderCoordinator.cpp` | `extractGroupGeometry()`, `resolveGroupDefaultStyle()`, `getGroupEffectiveBufferStyle()`, group render cache check/store in `renderModelAtTime()`, spatial setup in `preparePersistentJobs()` |
+| `engine/render/NativeRenderCoordinator.h` | `GroupLayerCacheEntry`, `_groupRenderCache`, `_groupRenderCacheMutex` |
+| `engine/render/NativePixelBuffer.cpp` | `setGroupSpatialLayout()`, spatial paths in `prepareBufferStyle()` / `expandBufferStyle()` |
+| `engine/render/NativePixelBuffer.h` | `_spatialBufW/H`, `_spatialNodePositions`, `_spatialGroupLayerCount`, `hasSpatialGroupLayout()` |
+| `models/ModelGroup.cpp` | Legacy reference: `InitRenderBufferNodes()` (all buffer style layouts), group layout attribute resolution |
+| `engine/ModelEngine.cpp` | Legacy reference: `getGroupBufferNodes()` (Per Preview spatial layout from world coordinates) |
