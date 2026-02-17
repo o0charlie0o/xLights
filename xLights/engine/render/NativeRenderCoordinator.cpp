@@ -1837,9 +1837,11 @@ bool NativeRenderCoordinator::renderAllFrames(
         }
     }
 
-    // Enable batch read mode on the effect provider: skips mutex acquisition
-    // on read-only queries since no writes occur during batch rendering.
-    _effectProvider->setBatchReadMode(true);
+    // NOTE: Do NOT enable batch read mode here. The background render queue
+    // runs concurrently with the main thread, which may call updateEffectSetting()
+    // while we're reading. The provider's mutex must remain active to prevent
+    // concurrent read/write on std::map (heap corruption).
+    // _effectProvider->setBatchReadMode(true);
 
     // Cumulative timing accumulators (in microseconds)
     double totalRenderUS = 0, totalSubmodelUS = 0, totalWriteUS = 0, totalProgressUS = 0;
@@ -2100,8 +2102,8 @@ bool NativeRenderCoordinator::renderAllFrames(
         _diskCache->enforceMaxSize(MAX_CACHE_BYTES);
     }
 
-    // Disable batch read mode on the effect provider
-    _effectProvider->setBatchReadMode(false);
+    // Batch read mode is no longer used (kept mutex-protected for thread safety).
+    // _effectProvider->setBatchReadMode(false);
 
     bool wasCancelled = _abort.load();
     _rendering.store(false);

@@ -1201,9 +1201,9 @@ bool NativeEffectProvider::getEffectAtTime(
     int timeMS,
     EffectInstanceInfo& outInfo) const
 {
-    if (!_batchReadMode) {
-        std::lock_guard<std::recursive_mutex> lock(_mutex);
-    }
+    // Always take the mutex — batch read mode is unsafe when the main thread
+    // may concurrently call updateEffectSetting/updateEffectPalette.
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     NativeElement* elem = getElementPtr(elementIndex);
     if (!elem) return false;
@@ -1223,9 +1223,7 @@ bool NativeEffectProvider::hasEffectAtTime(
     size_t layerIndex,
     int timeMS) const
 {
-    if (!_batchReadMode) {
-        std::lock_guard<std::recursive_mutex> lock(_mutex);
-    }
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     NativeElement* elem = getElementPtr(elementIndex);
     if (!elem) return false;
@@ -1241,9 +1239,7 @@ bool NativeEffectProvider::getLayerEffectTimeRange(
     int& outMinStartMS,
     int& outMaxEndMS) const
 {
-    if (!_batchReadMode) {
-        std::lock_guard<std::recursive_mutex> lock(_mutex);
-    }
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
 
     NativeElement* elem = getElementPtr(elementIndex);
     if (!elem) return false;
