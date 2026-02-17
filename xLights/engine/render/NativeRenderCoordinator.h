@@ -391,7 +391,11 @@ private:
         // Submodel mask: when a physical model matches a group through
         // submodel refs (e.g. group has "SingingTree/Outline" not "SingingTree"),
         // only these (bufX, bufY) positions should be kept non-black.
+        // Only applied when the model has NO own effects — if the model has its
+        // own effects (e.g. "On"), they should light all pixels regardless of
+        // how a group references this model.
         bool hasSubmodelMask = false;
+        bool hasOwnEffects = false;  // true = model has effects on its own element
         std::set<std::pair<int,int>> submodelMaskPositions;
 
         // Submodel/strand overlay: when this job renders a submodel or strand

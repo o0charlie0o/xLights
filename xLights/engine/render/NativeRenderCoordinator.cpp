@@ -949,6 +949,7 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
         job.layerCount = totalLayerCount;
         job.groupElementIndex = groupIdx;
         job.groupLayerCount = groupLayerCount;
+        job.hasOwnEffects = hasOwnEffects;
         job.pixelBuffer = std::make_unique<NativePixelBuffer>(
             _context, w, h, static_cast<int>(totalLayerCount), geom.nodes);
         job.pixelBuffer->setDimmingCurve(
@@ -1125,43 +1126,55 @@ RenderedFrame NativeRenderCoordinator::renderModelFrameStateful(
                     if (result.pixels[px] || result.pixels[px+1] || result.pixels[px+2])
                         nonBlack++;
                 }
-                printf("[SUBDBG] stateful '%s': %dx%d, %d non-black pixels BEFORE mask, hasMask=%d maskSize=%zu\n",
+                printf("[SUBDBG] stateful '%s': %dx%d, %d non-black pixels BEFORE mask, hasMask=%d hasOwn=%d maskSize=%zu\n",
                        modelName.c_str(), w, h, nonBlack,
-                       job.hasSubmodelMask, job.submodelMaskPositions.size());
+                       job.hasSubmodelMask, job.hasOwnEffects,
+                       job.submodelMaskPositions.size());
             }
         }
 
         // Apply submodel mask: zero out pixels that don't belong to any
         // matched submodel ref. This ensures the house preview only lights
         // the submodel's nodes, not the entire parent model.
+        // Skip mask when the model has its own effects — the model's own
+        // "On" or other effect should light ALL pixels, not just the subset
+        // that the group references via submodel.
         if (job.hasSubmodelMask && !job.submodelMaskPositions.empty()) {
-            int kept = 0, zeroed = 0;
-            for (int y = 0; y < h; y++) {
-                for (int x = 0; x < w; x++) {
-                    if (job.submodelMaskPositions.find({x, y}) ==
-                        job.submodelMaskPositions.end()) {
-                        size_t pIdx = (static_cast<size_t>(y) * w + x) * 4;
-                        if (pIdx + 3 < result.pixels.size()) {
-                            result.pixels[pIdx] = 0;
-                            result.pixels[pIdx + 1] = 0;
-                            result.pixels[pIdx + 2] = 0;
-                            result.pixels[pIdx + 3] = 0;
-                            zeroed++;
+            if (job.hasOwnEffects) {
+                static std::set<std::string> sSkipDbg;
+                if (sSkipDbg.insert(modelName).second) {
+                    printf("[SUBDBG] stateful '%s': SKIPPING submodel mask (model has own effects)\n",
+                           modelName.c_str());
+                }
+            } else {
+                int kept = 0, zeroed = 0;
+                for (int y = 0; y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        if (job.submodelMaskPositions.find({x, y}) ==
+                            job.submodelMaskPositions.end()) {
+                            size_t pIdx = (static_cast<size_t>(y) * w + x) * 4;
+                            if (pIdx + 3 < result.pixels.size()) {
+                                result.pixels[pIdx] = 0;
+                                result.pixels[pIdx + 1] = 0;
+                                result.pixels[pIdx + 2] = 0;
+                                result.pixels[pIdx + 3] = 0;
+                                zeroed++;
+                            }
+                        } else {
+                            kept++;
                         }
-                    } else {
-                        kept++;
                     }
                 }
-            }
-            static std::set<std::string> sMaskDbg;
-            if (sMaskDbg.insert(modelName).second) {
-                int nonBlackAfter = 0;
-                for (size_t px = 0; px < result.pixels.size(); px += 4) {
-                    if (result.pixels[px] || result.pixels[px+1] || result.pixels[px+2])
-                        nonBlackAfter++;
+                static std::set<std::string> sMaskDbg;
+                if (sMaskDbg.insert(modelName).second) {
+                    int nonBlackAfter = 0;
+                    for (size_t px = 0; px < result.pixels.size(); px += 4) {
+                        if (result.pixels[px] || result.pixels[px+1] || result.pixels[px+2])
+                            nonBlackAfter++;
+                    }
+                    printf("[SUBDBG] stateful '%s': AFTER mask: kept=%d zeroed=%d nonBlackAfter=%d\n",
+                           modelName.c_str(), kept, zeroed, nonBlackAfter);
                 }
-                printf("[SUBDBG] stateful '%s': AFTER mask: kept=%d zeroed=%d nonBlackAfter=%d\n",
-                       modelName.c_str(), kept, zeroed, nonBlackAfter);
             }
         }
     } else {
@@ -1278,6 +1291,7 @@ void NativeRenderCoordinator::preparePersistentJobs(
             job.layerCount = totalLayerCount;
             job.groupElementIndex = groupIdx;
             job.groupLayerCount = groupLayerCount;
+            job.hasOwnEffects = hasOwnEffects;
             {
                 auto tBuf0 = std::chrono::steady_clock::now();
                 job.pixelBuffer = std::make_unique<NativePixelBuffer>(
@@ -1581,8 +1595,8 @@ std::vector<RenderedFrame> NativeRenderCoordinator::renderAllModelsStateful(
             results[pm.index].pixels.resize(dataSize);
             std::memcpy(results[pm.index].pixels.data(), pixelData, dataSize);
 
-            // Apply submodel mask
-            if (job.hasSubmodelMask && !job.submodelMaskPositions.empty()) {
+            // Apply submodel mask (skip when model has own effects)
+            if (job.hasSubmodelMask && !job.hasOwnEffects && !job.submodelMaskPositions.empty()) {
                 auto& px = results[pm.index].pixels;
                 for (int y = 0; y < h; y++) {
                     for (int x = 0; x < w; x++) {
@@ -2395,6 +2409,7 @@ float NativeRenderCoordinator::getProgress() const {
         ModelJob job;
         job.elementIndex = effectElementIdx;
         job.layerCount = totalLayerCount;
+        job.hasOwnEffects = hasOwnEffects;
 
         if (parentHasGroupJob && hasOwnEffects) {
             // Blend layer mode: no group effect cascading (group job handles that).
