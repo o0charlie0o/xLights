@@ -1228,6 +1228,49 @@ static XLEngineBridge *_sharedBridge = nil;
         });
 }
 
+- (void)renderSidebarBatch:(NSArray<NSString *> *)modelNames
+                    timeMS:(NSInteger)timeMS
+                 groupName:(NSString * _Nullable)groupName {
+    if (!modelNames || modelNames.count == 0) return;
+
+    [self ensureEngineInitialized];
+    if (!_renderEngine) {
+        NSLog(@"XLEngineBridge: Cannot render sidebar batch - engine not available");
+        return;
+    }
+
+    std::vector<std::string> names;
+    names.reserve(modelNames.count);
+    for (NSString *name in modelNames) {
+        names.push_back([name UTF8String]);
+    }
+    std::string grp = groupName ? [groupName UTF8String] : "";
+    _renderEngine->renderSidebarBatch(names, (int)timeMS, grp);
+}
+
+- (void)ensureSidebarData:(NSString *)modelName {
+    [self ensureEngineInitialized];
+    if (!_renderEngine || !modelName) return;
+    _renderEngine->ensureSidebarData([modelName UTF8String]);
+}
+
+- (void)enumerateSidebarFrameBuffersWithBlock:(void (^)(NSString *modelName,
+                                                         const uint8_t *pixels,
+                                                         NSUInteger pixelBytes,
+                                                         NSUInteger width,
+                                                         NSUInteger height))block {
+    [self ensureEngineInitialized];
+    if (!_renderEngine || !block) return;
+
+    _renderEngine->visitSidebarFrameBuffers(
+        [block](const std::string& name, const uint8_t* pixels,
+                size_t pixelBytes, int w, int h) {
+            NSString *modelName = [NSString stringWithUTF8String:name.c_str()];
+            block(modelName, pixels, (NSUInteger)pixelBytes,
+                  (NSUInteger)w, (NSUInteger)h);
+        });
+}
+
 - (NSDictionary *)getPrerenderedFrameBuffer:(NSString *)modelName timeMS:(NSInteger)timeMS {
     // TODO: Implement when RenderEngine supports getPrerenderedFrameBuffer
     // This requires Phase 7 engine modernization to expose pre-rendered frame data

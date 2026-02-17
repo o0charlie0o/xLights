@@ -267,6 +267,7 @@ public:
     // =========================================================================
 
     void Clear();
+    void ClearEffectCache();
     void Fill(const xlColor& color);
     void AlphaBlend(const NativeRenderBuffer& src);
 

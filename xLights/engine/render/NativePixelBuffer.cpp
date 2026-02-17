@@ -1210,6 +1210,14 @@ void NativePixelBuffer::clearLayer(int layer) {
     _layers[layer].buffer.Clear();
 }
 
+void NativePixelBuffer::resetEffectState() {
+    for (auto& ls : _layers) {
+        ls.buffer.Clear();
+        ls.buffer.ClearEffectCache();
+    }
+    std::fill(_outputPixels.begin(), _outputPixels.end(), xlBLACK);
+}
+
 // =========================================================================
 // Sub-buffer support
 // =========================================================================

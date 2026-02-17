@@ -1224,6 +1224,9 @@ struct XLSidebarModelPreview: NSViewRepresentable {
             effectEndMS = endMS
             loopPositionMS = startMS
 
+            // Prime bg render infrastructure so param changes are reflected immediately
+            bridge.ensureSidebarData(modelName)
+
             if modelChanged {
                 resolvedModelNames = resolveModelNames(modelName, bridge: bridge)
                 preview.visibleModelFilter = resolvedModelNames
@@ -1284,12 +1287,14 @@ struct XLSidebarModelPreview: NSViewRepresentable {
 
             renderInProgress = true
             renderQueue.async { [weak self] in
-                var buffers: [(String, [String: Any])] = []
-                for name in models {
-                    bridge.renderModelFrame(name, timeMS: Int(timeMS))
-                    if let fb = bridge.getFrameBuffer(name) as? [String: Any] {
-                        buffers.append((name, fb))
-                    }
+                // Single batch call — all models rendered in parallel
+                bridge.renderSidebarBatch(models, timeMS: Int(timeMS), groupName: self?.currentModelName)
+
+                // Zero-copy collection of results
+                var buffers: [(String, Data, UInt, UInt)] = []
+                bridge.enumerateSidebarFrameBuffers { name, pixels, pixelBytes, width, height in
+                    guard let name, let pixels else { return }
+                    buffers.append((name, Data(bytes: pixels, count: Int(pixelBytes)), width, height))
                 }
 
                 DispatchQueue.main.async {
@@ -1297,11 +1302,8 @@ struct XLSidebarModelPreview: NSViewRepresentable {
                     self.renderInProgress = false
                     guard self.previewView === preview else { return }
 
-                    for (name, fb) in buffers {
-                        if let pixels = fb["pixels"] as? Data,
-                           let width = (fb["width"] as? NSNumber)?.uintValue,
-                           let height = (fb["height"] as? NSNumber)?.uintValue,
-                           pixels.count > 0, width > 0, height > 0 {
+                    for (name, pixels, width, height) in buffers {
+                        if pixels.count > 0, width > 0, height > 0 {
                             preview.setRenderedPixels(pixels, forModel: name,
                                                       width: UInt(width), height: UInt(height))
                         }

@@ -171,6 +171,27 @@
                                                  NSUInteger width,
                                                  NSUInteger height))block;
 
+/// Render multiple models in parallel for the sidebar preview.
+/// Uses dispatch_apply internally for parallelism.
+/// When groupName is non-nil and refers to a group with effects,
+/// renders the group as a unified spatial entity instead of per-model.
+- (void)renderSidebarBatch:(NSArray<NSString *> *)modelNames
+                    timeMS:(NSInteger)timeMS
+                 groupName:(NSString * _Nullable)groupName;
+
+/// Prime background render infrastructure for sidebar preview.
+/// Call on effect selection so that param changes trigger bg renders immediately.
+- (void)ensureSidebarData:(NSString *)modelName;
+
+/// Zero-copy sidebar frame buffer iteration. Same semantics as
+/// enumerateFrameBuffersWithBlock: but iterates only sidebar results
+/// (from renderSidebarBatch or renderModelFrame).
+- (void)enumerateSidebarFrameBuffersWithBlock:(void (^)(NSString *modelName,
+                                                         const uint8_t *pixels,
+                                                         NSUInteger pixelBytes,
+                                                         NSUInteger width,
+                                                         NSUInteger height))block;
+
 /// Get pre-rendered pixel data for a model at a specific time.
 /// This reads from the pre-rendered SequenceData (after renderAll) and does NOT trigger
 /// a new render. Suitable for use during playback. Returns nil if data is not available.

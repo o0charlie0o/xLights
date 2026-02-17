@@ -270,6 +270,14 @@ void NativeRenderBuffer::Clear()
     }
 }
 
+void NativeRenderBuffer::ClearEffectCache()
+{
+    for (auto& [key, cache] : infoCache) {
+        delete cache;
+    }
+    infoCache.clear();
+}
+
 void NativeRenderBuffer::Fill(const xlColor& color)
 {
     std::fill_n(pixels, pixelVector.size(), color);

@@ -1231,8 +1231,16 @@ void NativeRenderCoordinator::preparePersistentJobs(
             std::string matchedGroupName;
             {
                 auto tGrp0 = std::chrono::steady_clock::now();
-                // O(1) lookup via pre-built group membership map
+                // O(1) lookup via pre-built group membership map.
+                // For submodel refs ("Parent/Sub"), also check the parent model name,
+                // matching isModelInGroup()'s reverse submodel match behavior.
                 auto grpIt = _modelToGroupIdx.find(name);
+                if (grpIt == _modelToGroupIdx.end()) {
+                    size_t slash = name.find('/');
+                    if (slash != std::string::npos) {
+                        grpIt = _modelToGroupIdx.find(name.substr(0, slash));
+                    }
+                }
                 size_t gIdx = (grpIt != _modelToGroupIdx.end()) ? grpIt->second : SIZE_MAX;
                 if (gIdx != SIZE_MAX) {
                     ElementInfo groupInfo;
@@ -2167,6 +2175,23 @@ void NativeRenderCoordinator::resetPersistentState() {
     _geometryCache.clear();
     _modelToGroupIdx.clear();
     _groupMapBuilt = false;
+    _groupRenderCache.clear();
+    {
+        std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);
+        _renderCache.clear();
+    }
+}
+
+void NativeRenderCoordinator::resetPixelBufferState() {
+    std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+    // Reset pixel buffer data AND per-effect caches (fire state, meteor
+    // positions, sparkle seeds, etc.) so stateful effects restart cleanly.
+    // Keeps jobs, geometry, and group map to avoid expensive recreation.
+    for (auto& [name, job] : _persistentJobs) {
+        if (job.pixelBuffer) {
+            job.pixelBuffer->resetEffectState();
+        }
+    }
     _groupRenderCache.clear();
     {
         std::lock_guard<std::mutex> cacheLock(_renderCacheMutex);

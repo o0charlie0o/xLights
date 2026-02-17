@@ -341,6 +341,11 @@ public:
     // Reset persistent state for a single model.
     void resetPersistentState(const std::string& modelName);
 
+    // Lightweight reset: clear pixel buffer data and render caches but keep
+    // jobs, geometry, and group map intact.  Used for sidebar loop wrap to
+    // avoid the expensive full-rebuild that resetPersistentState() triggers.
+    void resetPixelBufferState();
+
     // Clear the in-memory render cache for all models.
     void invalidateAllCaches();
 

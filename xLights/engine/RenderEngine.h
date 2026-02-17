@@ -416,6 +416,23 @@ public:
     // getAllFrameBuffers(). The visitor must not call back into
     // RenderEngine (would deadlock).
     void visitFrameBuffers(const FrameBufferVisitor& visitor) const;
+
+    // Iterate only sidebar frame buffers under lock.
+    // Used by the sidebar preview to collect results after renderSidebarBatch().
+    void visitSidebarFrameBuffers(const FrameBufferVisitor& visitor) const;
+
+    // Render multiple models in parallel for the sidebar preview.
+    // Uses dispatch_apply internally for parallelism.
+    // When groupName is non-empty and refers to a group with effects,
+    // renders the group as a unified spatial entity (like the house preview)
+    // instead of rendering each model independently.
+    void renderSidebarBatch(const std::vector<std::string>& modelNames, int timeMS,
+                             const std::string& groupName = "");
+
+    // Prime background render infrastructure for sidebar preview.
+    // Call on effect selection so that the first param change triggers a
+    // bg render immediately (no lazy-init delay).
+    void ensureSidebarData(const std::string& modelName);
 #endif
 
 private:
@@ -456,12 +473,13 @@ private:
     std::shared_ptr<IRenderContext> _liveContext;
     int _lastLiveRenderTimeMS = -1; // for backward scrub detection
 
-    // Separate coordinator for per-model sidebar rendering (renderModelFrame).
-    // Isolated from the batch path so they don't share _lastLiveRenderTimeMS
-    // or persistent state — prevents mutual resetPersistentState() calls
-    // and _bufferCache.clear() interference during concurrent playback.
-    std::unique_ptr<NativeRenderCoordinator> _sidebarCoordinator;
-    std::unique_ptr<IRenderContext> _sidebarContext;
+    // Separate coordinator for per-model sidebar rendering (renderModelFrame
+    // and renderSidebarBatch). Isolated from the batch path so they don't
+    // share _lastLiveRenderTimeMS or persistent state.
+    // Uses shared_ptr so the parallel render loop can hold a reference even
+    // if invalidateAllCaches() resets it from another thread.
+    std::shared_ptr<NativeRenderCoordinator> _sidebarCoordinator;
+    std::shared_ptr<IRenderContext> _sidebarContext;
     int _lastSidebarRenderTimeMS = -1;
 
     // --- FSEQ Playback State ---
@@ -523,6 +541,12 @@ private:
     // Synthesize a submodel-specific FrameBuffer from the parent model's channel
     // data (FSEQ or pre-rendered). Stores result in _sidebarCache.
     void synthesizeSubmodelBuffer(const std::string& subRefName, int timeMS);
+
+    // Overload for sidebar: uses caller-provided frameData (with FSEQ+overlay)
+    // instead of _currentFrameData (house preview's data).
+    void synthesizeSubmodelBuffer(const std::string& subRefName, int timeMS,
+                                   const std::vector<uint8_t>& frameData,
+                                   uint32_t numChannels);
 
     // Synthesize a submodel FrameBuffer from parent's channel data and store
     // in _bufferCache. Used by the FSEQ/prerendered renderFrame() paths.

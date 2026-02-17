@@ -249,6 +249,11 @@ public:
         }
     }
 
+    // Reset all per-effect state so effects start fresh (as if newly created).
+    // Clears layer pixel data, output pixels, and effect render caches.
+    // Keeps buffer dimensions, nodes, and structural config intact.
+    void resetEffectState();
+
     // Sorted unique pixel indices (bufY * bufferWi + bufX) for node positions.
     const std::vector<int>& getNodePixelIndices() const { return _nodePixelIndices; }
 

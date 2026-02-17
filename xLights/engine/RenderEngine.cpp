@@ -1441,8 +1441,8 @@ void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)
 
         // Create or reuse persistent sidebar coordinator.
         if (!_sidebarCoordinator) {
-            _sidebarContext = std::make_unique<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
-            _sidebarCoordinator = std::make_unique<NativeRenderCoordinator>(
+            _sidebarContext = std::make_shared<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
+            _sidebarCoordinator = std::make_shared<NativeRenderCoordinator>(
                 _effectProvider, _modelProvider, _sidebarContext.get());
             _lastSidebarRenderTimeMS = -1;
         }
@@ -1620,6 +1620,120 @@ void RenderEngine::synthesizeSubmodelBuffer(const std::string& subRefName, int t
     _sidebarCache[subRefName] = std::move(fb);
 }
 
+void RenderEngine::synthesizeSubmodelBuffer(const std::string& subRefName, int timeMS,
+                                             const std::vector<uint8_t>& frameData,
+                                             uint32_t numChannels)
+{
+    // Overload for sidebar: uses caller-provided frameData (with FSEQ+overlay)
+    // instead of copying from _currentFrameData (which is the house preview's data).
+    if (frameData.empty() || !_modelProvider) return;
+
+    size_t slash = subRefName.find('/');
+    if (slash == std::string::npos) return;
+    std::string parentName = subRefName.substr(0, slash);
+    std::string subName = subRefName.substr(slash + 1);
+
+    auto parentIt = _modelChannelMap.find(parentName);
+    if (parentIt == _modelChannelMap.end()) return;
+    const ModelChannelInfo& parentChInfo = parentIt->second;
+
+    auto parentAttrs = _modelProvider->getModelAttributes(parentName);
+    if (parentAttrs.empty()) return;
+
+    auto allParentNodes = generateNodesFromAttributes(parentAttrs);
+    if (allParentNodes.empty()) return;
+
+    auto subAttrs = _modelProvider->getSubmodelAttributes(parentName, subName);
+    if (subAttrs.empty()) return;
+
+    auto subNodes = filterNodesToSubmodel(allParentNodes, subAttrs);
+    if (subNodes.empty()) return;
+
+    int maxBufX = 0, maxBufY = 0;
+    for (const auto& nc : subNodes) {
+        if (nc.bufX > maxBufX) maxBufX = nc.bufX;
+        if (nc.bufY > maxBufY) maxBufY = nc.bufY;
+    }
+    int subBufW = maxBufX + 1;
+    int subBufH = maxBufY + 1;
+
+    FrameBuffer fb;
+    fb.modelName = subRefName;
+    fb.width = subBufW;
+    fb.height = subBufH;
+    fb.timeMS = timeMS;
+    fb.pixels.resize(static_cast<size_t>(subBufW) * subBufH * 4, 0);
+
+    // Get parent node indices (same logic as original overload)
+    std::vector<int> parentNodeIndices;
+    {
+        auto typeIt = subAttrs.find("type");
+        bool isSubBuffer = (typeIt != subAttrs.end() && typeIt->second == "subbuffer");
+        if (isSubBuffer) {
+            for (int i = 0; i < static_cast<int>(allParentNodes.size()); i++)
+                parentNodeIndices.push_back(i);
+        } else {
+            for (int lineIdx = 0; lineIdx < 100; ++lineIdx) {
+                std::string key = "line" + std::to_string(lineIdx);
+                auto it = subAttrs.find(key);
+                if (it == subAttrs.end() || it->second.empty()) {
+                    if (lineIdx > 0) break;
+                    continue;
+                }
+                std::istringstream stream(it->second);
+                std::string token;
+                while (std::getline(stream, token, ',')) {
+                    size_t start = token.find_first_not_of(" \t");
+                    size_t end = token.find_last_not_of(" \t");
+                    if (start == std::string::npos) continue;
+                    token = token.substr(start, end - start + 1);
+                    if (token.empty()) continue;
+                    size_t dashPos = token.find('-');
+                    int rangeStart, rangeEnd;
+                    if (dashPos != std::string::npos) {
+                        rangeStart = std::atoi(token.substr(0, dashPos).c_str()) - 1;
+                        rangeEnd = std::atoi(token.substr(dashPos + 1).c_str()) - 1;
+                        if (rangeStart < 0) rangeStart = 0;
+                        if (rangeEnd < rangeStart) std::swap(rangeStart, rangeEnd);
+                    } else {
+                        rangeStart = rangeEnd = std::atoi(token.c_str()) - 1;
+                        if (rangeStart < 0) continue;
+                    }
+                    for (int idx = rangeStart; idx <= rangeEnd; idx++) {
+                        if (idx >= 0 && idx < static_cast<int>(allParentNodes.size()))
+                            parentNodeIndices.push_back(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    size_t subNodeCount = std::min(subNodes.size(), parentNodeIndices.size());
+    for (size_t i = 0; i < subNodeCount; i++) {
+        int parentIdx = parentNodeIndices[i];
+        uint32_t nodeChannel = parentChInfo.absStartChannel +
+                               (static_cast<uint32_t>(parentIdx) * parentChInfo.chansPerNode);
+        if (nodeChannel + parentChInfo.chansPerNode > numChannels) continue;
+
+        uint8_t r = frameData[nodeChannel + parentChInfo.rOffset];
+        uint8_t g = frameData[nodeChannel + parentChInfo.gOffset];
+        uint8_t b = frameData[nodeChannel + parentChInfo.bOffset];
+
+        int bx = subNodes[i].bufX;
+        int by = subNodes[i].bufY;
+        if (bx < 0 || bx >= subBufW || by < 0 || by >= subBufH) continue;
+
+        size_t pIdx = (static_cast<size_t>(by) * subBufW + bx) * 4;
+        fb.pixels[pIdx]     = r;
+        fb.pixels[pIdx + 1] = g;
+        fb.pixels[pIdx + 2] = b;
+        fb.pixels[pIdx + 3] = 255;
+    }
+
+    std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+    _sidebarCache[subRefName] = std::move(fb);
+}
+
 void RenderEngine::synthesizeSubmodelFrameBuffer(
     const std::string& subRefName, const ModelChannelInfo& parentChInfo, int timeMS)
 {
@@ -1738,6 +1852,320 @@ void RenderEngine::synthesizeSubmodelFrameBuffer(
     }
 
     _bufferCache[subRefName] = std::move(fb);
+}
+
+void RenderEngine::renderSidebarBatch(const std::vector<std::string>& modelNames, int timeMS,
+                                       const std::string& groupName)
+{
+    // NOTE: No _renderInProgress guard here. The sidebar is independent of the
+    // house preview and should never be blocked by batch renderAll/forceRenderAll.
+    if (modelNames.empty()) return;
+
+    // --- Group unified render path (always LIVE) ---
+    // When the sidebar shows a group with effects, render the group as a single
+    // spatial entity regardless of FSEQ/prerendered state. This ensures:
+    // 1. Setting changes are immediately reflected (no waiting for bg re-render)
+    // 2. The unified spatial rendering is always used for groups
+    // 3. No concurrent FSEQ reads (avoids thread-safety issues)
+    if (!groupName.empty() && _effectProvider && _modelProvider && !_modelChannelMap.empty()) {
+        bool isGroup = (_modelChannelMap.count(groupName) == 0);
+        size_t groupElemIdx = isGroup ? _effectProvider->getElementIndex(groupName) : SIZE_MAX;
+
+        if (isGroup && groupElemIdx != SIZE_MAX) {
+            int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
+            if (frameTimeMS <= 0) frameTimeMS = 50;
+            int durationMS = _provider ? _provider->getSequenceDurationMS() : 0;
+            if (durationMS <= 0) {
+                int totalFrames = _provider ? _provider->getTotalFrames() : 0;
+                durationMS = (totalFrames > 0) ? totalFrames * frameTimeMS : 60000;
+            }
+            double durationSec = durationMS / 1000.0;
+
+            std::shared_ptr<NativeRenderCoordinator> coordinator;
+            {
+                std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+                if (!_sidebarCoordinator) {
+                    _sidebarContext = std::make_shared<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
+                    _sidebarCoordinator = std::make_shared<NativeRenderCoordinator>(
+                        _effectProvider, _modelProvider, _sidebarContext.get());
+                    _lastSidebarRenderTimeMS = -1;
+                }
+                if (_lastSidebarRenderTimeMS >= 0 && timeMS < _lastSidebarRenderTimeMS) {
+                    _sidebarCoordinator->resetPixelBufferState();
+                }
+                _lastSidebarRenderTimeMS = timeMS;
+                coordinator = _sidebarCoordinator;
+            }
+
+            int32_t reqCh = computeRequiredChannels();
+            if (reqCh > 0) {
+                uint32_t numChannels = static_cast<uint32_t>(reqCh);
+                std::vector<uint8_t> localFrameData(numChannels, 0);
+
+                auto resolvedCh = buildResolvedChannelMap();
+                coordinator->setResolvedStartChannels(resolvedCh);
+
+                bool groupOk = coordinator->renderGroupToChannels(
+                    groupName, timeMS, localFrameData.data(), numChannels);
+
+                if (groupOk) {
+                    std::map<std::string, FrameBuffer> results;
+                    std::vector<std::string> subRefs;
+                    for (const auto& mn : modelNames) {
+                        bool isSubRef = (mn.find('/') != std::string::npos);
+                        std::string physModel = isSubRef ? mn.substr(0, mn.find('/')) : mn;
+                        if (isSubRef) subRefs.push_back(mn);
+                        if (results.count(physModel)) continue;
+
+                        auto chIt = _modelChannelMap.find(physModel);
+                        if (chIt == _modelChannelMap.end()) continue;
+                        const auto& chInfo = chIt->second;
+                        if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+
+                        FrameBuffer fb;
+                        fb.modelName = physModel;
+                        fb.width = chInfo.bufferWidth;
+                        fb.height = chInfo.bufferHeight;
+                        fb.timeMS = timeMS;
+                        fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+                        for (uint32_t ni = 0; ni < chInfo.nodeCount; ni++) {
+                            uint32_t ch = chInfo.absStartChannel + ni * chInfo.chansPerNode;
+                            if (ch + chInfo.chansPerNode > numChannels) continue;
+                            uint8_t r = localFrameData[ch + chInfo.rOffset];
+                            uint8_t g = localFrameData[ch + chInfo.gOffset];
+                            uint8_t b = localFrameData[ch + chInfo.bOffset];
+                            int bx = chInfo.nodeBufCoords[ni].first;
+                            int by = chInfo.nodeBufCoords[ni].second;
+                            if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+                            size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                            fb.pixels[idx] = r; fb.pixels[idx+1] = g;
+                            fb.pixels[idx+2] = b; fb.pixels[idx+3] = 255;
+                        }
+                        results[physModel] = std::move(fb);
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+                        for (auto& [name, fb] : results)
+                            _sidebarCache[name] = std::move(fb);
+                    }
+                    for (const auto& subRef : subRefs)
+                        synthesizeSubmodelBuffer(subRef, timeMS, localFrameData, numChannels);
+
+                    notifyFrameRendered(timeMS);
+                    return;  // Done — skip FSEQ/prerendered and per-model paths
+                }
+            }
+        }
+    }
+    // (Group path not taken — fall through to FSEQ/prerendered or per-model LIVE)
+
+    bool haveFseq = false;
+    if (_fseqLoaded.load(std::memory_order_acquire)) {
+        std::lock_guard<std::mutex> lock(_fseqMutex);
+        haveFseq = (_fseqFile != nullptr);
+    }
+
+    if (haveFseq || (_renderedData && _renderedData->isValid() && !_modelChannelMap.empty())) {
+        // FSEQ / PRERENDERED path: read frame data once, build all model
+        // FrameBuffers from the shared data (avoids N separate FSEQ reads).
+        int stepTime = 25;
+        uint32_t numChannels = 0;
+        std::vector<uint8_t> localFrameData;
+
+        if (haveFseq) {
+            std::shared_ptr<FSEQFile> localFseq;
+            {
+                std::lock_guard<std::mutex> fLock(_fseqMutex);
+                localFseq = _fseqFile;
+            }
+            if (!localFseq) return;
+            stepTime = localFseq->getStepTime();
+            if (stepTime <= 0) stepTime = 50;
+            int frameIndex = timeMS / stepTime;
+            if (frameIndex < 0) frameIndex = 0;
+            int nf = static_cast<int>(localFseq->getNumFrames());
+            if (nf > 0 && frameIndex >= nf) frameIndex = nf - 1;
+            numChannels = static_cast<uint32_t>(localFseq->getChannelCount());
+            localFrameData.resize(numChannels, 0);
+            FSEQFile::FrameData* fd = localFseq->getFrame(static_cast<uint32_t>(frameIndex));
+            if (!fd) return;
+            fd->readFrame(localFrameData.data(), numChannels);
+            delete fd;
+        } else {
+            stepTime = static_cast<int>(_renderedData->getFrameTimeMS());
+            if (stepTime <= 0) stepTime = 25;
+            int frameIndex = timeMS / stepTime;
+            if (frameIndex < 0) frameIndex = 0;
+            int nf = static_cast<int>(_renderedData->getNumFrames());
+            if (nf > 0 && frameIndex >= nf) frameIndex = nf - 1;
+            const uint8_t* frameData = _renderedData->getFrame(static_cast<uint32_t>(frameIndex));
+            if (!frameData) return;
+            numChannels = _renderedData->getNumChannels();
+            localFrameData.assign(frameData, frameData + numChannels);
+        }
+
+        // Overlay bg-rendered models' channel data (same as house preview renderFrame).
+        // When an effect is edited, invalidateModelAndGroup() queues a bg render that
+        // writes updated channels into _renderedData. We overlay those on top of the
+        // FSEQ baseline so the sidebar matches the house preview pixel-for-pixel.
+        if (_renderedData && _renderedData->isValid() && _bgRenderQueue) {
+            auto completed = _bgRenderQueue->getCompletedModels();
+            if (!completed.empty()) {
+                int overlayFrameIdx = timeMS / stepTime;
+                int nfOverlay = static_cast<int>(_renderedData->getNumFrames());
+                if (overlayFrameIdx < 0) overlayFrameIdx = 0;
+                if (nfOverlay > 0 && overlayFrameIdx >= nfOverlay) overlayFrameIdx = nfOverlay - 1;
+                const uint8_t* overlayFrame = _renderedData->getFrame(
+                    static_cast<uint32_t>(overlayFrameIdx));
+                if (overlayFrame) {
+                    std::lock_guard<std::mutex> dLock(_dirtyMutex);
+                    for (const auto& mName : completed) {
+                        auto rangeIt = _modelChannelRanges.find(mName);
+                        if (rangeIt == _modelChannelRanges.end()) continue;
+                        uint32_t startCh = rangeIt->second.first;
+                        uint32_t chCount = rangeIt->second.second;
+                        if (startCh + chCount <= numChannels) {
+                            std::memcpy(localFrameData.data() + startCh,
+                                        overlayFrame + startCh, chCount);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build FrameBuffers for all requested models from the shared frame data
+        std::map<std::string, FrameBuffer> results;
+        std::vector<std::string> subRefs;
+
+        for (const auto& modelName : modelNames) {
+            bool isSubRef = (modelName.find('/') != std::string::npos);
+            std::string physicalModel = isSubRef ? modelName.substr(0, modelName.find('/')) : modelName;
+
+            if (isSubRef) {
+                subRefs.push_back(modelName);
+            }
+
+            // Skip if we already built this physical model's buffer
+            if (results.count(physicalModel)) continue;
+
+            auto chIt = _modelChannelMap.find(physicalModel);
+            if (chIt == _modelChannelMap.end()) continue;
+            const auto& chInfo = chIt->second;
+            if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+
+            FrameBuffer fb;
+            fb.modelName = physicalModel;
+            fb.width = chInfo.bufferWidth;
+            fb.height = chInfo.bufferHeight;
+            fb.timeMS = timeMS;
+            fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+            for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+                if (nodeChannel + chInfo.chansPerNode > numChannels) continue;
+
+                uint8_t r = localFrameData[nodeChannel + chInfo.rOffset];
+                uint8_t g = localFrameData[nodeChannel + chInfo.gOffset];
+                uint8_t b = localFrameData[nodeChannel + chInfo.bOffset];
+
+                int bx = chInfo.nodeBufCoords[i].first;
+                int by = chInfo.nodeBufCoords[i].second;
+                if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+                size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                fb.pixels[idx]     = r;
+                fb.pixels[idx + 1] = g;
+                fb.pixels[idx + 2] = b;
+                fb.pixels[idx + 3] = 255;
+            }
+
+            results[physicalModel] = std::move(fb);
+        }
+
+        // Store all results in sidebar cache under a single lock
+        {
+            std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+            for (auto& [name, fb] : results) {
+                _sidebarCache[name] = std::move(fb);
+            }
+        }
+
+        // Synthesize submodel buffers using the sidebar's own localFrameData
+        // (with FSEQ + overlay), NOT _currentFrameData (house preview's data).
+        for (const auto& subRef : subRefs) {
+            synthesizeSubmodelBuffer(subRef, timeMS, localFrameData, numChannels);
+        }
+
+        notifyFrameRendered(timeMS);
+    } else if (_effectProvider && _modelProvider) {
+        // LIVE EFFECT path: render all models in parallel via coordinator.
+        int frameTimeMS = _provider ? _provider->getFrameTimeMS() : 50;
+        if (frameTimeMS <= 0) frameTimeMS = 50;
+
+        int durationMS = _provider ? _provider->getSequenceDurationMS() : 0;
+        if (durationMS <= 0) {
+            int totalFrames = _provider ? _provider->getTotalFrames() : 0;
+            durationMS = (totalFrames > 0) ? totalFrames * frameTimeMS : 60000;
+        }
+        double durationSec = durationMS / 1000.0;
+
+        // Capture a shared_ptr to the coordinator so it stays alive even if
+        // invalidateAllCaches() resets _sidebarCoordinator on another thread.
+        std::shared_ptr<NativeRenderCoordinator> coordinator;
+        {
+            std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+
+            if (!_sidebarCoordinator) {
+                _sidebarContext = std::make_shared<RenderEngineContext>(frameTimeMS, durationSec, _audioProvider);
+                _sidebarCoordinator = std::make_shared<NativeRenderCoordinator>(
+                    _effectProvider, _modelProvider, _sidebarContext.get());
+                _lastSidebarRenderTimeMS = -1;
+            }
+
+            if (_lastSidebarRenderTimeMS >= 0 && timeMS < _lastSidebarRenderTimeMS) {
+                _sidebarCoordinator->resetPixelBufferState();
+            }
+            _lastSidebarRenderTimeMS = timeMS;
+
+            coordinator = _sidebarCoordinator;
+        }
+        // _sidebarCacheMutex released — coordinator kept alive by shared_ptr.
+
+        // Render all models in parallel via dispatch_apply.
+        auto allFrames = coordinator->renderAllModelsStateful(modelNames, timeMS);
+
+        // Write results to _sidebarCache under the lock.
+        {
+            std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+            for (size_t i = 0; i < allFrames.size(); ++i) {
+                auto& rf = allFrames[i];
+                if (rf.isValid()) {
+                    FrameBuffer fb;
+                    fb.modelName = rf.modelName;
+                    fb.width = rf.width;
+                    fb.height = rf.height;
+                    fb.timeMS = rf.timeMS;
+                    fb.pixels = std::move(rf.pixels);
+                    _sidebarCache[modelNames[i]] = std::move(fb);
+                }
+            }
+        }
+
+        notifyFrameRendered(timeMS);
+    }
+}
+
+void RenderEngine::visitSidebarFrameBuffers(const FrameBufferVisitor& visitor) const
+{
+    std::lock_guard<std::mutex> lock(_sidebarCacheMutex);
+    for (const auto& [name, fb] : _sidebarCache) {
+        if (fb.isValid()) {
+            visitor(name, fb.pixels.data(), fb.pixels.size(),
+                    fb.width, fb.height);
+        }
+    }
 }
 
 void RenderEngine::forceRenderAll(RenderCompleteCallback callback)
@@ -3225,31 +3653,33 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
     // and reset its live coordinator persistent state. No additional cache
     // clearing needed here.
 
-    // Ensure bg render queue exists (creates _renderedData if needed).
-    // Without this, effects changed before the first "Render All" would
-    // never get a bg render and models stay dirty forever.
+    // Ensure bg render queue infrastructure exists (creates _renderedData,
+    // _modelChannelRanges, and _modelChannelMap which liveRenderDirtyModels needs).
     if (!_bgRenderQueue) {
         ensureBackgroundRenderQueue();
     }
 
-    // Queue dirty physical models for a single batched background re-render
-    // with 150ms debounce. All dirty models are rendered in one parallel
-    // renderModels() call (like "Render All"), not one-by-one serially.
-    if (_bgRenderQueue) {
-        std::vector<std::string> dirtyPhysical;
-        for (const auto& name : visited) {
-            if (_modelChannelMap.count(name) > 0) {
-                dirtyPhysical.push_back(name);
-            }
-        }
-        if (!dirtyPhysical.empty()) {
-            printf("[RDBG] invalidateModelAndGroup: queueBatch(%zu models, 150ms debounce)\n",
-                   dirtyPhysical.size());
-            _bgRenderQueue->queueBatch(dirtyPhysical, 150);
-        }
-    } else {
-        printf("[RDBG] invalidateModelAndGroup: ensureBackgroundRenderQueue failed — bg render disabled\n");
-    }
+    // DO NOT queue a background batch re-render on parameter changes.
+    //
+    // Background batch renders cause two severe live-preview problems:
+    //
+    // 1. BLACK PREVIEW: The batch re-renders ALL frames for ALL dirty models
+    //    (10-20+ seconds for long sequences). During this time, liveRenderDirtyModels()
+    //    is blocked by isBatchRendering(). Models whose buffer cache was cleared by
+    //    invalidateModel() have no cache entry → the main preview shows solid black.
+    //
+    // 2. CONCURRENT _effectProvider ACCESS: The bg batch coordinator uses
+    //    dispatch_apply on the global concurrent queue — dozens of threads all
+    //    reading _effectProvider simultaneously. The sidebar coordinator also calls
+    //    _effectProvider concurrently. This causes heap corruption and crashes.
+    //
+    // Instead, liveRenderDirtyModels() in renderFrame() handles live preview at the
+    // current time position. The FSEQ becomes stale after parameter changes; the user
+    // must explicitly click "Render All" to persist the updated parameters to disk.
+    // This matches the expected UX: real-time preview while editing, explicit render
+    // to commit changes.
+    printf("[RDBG] invalidateModelAndGroup: %zu models marked dirty (no bg batch — live render only)\n",
+           visited.size());
 
     // Clear disk cache entries for dirty models only (not the entire cache).
     if (_diskCache) {
@@ -3311,6 +3741,16 @@ void RenderEngine::setShowFolder(const std::string& path)
 {
     _showFolderPath = path;
     printf("RenderEngine: show folder set to '%s'\n", path.c_str());
+}
+
+// --- Sidebar data priming ---
+
+void RenderEngine::ensureSidebarData(const std::string& modelName)
+{
+    // Called from the bridge on effect selection. Ensures the bg render
+    // queue and _renderedData exist so that the first param change triggers
+    // a bg render immediately (rather than needing to create infrastructure).
+    ensureBackgroundRenderQueue();
 }
 
 // --- Background render queue ---
