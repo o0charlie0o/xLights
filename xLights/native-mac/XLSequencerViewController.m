@@ -7428,14 +7428,12 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
 - (NSString *)zoomLevelKeyForCurrentSequence {
     if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
-        NSLog(@"[PERSIST] zoomLevelKeyForCurrentSequence: no engine or sequence not loaded");
         return nil;
     }
 
     NSDictionary *seqInfo = [self.engineBridge getSequenceInfo];
     NSString *filePath = seqInfo[@"filePath"];
     if (!filePath || filePath.length == 0) {
-        NSLog(@"[PERSIST] zoomLevelKeyForCurrentSequence: no filePath in seqInfo (keys: %@)", [seqInfo allKeys]);
         return nil;
     }
 
@@ -7443,9 +7441,7 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Use the file name + a hash of the full path for uniqueness
     NSString *fileName = [filePath lastPathComponent];
     NSUInteger pathHash = [filePath hash];
-    NSString *key = [NSString stringWithFormat:@"XLSequencerZoom_%@_%lu", fileName, (unsigned long)pathHash];
-    NSLog(@"[PERSIST] zoomLevelKeyForCurrentSequence: key=%@", key);
-    return key;
+    return [NSString stringWithFormat:@"XLSequencerZoom_%@_%lu", fileName, (unsigned long)pathHash];
 }
 
 - (void)saveZoomLevelForCurrentSequence {
@@ -7454,70 +7450,70 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 
     CGFloat zoomLevel = _scrollCoordinator.zoomLevel;
     [[NSUserDefaults standardUserDefaults] setDouble:zoomLevel forKey:key];
-    NSLog(@"[PERSIST] saveZoomLevel: %.4f for key=%@", zoomLevel, key);
 }
 
 - (void)loadZoomLevelForCurrentSequence {
     NSString *key = [self zoomLevelKeyForCurrentSequence];
     if (!key) {
-        NSLog(@"[PERSIST] loadZoomLevel: no key, defaulting to zoom-to-fit");
         [self zoomToFit:nil];
         return;
     }
 
     CGFloat savedZoom = [[NSUserDefaults standardUserDefaults] doubleForKey:key];
-    NSLog(@"[PERSIST] loadZoomLevel: savedZoom=%.4f for key=%@", savedZoom, key);
+    NSLog(@"[PERSIST] loadZoomLevel: %.4f", savedZoom);
     if (savedZoom > 0) {
         [_scrollCoordinator setZoomLevel:savedZoom];
         _transportBar.zoomLevel = savedZoom;
     } else {
-        NSLog(@"[PERSIST] loadZoomLevel: no saved value, defaulting to zoom-to-fit");
         [self zoomToFit:nil];
     }
 }
 
 #pragma mark - Scroll Offset Persistence
 
-- (NSString *)scrollOffsetKeyForCurrentSequence {
+- (NSString *)scrollOffsetBaseKeyForCurrentSequence {
     if (!self.engineBridge || ![self.engineBridge isSequenceLoaded]) {
-        NSLog(@"[PERSIST] scrollOffsetKey: no engine or sequence not loaded");
         return nil;
     }
 
     NSDictionary *seqInfo = [self.engineBridge getSequenceInfo];
     NSString *filePath = seqInfo[@"filePath"];
     if (!filePath || filePath.length == 0) {
-        NSLog(@"[PERSIST] scrollOffsetKey: no filePath in seqInfo");
         return nil;
     }
 
     NSString *fileName = [filePath lastPathComponent];
     NSUInteger pathHash = [filePath hash];
-    NSString *key = [NSString stringWithFormat:@"XLSequencerScrollX_%@_%lu", fileName, (unsigned long)pathHash];
-    NSLog(@"[PERSIST] scrollOffsetKey: key=%@", key);
-    return key;
+    return [NSString stringWithFormat:@"XLSequencerScroll_%@_%lu", fileName, (unsigned long)pathHash];
 }
 
 - (void)saveScrollOffsetForCurrentSequence {
-    NSString *key = [self scrollOffsetKeyForCurrentSequence];
-    if (!key) return;
+    NSString *baseKey = [self scrollOffsetBaseKeyForCurrentSequence];
+    if (!baseKey) return;
 
-    CGFloat scrollOffset = _scrollCoordinator.horizontalScrollOffset;
-    [[NSUserDefaults standardUserDefaults] setDouble:scrollOffset forKey:key];
-    NSLog(@"[PERSIST] saveScrollOffset: %.1f for key=%@", scrollOffset, key);
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    CGFloat hOffset = _scrollCoordinator.horizontalScrollOffset;
+    CGFloat vOffset = _scrollCoordinator.verticalScrollOffset;
+    [defaults setDouble:hOffset forKey:[baseKey stringByAppendingString:@"_X"]];
+    [defaults setDouble:vOffset forKey:[baseKey stringByAppendingString:@"_Y"]];
 }
 
 - (void)loadScrollOffsetForCurrentSequence {
-    NSString *key = [self scrollOffsetKeyForCurrentSequence];
-    if (!key) {
+    NSString *baseKey = [self scrollOffsetBaseKeyForCurrentSequence];
+    if (!baseKey) {
         NSLog(@"[PERSIST] loadScrollOffset: no key, skipping");
         return;
     }
 
-    CGFloat savedOffset = [[NSUserDefaults standardUserDefaults] doubleForKey:key];
-    NSLog(@"[PERSIST] loadScrollOffset: savedOffset=%.1f for key=%@", savedOffset, key);
-    if (savedOffset > 0) {
-        [_scrollCoordinator setHorizontalScrollOffset:savedOffset];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    CGFloat savedH = [defaults doubleForKey:[baseKey stringByAppendingString:@"_X"]];
+    CGFloat savedV = [defaults doubleForKey:[baseKey stringByAppendingString:@"_Y"]];
+    NSLog(@"[PERSIST] loadScrollOffset: h=%.1f v=%.1f for baseKey=%@", savedH, savedV, baseKey);
+    if (savedH > 0) {
+        [_scrollCoordinator setHorizontalScrollOffset:savedH];
+    }
+    if (savedV > 0) {
+        [_scrollCoordinator setVerticalScrollOffset:savedV];
     }
 }
 
@@ -7676,6 +7672,8 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     CGFloat viewHeight = NSHeight(_effectsGridView.bounds);
     CGFloat maxScroll = _rowCount * rowHeight - viewHeight;
     coordinator.maxVerticalScrollOffset = fmax(0, maxScroll);
+
+    [self saveScrollOffsetForCurrentSequence];
 }
 
 - (void)scrollCoordinator:(XLScrollCoordinator *)coordinator didChangeZoomLevel:(CGFloat)zoomLevel {

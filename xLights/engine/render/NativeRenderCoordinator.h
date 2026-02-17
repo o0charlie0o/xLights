@@ -325,6 +325,16 @@ public:
     std::vector<RenderedFrame> renderAllModelsStateful(
         const std::vector<std::string>& modelNames, int timeMS);
 
+    // Render a group as a single combined entity and write channel data
+    // directly into a frame buffer. Returns true if the group had effects
+    // and rendered successfully.
+    // @param groupName   Name of the model group
+    // @param timeMS      Current time in milliseconds
+    // @param frameData   Output buffer (channel array, size >= numChannels)
+    // @param numChannels Size of the output buffer
+    bool renderGroupToChannels(const std::string& groupName, int timeMS,
+                               uint8_t* frameData, uint32_t numChannels);
+
     // Reset all persistent model state (call on backward scrub or effect edit).
     void resetPersistentState();
 

@@ -13,6 +13,7 @@
 #include "NativeSequenceData.h"
 
 #include <chrono>
+#include <unistd.h>
 #include <dispatch/dispatch.h>
 
 namespace xlEngine {
@@ -153,10 +154,20 @@ void BackgroundRenderQueue::queueBatch(const std::vector<std::string>& modelName
 
         if (batch.empty()) return;
 
+        // Wait for any in-progress live render to finish before starting.
+        // Both the live render and bg batch use the shared effect provider,
+        // which is not thread-safe. Spin briefly (live renders are <100ms).
+        int spinCount = 0;
+        while (this->liveRendering.load(std::memory_order_acquire)) {
+            usleep(1000); // 1ms
+            if (++spinCount > 200) break; // safety: max 200ms wait
+        }
+
         this->_batchRendering.store(true);
 
-        printf("[RDBG] BackgroundRenderQueue: batch rendering %zu models (gen=%llu)\n",
-               batch.size(), capturedGeneration);
+        printf("[RDBG] BackgroundRenderQueue: batch rendering %zu models (gen=%llu)%s\n",
+               batch.size(), capturedGeneration,
+               spinCount > 0 ? " (waited for live render)" : "");
 
         auto t0 = std::chrono::steady_clock::now();
         bool success = coordinator->renderModels(batch, *output);

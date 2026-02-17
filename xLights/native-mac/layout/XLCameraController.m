@@ -304,14 +304,11 @@ static NSString * const kCameraSaved      = @"XLHousePreviewCamera.saved";
     [defaults setFloat:_target.y forKey:kCameraTargetY];
     [defaults setFloat:_target.z forKey:kCameraTargetZ];
     [defaults setBool:YES forKey:kCameraSaved];
-    NSLog(@"[PERSIST] saveCameraState: az=%.3f el=%.3f dist=%.1f target=(%.1f,%.1f,%.1f)",
-          _azimuth, _elevation, _distance, _target.x, _target.y, _target.z);
 }
 
 - (BOOL)restoreCameraState {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     if (![defaults boolForKey:kCameraSaved]) {
-        NSLog(@"[PERSIST] restoreCameraState: no saved state");
         return NO;
     }
 
@@ -329,8 +326,6 @@ static NSString * const kCameraSaved      = @"XLHousePreviewCamera.saved";
     _elevation = fmaxf(_minElevation, fminf(_maxElevation, _elevation));
     _distance = fmaxf(_minDistance, fminf(_maxDistance, _distance));
 
-    NSLog(@"[PERSIST] restoreCameraState: az=%.3f el=%.3f dist=%.1f target=(%.1f,%.1f,%.1f) animating=%d",
-          _azimuth, _elevation, _distance, _target.x, _target.y, _target.z, _animating);
     return YES;
 }
 

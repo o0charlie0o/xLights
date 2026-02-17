@@ -1596,6 +1596,116 @@ std::vector<RenderedFrame> NativeRenderCoordinator::renderAllModelsStateful(
 }
 
 // ---------------------------------------------------------------------------
+// Group-as-single-model rendering: renders a group once and writes channel data
+// ---------------------------------------------------------------------------
+
+bool NativeRenderCoordinator::renderGroupToChannels(
+    const std::string& groupName, int timeMS,
+    uint8_t* frameData, uint32_t numChannels)
+{
+    if (!_effectProvider || !_modelProvider || !_context || !frameData) return false;
+
+    // Look up the group's element index — if no effects, nothing to do
+    size_t groupElemIdx = _effectProvider->getElementIndex(groupName);
+    if (groupElemIdx == SIZE_MAX) return false;
+
+    ElementInfo groupInfo;
+    if (!_effectProvider->getElement(groupElemIdx, groupInfo)) return false;
+    if (groupInfo.effectLayerCount == 0) return false;
+
+    size_t layerCount = groupInfo.effectLayerCount;
+
+    // Clear stale group render cache entries and geometry cache for this group.
+    // This is called when effects are dirty, so buffer style may have changed.
+    {
+        std::lock_guard<std::mutex> grpLock(_groupRenderCacheMutex);
+        _groupRenderCache.clear();
+    }
+
+    // Get effective buffer style for the group's first layer
+    std::string bufferStyle = getGroupEffectiveBufferStyle(groupElemIdx, groupName);
+
+    // Extract combined geometry for all member nodes
+    ModelGeometry groupGeom = extractGroupGeometry(groupName, bufferStyle);
+    if (groupGeom.nodeCount == 0) return false;
+
+    // Create or reuse a persistent ModelJob for this group
+    std::string jobKey = groupName + "##group_channel";
+    ModelJob* job = nullptr;
+    {
+        std::lock_guard<std::recursive_mutex> lock(_stateMutex);
+        auto it = _persistentJobs.find(jobKey);
+        if (it == _persistentJobs.end()) {
+            ModelJob newJob;
+            newJob.geometry = groupGeom;
+            newJob.elementIndex = groupElemIdx;
+            newJob.layerCount = layerCount;
+            newJob.isGroupJob = true;
+
+            // Compute effect time range for early-exit optimization
+            newJob.hasEffectTimeRange = false;
+            int minStart = INT_MAX, maxEnd = 0;
+            for (size_t li = 0; li < layerCount; ++li) {
+                auto effects = _effectProvider->getEffectsOnLayer(groupElemIdx, li);
+                for (const auto& eff : effects) {
+                    if (eff.startTimeMS < minStart) minStart = eff.startTimeMS;
+                    if (eff.endTimeMS > maxEnd) maxEnd = eff.endTimeMS;
+                    newJob.hasEffectTimeRange = true;
+                }
+            }
+            if (newJob.hasEffectTimeRange) {
+                newJob.effectMinStartMS = minStart;
+                newJob.effectMaxEndMS = maxEnd;
+            }
+
+            // Create pixel buffer with group geometry
+            newJob.pixelBuffer = std::make_unique<NativePixelBuffer>(
+                _context, groupGeom.bufferWi, groupGeom.bufferHt,
+                static_cast<int>(layerCount),
+                groupGeom.nodes);
+
+            auto& inserted = _persistentJobs[jobKey];
+            inserted = std::move(newJob);
+            job = &inserted;
+        } else {
+            job = &it->second;
+            // Update element index and layer count in case effects changed
+            job->elementIndex = groupElemIdx;
+            if (job->layerCount != layerCount) {
+                job->layerCount = layerCount;
+                job->pixelBuffer = std::make_unique<NativePixelBuffer>(
+                    _context, groupGeom.bufferWi, groupGeom.bufferHt,
+                    static_cast<int>(layerCount),
+                    groupGeom.nodes);
+            }
+            // Refresh effect time range (effects may have changed)
+            job->hasEffectTimeRange = false;
+            int minStart = INT_MAX, maxEnd = 0;
+            for (size_t li = 0; li < layerCount; ++li) {
+                auto effects = _effectProvider->getEffectsOnLayer(groupElemIdx, li);
+                for (const auto& eff : effects) {
+                    if (eff.startTimeMS < minStart) minStart = eff.startTimeMS;
+                    if (eff.endTimeMS > maxEnd) maxEnd = eff.endTimeMS;
+                    job->hasEffectTimeRange = true;
+                }
+            }
+            if (job->hasEffectTimeRange) {
+                job->effectMinStartMS = minStart;
+                job->effectMaxEndMS = maxEnd;
+            }
+        }
+    }
+
+    // Render the group effect onto the combined buffer (single render)
+    renderModelAtTime(*job, timeMS);
+
+    // Write channel data directly into the output frame buffer
+    job->pixelBuffer->getColors(frameData, numChannels);
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Unified batch rendering: per-frame-all-models (same approach as live preview)
 // ---------------------------------------------------------------------------
 

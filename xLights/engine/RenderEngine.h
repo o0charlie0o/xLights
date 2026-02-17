@@ -584,6 +584,13 @@ private:
     // results into _bufferCache. Returns the number of models rendered.
     int liveRenderDirtyModels(int timeMS);
 
+    // Build resolved start channel map from _modelChannelMap for coordinators.
+    std::unordered_map<std::string, uint32_t> buildResolvedChannelMap() const;
+
+    // Detect if dirty models share a common group parent. Returns the group
+    // name if found (non-empty), or empty string if no group context.
+    std::string findDirtyGroupParent(const std::set<std::string>& dirtyModels) const;
+
     // Callback invoked on a bg thread after a single dirty model finishes
     // background re-rendering. Set from Obj-C++ bridge to post UI notifications.
     std::function<void(const std::string&)> _bgRenderCompleteCallback;

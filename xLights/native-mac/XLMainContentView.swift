@@ -114,7 +114,6 @@ final class XLAppState {
         }
         if defaults.object(forKey: "XLHousePreviewVisible") != nil {
             housePreviewVisible = defaults.bool(forKey: "XLHousePreviewVisible")
-            NSLog("[PERSIST] loadState: housePreviewVisible=\(housePreviewVisible)")
         }
         if let widthsDict = defaults.dictionary(forKey: "XLPanelWidthProportions") as? [String: Double] {
             for (key, value) in widthsDict {

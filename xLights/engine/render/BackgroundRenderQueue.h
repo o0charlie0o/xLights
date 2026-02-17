@@ -127,6 +127,12 @@ private:
     uint64_t _batchGeneration = 0;
     std::set<std::string> _pendingBatchModels;
     std::atomic<bool> _batchRendering{false};
+
+public:
+    // Live rendering guard: set by the render engine before calling
+    // liveRenderDirtyModels() and cleared after. The bg batch block
+    // spins briefly if this is set to avoid concurrent effectProvider access.
+    std::atomic<bool> liveRendering{false};
 };
 
 } // namespace xlEngine

@@ -951,9 +951,10 @@ void RenderEngine::renderFrame(int timeMS)
         } // release _bufferCacheMutex before logging and notifying
 
         // Live-render dirty models at the current frame for immediate feedback.
-        // Erase their stale FSEQ-sourced cache entries first so liveRenderDirtyModels
-        // knows to re-render them (it skips models already in cache).
-        if (hasDirtyModels()) {
+        // Skip when bg batch render is in progress — both use dispatch_apply on
+        // the global queue, so we avoid concurrent rendering. During the bg render,
+        // dirty models keep their FSEQ-sourced FrameBuffers (stale but not black).
+        if (hasDirtyModels() && (!_bgRenderQueue || !_bgRenderQueue->isBatchRendering())) {
             std::set<std::string> dirtySnapshot;
             { std::lock_guard<std::mutex> dlock(_dirtyMutex); dirtySnapshot = _dirtyModels; }
             {
@@ -1209,8 +1210,8 @@ void RenderEngine::renderFrame(int timeMS)
         } // release _bufferCacheMutex before logging and notifying
 
         // Live-render dirty models at the current frame for immediate feedback.
-        // Erase their stale prerendered-sourced cache entries first.
-        if (hasDirtyModels()) {
+        // Skip when bg batch render is in progress to avoid concurrent dispatch_apply.
+        if (hasDirtyModels() && (!_bgRenderQueue || !_bgRenderQueue->isBatchRendering())) {
             std::set<std::string> dirtySnapshot;
             { std::lock_guard<std::mutex> dlock(_dirtyMutex); dirtySnapshot = _dirtyModels; }
             {
@@ -2813,6 +2814,39 @@ void RenderEngine::invalidateModel(const std::string& modelName)
     }
 }
 
+std::unordered_map<std::string, uint32_t> RenderEngine::buildResolvedChannelMap() const
+{
+    std::unordered_map<std::string, uint32_t> result;
+    for (const auto& [name, chInfo] : _modelChannelMap) {
+        result[name] = chInfo.absStartChannel;
+    }
+    return result;
+}
+
+std::string RenderEngine::findDirtyGroupParent(const std::set<std::string>& dirtyModels) const
+{
+    if (!_modelProvider) return "";
+
+    // Look for names in dirtyModels that are NOT in _modelChannelMap — these
+    // are group names (groups are skipped when building the channel map).
+    for (const auto& name : dirtyModels) {
+        if (_modelChannelMap.count(name) > 0) continue;
+        // Verify it's actually a group
+        auto attrs = _modelProvider->getModelAttributes(name);
+        auto displayAs = attrs.find("DisplayAs");
+        if (displayAs != attrs.end() && displayAs->second == "ModelGroup") {
+            // Check that this group has effects (element exists)
+            if (_effectProvider) {
+                size_t elemIdx = _effectProvider->getElementIndex(name);
+                if (elemIdx != SIZE_MAX) {
+                    return name;
+                }
+            }
+        }
+    }
+    return "";
+}
+
 int RenderEngine::liveRenderDirtyModels(int timeMS)
 {
     if (!_effectProvider || !_modelProvider) return 0;
@@ -2873,37 +2907,261 @@ int RenderEngine::liveRenderDirtyModels(int timeMS)
         liveCoord = _liveCoordinator;
     }
 
-    // No persistent state reset needed — renderModelAtTime re-reads effect
-    // parameters from the provider on every call (getEffectAtTime). The
-    // ModelJob geometry/layer structure is still valid for parameter changes.
+    // Signal to the bg render queue that a live render is in progress.
+    // The bg batch checks this flag before starting to avoid concurrent
+    // access to the shared effect provider (which is not thread-safe).
+    if (_bgRenderQueue) _bgRenderQueue->liveRendering.store(true, std::memory_order_release);
 
-    // Render all dirty models in a single parallel call. Metal shared resources
-    // (device, command queue, pipeline) are singletons, so concurrent creation
-    // from dispatch_apply is safe.
+    // --- Group fast path ---
+    // Detect if the dirty models share a common group parent. When a group
+    // effect is edited, invalidateModelAndGroup inserts both the group name
+    // and all member names into _dirtyModels. The group name is NOT in
+    // _modelChannelMap (groups are skipped), so it's filtered out of
+    // dirtyPhysical but still present in dirtyNow.
+    std::string groupName = findDirtyGroupParent(dirtyNow);
+
+    bool usedGroupFastPath = false;
+    if (!groupName.empty() && _renderedData && _renderedData->isValid() &&
+        _currentFrameIndex >= 0) {
+        // Set resolved start channels on the live coordinator so
+        // extractGroupGeometry computes correct actChannel values.
+        auto resolvedCh = buildResolvedChannelMap();
+        liveCoord->setResolvedStartChannels(resolvedCh);
+
+        uint32_t numChannels = _renderedData->getNumChannels();
+        uint8_t* frameData = _renderedData->getFrame(
+            static_cast<uint32_t>(_currentFrameIndex));
+
+        if (frameData) {
+            // Zero all dirty models' channel ranges before group render
+            for (const auto& name : dirtyPhysical) {
+                auto chIt = _modelChannelMap.find(name);
+                if (chIt == _modelChannelMap.end()) continue;
+                const auto& chInfo = chIt->second;
+                uint32_t startCh = chInfo.absStartChannel;
+                uint32_t chCount = chInfo.nodeCount * chInfo.chansPerNode;
+                if (startCh + chCount <= numChannels) {
+                    std::memset(frameData + startCh, 0, chCount);
+                }
+            }
+
+            auto t0 = std::chrono::steady_clock::now();
+            bool ok = liveCoord->renderGroupToChannels(
+                groupName, timeMS, frameData, numChannels);
+            auto t1 = std::chrono::steady_clock::now();
+            double renderMS = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+            if (ok) {
+                usedGroupFastPath = true;
+
+                // Copy dirty models' channel ranges into _currentFrameData
+                uint32_t fdSize = static_cast<uint32_t>(_currentFrameData.size());
+                for (const auto& name : dirtyPhysical) {
+                    auto chIt = _modelChannelMap.find(name);
+                    if (chIt == _modelChannelMap.end()) continue;
+                    const auto& ci = chIt->second;
+                    uint32_t startCh = ci.absStartChannel;
+                    uint32_t chCount = ci.nodeCount * ci.chansPerNode;
+                    uint32_t endCh = std::min(startCh + chCount,
+                                              std::min(numChannels, fdSize));
+                    if (startCh < endCh) {
+                        std::memcpy(_currentFrameData.data() + startCh,
+                                    frameData + startCh, endCh - startCh);
+                    }
+                }
+
+                // Build FrameBuffers from channel data for all dirty models
+                int count = 0;
+                {
+                    std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+                    uint32_t chBufSize = static_cast<uint32_t>(_currentFrameData.size());
+                    for (const auto& name : dirtyPhysical) {
+                        auto chIt = _modelChannelMap.find(name);
+                        if (chIt == _modelChannelMap.end()) continue;
+                        const auto& chInfo = chIt->second;
+
+                        FrameBuffer fb;
+                        fb.modelName = name;
+                        fb.width = chInfo.bufferWidth;
+                        fb.height = chInfo.bufferHeight;
+                        fb.timeMS = timeMS;
+                        fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+                        for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                            uint32_t ch = chInfo.absStartChannel + i * chInfo.chansPerNode;
+                            if (ch + chInfo.chansPerNode > chBufSize) continue;
+                            uint8_t r = _currentFrameData[ch + chInfo.rOffset];
+                            uint8_t g = _currentFrameData[ch + chInfo.gOffset];
+                            uint8_t b = _currentFrameData[ch + chInfo.bOffset];
+                            int bx = chInfo.nodeBufCoords[i].first;
+                            int by = chInfo.nodeBufCoords[i].second;
+                            if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+                            size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                            fb.pixels[idx]     = r;
+                            fb.pixels[idx + 1] = g;
+                            fb.pixels[idx + 2] = b;
+                            fb.pixels[idx + 3] = 255;
+                        }
+
+                        _bufferCache[name] = std::move(fb);
+                        count++;
+                    }
+                }
+
+                if (_bgRenderQueue) _bgRenderQueue->liveRendering.store(false, std::memory_order_release);
+                printf("[RDBG] liveRenderDirtyModels: GROUP FAST PATH '%s' → %d/%zu models at t=%dms, render=%.1fms\n",
+                       groupName.c_str(), count, dirtyPhysical.size(), timeMS, renderMS);
+                return count;
+            }
+        }
+    }
+
+    // --- Standard per-model path (fallback when no group context) ---
+
+    // Render all dirty models in a single parallel call.
     auto t0 = std::chrono::steady_clock::now();
     auto liveFrames = liveCoord->renderAllModelsStateful(dirtyPhysical, timeMS);
     auto t1 = std::chrono::steady_clock::now();
     double renderMS = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
+    // Write live-rendered pixels into _renderedData at the current frame so
+    // that the channel-based PRERENDERED path produces correct FrameBuffers.
+    // We map raw buffer-grid pixels → channel data using _modelChannelMap
+    // (nodeBufCoords for reading pixels, absStartChannel for writing channels).
+    // This avoids depending on the coordinator's actChannel values.
+    bool wroteToRenderedData = false;
+    if (_renderedData && _renderedData->isValid() && _currentFrameIndex >= 0) {
+        uint32_t numChannels = _renderedData->getNumChannels();
+        uint8_t* frameData = _renderedData->getFrame(
+            static_cast<uint32_t>(_currentFrameIndex));
+
+        if (frameData) {
+            // Build a quick lookup from model name → RenderedFrame
+            std::unordered_map<std::string, size_t> rfIndex;
+            for (size_t i = 0; i < liveFrames.size(); i++) {
+                if (liveFrames[i].isValid()) {
+                    rfIndex[liveFrames[i].modelName] = i;
+                }
+            }
+
+            for (const auto& name : dirtyPhysical) {
+                auto chIt = _modelChannelMap.find(name);
+                if (chIt == _modelChannelMap.end()) continue;
+                auto rfIt = rfIndex.find(name);
+                if (rfIt == rfIndex.end()) continue;
+
+                const auto& chInfo = chIt->second;
+                const auto& rf = liveFrames[rfIt->second];
+
+                // Zero this model's channel range first
+                uint32_t startCh = chInfo.absStartChannel;
+                uint32_t chCount = chInfo.nodeCount * chInfo.chansPerNode;
+                if (startCh + chCount <= numChannels) {
+                    std::memset(frameData + startCh, 0, chCount);
+                }
+
+                // Map raw buffer pixels → channel data via nodeBufCoords.
+                // nodeBufCoords[i] gives the (bufX, bufY) for node i in the
+                // model's buffer grid — read the pixel there, then write to
+                // the node's channel offset in _renderedData.
+                for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                    int bx = chInfo.nodeBufCoords[i].first;
+                    int by = chInfo.nodeBufCoords[i].second;
+                    if (bx < 0 || bx >= rf.width || by < 0 || by >= rf.height) continue;
+
+                    size_t pixIdx = (static_cast<size_t>(by) * rf.width + bx) * 4;
+                    uint8_t r = rf.pixels[pixIdx];
+                    uint8_t g = rf.pixels[pixIdx + 1];
+                    uint8_t b = rf.pixels[pixIdx + 2];
+
+                    uint32_t ch = chInfo.absStartChannel + i * chInfo.chansPerNode;
+                    if (ch + chInfo.chansPerNode > numChannels) continue;
+                    frameData[ch + chInfo.rOffset] = r;
+                    frameData[ch + chInfo.gOffset] = g;
+                    frameData[ch + chInfo.bOffset] = b;
+                }
+            }
+
+            // Copy only dirty models' channel ranges into _currentFrameData.
+            // _renderedData is zeroed for non-dirty models, so a full memcpy
+            // would wipe out valid FSEQ data for unmodified models.
+            uint32_t fdSize = static_cast<uint32_t>(_currentFrameData.size());
+            for (const auto& name : dirtyPhysical) {
+                auto chIt2 = _modelChannelMap.find(name);
+                if (chIt2 == _modelChannelMap.end()) continue;
+                const auto& ci = chIt2->second;
+                uint32_t startCh = ci.absStartChannel;
+                uint32_t chCount = ci.nodeCount * ci.chansPerNode;
+                uint32_t endCh = std::min(startCh + chCount,
+                                          std::min(numChannels, fdSize));
+                if (startCh < endCh) {
+                    std::memcpy(_currentFrameData.data() + startCh,
+                                frameData + startCh, endCh - startCh);
+                }
+            }
+            wroteToRenderedData = true;
+        }
+    }
+
+    // Build FrameBuffers: if we wrote to _renderedData, rebuild from channel
+    // data (identical to the PRERENDERED path). Otherwise use raw pixels.
     int count = 0;
     {
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
-        for (auto& rf : liveFrames) {
-            if (rf.isValid()) {
+        if (wroteToRenderedData) {
+            uint32_t numChannels = static_cast<uint32_t>(_currentFrameData.size());
+            for (const auto& name : dirtyPhysical) {
+                auto chIt = _modelChannelMap.find(name);
+                if (chIt == _modelChannelMap.end()) continue;
+                const auto& chInfo = chIt->second;
+
                 FrameBuffer fb;
-                fb.modelName = rf.modelName;
-                fb.width = rf.width;
-                fb.height = rf.height;
-                fb.timeMS = rf.timeMS;
-                fb.pixels = std::move(rf.pixels);
-                _bufferCache[rf.modelName] = std::move(fb);
+                fb.modelName = name;
+                fb.width = chInfo.bufferWidth;
+                fb.height = chInfo.bufferHeight;
+                fb.timeMS = timeMS;
+                fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+                for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                    uint32_t ch = chInfo.absStartChannel + i * chInfo.chansPerNode;
+                    if (ch + chInfo.chansPerNode > numChannels) continue;
+                    uint8_t r = _currentFrameData[ch + chInfo.rOffset];
+                    uint8_t g = _currentFrameData[ch + chInfo.gOffset];
+                    uint8_t b = _currentFrameData[ch + chInfo.bOffset];
+                    int bx = chInfo.nodeBufCoords[i].first;
+                    int by = chInfo.nodeBufCoords[i].second;
+                    if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+                    size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                    fb.pixels[idx]     = r;
+                    fb.pixels[idx + 1] = g;
+                    fb.pixels[idx + 2] = b;
+                    fb.pixels[idx + 3] = 255;
+                }
+
+                _bufferCache[name] = std::move(fb);
                 count++;
+            }
+        } else {
+            // Fallback: use raw buffer pixels directly
+            for (auto& rf : liveFrames) {
+                if (rf.isValid()) {
+                    FrameBuffer fb;
+                    fb.modelName = rf.modelName;
+                    fb.width = rf.width;
+                    fb.height = rf.height;
+                    fb.timeMS = rf.timeMS;
+                    fb.pixels = std::move(rf.pixels);
+                    _bufferCache[rf.modelName] = std::move(fb);
+                    count++;
+                }
             }
         }
     }
 
-    printf("[RDBG] liveRenderDirtyModels: %d/%zu models at t=%dms, render=%.1fms\n",
-           count, dirtyPhysical.size(), timeMS, renderMS);
+    if (_bgRenderQueue) _bgRenderQueue->liveRendering.store(false, std::memory_order_release);
+    printf("[RDBG] liveRenderDirtyModels: %d/%zu models at t=%dms, render=%.1fms (channel=%s)\n",
+           count, dirtyPhysical.size(), timeMS, renderMS,
+           wroteToRenderedData ? "yes" : "no(fallback)");
     return count;
 }
 
@@ -2967,6 +3225,13 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
     // and reset its live coordinator persistent state. No additional cache
     // clearing needed here.
 
+    // Ensure bg render queue exists (creates _renderedData if needed).
+    // Without this, effects changed before the first "Render All" would
+    // never get a bg render and models stay dirty forever.
+    if (!_bgRenderQueue) {
+        ensureBackgroundRenderQueue();
+    }
+
     // Queue dirty physical models for a single batched background re-render
     // with 150ms debounce. All dirty models are rendered in one parallel
     // renderModels() call (like "Render All"), not one-by-one serially.
@@ -2978,8 +3243,12 @@ void RenderEngine::invalidateModelAndGroup(const std::string& modelName)
             }
         }
         if (!dirtyPhysical.empty()) {
+            printf("[RDBG] invalidateModelAndGroup: queueBatch(%zu models, 150ms debounce)\n",
+                   dirtyPhysical.size());
             _bgRenderQueue->queueBatch(dirtyPhysical, 150);
         }
+    } else {
+        printf("[RDBG] invalidateModelAndGroup: ensureBackgroundRenderQueue failed — bg render disabled\n");
     }
 
     // Clear disk cache entries for dirty models only (not the entire cache).
@@ -3182,9 +3451,23 @@ void RenderEngine::notifyBackgroundRenderComplete(const std::string& modelName)
                         fb.pixels[idx + 2] = b;
                         fb.pixels[idx + 3] = 255;
                     }
+
                     _bufferCache[modelName] = std::move(fb);
+                    printf("[RDBG] bgRenderComplete: updated bufferCache for '%s' dim=%dx%d frame=%d\n",
+                           modelName.c_str(), fb.width, fb.height, _currentFrameIndex);
+                } else {
+                    printf("[RDBG] bgRenderComplete: NO frameData for '%s' frame=%d\n",
+                           modelName.c_str(), _currentFrameIndex);
                 }
+            } else {
+                printf("[RDBG] bgRenderComplete: '%s' NOT in _modelChannelMap\n",
+                       modelName.c_str());
             }
+        } else {
+            printf("[RDBG] bgRenderComplete: skipped '%s' — frameIdx=%d renderedData=%s valid=%s\n",
+                   modelName.c_str(), _currentFrameIndex,
+                   _renderedData ? "yes" : "no",
+                   (_renderedData && _renderedData->isValid()) ? "yes" : "no");
         }
     }
 

@@ -116,6 +116,7 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
     class Coordinator: @unchecked Sendable {
         weak var viewController: XLSequencerViewController?
         private var observer: NSObjectProtocol?
+        private var hasAutoOpenedPreview = false
 
         func startObserving() {
             guard observer == nil else { return }
@@ -125,21 +126,28 @@ struct XLSequencerTabView: NSViewControllerRepresentable {
                 queue: .main
             ) { [weak self] _ in
                 DispatchQueue.main.async {
-                    self?.viewController?.reloadSequenceData()
+                    guard let self, let vc = self.viewController else { return }
+                    vc.reloadSequenceData()
                     // Restore saved zoom only on sequence open/create (not on every reload)
-                    self?.viewController?.loadZoomLevelForCurrentSequence()
+                    vc.loadZoomLevelForCurrentSequence()
 
                     // Defer scroll restore and house preview to next run loop tick
                     // so views have time to layout with the new zoom level first
-                    DispatchQueue.main.async {
-                        // Restore scroll position after zoom so offset maps to correct pixel position
-                        self?.viewController?.loadScrollOffsetForCurrentSequence()
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, let vc = self.viewController else { return }
 
-                        // Auto-reopen house preview if it was visible last session
-                        let shouldOpenPreview = UserDefaults.standard.bool(forKey: "XLHousePreviewVisible")
-                        NSLog("[PERSIST] sequence loaded: XLHousePreviewVisible=\(shouldOpenPreview)")
-                        if shouldOpenPreview {
-                            self?.viewController?.toggleHousePreview()
+                        // Restore scroll position after zoom so offset maps to correct pixel position
+                        vc.loadScrollOffsetForCurrentSequence()
+
+                        // Auto-reopen house preview once per app launch, only when a sequence is loaded
+                        if !self.hasAutoOpenedPreview,
+                           vc.engineBridge?.isSequenceLoaded() == true {
+                            self.hasAutoOpenedPreview = true
+                            let shouldOpenPreview = UserDefaults.standard.bool(forKey: "XLHousePreviewVisible")
+                            NSLog("[PERSIST] sequence loaded: XLHousePreviewVisible=\(shouldOpenPreview)")
+                            if shouldOpenPreview {
+                                vc.toggleHousePreview()
+                            }
                         }
                     }
                 }

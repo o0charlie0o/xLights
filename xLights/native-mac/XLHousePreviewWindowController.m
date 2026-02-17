@@ -14,8 +14,6 @@
 #import "XLPlaybackController.h"
 #import "XLEngineBridge.h"
 
-static NSString * const kWindowFrameKey = @"XLHousePreviewWindowFrame";
-
 // Toolbar item identifiers
 static NSToolbarIdentifier const kToolbarIdentifier = @"XLHousePreviewToolbar";
 static NSToolbarItemIdentifier const kToolbarTransportItem = @"XLHousePreviewTransport";
@@ -78,17 +76,8 @@ static NSToolbarItemIdentifier const kToolbarViewpointItem = @"XLHousePreviewVie
 
         panel.contentView = _previewView;
 
-        // Restore saved window frame
-        NSString *frameString = [[NSUserDefaults standardUserDefaults] stringForKey:kWindowFrameKey];
-        NSLog(@"[PERSIST] HousePreview init: saved frame string=%@", frameString ?: @"(none)");
-        if (frameString) {
-            NSRect frame = NSRectFromString(frameString);
-            if (frame.size.width > 0 && frame.size.height > 0) {
-                [panel setFrame:frame display:NO];
-                NSLog(@"[PERSIST] HousePreview init: restored frame=%.0fx%.0f at (%.0f,%.0f)",
-                      frame.size.width, frame.size.height, frame.origin.x, frame.origin.y);
-            }
-        }
+        // Let AppKit handle frame save/restore automatically
+        [panel setFrameAutosaveName:@"XLHousePreviewWindow"];
 
         // Listen for sequence data changes to reload models
         [[NSNotificationCenter defaultCenter] addObserver:self
@@ -276,22 +265,11 @@ static NSToolbarItemIdentifier const kToolbarViewpointItem = @"XLHousePreviewVie
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
-    NSString *frameString = NSStringFromRect(self.window.frame);
-    [[NSUserDefaults standardUserDefaults] setObject:frameString forKey:kWindowFrameKey];
     [_previewView.cameraController saveCameraState];
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
-    NSString *frameString = NSStringFromRect(self.window.frame);
-    [[NSUserDefaults standardUserDefaults] setObject:frameString forKey:kWindowFrameKey];
-    NSLog(@"[PERSIST] windowDidResize: saved frame=%@", frameString);
     [_previewView setNeedsRender];
-}
-
-- (void)windowDidMove:(NSNotification *)notification {
-    NSString *frameString = NSStringFromRect(self.window.frame);
-    [[NSUserDefaults standardUserDefaults] setObject:frameString forKey:kWindowFrameKey];
-    NSLog(@"[PERSIST] windowDidMove: saved frame=%@", frameString);
 }
 
 #pragma mark - XLMetalPreviewDelegate
