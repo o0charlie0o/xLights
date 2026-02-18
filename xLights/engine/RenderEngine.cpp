@@ -4340,6 +4340,19 @@ void RenderEngine::renderFrame(int timeMS)
         const uint8_t* channelData = &seqData[frameIndex][0];
         uint32_t numChannels = seqData.NumChannels();
 
+        // Diagnostic: log once per second
+        static int sLastDiagSec = -1;
+        int curSec = timeMS / 1000;
+        if (curSec != sLastDiagSec) {
+            sLastDiagSec = curSec;
+            uint32_t nonZero = 0;
+            for (uint32_t i = 0; i < numChannels; i++) {
+                if (channelData[i] != 0) nonZero++;
+            }
+            printf("[DIAG] renderFrame(%dms): frameIdx=%d numCh=%u nonZeroCh=%u mapSize=%zu bufCache=%zu\n",
+                   timeMS, frameIndex, numChannels, nonZero, _modelChannelMap.size(), _bufferCache.size());
+        }
+
         std::lock_guard<std::mutex> lock(_bufferCacheMutex);
         for (const auto& [name, chInfo] : _modelChannelMap) {
             if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
