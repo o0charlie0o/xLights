@@ -156,4 +156,19 @@
 /// When YES, new render requests are dropped to prevent queue buildup.
 @property (nonatomic, readonly) BOOL renderInProgress;
 
+#pragma mark - Effect Preview
+
+/// Whether the effect preview loop is currently active.
+@property (nonatomic, readonly) BOOL isPreviewingEffect;
+
+/// Start looping preview playback over a selected effect's time range.
+/// Automatically stops when play/stop is called or another preview starts.
+/// @param startMS Effect start time in milliseconds.
+/// @param endMS Effect end time in milliseconds.
+- (void)startEffectPreviewFromMS:(NSInteger)startMS toMS:(NSInteger)endMS;
+
+/// Stop the effect preview loop. Called automatically when playback starts
+/// or when the effect is deselected.
+- (void)stopEffectPreview;
+
 @end

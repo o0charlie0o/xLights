@@ -1300,7 +1300,11 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
 - (void)effectDidChange:(NSNotification *)notification {
     [_effectsGridView setNeedsDisplay:YES];
     _renderProgressIndicator.animating = YES;
-    [_playbackController renderCurrentFrame];
+    // Don't call renderCurrentFrame when effect preview is active —
+    // the preview loop renders at the correct time within the effect range.
+    if (!_playbackController.isPreviewingEffect) {
+        [_playbackController renderCurrentFrame];
+    }
 
     if (!_symbolPropagating && _symbolLibraryManager && _engineBridge) {
         NSInteger selectedRenderIdx = _effectsGridView.selectedEffectID;
@@ -2510,8 +2514,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // effectIndex is a flat render index — use the grid view's stored effectId
     effectId = [gridView effectIdAtRenderIndex:(NSUInteger)effectIndex];
 
+    NSDictionary *effectInfo = nil;
     if (_engineBridge && effectId >= 0) {
-        NSDictionary *effectInfo = [_engineBridge getEffect:effectId];
+        effectInfo = [_engineBridge getEffect:effectId];
         effectType = effectInfo[@"effectType"];
     }
 
@@ -2528,6 +2533,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
                                                         object:self
                                                       userInfo:userInfo];
+
+    // Start effect preview loop when not playing (matches legacy xLights behavior)
+    if (effectInfo && !_playbackController.isPlaying) {
+        NSInteger startMS = [effectInfo[@"startTimeMS"] integerValue];
+        NSInteger endMS = [effectInfo[@"endTimeMS"] integerValue];
+        [_playbackController startEffectPreviewFromMS:startMS toMS:endMS];
+    }
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2692,6 +2704,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     _cellRangeSelected = NO;
     NSLog(@"Clicked at time %.0fms, row %ld", timeMS, (long)row);
 
+    // Stop effect preview loop when deselecting
+    [_playbackController stopEffectPreview];
+
     // Clicking on empty area clears selection (use -1 as "no effect" sentinel)
     NSDictionary *userInfo = @{
         @"effectId": @(-1),
@@ -2848,7 +2863,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     didChangeSelection:(NSIndexSet *)selectedIndices
 {
     if (selectedIndices.count == 0) {
-        // No selection
+        // No selection — stop effect preview
+        [_playbackController stopEffectPreview];
+
         NSDictionary *userInfo = @{
             @"effectId": @(-1),
             @"effectType": [NSNull null],
@@ -2896,6 +2913,19 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     [[NSNotificationCenter defaultCenter] postNotificationName:XLEffectSelectionDidChangeNotification
                                                         object:self
                                                       userInfo:userInfo];
+
+    // Start effect preview for single selection when not playing
+    if (selectedIndices.count == 1 && primaryEffectId >= 0 && !_playbackController.isPlaying) {
+        NSDictionary *effectInfo = [_engineBridge getEffect:primaryEffectId];
+        if (effectInfo) {
+            NSInteger startMS = [effectInfo[@"startTimeMS"] integerValue];
+            NSInteger endMS = [effectInfo[@"endTimeMS"] integerValue];
+            [_playbackController startEffectPreviewFromMS:startMS toMS:endMS];
+        }
+    } else if (selectedIndices.count > 1) {
+        // Multi-select: stop preview (ambiguous which effect to preview)
+        [_playbackController stopEffectPreview];
+    }
 }
 
 - (void)effectsGrid:(XLEffectsGridView *)gridView
@@ -2927,7 +2957,9 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
     // Lightweight refresh — don't reset playback or zoom
     [self refreshTimingData];
 
-    // Clear selection notification
+    // Stop effect preview and clear selection
+    [_playbackController stopEffectPreview];
+
     NSDictionary *userInfo = @{
         @"effectId": @(-1),
         @"effectType": [NSNull null],
@@ -3010,7 +3042,13 @@ static NSString *XLExtractFirstPaletteColor(NSString *paletteString) {
         NSLog(@"XLSequencerViewController: Created effect with ID %ld", (long)effectId);
         // Reload data to show the new effect
         [self reloadSequenceData];
-        [_playbackController renderCurrentFrame];
+
+        // Start effect preview loop for the new effect
+        if (!_playbackController.isPlaying) {
+            [_playbackController startEffectPreviewFromMS:(NSInteger)startTimeMS toMS:(NSInteger)endTimeMS];
+        } else {
+            [_playbackController renderCurrentFrame];
+        }
     } else {
         NSLog(@"XLSequencerViewController: Failed to create effect");
     }

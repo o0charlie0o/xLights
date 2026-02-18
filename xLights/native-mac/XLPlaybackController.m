@@ -28,6 +28,13 @@
     dispatch_source_t _renderLoopTimer;
     atomic_bool _renderLoopActive;
     NSInteger _lastRenderedFrameMS;
+
+    // Effect preview loop: loops over selected effect's time range when paused
+    dispatch_source_t _effectPreviewTimer;
+    atomic_bool _effectPreviewActive;
+    NSInteger _effectPreviewStartMS;
+    NSInteger _effectPreviewEndMS;
+    CFAbsoluteTime _effectPreviewOrigin;
 }
 
 @property (nonatomic, assign, readwrite) BOOL isPlaying;
@@ -78,6 +85,7 @@
         _renderQueue = dispatch_queue_create("com.xlights.render", DISPATCH_QUEUE_SERIAL);
         atomic_init(&_renderInProgress, false);
         atomic_init(&_renderLoopActive, false);
+        atomic_init(&_effectPreviewActive, false);
 
         // Create native audio player
         _audioPlayer = [[XLAudioPlayer alloc] init];
@@ -89,6 +97,7 @@
 - (void)dealloc {
     [self stopPlaybackTimer];
     [self stopRenderLoop];
+    [self stopEffectPreview];
 }
 
 #pragma mark - Render Loop (runs on render queue, independent of main queue)
@@ -412,6 +421,9 @@
 
 - (void)play {
     NSLog(@"XLPlaybackController: play() called — isPlaying=%d isPaused=%d", _isPlaying, _isPaused);
+
+    // Stop effect preview loop — real playback takes priority
+    [self stopEffectPreview];
 
     if (_isPlaying && !_isPaused) return;
 
@@ -761,6 +773,121 @@
     // If we were playing, restart with engine audio
     if (_isPlaying && !_isPaused) {
         [_engineBridge play];
+    }
+}
+
+#pragma mark - Effect Preview Loop
+
+- (BOOL)isPreviewingEffect {
+    return atomic_load(&_effectPreviewActive);
+}
+
+- (void)startEffectPreviewFromMS:(NSInteger)startMS toMS:(NSInteger)endMS {
+    // Don't start preview if we're actively playing the sequence
+    if (_isPlaying && !_isPaused) return;
+
+    // Validate range
+    if (endMS <= startMS) return;
+
+    // Stop any existing preview
+    [self stopEffectPreview];
+
+    _effectPreviewStartMS = startMS;
+    _effectPreviewEndMS = endMS;
+    _effectPreviewOrigin = CFAbsoluteTimeGetCurrent();
+    atomic_store(&_effectPreviewActive, true);
+
+    [self updateSequenceInfo];
+
+    // Enable preview rendering on the preview views
+    if (_previewView) {
+        _previewView.previewRenderingActive = YES;
+        _previewView.sequenceDurationMS = _durationMS;
+        _previewView.frameTimeMS = _frameTimeMS;
+    }
+
+    // Start a timer on the render queue that loops through the effect range
+    _effectPreviewTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _renderQueue);
+    uint64_t interval = (uint64_t)(_frameTimeMS > 0 ? _frameTimeMS : 50) * NSEC_PER_MSEC;
+    dispatch_source_set_timer(_effectPreviewTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 0),
+                              interval,
+                              1 * NSEC_PER_MSEC);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(_effectPreviewTimer, ^{
+        [weakSelf effectPreviewTick];
+    });
+
+    dispatch_resume(_effectPreviewTimer);
+    NSLog(@"XLPlaybackController: Effect preview started [%ld-%ld ms]",
+          (long)startMS, (long)endMS);
+}
+
+- (void)stopEffectPreview {
+    if (!atomic_load(&_effectPreviewActive)) return;
+
+    atomic_store(&_effectPreviewActive, false);
+    if (_effectPreviewTimer) {
+        dispatch_source_cancel(_effectPreviewTimer);
+        _effectPreviewTimer = nil;
+    }
+    NSLog(@"XLPlaybackController: Effect preview stopped");
+}
+
+- (void)effectPreviewTick {
+    if (!atomic_load(&_effectPreviewActive)) return;
+
+    XLEngineBridge *bridge = _engineBridge;
+    if (!bridge) return;
+
+    // Calculate current position within the effect range, looping
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CFAbsoluteTime elapsed = now - _effectPreviewOrigin;
+    NSInteger elapsedMS = (NSInteger)(elapsed * 1000.0);
+    NSInteger range = _effectPreviewEndMS - _effectPreviewStartMS;
+    if (range <= 0) return;
+
+    NSInteger offsetMS = elapsedMS % range;
+    NSInteger currentMS = _effectPreviewStartMS + offsetMS;
+
+    // Snap to frame boundary
+    if (_frameTimeMS > 0) {
+        currentMS = (currentMS / _frameTimeMS) * _frameTimeMS;
+    }
+
+    @try {
+        [bridge renderFrame:currentMS];
+
+        NSMutableArray *frameUpdates = [NSMutableArray new];
+        [bridge enumerateFrameBuffersWithBlock:^(NSString *modelName,
+                                                 const uint8_t *pixels,
+                                                 NSUInteger pixelBytes,
+                                                 NSUInteger width,
+                                                 NSUInteger height) {
+            NSData *pixelData = [NSData dataWithBytes:pixels length:pixelBytes];
+            [frameUpdates addObject:@[modelName, pixelData, @(width), @(height)]];
+        }];
+
+        XLMetalPreviewView *preview = self.previewView;
+        XLMetalPreviewView *sidebarPreview = self.sidebarPreviewView;
+
+        if (frameUpdates.count > 0) {
+            [preview buildColorBufferFromFrameUpdates:frameUpdates];
+            [sidebarPreview buildColorBufferFromFrameUpdates:frameUpdates];
+        }
+
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if ([strongSelf.delegate respondsToSelector:@selector(playbackController:didRenderFrameAtMS:)]) {
+                [strongSelf.delegate playbackController:strongSelf didRenderFrameAtMS:currentMS];
+            }
+        });
+    } @catch (NSException *exception) {
+        NSLog(@"XLPlaybackController: Exception in effect preview at %ldms: %@ - %@",
+              (long)currentMS, exception.name, exception.reason);
     }
 }
 
