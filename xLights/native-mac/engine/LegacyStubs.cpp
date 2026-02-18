@@ -21,6 +21,8 @@
 #include <wx/taskbar.h>
 #include <wx/glcanvas.h>
 #include <wx/bmpbndl.h>
+#include <wx/xml/xml.h>
+#include <wx/filename.h>
 #include "../../xLightsMain.h"
 #include "../../xLightsApp.h"
 #include "../../automation/LuaRunner.h"
@@ -117,15 +119,83 @@ wxBEGIN_EVENT_TABLE(AIColorPaletteDialog, wxDialog)
 wxEND_EVENT_TABLE()
 
 // ===================================================================
-// Section 3: xLightsFrame constructor/destructor
+// Section 3: xLightsFrame constructor/destructor + headless init
 // ===================================================================
+
+static xLightsFrame* s_headlessFrame = nullptr;
 
 xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderOnlyMode)
     : _exiting(false),
-      jobPool("xLightsStub"), color_mgr(this),
+      jobPool("xLightsHeadless"), color_mgr(this),
       AllModels(&_outputManager, this), AllObjects(this),
-      _sequenceElements(this), _presetSequenceElements(this) {}
-xLightsFrame::~xLightsFrame() {}
+      _sequenceElements(this), _presetSequenceElements(this)
+{
+    // EffectManager auto-registers all 60+ effects in its constructor,
+    // so effectManager is already populated at this point.
+    printf("[LegacyStubs] xLightsFrame constructed: %zu effects registered\n",
+           effectManager.size());
+}
+
+xLightsFrame::~xLightsFrame() {
+    if (s_headlessFrame == this) {
+        s_headlessFrame = nullptr;
+    }
+}
+
+// Create and return the headless xLightsFrame singleton.
+// Safe to call multiple times — returns existing instance.
+xLightsFrame* xLightsFrame::CreateHeadless() {
+    if (!s_headlessFrame) {
+        s_headlessFrame = new xLightsFrame(nullptr, 0, wxID_ANY, true);
+        xLightsApp::__frame = s_headlessFrame;
+        printf("[LegacyStubs] Headless xLightsFrame created (%zu effects)\n",
+               s_headlessFrame->effectManager.size());
+    }
+    return s_headlessFrame;
+}
+
+// Initialize the headless frame for a given show folder.
+// Loads OutputManager, ModelManager, and recalculates start channels.
+bool xLightsFrame::InitHeadless(const std::string& showDir) {
+    CurrentDir = wxString(showDir);
+
+    // Load output configuration (controllers / networks)
+    std::string networksPath = showDir + "/xlights_networks.xml";
+    if (wxFileExists(wxString(networksPath))) {
+        _outputManager.Load(showDir);
+        printf("[LegacyStubs] OutputManager loaded from '%s'\n", showDir.c_str());
+    } else {
+        printf("[LegacyStubs] No xlights_networks.xml found in '%s'\n", showDir.c_str());
+    }
+
+    // Load models from xlights_rgbeffects.xml
+    std::string rgbPath = showDir + "/xlights_rgbeffects.xml";
+    if (wxFileExists(wxString(rgbPath))) {
+        wxXmlDocument doc;
+        if (doc.Load(wxString(rgbPath))) {
+            wxXmlNode* root = doc.GetRoot();
+            // Find <models> node and load
+            for (wxXmlNode* node = root->GetChildren(); node; node = node->GetNext()) {
+                if (node->GetName() == "models") {
+                    AllModels.LoadModels(node, 0, 0);
+                    printf("[LegacyStubs] Models loaded: %zu models\n",
+                           AllModels.size());
+                    break;
+                }
+            }
+        } else {
+            printf("[LegacyStubs] Failed to parse '%s'\n", rgbPath.c_str());
+            return false;
+        }
+    } else {
+        printf("[LegacyStubs] No xlights_rgbeffects.xml found in '%s'\n", showDir.c_str());
+        return false;
+    }
+
+    AllModels.RecalcStartChannels();
+    printf("[LegacyStubs] Start channels recalculated\n");
+    return true;
+}
 
 // ===================================================================
 // Section 4: xLightsFrame static data members
@@ -157,7 +227,7 @@ const wxWindowID xLightsFrame::ID_MENUITEM_RECENTFOLDERS = wxNewId();
 // Section 6: xLightsFrame static methods
 // ===================================================================
 
-xLightsFrame* xLightsFrame::GetFrame() { return nullptr; }
+xLightsFrame* xLightsFrame::GetFrame() { return s_headlessFrame; }
 wxXmlNode* xLightsFrame::FindNode(wxXmlNode*, const wxString&, const wxString&, const wxString&, bool) { return nullptr; }
 void xLightsFrame::AddTraceMessage(const std::string&) {}
 bool xLightsFrame::IsCheckSequenceOptionDisabled(const std::string&) { return false; }

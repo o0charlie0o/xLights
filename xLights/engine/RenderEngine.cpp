@@ -752,6 +752,78 @@ void RenderEngine::renderFrame(int timeMS)
     // preview will briefly freeze during rendering, then resume with correct data.
     if (_renderInProgress.load(std::memory_order_acquire)) return;
 
+    // =========================================================
+    // LEGACY RENDER PATH: Route through proven PixelBuffer pipeline
+    // =========================================================
+    if (_useLegacyRender && _legacyRenderFunc && !_modelChannelMap.empty()) {
+        const uint8_t* channelData = nullptr;
+        uint32_t numChannels = 0;
+        _legacyRenderFunc(_legacyBridge, timeMS, &channelData, &numChannels);
+
+        if (!channelData || numChannels == 0) {
+            notifyFrameRendered(timeMS);
+            return;
+        }
+
+        // Copy channel data into _currentFrameData
+        _currentFrameData.resize(numChannels);
+        std::memcpy(_currentFrameData.data(), channelData, numChannels);
+
+        // Build FrameBuffers for all mapped models (reuses existing channel→pixel code)
+        {
+            std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+            _bufferCache.clear();
+
+            for (const auto& [modelName, chInfo] : _modelChannelMap) {
+                if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+
+                FrameBuffer fb;
+                fb.modelName = modelName;
+                fb.width = chInfo.bufferWidth;
+                fb.height = chInfo.bufferHeight;
+                fb.timeMS = timeMS;
+                fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+                for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                    uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+                    if (nodeChannel + chInfo.chansPerNode > numChannels) continue;
+
+                    uint8_t r = _currentFrameData[nodeChannel + chInfo.rOffset];
+                    uint8_t g = _currentFrameData[nodeChannel + chInfo.gOffset];
+                    uint8_t b = _currentFrameData[nodeChannel + chInfo.bOffset];
+
+                    int bx = chInfo.nodeBufCoords[i].first;
+                    int by = chInfo.nodeBufCoords[i].second;
+                    if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+                    size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                    fb.pixels[idx]     = r;
+                    fb.pixels[idx + 1] = g;
+                    fb.pixels[idx + 2] = b;
+                    fb.pixels[idx + 3] = 255;
+                }
+                _bufferCache[modelName] = std::move(fb);
+            }
+
+            // Synthesize submodel FrameBuffers
+            if (_modelProvider) {
+                auto allNames = _modelProvider->getModelNames();
+                for (const auto& name : allNames) {
+                    size_t slash = name.find('/');
+                    if (slash == std::string::npos) continue;
+                    if (_bufferCache.count(name)) continue;
+                    std::string parentName = name.substr(0, slash);
+                    auto parentIt = _modelChannelMap.find(parentName);
+                    if (parentIt == _modelChannelMap.end()) continue;
+                    synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
+                }
+            }
+        }
+
+        notifyFrameRendered(timeMS);
+        return;
+    }
+
     // Log path changes and periodic state.
     // Counters reset on path changes AND on render generation bumps (after renderAll).
     static bool sRdbgResetCounters = false;
@@ -2313,6 +2385,17 @@ void RenderEngine::reRenderForEffectChange(RenderCompleteCallback callback)
 
 void RenderEngine::renderAll(RenderCompleteCallback callback)
 {
+    // Legacy render path: batch render via LegacyRenderBridge
+    if (_useLegacyRender && _legacyRenderFunc && _legacyBridge) {
+        printf("[RDBG] renderAll: LEGACY PATH — delegating to LegacyRenderBridge\n");
+        // The legacy bridge's renderAll calls renderFrameAtTimeMS for each frame,
+        // populating _seqData. Future renderFrame() calls then read from that data.
+        // For now, just notify completion — the per-frame rendering happens on demand.
+        notifyRenderComplete(false);
+        if (callback) callback(false);
+        return;
+    }
+
     // Set _renderInProgress if not already set (forceRenderAll sets it first).
     // This blocks renderFrame() on the main thread during the entire render.
     bool wasAlreadyInProgress = _renderInProgress.exchange(true, std::memory_order_acq_rel);
@@ -2930,6 +3013,9 @@ bool RenderEngine::abortRender(int timeoutMS)
 
 void RenderEngine::warmUpCoordinator()
 {
+    // Skip warm-up when using legacy render pipeline
+    if (_useLegacyRender) return;
+
     if (!_effectProvider || !_modelProvider) return;
 
     // Skip if coordinator already has warm persistent jobs

@@ -12,6 +12,8 @@
 #import "effects/XLEffectPanelDefinitions.h"
 #import "layout/XLORS5Parser.h"
 #import "XLNativePhonemeDictionary.h"
+#import "engine/LegacyRenderBridge.h"
+#include "engine/LegacyModelProviderAdapter.h"
 
 // Include C++ engine headers
 // During transition period, these will delegate to the existing xLightsFrame
@@ -74,6 +76,13 @@ enum class ElementType { ELEMENT_TYPE_TIMING, ELEMENT_TYPE_MODEL, ELEMENT_TYPE_S
 #include <memory>
 #include <set>
 
+// C trampoline for RenderEngine → LegacyRenderBridge (avoids Obj-C in .cpp)
+static void LegacyRenderTrampoline(void* bridge, int timeMS,
+                                    const uint8_t** outData, uint32_t* outNumCh) {
+    LegacyRenderBridge* lb = (__bridge LegacyRenderBridge*)bridge;
+    [lb renderFrameAtTimeMS:timeMS bufferOut:outData numChannels:outNumCh];
+}
+
 // Static singleton instance for standalone mode
 static XLEngineBridge *_sharedBridge = nil;
 
@@ -117,6 +126,10 @@ static XLEngineBridge *_sharedBridge = nil;
     // --- Auto-Save ---
     dispatch_source_t _autoSaveTimer;
     dispatch_queue_t _autoSaveQueue;
+
+    // --- Legacy Render Bridge ---
+    LegacyRenderBridge* _legacyBridge;
+    std::unique_ptr<xlEngine::LegacyModelProviderAdapter> _legacyModelProvider;
 }
 
 #pragma mark - Lifecycle
@@ -306,6 +319,37 @@ static XLEngineBridge *_sharedBridge = nil;
     }
 }
 
+- (void)initializeLegacyBridge:(NSString *)showFolderPath {
+    @try {
+        _legacyBridge = [[LegacyRenderBridge alloc] init];
+        BOOL loadOK = [_legacyBridge loadShowFolder:showFolderPath];
+
+        if (loadOK) {
+            // Create a LegacyModelProviderAdapter wrapping the real ModelManager
+            xLightsFrame* frame = [_legacyBridge frame];
+            if (frame) {
+                _legacyModelProvider = std::make_unique<xlEngine::LegacyModelProviderAdapter>(frame);
+
+                // Wire into RenderEngine: replace NativeModelProvider with legacy adapter
+                if (_renderEngine) {
+                    _renderEngine->setModelProvider(_legacyModelProvider.get());
+                    _renderEngine->setLegacyBridge(
+                        (__bridge void*)_legacyBridge,
+                        &LegacyRenderTrampoline);
+                    _renderEngine->setUseLegacyRender(true);
+                    NSLog(@"XLEngineBridge: Legacy render bridge enabled");
+                }
+            }
+        } else {
+            NSLog(@"XLEngineBridge: Legacy bridge failed to load show folder");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"XLEngineBridge: Exception initializing legacy bridge: %@ - %@",
+              exception.name, exception.reason);
+        _legacyBridge = nil;
+    }
+}
+
 - (BOOL)isEngineAvailable {
     [self ensureEngineInitialized];
     return _engineInitialized;
@@ -348,6 +392,8 @@ static XLEngineBridge *_sharedBridge = nil;
                 _nativeOutputProvider->loadFromXML(networksPath);
             }
             NSLog(@"XLEngineBridge: Reloaded show folder: %@", showFolderPath);
+            // Re-initialize legacy bridge with updated show data
+            [self initializeLegacyBridge:showFolderPath];
             return YES;
         } @catch (NSException *exception) {
             NSLog(@"XLEngineBridge: Exception reloading show folder: %@ - %@",
@@ -358,6 +404,12 @@ static XLEngineBridge *_sharedBridge = nil;
 
     // Initialize standalone providers
     [self initializeStandaloneProviders];
+
+    // Initialize legacy render bridge (loads models via real ModelManager)
+    if (_engineInitialized) {
+        [self initializeLegacyBridge:showFolderPath];
+    }
+
     return _engineInitialized;
 }
 
@@ -418,12 +470,26 @@ static XLEngineBridge *_sharedBridge = nil;
             // Build group name set from show XML for icon display
             [self rebuildGroupNamesFromShowXML];
 
+            // Load sequence into legacy render bridge (for legacy rendering path)
+            if (_legacyBridge && [_legacyBridge isShowLoaded]) {
+                BOOL legacyOK = [_legacyBridge loadSequence:path];
+                NSLog(@"XLEngineBridge: Legacy bridge loadSequence = %s",
+                      legacyOK ? "YES" : "NO");
+                if (legacyOK && _renderEngine) {
+                    // Rebuild channel map with legacy model provider
+                    // (the map is needed for channel→pixel conversion in renderFrame)
+                    _renderEngine->setUseLegacyRender(true);
+                }
+            }
+
             // Try to load the corresponding FSEQ file for playback rendering
+            // (still loaded as fallback if legacy render is disabled)
             [self loadFSEQForSequence:path];
 
             // Pre-warm the render coordinator on a background thread so the
             // first render doesn't spend ~1s in preparePersistentJobs setup.
-            if (_renderEngine) {
+            // Skip when using legacy rendering (coordinator not needed).
+            if (_renderEngine && !_renderEngine->getUseLegacyRender()) {
                 xlEngine::RenderEngine* engine = _renderEngine.get();
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                     engine->warmUpCoordinator();

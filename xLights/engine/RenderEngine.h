@@ -373,6 +373,27 @@ public:
     int getNumFrames() const;
 
 #ifdef XLIGHTS_NATIVE
+    // --- Legacy Render Bridge ---
+
+    // C function pointer type for legacy render bridge callback.
+    // Avoids Obj-C dependency in this header.
+    using LegacyRenderFunc = void(*)(void* bridge, int timeMS,
+                                      const uint8_t** outData, uint32_t* outNumCh);
+
+    // Enable/disable legacy rendering (routes through proven PixelBuffer pipeline).
+    // When enabled, renderFrame() reads channel data from the legacy xLightsFrame
+    // instead of NativeRenderCoordinator.
+    void setUseLegacyRender(bool enable) { _useLegacyRender = enable; }
+    bool getUseLegacyRender() const { return _useLegacyRender; }
+
+    // Set the legacy render bridge and render function.
+    // bridge: LegacyRenderBridge* (opaque, caller retains ownership)
+    // func: C function that calls bridge's renderFrameAtTimeMS
+    void setLegacyBridge(void* bridge, LegacyRenderFunc func) {
+        _legacyBridge = bridge;
+        _legacyRenderFunc = func;
+    }
+
     // --- FSEQ Playback (Native Build Only) ---
 
     // Set the model provider for accessing model data during FSEQ rendering.
@@ -450,6 +471,14 @@ private:
     IRenderProvider* _provider; // render provider interface
 
 #ifdef XLIGHTS_NATIVE
+    // --- Legacy Render Bridge (routes through proven PixelBuffer pipeline) ---
+    // When _useLegacyRender is true, renderFrame() calls _legacyRenderFunc
+    // to render via the proven legacy PixelBuffer pipeline, bypassing
+    // NativeRenderCoordinator entirely.
+    bool _useLegacyRender = false;
+    void* _legacyBridge = nullptr; // LegacyRenderBridge* (Obj-C type, opaque here)
+    LegacyRenderFunc _legacyRenderFunc = nullptr;
+
     // --- Native Render State ---
     IModelProvider* _modelProvider = nullptr;
     IOutputProvider* _outputProvider = nullptr;

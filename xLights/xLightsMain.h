@@ -1781,6 +1781,8 @@ public:
     void ShowDataFindPanel();
 
     static xLightsFrame *GetFrame();
+    static xLightsFrame *CreateHeadless();
+    bool InitHeadless(const std::string& showDir);
     void CallOnEffectBeforeSelected(std::function<bool(Effect *)> &&cb);
     void CallOnEffectAfterSelected(std::function<bool(Effect *)> &&cb);
 private:
