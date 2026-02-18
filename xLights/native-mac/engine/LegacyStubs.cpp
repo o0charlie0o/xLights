@@ -215,15 +215,15 @@ bool xLightsFrame::InitHeadless(const std::string& showDir) {
         printf("[LegacyStubs] No xlights_networks.xml found in '%s'\n", showDir.c_str());
     }
 
-    // Load models from xlights_rgbeffects.xml
+    // Load models from xlights_rgbeffects.xml into the persistent EffectsXml member.
+    // Models store pointers into this XML tree, so it must outlive them.
     std::string rgbPath = showDir + "/xlights_rgbeffects.xml";
     if (wxFileExists(wxString(rgbPath))) {
-        wxXmlDocument doc;
-        if (doc.Load(wxString(rgbPath))) {
-            wxXmlNode* root = doc.GetRoot();
-            // Find <models> node and load
+        if (EffectsXml.Load(wxString(rgbPath))) {
+            wxXmlNode* root = EffectsXml.GetRoot();
             for (wxXmlNode* node = root->GetChildren(); node; node = node->GetNext()) {
                 if (node->GetName() == "models") {
+                    ModelsNode = node;
                     AllModels.LoadModels(node, 0, 0);
                     printf("[LegacyStubs] Models loaded: %zu models\n",
                            AllModels.size());
