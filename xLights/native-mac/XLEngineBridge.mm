@@ -333,6 +333,7 @@ static XLEngineBridge *_sharedBridge = nil;
                 // Wire into RenderEngine: replace NativeModelProvider with legacy adapter
                 if (_renderEngine) {
                     _renderEngine->setModelProvider(_legacyModelProvider.get());
+                    _renderEngine->rebuildChannelMap();
                     _renderEngine->setLegacyBridge(
                         (__bridge void*)_legacyBridge,
                         &LegacyRenderTrampoline);

@@ -96,6 +96,14 @@ void RenderEngine::setModelProvider(IModelProvider* provider)
     _modelProvider = provider;
 }
 
+void RenderEngine::rebuildChannelMap()
+{
+    buildControllerChannelMap();
+    buildModelTotalChannelsMap();
+    buildModelChannelMap();
+    printf("[RDBG] rebuildChannelMap: %zu models mapped\n", _modelChannelMap.size());
+}
+
 void RenderEngine::setOutputProvider(IOutputProvider* provider)
 {
     _outputProvider = provider;
@@ -4319,6 +4327,51 @@ void RenderEngine::renderFrame(int timeMS)
     if (frameTime <= 0) return;
 
     _frame->RenderTimeSlice(timeMS, timeMS + frameTime, true);
+
+    // Convert _seqData channel data → FrameBuffers for the preview.
+    // RenderTimeSlice populates _seqData but the native preview reads
+    // from _bufferCache FrameBuffers.
+    if (!_modelChannelMap.empty()) {
+        int frameIndex = timeMS / frameTime;
+        if (frameIndex < 0) frameIndex = 0;
+        if (frameIndex >= (int)seqData.NumFrames())
+            frameIndex = seqData.NumFrames() - 1;
+
+        const uint8_t* channelData = &seqData[frameIndex][0];
+        uint32_t numChannels = seqData.NumChannels();
+
+        std::lock_guard<std::mutex> lock(_bufferCacheMutex);
+        for (const auto& [name, chInfo] : _modelChannelMap) {
+            if (chInfo.bufferWidth <= 0 || chInfo.bufferHeight <= 0) continue;
+
+            FrameBuffer fb;
+            fb.modelName = name;
+            fb.width = chInfo.bufferWidth;
+            fb.height = chInfo.bufferHeight;
+            fb.timeMS = timeMS;
+            fb.pixels.resize(static_cast<size_t>(fb.width) * fb.height * 4, 0);
+
+            for (uint32_t i = 0; i < chInfo.nodeCount; i++) {
+                uint32_t nodeChannel = chInfo.absStartChannel + (i * chInfo.chansPerNode);
+                if (nodeChannel + chInfo.chansPerNode > numChannels) continue;
+
+                uint8_t r = channelData[nodeChannel + chInfo.rOffset];
+                uint8_t g = channelData[nodeChannel + chInfo.gOffset];
+                uint8_t b = channelData[nodeChannel + chInfo.bOffset];
+
+                int bx = chInfo.nodeBufCoords[i].first;
+                int by = chInfo.nodeBufCoords[i].second;
+                if (bx < 0 || bx >= fb.width || by < 0 || by >= fb.height) continue;
+
+                size_t idx = (static_cast<size_t>(by) * fb.width + bx) * 4;
+                fb.pixels[idx]     = r;
+                fb.pixels[idx + 1] = g;
+                fb.pixels[idx + 2] = b;
+                fb.pixels[idx + 3] = 255;
+            }
+            _bufferCache[name] = std::move(fb);
+        }
+    }
 }
 
 void RenderEngine::renderModelFrame(const std::string& modelName, int timeMS)

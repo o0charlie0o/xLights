@@ -399,6 +399,10 @@ public:
     // Set the model provider for accessing model data during FSEQ rendering.
     void setModelProvider(IModelProvider* provider);
 
+    // Rebuild the model-to-channel mapping from the current model provider.
+    // Must be called after setModelProvider when using the legacy render path.
+    void rebuildChannelMap();
+
     // Set the output provider for resolving controller channel mappings.
     void setOutputProvider(IOutputProvider* provider);
 
