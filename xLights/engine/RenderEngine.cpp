@@ -1278,6 +1278,17 @@ void RenderEngine::renderFrame(int timeMS)
         }
         // _bufferCacheMutex released — coordinator is kept alive by shared_ptr.
 
+        // Drain dirty models and reset their persistent state on the coordinator.
+        // This ensures models that were in _skippedModels get re-evaluated after
+        // a group effect is added (same fix as in liveRenderDirtyModels).
+        {
+            std::set<std::string> dirtySnapshot;
+            { std::lock_guard<std::mutex> dlock(_dirtyMutex); std::swap(dirtySnapshot, _dirtyModels); }
+            for (const auto& name : dirtySnapshot) {
+                coordinator->resetPersistentState(name);
+            }
+        }
+
         // Log which rendering path we're on (once)
         static bool sLivePathLogged = false;
         if (!sLivePathLogged) {
@@ -3339,6 +3350,23 @@ int RenderEngine::liveRenderDirtyModels(int timeMS)
     // The bg batch checks this flag before starting to avoid concurrent
     // access to the shared effect provider (which is not thread-safe).
     if (_bgRenderQueue) _bgRenderQueue->liveRendering.store(true, std::memory_order_release);
+
+    // Reset dirty models' persistent state on the coordinator.
+    // This clears _skippedModels entries (so models that previously had no
+    // effects get re-evaluated after a group effect is added), erases stale
+    // _persistentJobs (so group layer cascading is rebuilt), and forces the
+    // group membership map to be rebuilt. This runs on the render queue,
+    // safe from races with the main thread's invalidateModel().
+    for (const auto& name : dirtyPhysical) {
+        liveCoord->resetPersistentState(name);
+    }
+    // Also reset non-physical dirty entries (groups) so their cached
+    // group channel jobs ("groupName##group_channel") are refreshed.
+    for (const auto& name : dirtyNow) {
+        if (_modelChannelMap.count(name) == 0) {
+            liveCoord->resetPersistentState(name);
+        }
+    }
 
     // --- Group fast path ---
     // Detect if the dirty models share a common group parent. When a group
