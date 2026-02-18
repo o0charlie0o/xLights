@@ -97,7 +97,8 @@
         SequenceElements& seqElems = _frame->GetSequenceElements();
         seqElems.Clear();
         seqElems.SetFrequency(1000 / frameTimeMS);
-        seqElems.SetViewsManager(nullptr); // no views in headless mode
+        // Don't call SetViewsManager(nullptr) — it dereferences the pointer.
+        // SequenceElements works fine without a views manager for rendering.
         seqElems.LoadSequencerFile(xmlFile, showDir);
 
         // Calculate total channels needed
