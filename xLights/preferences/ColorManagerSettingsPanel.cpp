@@ -20,6 +20,7 @@
 
 #include <wx/preferences.h>
 #include "../xLightsMain.h"
+#include "../ExternalHooks.h"
 #include "../sequencer/MainSequencer.h"
 #include "../UtilFunctions.h"
 #include "xlColourData.h"

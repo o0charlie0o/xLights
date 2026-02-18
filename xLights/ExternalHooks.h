@@ -10,7 +10,7 @@
  **************************************************************/
 
 
-#ifndef XLIGHTS_NATIVE
+#if !defined(XLIGHTS_NATIVE) && !defined(XLIGHTS_USE_LEGACY_RENDER)
 #if defined(__WXOSX__)
 #if __has_include("ExternalHooksMacOS.h")
 #include "osxUtils/ExternalHooksMacOS.h"
@@ -24,7 +24,7 @@
 #include "linuxUtils/ExternalHooksLinux.h"
 #endif
 #endif
-#endif // !XLIGHTS_NATIVE
+#endif // !XLIGHTS_NATIVE && !XLIGHTS_USE_LEGACY_RENDER
 
 #ifndef __XL_EXTERNAL_HOOKS__
 

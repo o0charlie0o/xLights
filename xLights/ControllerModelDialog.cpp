@@ -28,6 +28,7 @@
 #include <wx/position.h>
 
 #include "ControllerModelDialog.h"
+#include "ExternalHooks.h"
 #include "Pixels.h"
 #include "UtilFunctions.h"
 #include "xLightsMain.h"

@@ -10,8 +10,8 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
-#ifdef XLIGHTS_NATIVE
-// Native build: RenderBuffer is an alias for NativeRenderBuffer.
+#if defined(XLIGHTS_NATIVE) && !defined(XLIGHTS_USE_LEGACY_RENDER)
+// Pure native build (no legacy render): RenderBuffer is an alias for NativeRenderBuffer.
 // Effects call the same API (SetPixel, GetMultiColorBlend, etc.) but the
 // underlying implementation is wx-free. Display-list and wx-image methods
 // are not available — guard those code paths with #ifndef XLIGHTS_NATIVE.

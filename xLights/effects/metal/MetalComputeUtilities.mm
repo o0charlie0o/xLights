@@ -1,4 +1,5 @@
 
+#include <thread>
 #include "MetalComputeUtilities.hpp"
 #include "../../PixelBuffer.h"
 #include "../../RenderBuffer.h"
