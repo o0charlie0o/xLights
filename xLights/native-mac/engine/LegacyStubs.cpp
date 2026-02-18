@@ -174,8 +174,10 @@ static void EnsureWxInitialized() {
         return;
     }
 
-    // Call OnInit to complete app setup (our OnInit just returns true).
-    s_wxApp->CallOnInit();
+    // Do NOT call s_wxApp->CallOnInit() — on macOS Cocoa it enters
+    // [NSApplication run] which replaces the native app's delegate with
+    // wxNSAppController, breaking our AppKit-based app.
+    // wxEntryStart() alone provides the app traits wxTimer needs.
     wxInitAllImageHandlers();
 
     s_wxInitialized = true;
