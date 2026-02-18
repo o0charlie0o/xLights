@@ -47,7 +47,12 @@
     if (self) {
         _showLoaded = NO;
         _sequenceLoaded = NO;
+
+        // wxEntryStart (called inside CreateHeadless) replaces the NSApp
+        // delegate with wxNSAppController. Save and restore ours.
+        id savedDelegate = [[NSApplication sharedApplication] delegate];
         _frame = xLightsFrame::CreateHeadless();
+        [[NSApplication sharedApplication] setDelegate:savedDelegate];
         if (_frame) {
             NSLog(@"LegacyRenderBridge: Headless xLightsFrame created (%zu effects)",
                   _frame->GetEffectManager().size());

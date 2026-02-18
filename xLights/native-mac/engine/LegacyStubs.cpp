@@ -26,6 +26,7 @@
 #include <wx/filename.h>
 #include <wx/init.h>
 #include <wx/image.h>
+#include <wx/debug.h>
 #include "../../xLightsMain.h"
 #include "../../xLightsApp.h"
 #include "../../automation/LuaRunner.h"
@@ -156,6 +157,17 @@ public:
 // Must be called before constructing xLightsFrame which has wxTimer members.
 static bool s_wxInitialized = false;
 static wxHeadlessApp* s_wxApp = nullptr;
+// Assert handler that logs instead of showing a blocking dialog.
+static void HeadlessAssertHandler(const wxString& file, int line,
+                                   const wxString& func, const wxString& cond,
+                                   const wxString& msg) {
+    printf("[wx-headless] Assert in %s:%d (%s): %s %s\n",
+           (const char*)file.utf8_str(), line,
+           (const char*)func.utf8_str(),
+           (const char*)cond.utf8_str(),
+           (const char*)msg.utf8_str());
+}
+
 static void EnsureWxInitialized() {
     if (s_wxInitialized) return;
 
@@ -164,6 +176,8 @@ static void EnsureWxInitialized() {
     wxApp::SetInstance(s_wxApp);
 
     // wxEntryStart initializes the wx library with the registered app.
+    // NOTE: wxEntryStart replaces the NSApplication delegate — callers
+    // in .mm code must save/restore it around CreateHeadless().
     int argc = 0;
     char* argv[] = { nullptr };
     if (!wxEntryStart(argc, argv)) {
@@ -174,10 +188,9 @@ static void EnsureWxInitialized() {
         return;
     }
 
-    // Do NOT call s_wxApp->CallOnInit() — on macOS Cocoa it enters
-    // [NSApplication run] which replaces the native app's delegate with
-    // wxNSAppController, breaking our AppKit-based app.
-    // wxEntryStart() alone provides the app traits wxTimer needs.
+    // Replace wx assert handler with one that logs instead of showing dialogs.
+    wxSetAssertHandler(HeadlessAssertHandler);
+
     wxInitAllImageHandlers();
 
     s_wxInitialized = true;
