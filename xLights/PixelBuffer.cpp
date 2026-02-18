@@ -2900,7 +2900,19 @@ void PixelBufferClass::CalcOutput(int EffectPeriod, const std::vector<bool>& val
         }
         sparkles = &sparklesVector[0];
     }
-    if (!GPURenderUtils::BlendLayers(this, EffectPeriod, validLayers, saveLayer, saveToPixels)) {
+    // [DIAG] Log which blending path is taken
+    static int sBlendDiagCount = 0;
+    bool blendDiag = (sBlendDiagCount < 5);
+
+    bool gpuHandled = GPURenderUtils::BlendLayers(this, EffectPeriod, validLayers, saveLayer, saveToPixels);
+    if (blendDiag) {
+        printf("[CalcOutput-DIAG] GPURenderUtils::BlendLayers returned %s, nodeCount=%zu\n",
+               gpuHandled ? "true(GPU)" : "false(CPU fallback)",
+               layers[saveLayer]->buffer.Nodes.size());
+        sBlendDiagCount++;
+    }
+
+    if (!gpuHandled) {
         for (int ii = (numLayers - 1); ii >= 0; --ii) {
             if (!validLayers[ii]) {
                 continue;

@@ -215,6 +215,10 @@ xLightsFrame* xLightsFrame::CreateHeadless() {
 bool xLightsFrame::InitHeadless(const std::string& showDir) {
     CurrentDir = wxString(showDir);
 
+    // Enable render mode so wx GUI calls (SetStatusText, etc.) just print
+    // to stdout instead of accessing non-existent UI controls.
+    _renderMode = true;
+
     // Suspend deferred work so OutputModelManager doesn't call CallAfter
     // (no wx event loop in headless mode).
     _outputModelManager.SuspendDeferredWork(true);
@@ -234,14 +238,29 @@ bool xLightsFrame::InitHeadless(const std::string& showDir) {
     if (wxFileExists(wxString(rgbPath))) {
         if (EffectsXml.Load(wxString(rgbPath))) {
             wxXmlNode* root = EffectsXml.GetRoot();
+            wxXmlNode* modelsNode = nullptr;
+            wxXmlNode* groupsNode = nullptr;
+
+            // Find both models and modelGroups nodes
             for (wxXmlNode* node = root->GetChildren(); node; node = node->GetNext()) {
                 if (node->GetName() == "models") {
+                    modelsNode = node;
                     ModelsNode = node;
-                    AllModels.LoadModels(node, 0, 0);
-                    printf("[LegacyStubs] Models loaded: %zu models\n",
-                           AllModels.size());
-                    break;
+                } else if (node->GetName() == "modelGroups") {
+                    groupsNode = node;
                 }
+            }
+
+            // Load models first
+            if (modelsNode) {
+                AllModels.LoadModels(modelsNode, 0, 0);
+                printf("[LegacyStubs] Models loaded: %zu models\n", AllModels.size());
+            }
+
+            // Load model groups (must be after models so groups can reference them)
+            if (groupsNode) {
+                AllModels.LoadGroups(groupsNode, 0, 0);
+                printf("[LegacyStubs] Model groups loaded, total models now: %zu\n", AllModels.size());
             }
         } else {
             printf("[LegacyStubs] Failed to parse '%s'\n", rgbPath.c_str());

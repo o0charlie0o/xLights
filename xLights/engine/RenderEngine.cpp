@@ -758,7 +758,22 @@ void RenderEngine::renderFrame(int timeMS)
     // in progress on a background thread. Those methods modify _renderedData,
     // _fseqFile, _modelChannelMap, etc. without fine-grained locking. The
     // preview will briefly freeze during rendering, then resume with correct data.
-    if (_renderInProgress.load(std::memory_order_acquire)) return;
+    if (_renderInProgress.load(std::memory_order_acquire)) {
+        static int sSkipCount = 0;
+        if (sSkipCount++ < 5) printf("[DIAG] renderFrame(%d): SKIPPED — renderInProgress\n", timeMS);
+        return;
+    }
+
+    // [DIAG] Log legacy path condition state
+    {
+        static int sDiagCount = 0;
+        if (sDiagCount < 20 || sDiagCount % 200 == 0) {
+            printf("[DIAG] renderFrame(%dms): useLegacy=%d legacyFunc=%d mapSize=%zu call#%d\n",
+                   timeMS, (int)_useLegacyRender, (_legacyRenderFunc != nullptr),
+                   _modelChannelMap.size(), sDiagCount);
+        }
+        sDiagCount++;
+    }
 
     // =========================================================
     // LEGACY RENDER PATH: Route through proven PixelBuffer pipeline
@@ -767,6 +782,22 @@ void RenderEngine::renderFrame(int timeMS)
         const uint8_t* channelData = nullptr;
         uint32_t numChannels = 0;
         _legacyRenderFunc(_legacyBridge, timeMS, &channelData, &numChannels);
+
+        // [DIAG] Log legacy render result
+        {
+            static int sLegDiag = 0;
+            if (sLegDiag < 10) {
+                uint32_t nonZero = 0;
+                if (channelData && numChannels > 0) {
+                    for (uint32_t i = 0; i < numChannels && i < 2000; i++) {
+                        if (channelData[i] != 0) nonZero++;
+                    }
+                }
+                printf("[DIAG] renderFrame(%dms): LEGACY PATH — channels=%u nonZero(first2k)=%u\n",
+                       timeMS, numChannels, nonZero);
+                sLegDiag++;
+            }
+        }
 
         if (!channelData || numChannels == 0) {
             notifyFrameRendered(timeMS);
@@ -825,6 +856,22 @@ void RenderEngine::renderFrame(int timeMS)
                     if (parentIt == _modelChannelMap.end()) continue;
                     synthesizeSubmodelFrameBuffer(name, parentIt->second, timeMS);
                 }
+            }
+        }
+
+        // [DIAG] Log buffer cache stats
+        {
+            static int sBufDiag = 0;
+            if (sBufDiag < 5) {
+                size_t totalNonZero = 0;
+                for (const auto& [name, fb] : _bufferCache) {
+                    for (size_t pi = 0; pi < fb.pixels.size(); pi += 4) {
+                        if (fb.pixels[pi] || fb.pixels[pi+1] || fb.pixels[pi+2]) totalNonZero++;
+                    }
+                }
+                printf("[DIAG] renderFrame(%dms): LEGACY bufferCache=%zu models, totalNonZeroPixels=%zu\n",
+                       timeMS, _bufferCache.size(), totalNonZero);
+                sBufDiag++;
             }
         }
 
