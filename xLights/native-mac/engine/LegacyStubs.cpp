@@ -202,6 +202,10 @@ xLightsFrame* xLightsFrame::CreateHeadless() {
 bool xLightsFrame::InitHeadless(const std::string& showDir) {
     CurrentDir = wxString(showDir);
 
+    // Suspend deferred work so OutputModelManager doesn't call CallAfter
+    // (no wx event loop in headless mode).
+    _outputModelManager.SuspendDeferredWork(true);
+
     // Load output configuration (controllers / networks)
     std::string networksPath = showDir + "/xlights_networks.xml";
     if (wxFileExists(wxString(networksPath))) {

@@ -96,7 +96,7 @@ void OutputModelManager::AddASAPWork(uint32_t work, const std::string& from, Bas
         }
     }
 	_workASAP |= work;
-    if (!_workRequested)
+    if (!_workRequested && !_suspendedDeferredWork)
     {
         _frame->CallAfter(&xLightsFrame::DoASAPWork);
         _workRequested = true;
