@@ -17,12 +17,15 @@
 // legacy .cpp files (Tab*.cpp, Render.cpp, etc.). This file only
 // provides symbols unique to xLightsMain.cpp.
 
+#include <wx/app.h>
 #include <wx/event.h>
 #include <wx/taskbar.h>
 #include <wx/glcanvas.h>
 #include <wx/bmpbndl.h>
 #include <wx/xml/xml.h>
 #include <wx/filename.h>
+#include <wx/init.h>
+#include <wx/image.h>
 #include "../../xLightsMain.h"
 #include "../../xLightsApp.h"
 #include "../../automation/LuaRunner.h"
@@ -142,10 +145,48 @@ xLightsFrame::~xLightsFrame() {
     }
 }
 
+// Minimal wxApp subclass for headless use.
+// Provides GUI app traits (needed by wxTimer) without running an event loop.
+class wxHeadlessApp : public wxApp {
+public:
+    bool OnInit() override { return true; }
+};
+
+// Ensure wxWidgets core is initialized with a GUI wxApp instance.
+// Must be called before constructing xLightsFrame which has wxTimer members.
+static bool s_wxInitialized = false;
+static wxHeadlessApp* s_wxApp = nullptr;
+static void EnsureWxInitialized() {
+    if (s_wxInitialized) return;
+
+    // Create and register a wxApp so wxTimer can get GUI traits.
+    s_wxApp = new wxHeadlessApp();
+    wxApp::SetInstance(s_wxApp);
+
+    // wxEntryStart initializes the wx library with the registered app.
+    int argc = 0;
+    char* argv[] = { nullptr };
+    if (!wxEntryStart(argc, argv)) {
+        printf("[LegacyStubs] WARNING: wxEntryStart() failed\n");
+        delete s_wxApp;
+        s_wxApp = nullptr;
+        wxApp::SetInstance(nullptr);
+        return;
+    }
+
+    // Call OnInit to complete app setup (our OnInit just returns true).
+    s_wxApp->CallOnInit();
+    wxInitAllImageHandlers();
+
+    s_wxInitialized = true;
+    printf("[LegacyStubs] wxWidgets GUI app initialized for headless use\n");
+}
+
 // Create and return the headless xLightsFrame singleton.
 // Safe to call multiple times — returns existing instance.
 xLightsFrame* xLightsFrame::CreateHeadless() {
     if (!s_headlessFrame) {
+        EnsureWxInitialized();
         s_headlessFrame = new xLightsFrame(nullptr, 0, wxID_ANY, true);
         xLightsApp::__frame = s_headlessFrame;
         printf("[LegacyStubs] Headless xLightsFrame created (%zu effects)\n",
